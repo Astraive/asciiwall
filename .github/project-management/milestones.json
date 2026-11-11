@@ -1,0 +1,618 @@
+[
+  {
+    "repository": "asciiwall",
+    "id": "M0",
+    "title": "M0 — Foundation",
+    "goal": "Establish reproducible Rust architecture and resolve integration risks before support claims.",
+    "entry_conditions": [
+      "Source baseline and ownership agreed; both repositories remain existing MIT repositories."
+    ],
+    "exit_conditions": [
+      "Pinned Rust/workspace and graphics/codec decisions recorded.",
+      "Portable frame, capability, settings and IPC ownership contracts reviewed.",
+      "Windows surface and Linux bridge spikes report pass/fail and explicit fallback; CI trust boundaries documented."
+    ],
+    "gate": "QA-M0",
+    "quality_gate": "QA-M0: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 113,
+    "platforms": [
+      "all",
+      "windows",
+      "macos",
+      "linux",
+      "cli",
+      "headless"
+    ],
+    "risks": [
+      "Undocumented Windows hosting",
+      "Graphics-family type mismatch",
+      "Codec licensing and confinement feasibility"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval"
+    ],
+    "unlocks": [
+      "M1 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "prototype"
+  },
+  {
+    "repository": "asciiwall",
+    "id": "M1",
+    "title": "M1 — ASCII Engine Prototype",
+    "goal": "Convert local rights-cleared images into deterministic ASCII text and PNG offline.",
+    "entry_conditions": [
+      "QA-M0 accepted for foundation contracts; image and font fixtures rights-cleared."
+    ],
+    "exit_conditions": [
+      "Frame/cell budgets and safe image decode enforce limits.",
+      "Density/aspect, color, glyph/font and quality fixtures pass deterministic golden/property checks.",
+      "CLI normal, invalid, boundary, cancellation and network-denied runs produce documented output/exit codes."
+    ],
+    "gate": "QA-M1",
+    "quality_gate": "QA-M1: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 54,
+    "platforms": [
+      "all",
+      "cli",
+      "headless"
+    ],
+    "risks": [
+      "Glyph quality versus throughput",
+      "Font provenance and aspect accuracy"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "M2 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "prototype"
+  },
+  {
+    "repository": "asciiwall",
+    "id": "M2",
+    "title": "M2 — Native Renderer",
+    "goal": "Present bounded glyph frames through wgpu with stable preview and procedural scenes.",
+    "entry_conditions": [
+      "Stable core frame and font contracts; conversion prototype evidence available."
+    ],
+    "exit_conditions": [
+      "Atlas/device-loss and resize paths are bounded and recover safely.",
+      "The bounded deterministic runtime contract (SCN-001) and documented v1 generators SCN-002..SCN-007 (matrix rain, starfield, waves, noise field, cube wireframe and solid) render through the native/preview renderer with validated v1 bounds, fixed-step seeded behavior, bounded state/catch-up, effective caps, reduced-motion/static variants and deterministic offline snapshots/exports; record actual per-preset p50/p95/p99 and peak-state-byte evidence without inventing measurements. Advanced SCN-008..SCN-011 and effects remain in M4 or later.",
+      "Static idle has no continuous redraw and CPU/GPU/frame-time baseline includes environment and binary hashes.",
+      "The E12 multi-trial media benchmark remains M4; M2 requires only its named-machine renderer baseline, with no universal performance claim."
+    ],
+    "gate": "QA-M2",
+    "quality_gate": "QA-M2: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 80,
+    "platforms": [
+      "all",
+      "windows",
+      "macos",
+      "linux",
+      "headless"
+    ],
+    "risks": [
+      "Driver variability",
+      "GPU memory pressure",
+      "Host-native presenters may differ"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "M3 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "prototype"
+  },
+  {
+    "repository": "asciiwall",
+    "id": "M3",
+    "title": "M3 — Windows First Wallpaper",
+    "goal": "Demonstrate a real below-icons Windows wallpaper with safe desktop interaction and lifecycle.",
+    "entry_conditions": [
+      "QA-M2 preview accepted; Windows native surface spike approved."
+    ],
+    "exit_conditions": [
+      "One named Windows tuple passes placement, icon/input preservation and Stop.",
+      "Explorer restart, lock/unlock, suspend/resume, hotplug, scaling and session recovery have reproducible evidence for the named Windows tuple; MON-001 owns typed output transforms/calibration, while COR-004/PWR-001 own bounded pause/resume primitives and WND-002 owns host recovery. Full multi-output assignment modes and ambiguous identity recovery remain scheduled in M5.",
+      "Portable transactional assignment state (COR-003) and failed native attachment (WND-002) restore the previous wallpaper or an explicitly safe static/preview fallback, never topmost fullscreen; full asynchronous native Apply/media integration remains scheduled in M5."
+    ],
+    "gate": "QA-M3",
+    "quality_gate": "QA-M3: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 55,
+    "platforms": [
+      "all",
+      "windows"
+    ],
+    "risks": [
+      "Undocumented shell behavior",
+      "Remote-session differences",
+      "Multi-DPI coordinate errors"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "M4 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "windows-alpha"
+  },
+  {
+    "repository": "asciiwall",
+    "id": "M4",
+    "title": "M4 — Media and Effects",
+    "goal": "Integrate bounded media decode/timing, clip playback, bake/export and reactive effects.",
+    "entry_conditions": [
+      "Stable renderer and media worker interface; platform confinement required before untrusted decode is advertised."
+    ],
+    "exit_conditions": [
+      "VFR, missing/duplicate timestamps, seek, loop and cancellation fixtures pass with bounded queues.",
+      "Clip headers/indexes/blocks and writer roundtrips reject malformed or over-budget inputs.",
+      "Effects, pointer/window reactions and transitions respect capabilities and reduced motion; bake/export is deterministic and transactional."
+    ],
+    "gate": "QA-M4",
+    "quality_gate": "QA-M4: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 191,
+    "platforms": [
+      "all",
+      "windows",
+      "macos",
+      "linux",
+      "cli",
+      "headless"
+    ],
+    "risks": [
+      "Native decoder attack surface",
+      "Unbounded frame retention",
+      "Preview and bake divergence"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "M5 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "alpha"
+  },
+  {
+    "repository": "asciiwall",
+    "id": "M5",
+    "title": "M5 — Full Desktop Application",
+    "goal": "Deliver editable native UI, all setting ownership and local library workflows without silent no-ops.",
+    "entry_conditions": [
+      "Core runtime and preview contracts stable; settings registry owns each documented key."
+    ],
+    "exit_conditions": [
+      "Requested/effective inspector reports capability/permission denials and clamping reasons.",
+      "Draft, preview, Apply, cancel/undo, presets, persistence/migration and failed transaction rollback are tested.",
+      "Local gallery, import/export UI and keyboard/contrast/motion/localization baseline integrate with real package contracts; later controls are absent or visibly gated.",
+      "Offline local import/index and application library management are in M5; signed catalog and second-repository interoperability remain M6."
+    ],
+    "gate": "QA-M5",
+    "quality_gate": "QA-M5: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 229,
+    "platforms": [
+      "all",
+      "windows",
+      "macos",
+      "linux",
+      "cli",
+      "headless"
+    ],
+    "risks": [
+      "172-key integration drift",
+      "Controller versus preview ownership",
+      "Accessibility regressions"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "M6 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "alpha"
+  },
+  {
+    "repository": "asciiwall",
+    "id": "M6",
+    "title": "M6 — Package Ecosystem",
+    "goal": "Freeze interoperable portable packages and connect safe local import/export to the signed static library.",
+    "entry_conditions": [
+      "Manifest/scene contracts reviewed; extraction limits and restricted decode established before community imports."
+    ],
+    "exit_conditions": [
+      "Packer/importer/schema/catalog fixtures interoperate for each v1 source kind; format remains draft until conformance passes.",
+      "Traversal, links, bombs, races, malformed scenes and cancellation cannot overwrite unrelated files or corrupt installed state.",
+      "Reproducible export preserves license/provenance; opt-in catalog/download verifies exact signatures/hashes and installed versions stay pinned.",
+      "Library L1/L2 compatibility evidence references a pinned engine release; offline local operations never require catalog access."
+    ],
+    "gate": "QA-M6",
+    "quality_gate": "QA-M6: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 110,
+    "platforms": [
+      "all",
+      "windows",
+      "macos",
+      "linux",
+      "cli",
+      "headless"
+    ],
+    "risks": [
+      "Format freeze too early",
+      "Key compromise and offline revocation limits",
+      "Cross-repository release skew"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "M7 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "alpha"
+  },
+  {
+    "repository": "asciiwall",
+    "id": "M7",
+    "title": "M7 — Cross-Platform Alpha",
+    "goal": "Qualify named macOS and Linux adapters without universal OS support promises.",
+    "entry_conditions": [
+      "Portable contracts stable; adapter-specific feasibility and confinement results reviewed."
+    ],
+    "exit_conditions": [
+      "macOS, named X11/layer-shell and Plasma/GNOME pilots report exact OS/session/shell/GPU/package tuples.",
+      "Wallpaper placement, permission refusal, input preservation, recovery/removal and safe fallback pass separately per adapter.",
+      "Unsupported observers are explicitly disabled with reasons; shell-hosted presenters do not assume embeddable native wgpu surfaces."
+    ],
+    "gate": "QA-M7",
+    "quality_gate": "QA-M7: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 58,
+    "platforms": [
+      "all",
+      "macos",
+      "linux",
+      "x11",
+      "wayland",
+      "kde",
+      "gnome"
+    ],
+    "risks": [
+      "Wayland protocol and observer limits",
+      "Shell ABI changes",
+      "Native worker restriction gaps"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "M8 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "alpha"
+  },
+  {
+    "repository": "asciiwall",
+    "id": "M8",
+    "title": "M8 — Beta",
+    "goal": "Harden compatibility, security, accessibility, resource controls and native stability.",
+    "entry_conditions": [
+      "In-scope features integrated; tested tuple list frozen for certification; all 120 QA scenarios assigned."
+    ],
+    "exit_conditions": [
+      "All in-scope P0 scenario rows include passing reproducible evidence; no unresolved P0/security/data-loss defect.",
+      "Fuzz, failure injection, migration, native soak, accessibility and measured resource budgets pass on claimed tuples.",
+      "Confinement denies unrelated-file/network access and cleans child processes; trusted-input-only limitations remain explicit where not proven."
+    ],
+    "gate": "QA-M8",
+    "quality_gate": "QA-M8: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 96,
+    "platforms": [
+      "all",
+      "windows",
+      "macos",
+      "linux",
+      "cli",
+      "headless"
+    ],
+    "risks": [
+      "Thin native lab coverage",
+      "Security findings",
+      "Platform updates invalidate evidence"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "M9 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "beta"
+  },
+  {
+    "repository": "asciiwall",
+    "id": "M9",
+    "title": "M9 — 1.0 Release",
+    "goal": "Ship independently verifiable artifacts, support documentation and rollback-ready release receipts.",
+    "entry_conditions": [
+      "QA-M8 accepted; release candidate/version/schema matrix and pinned dependency inventory frozen."
+    ],
+    "exit_conditions": [
+      "Clean-machine offline install/run/upgrade/downgrade/uninstall passes on each claimed tuple.",
+      "Artifact hashes, SBOM/notices, provenance, required signing/notarization and catalog trust metadata match exact released bytes.",
+      "Release docs name limitations, recovery/private reporting and verification steps; signer approves go/no-go and rollback drill evidence.",
+      "No platform is called supported solely because its build compiled; library L3 aligns with released package compatibility."
+    ],
+    "gate": "QA-M9",
+    "quality_gate": "QA-M9: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 10,
+    "platforms": [
+      "all"
+    ],
+    "risks": [
+      "Signing credential availability",
+      "Installer/helper identity mismatch",
+      "Release artifact substitution"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "M10 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "1.0.0"
+  },
+  {
+    "repository": "asciiwall",
+    "id": "M10",
+    "title": "M10 — Post-Launch",
+    "goal": "Maintain compatibility and security through explicit per-release gates and reviewed new content.",
+    "entry_conditions": [
+      "QA-M9 signed and support/incident ownership accepted."
+    ],
+    "exit_conditions": [
+      "Each maintenance release has a scoped compatibility/advisory/license review and regression receipt.",
+      "New scene/content changes retain deterministic budgets, rights review and compatible versions.",
+      "Incident, key rotation/revocation and rollback procedures preserve local offline functionality and privacy."
+    ],
+    "gate": "QA-M10",
+    "quality_gate": "QA-M10: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 32,
+    "platforms": [
+      "all"
+    ],
+    "risks": [
+      "Host API drift",
+      "Maintainer capacity",
+      "Offline revocation remains delayed"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "Subsequent scoped maintenance release; repeat gate for each release"
+    ],
+    "target_release": "post-1.0"
+  },
+  {
+    "repository": "asciiwall-library",
+    "id": "L0",
+    "title": "L0 — Library Foundation",
+    "goal": "Establish a separate rights-reviewed recipe repository and contributor trust boundaries.",
+    "entry_conditions": [
+      "Library repository confirmed MIT-only baseline; source requirements and maintainer roles agreed."
+    ],
+    "exit_conditions": [
+      "Recipe/source/artifact separation, identifiers, provenance and contribution/review rules documented.",
+      "PR validation has no production signing credentials; asset rights and takedown process has named owners."
+    ],
+    "gate": "LQA-L0",
+    "quality_gate": "LQA-L0: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 17,
+    "platforms": [
+      "all",
+      "headless"
+    ],
+    "risks": [
+      "Unclear media rights",
+      "App/library coupling"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval"
+    ],
+    "unlocks": [
+      "L1 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "library-foundation"
+  },
+  {
+    "repository": "asciiwall-library",
+    "id": "L1",
+    "title": "L1 — Package and Catalog Tooling",
+    "goal": "Build reproducible packages and exact-byte signed catalog using a pinned compatible engine toolchain.",
+    "entry_conditions": [
+      "L0 accepted; PKG-001 manifest/scene and compatible packer interfaces available."
+    ],
+    "exit_conditions": [
+      "Recipe validator, pinned packer, independent package validation and catalog schema fixtures pass.",
+      "Immutable package hashes/sizes/URLs/previews and signature verification are tested without privileged PR execution.",
+      "Key rotation, emergency replacement and artifact manifest recovery procedure have evidence."
+    ],
+    "gate": "LQA-L1",
+    "quality_gate": "LQA-L1: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 54,
+    "platforms": [
+      "all",
+      "headless"
+    ],
+    "risks": [
+      "Packer version skew",
+      "Signing key exposure",
+      "Nondeterministic media"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "L2 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "library-alpha"
+  },
+  {
+    "repository": "asciiwall-library",
+    "id": "L2",
+    "title": "L2 — Starter Collection Alpha",
+    "goal": "Curate the 36 source recipe briefs without shipping unimplemented later engine capabilities.",
+    "entry_conditions": [
+      "L1 tooling accepted; recipe source kinds and feature requirements match a pinned engine."
+    ],
+    "exit_conditions": [
+      "All 36 briefs have an explicit v1 versus later/experimental disposition and rights record.",
+      "Accepted v1 recipes have deterministic seeds, safe limits, compatible package validation and original static previews.",
+      "Collection variants and quality tiers are measured; missing rights/unsupported extensions block publication, not replaced with mock content."
+    ],
+    "gate": "LQA-L2",
+    "quality_gate": "LQA-L2: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 116,
+    "platforms": [
+      "all",
+      "headless"
+    ],
+    "risks": [
+      "Unlicensed source media",
+      "Later scene support confused with v1",
+      "Preview inconsistency"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "L3 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "library-alpha"
+  },
+  {
+    "repository": "asciiwall-library",
+    "id": "L3",
+    "title": "L3 — Compatible Library 1.0",
+    "goal": "Release a trusted immutable catalog interoperable with the application 1.0 format.",
+    "entry_conditions": [
+      "L2 accepted; application M6 conformance and M9 release compatibility matrix approved."
+    ],
+    "exit_conditions": [
+      "Collection release pins app/schema/packer versions and all package/license/provenance records match exact artifact bytes.",
+      "Clean offline import and explicit online catalog/download verify signatures/hashes and preserve pinned installed assignments.",
+      "Trusted release approvals, public verification docs and key recovery/rotation evidence are signed."
+    ],
+    "gate": "LQA-L3",
+    "quality_gate": "LQA-L3: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 76,
+    "platforms": [
+      "all",
+      "headless"
+    ],
+    "risks": [
+      "App release skew",
+      "Revocation freshness",
+      "Artifact hosting drift"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "L4 work may advance after its own entry conditions are met"
+    ],
+    "target_release": "library-1.0.0"
+  },
+  {
+    "repository": "asciiwall-library",
+    "id": "L4",
+    "title": "L4 — Maintenance",
+    "goal": "Maintain immutable catalog history, reviewed submissions and app-version compatibility.",
+    "entry_conditions": [
+      "L3 signed; maintainer/advisory and release key custody assigned."
+    ],
+    "exit_conditions": [
+      "Every update creates new package version/catalog sequence and never mutates prior bytes.",
+      "Security/takedown/key-rotation handling records affected hashes and offline freshness limits.",
+      "Routine compatibility and rights review updates release notes without silently changing running wallpapers."
+    ],
+    "gate": "LQA-L4",
+    "quality_gate": "LQA-L4: each in-scope criterion and scenario has Pass or explicitly approved non-security waiver with linked follow-up; zero unresolved P0, destructive-data or security failures; evidence reviewed before closure, never issue-count-only completion.",
+    "effort_days": 61,
+    "platforms": [
+      "all",
+      "headless"
+    ],
+    "risks": [
+      "Hosting availability",
+      "Rights withdrawal",
+      "Key compromise"
+    ],
+    "signoff": [
+      "Responsible implementation maintainer",
+      "Independent QA/evidence reviewer",
+      "Project owner release or milestone approval",
+      "Security reviewer for changed trust boundaries",
+      "Rights/provenance reviewer for distributed assets"
+    ],
+    "unlocks": [
+      "Subsequent scoped maintenance release; repeat gate for each release"
+    ],
+    "target_release": "library-post-1.0"
+  }
+]

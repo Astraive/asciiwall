@@ -1,0 +1,847 @@
+{
+  "schema_version": 1,
+  "project": {
+    "id": "PVT_kwDOEF_JvM4BrI0s",
+    "number": 4,
+    "desired_title": "AsciiWall — Master Development Roadmap",
+    "repositories": [
+      "Astraive/asciiwall",
+      "Astraive/asciiwall-library"
+    ]
+  },
+  "fields": [
+    {
+      "name": "Status",
+      "kind": "SINGLE_SELECT",
+      "source": "status",
+      "options": [
+        "Backlog",
+        "Ready",
+        "In Progress",
+        "In Review",
+        "Blocked",
+        "Done"
+      ],
+      "fallback": "Reuse the existing Status field. Rename Todo to Backlog only when the live project has zero items; if items exist, preserve Todo, add Backlog and record the manual migration requirement."
+    },
+    {
+      "name": "Priority",
+      "kind": "SINGLE_SELECT",
+      "source": "priority",
+      "options": [
+        "P0",
+        "P1",
+        "P2",
+        "P3"
+      ],
+      "fallback": "priority:* labels are canonical if custom field writes are unavailable."
+    },
+    {
+      "name": "Size",
+      "kind": "SINGLE_SELECT",
+      "source": "size",
+      "options": [
+        "S",
+        "M",
+        "L",
+        "XL"
+      ],
+      "fallback": "size:* labels; XL containers only."
+    },
+    {
+      "name": "Work type",
+      "kind": "SINGLE_SELECT",
+      "source": "type",
+      "options": [
+        "Epic",
+        "Feature",
+        "Task",
+        "Bug",
+        "Enhancement",
+        "Chore",
+        "Documentation",
+        "Test",
+        "Research",
+        "Security",
+        "Refactor",
+        "Performance",
+        "Maintenance",
+        "Duplicate"
+      ],
+      "fallback": "Project Type is a distinct 14-option taxonomy, separate from Kind."
+    },
+    {
+      "name": "Kind",
+      "kind": "SINGLE_SELECT",
+      "source": "kind",
+      "options": [
+        "roadmap",
+        "epic",
+        "task",
+        "gate"
+      ],
+      "fallback": "kind:* labels remain canonical if this custom field is unavailable; Kind is separate from Type."
+    },
+    {
+      "name": "Area",
+      "kind": "SINGLE_SELECT",
+      "source": "area",
+      "options": [
+        "accessibility",
+        "architecture",
+        "ascii-conversion",
+        "catalog",
+        "cli",
+        "community",
+        "diagnostics",
+        "documentation",
+        "fonts",
+        "image-decoding",
+        "interactions",
+        "ipc",
+        "library-foundation",
+        "library-quality",
+        "library-release",
+        "licensing",
+        "linux-host",
+        "local-library",
+        "macos-host",
+        "media",
+        "multi-monitor",
+        "native-packaging",
+        "native-ui",
+        "package-format",
+        "performance",
+        "platform-hosting",
+        "power-lifecycle",
+        "privacy",
+        "procedural-scenes",
+        "provenance",
+        "quality",
+        "release-engineering",
+        "rendering",
+        "runtime",
+        "scene-effects",
+        "scene-graph",
+        "security",
+        "settings",
+        "starter-artwork",
+        "transitions",
+        "windows-host"
+      ],
+      "fallback": "Canonical area:* labels and matching Area values use the listed normalized area names."
+    },
+    {
+      "name": "Platform",
+      "kind": "MULTI_SELECT",
+      "source": "platforms",
+      "options": [
+        "all",
+        "windows",
+        "macos",
+        "linux",
+        "x11",
+        "wayland",
+        "kde",
+        "gnome",
+        "cli",
+        "headless"
+      ],
+      "fallback": "MULTI_SELECT is exposed in live custom-field schema. If writes unsupported or denied, platform:* labels preserve all values; never collapse to one platform."
+    },
+    {
+      "name": "Repository",
+      "kind": "NATIVE_REPOSITORY",
+      "source": "repository",
+      "options": [
+        "Astraive/asciiwall",
+        "Astraive/asciiwall-library"
+      ],
+      "fallback": "Reuse native Repository; do not shadow with a custom field."
+    },
+    {
+      "name": "Repo role",
+      "kind": "SINGLE_SELECT",
+      "source": "repository display role",
+      "options": [
+        "Main App",
+        "Wallpaper Library"
+      ],
+      "fallback": "Optional display categorization only; native Repository remains authoritative."
+    },
+    {
+      "name": "Milestone",
+      "kind": "NATIVE_MILESTONE",
+      "source": "milestone",
+      "options": [
+        "M0 — Foundation",
+        "M1 — ASCII Engine Prototype",
+        "M2 — Native Renderer",
+        "M3 — Windows First Wallpaper",
+        "M4 — Media and Effects",
+        "M5 — Full Desktop Application",
+        "M6 — Package Ecosystem",
+        "M7 — Cross-Platform Alpha",
+        "M8 — Beta",
+        "M9 — 1.0 Release",
+        "M10 — Post-Launch",
+        "L0 — Library Foundation",
+        "L1 — Package and Catalog Tooling",
+        "L2 — Starter Collection Alpha",
+        "L3 — Compatible Library 1.0",
+        "L4 — Maintenance"
+      ],
+      "fallback": "Reuse native issue milestone; do not add a duplicate custom Milestone field."
+    },
+    {
+      "name": "Phase",
+      "kind": "SINGLE_SELECT",
+      "source": "phase",
+      "options": [
+        "Foundation",
+        "ASCII Engine Prototype",
+        "Native Renderer",
+        "Windows First Wallpaper",
+        "Media and Effects",
+        "Full Desktop Application",
+        "Package Ecosystem",
+        "Cross-Platform Alpha",
+        "Beta",
+        "1.0 Release",
+        "Post-Launch",
+        "Library Foundation",
+        "Package and Catalog Tooling",
+        "Starter Collection Alpha",
+        "Compatible Library 1.0",
+        "Maintenance"
+      ],
+      "fallback": "One canonical phase maps to each native milestone; this field describes phase-level organization only."
+    },
+    {
+      "name": "Blocked",
+      "kind": "SINGLE_SELECT",
+      "source": "computed unresolved depends_on",
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "fallback": "Compute from native hard-blocker issue state where published; local depends_on until then. Status Blocked is workflow, not an independent blocker source."
+    },
+    {
+      "name": "Target release",
+      "kind": "TEXT",
+      "source": "milestone.target_release",
+      "options": [],
+      "fallback": "TEXT field sourced from milestone.target_release; no option list, calendar date, or completion claim."
+    },
+    {
+      "name": "Assignees",
+      "kind": "NATIVE_ASSIGNEES",
+      "source": "responsible contributor",
+      "options": [],
+      "fallback": "Reuse native Assignees. Leave unassigned until a contributor accepts; never invent an owner."
+    },
+    {
+      "name": "Effort",
+      "kind": "NUMBER",
+      "source": "effort_days",
+      "options": [],
+      "fallback": "Positive estimated person-days; container effort is coordination only and excluded from child effort rollups."
+    },
+    {
+      "name": "Title",
+      "kind": "NATIVE_TITLE",
+      "source": "issue title",
+      "options": [],
+      "fallback": "Reuse the existing native Title field; never create a shadow custom field."
+    },
+    {
+      "name": "Labels",
+      "kind": "NATIVE_LABELS",
+      "source": "generated taxonomy labels",
+      "options": [],
+      "fallback": "Reuse the existing native Labels field for priority/size/type/platform/area/kind and computed path labels."
+    },
+    {
+      "name": "Parent issue",
+      "kind": "NATIVE_PARENT_ISSUE",
+      "source": "parent",
+      "options": [],
+      "fallback": "Reuse native issue parent/sub-issues relationship."
+    },
+    {
+      "name": "Sub-issues progress",
+      "kind": "NATIVE_SUB_ISSUES_PROGRESS",
+      "source": "native child issue progress",
+      "options": [],
+      "fallback": "Reuse existing native Sub-issues progress field."
+    },
+    {
+      "name": "Updated",
+      "kind": "NATIVE_UPDATED",
+      "source": "native updated timestamp",
+      "options": [],
+      "fallback": "Read-only native sorting field; no timestamp is fabricated."
+    }
+  ],
+  "views": [
+    {
+      "name": "Master Roadmap",
+      "layout": "BOARD_LAYOUT",
+      "filter": "",
+      "group_by": "Phase",
+      "secondary_group_by": "Status",
+      "sort_by": [
+        "Priority",
+        "Milestone"
+      ],
+      "purpose": "Cross-repository execution sequence and ownership",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress",
+        "Phase",
+        "Kind",
+        "Work type"
+      ]
+    },
+    {
+      "name": "All Backlog Items",
+      "layout": "TABLE_LAYOUT",
+      "filter": "status:Backlog",
+      "group_by": "Repository",
+      "secondary_group_by": "Milestone",
+      "sort_by": [
+        "Priority",
+        "Size"
+      ],
+      "purpose": "Unscheduled backlog triage without hiding one repository",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress",
+        "Phase",
+        "Kind"
+      ]
+    },
+    {
+      "name": "Milestone Roadmap",
+      "layout": "TABLE_LAYOUT",
+      "filter": "",
+      "group_by": "Milestone",
+      "secondary_group_by": "Repository",
+      "sort_by": [
+        "Phase",
+        "Priority"
+      ],
+      "purpose": "Milestone dependencies without invented start/end dates",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress",
+        "Phase",
+        "Target release",
+        "Kind"
+      ]
+    },
+    {
+      "name": "Epics",
+      "layout": "TABLE_LAYOUT",
+      "filter": "label:\"kind:epic\" -label:\"kind:roadmap\"",
+      "group_by": "Repository",
+      "secondary_group_by": "Milestone",
+      "sort_by": [
+        "Area",
+        "Priority"
+      ],
+      "purpose": "Parent workstream health and native sub-issue progress",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress",
+        "Kind",
+        "Work type"
+      ]
+    },
+    {
+      "name": "P0 Critical Path",
+      "layout": "TABLE_LAYOUT",
+      "filter": "label:\"priority:P0\" label:\"path:critical\" -status:Done",
+      "group_by": "Milestone",
+      "secondary_group_by": "Blocked",
+      "sort_by": [
+        "Phase",
+        "Effort"
+      ],
+      "purpose": "P0 work plus critical-path evidence; P0 is not itself proof of critical-path membership",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress",
+        "Phase",
+        "Kind"
+      ]
+    },
+    {
+      "name": "Ready for Development",
+      "layout": "TABLE_LAYOUT",
+      "filter": "status:Ready Blocked:No",
+      "group_by": "Area",
+      "secondary_group_by": "Repository",
+      "sort_by": [
+        "Priority",
+        "Size"
+      ],
+      "purpose": "Only dependency-cleared work meeting Definition of Ready",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress"
+      ]
+    },
+    {
+      "name": "Currently Blocked",
+      "layout": "TABLE_LAYOUT",
+      "filter": "Blocked:Yes -status:Done",
+      "group_by": "Milestone",
+      "secondary_group_by": "Area",
+      "sort_by": [
+        "Priority",
+        "Repository"
+      ],
+      "purpose": "Hard-blocker triage; show native blocker links and local depends_on",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress"
+      ]
+    },
+    {
+      "name": "Windows Development",
+      "layout": "TABLE_LAYOUT",
+      "filter": "platform:windows",
+      "group_by": "Milestone",
+      "secondary_group_by": "Area",
+      "sort_by": [
+        "Priority",
+        "Status"
+      ],
+      "purpose": "Native Windows adapter and packaging evidence",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress"
+      ]
+    },
+    {
+      "name": "macOS Development",
+      "layout": "TABLE_LAYOUT",
+      "filter": "platform:macos",
+      "group_by": "Milestone",
+      "secondary_group_by": "Area",
+      "sort_by": [
+        "Priority",
+        "Status"
+      ],
+      "purpose": "macOS permissions, host and signing readiness",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress"
+      ]
+    },
+    {
+      "name": "Linux Development",
+      "layout": "TABLE_LAYOUT",
+      "filter": "platform:linux",
+      "group_by": "Milestone",
+      "secondary_group_by": "Area",
+      "sort_by": [
+        "Priority",
+        "Status"
+      ],
+      "purpose": "Linux shared work; family predicate below includes compositor/session-specific tickets",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress"
+      ]
+    },
+    {
+      "name": "Rust Engine",
+      "layout": "TABLE_LAYOUT",
+      "filter": "repo:Astraive/asciiwall label:\"area:architecture\",\"area:runtime\",\"area:ascii-conversion\",\"area:fonts\",\"area:image-decoding\",\"area:rendering\",\"area:scene-graph\",\"area:scene-effects\",\"area:procedural-scenes\",\"area:performance\",\"area:media\",\"area:package-format\"",
+      "group_by": "Area",
+      "secondary_group_by": "Milestone",
+      "sort_by": [
+        "Priority",
+        "Status"
+      ],
+      "purpose": "Portable runtime, conversion and rendering contracts",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress"
+      ]
+    },
+    {
+      "name": "UI and Customization",
+      "layout": "TABLE_LAYOUT",
+      "filter": "label:\"area:native-ui\",\"area:settings\",\"area:interactions\",\"area:accessibility\",\"area:transitions\"",
+      "group_by": "Area",
+      "secondary_group_by": "Milestone",
+      "sort_by": [
+        "Priority",
+        "Status"
+      ],
+      "purpose": "Settings, editor, interaction and accessibility integration",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress"
+      ]
+    },
+    {
+      "name": "Media Processing",
+      "layout": "TABLE_LAYOUT",
+      "filter": "repo:Astraive/asciiwall label:\"area:image-decoding\",\"area:media\",\"area:ascii-conversion\",\"area:rendering\",\"area:performance\",\"area:scene-effects\",\"area:transitions\"",
+      "group_by": "Area",
+      "secondary_group_by": "Milestone",
+      "sort_by": [
+        "Priority",
+        "Status"
+      ],
+      "purpose": "Decode, scheduling, clips, color and export ownership",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress"
+      ]
+    },
+    {
+      "name": "QA and Verification",
+      "layout": "TABLE_LAYOUT",
+      "filter": "label:\"type:test\",\"kind:gate\",\"area:quality\",\"area:diagnostics\",\"area:performance\",\"area:provenance\"",
+      "group_by": "Milestone",
+      "secondary_group_by": "Repository",
+      "sort_by": [
+        "Priority",
+        "Status"
+      ],
+      "purpose": "Gate evidence, executable tests and scenario ownership",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress",
+        "Kind",
+        "Work type"
+      ]
+    },
+    {
+      "name": "Security",
+      "layout": "TABLE_LAYOUT",
+      "filter": "label:\"type:security\",\"area:security\",\"area:privacy\",\"area:ipc\",\"area:provenance\",\"area:catalog\"",
+      "group_by": "Milestone",
+      "secondary_group_by": "Repository",
+      "sort_by": [
+        "Priority",
+        "Status"
+      ],
+      "purpose": "Threat-boundary, privacy, supply-chain and confinement work",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress",
+        "Kind",
+        "Work type"
+      ]
+    },
+    {
+      "name": "Library Contributions",
+      "layout": "TABLE_LAYOUT",
+      "filter": "repo:Astraive/asciiwall-library",
+      "group_by": "Milestone",
+      "secondary_group_by": "Area",
+      "sort_by": [
+        "Priority",
+        "Status"
+      ],
+      "purpose": "Recipe rights, tooling and curated release queue",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress"
+      ]
+    },
+    {
+      "name": "Release Readiness",
+      "layout": "TABLE_LAYOUT",
+      "filter": "label:\"kind:gate\",\"area:release-engineering\",\"area:native-packaging\",\"area:licensing\",\"area:provenance\",\"area:library-release\",\"area:library-quality\" -status:Done",
+      "group_by": "Milestone",
+      "secondary_group_by": "Repository",
+      "sort_by": [
+        "Priority",
+        "Blocked"
+      ],
+      "purpose": "Release gates, installer, compatibility and rights approvals",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress",
+        "Phase",
+        "Kind",
+        "Work type",
+        "Target release"
+      ]
+    },
+    {
+      "name": "Completed Work",
+      "layout": "TABLE_LAYOUT",
+      "filter": "status:Done",
+      "group_by": "Milestone",
+      "secondary_group_by": "Repository",
+      "sort_by": [
+        "Area",
+        "Updated"
+      ],
+      "purpose": "Reviewed completion history, not an inferred completion status",
+      "visible_fields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Size",
+        "Area",
+        "Platform",
+        "Repository",
+        "Milestone",
+        "Blocked",
+        "Effort",
+        "Assignees",
+        "Parent issue",
+        "Sub-issues progress"
+      ]
+    }
+  ],
+  "status_mapping": {
+    "local_to_observed_native": {
+      "Backlog": "Todo",
+      "In Progress": "In Progress",
+      "Done": "Done"
+    },
+    "desired_local_workflow": [
+      "Backlog",
+      "Ready",
+      "In Progress",
+      "In Review",
+      "Blocked",
+      "Done"
+    ],
+    "note": "The static mapping records historically observed native status names only. At runtime the tool reads current option IDs and item count; Todo becomes Backlog only for a project with zero items, otherwise Todo is retained and migration is reported. No project-item snapshot or membership data is versioned."
+  },
+  "target_release_text_values": [
+    "1.0.0",
+    "alpha",
+    "beta",
+    "library-1.0.0",
+    "library-alpha",
+    "library-foundation",
+    "library-post-1.0",
+    "post-1.0",
+    "prototype",
+    "windows-alpha"
+  ],
+  "derived_labels": [
+    {
+      "name": "path:critical",
+      "source": "effort-weighted longest hard-dependency chain; estimates not dates",
+      "meaning": "One deterministic maximum-weight chain in the acyclic hard-blocker graph; atomic own effort totals 85 engineering days, containers contribute zero. This is a planning lower bound, not a schedule."
+    }
+  ],
+  "api_capabilities": {
+    "create_update_views": "The observed createProjectV2View input accepts name, layout and configuration; filter is supplied by a separate updateProjectV2View mutation and then independently refetched.",
+    "configuration_fields": [
+      "visibleFieldIds"
+    ],
+    "filter": "updateProjectV2View exposes filter. The configuration tool attempts the static label/status filters only on authorized apply and records exact refetch failures; custom Blocked-field filtering is not inferred.",
+    "custom_field_types": [
+      "TEXT",
+      "SINGLE_SELECT",
+      "MULTI_SELECT",
+      "NUMBER",
+      "DATE",
+      "ITERATION"
+    ],
+    "grouping": "No grouping or sorting setter exists in the observed API schema; grouping and sorting remain explicit per-view manual UI steps, not applied by the tool.",
+    "roadmap_dates": "No start/end, due dates, DATE fields or ITERATION fields are present. Milestone Roadmap uses TABLE_LAYOUT until real schedule data exists; no dates are invented."
+  }
+}

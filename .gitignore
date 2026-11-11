@@ -1,0 +1,4 @@
+# Defensive ignore for external local backlog data and Python bytecode
+/.issues/
+__pycache__/
+*.py[cod]

@@ -1,0 +1,52 @@
+name: Repository checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-quality:
+    name: Repository quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Check Markdown, JSON, local links, fences, and repository file policy
+        run: python scripts/check-repository.py
+      - name: Parse workflow and issue-form YAML
+        run: |
+          ruby -ryaml -e 'Dir.glob(".github/**/*.{yml,yaml}").sort.each { |f| YAML.safe_load(File.read(f, encoding: "UTF-8")); puts "YAML OK: #{f}" }'
+      - name: Parse all repository PowerShell scripts without executing them
+        shell: pwsh
+        run: ./scripts/check-powershell.ps1
+      - name: Check pull request title, body, and commit trailers
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python scripts/check-conventions.py --title "$PR_TITLE"
+          python scripts/check-conventions.py --coauthor-check-env PR_BODY
+          PR_COMMIT_BODIES="$(git log --format=%B "${BASE_SHA}..${HEAD_SHA}")"
+          export PR_COMMIT_BODIES
+          python scripts/check-conventions.py --coauthor-check-env PR_COMMIT_BODIES

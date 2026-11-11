@@ -1,0 +1,97 @@
+name: QA verification or milestone gate
+description: Track milestone acceptance gates (QA-M0..QA-M10), edge-case matrix checks (EC-*), or native platform tuple verification.
+title: "[QA] "
+labels: ["type:test", "kind:gate"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Follow [Quality gates](https://github.com/Astraive/asciiwall/blob/main/docs/quality-gates.md), [Acceptance criteria](https://github.com/Astraive/asciiwall/blob/main/docs/quality/acceptance-criteria.md), and [Testing strategy](https://github.com/Astraive/asciiwall/blob/main/docs/quality/test-strategy.md).
+        - P0 destructive-data, archive-escape, unauthorized-observation, desktop-lockout, or security failures are **non-waivable**.
+        - Record only actually observed runs and environments; never mark unexecuted Rust, media, or native desktop gates as passing.
+  - type: input
+    id: gate-id
+    attributes:
+      label: Gate or scenario ID(s)
+      description: Milestone gate (`QA-M0`..`QA-M10`) and/or edge-case matrix IDs (`EC-001`..`EC-120`).
+      placeholder: e.g. QA-M0 or EC-001, EC-002
+    validations:
+      required: true
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Milestone
+      options:
+        - M0 — Foundation
+        - M1 — ASCII Engine Prototype
+        - M2 — Native Renderer
+        - M3 — Windows First Wallpaper
+        - M4 — Media and Effects
+        - M5 — Full Desktop Application
+        - M6 — Package Ecosystem
+        - M7 — Cross-Platform Alpha
+        - M8 — Beta
+        - M9 — 1.0 Release
+        - M10 — Post-Launch
+    validations:
+      required: true
+  - type: dropdown
+    id: evidence-levels
+    attributes:
+      label: Evidence levels covered
+      description: Separate evidence tiers per `docs/quality/test-strategy.md`.
+      multiple: true
+      options:
+        - Document / Schema QA
+        - Unit / Property Tests
+        - Integration / Fake-Host
+        - Fuzz / Sanitizer
+        - Benchmark (named hardware)
+        - Native Manual Desktop Tuple
+        - Release / Clean-Machine Install
+    validations:
+      required: true
+  - type: textarea
+    id: platform-tuple
+    attributes:
+      label: Verified environment tuple
+      description: Exact OS build, session type, compositor/shell, GPU/driver, packaging format, and enabled capabilities (or `Repository scripts / CI only`).
+    validations:
+      required: true
+  - type: textarea
+    id: procedure
+    attributes:
+      label: Verification procedure and commands
+      description: Exact commands executed or manual native verification steps performed.
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Observed outcome
+      options:
+        - Planned / Not yet executed
+        - Pass (all in-scope checks verified)
+        - Fail (blocking defect found)
+        - Blocked (missing prerequisite)
+        - Waived (non-security P1/P2 only, linked follow-up required)
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Observed results and artifacts
+      description: Exact test counts, command stdout/stderr summary, binary/commit SHA, and any residual limitations or unverified paths.
+    validations:
+      required: true
+  - type: checkboxes
+    id: gate-checklist
+    attributes:
+      label: Gate integrity checklist
+      options:
+        - label: Zero unresolved P0 security, archive-escape, destructive-data, or desktop-lockout failures exist for the claimed scope.
+          required: true
+        - label: Only actually executed tests and verified platform tuples are reported as passing.
+          required: true
+        - label: Attached diagnostics/evidence exclude secrets, personal media, proprietary fonts, and unredacted host paths.
+          required: true
