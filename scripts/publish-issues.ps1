@@ -14,7 +14,8 @@ param(
     [string] $ExpectedLogin = '',
     [ValidateRange(1, 10)][int] $ReadAttempts = 4,
     [ValidateRange(1, 3600)][int] $CommandTimeoutSeconds = 180,
-    [string[]] $RetryOperation = @()
+    [string[]] $RetryOperation = @(),
+    [switch] $CreateMissing
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +29,9 @@ $script:Tickets = @{}
 $script:Identities = @{}
 $script:TicketsById = $null
 $script:TicketsByDirectory = $null
+$script:SourceOrder = @()
+$script:ProtectedKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$script:CreationBatchPreviewBasis = $null
 $script:Milestones = @{}
 $script:Fields = @{}
 $script:ProjectItems = @{}
@@ -195,7 +199,7 @@ function Set-Reconciled([string] $Operation) {
         Save-Ledger
     }
 }
-function Mutate([string] $Operation, [string] $Method, [string] $Endpoint, $Payload) {
+function Mutate([string] $Operation, [string] $Method, [string] $Endpoint, $Payload, [hashtable] $JournalDetails = @{}) {
     [void] $script:CurrentOperations.Add($Operation)
     Assert ([bool] $Apply) "Read-only mode requires pending operation: $Operation $Method $Endpoint $(Json $Payload)"
     Assert (-not $script:AttemptedOperations.ContainsKey($Operation)) "A mutation for '$Operation' was already attempted in this process; refusing a second request."
@@ -204,11 +208,13 @@ function Mutate([string] $Operation, [string] $Method, [string] $Endpoint, $Payl
         throw "Unreconciled durable operation '$Operation'. Refetch did not prove its desired result. Inspect remote state; only after proving it did not apply, authorize one explicit attempt with -RetryOperation '$Operation'. Pending: $Method $Endpoint $(Json $Payload)"
     }
     $script:AttemptedOperations[$Operation] = $true
-    $script:Ledger.operations[$Operation] = @{
+    $journalEntry = @{
         state = 'intent'; method = $Method; endpoint = $Endpoint; payload = $Payload
         payload_sha256 = Hash (Json $Payload); started_at = [DateTimeOffset]::UtcNow.ToString('o')
         previous_attempt = $(if ($old) { @{ state = $old.state; started_at = $old.started_at; payload_sha256 = $old.payload_sha256; error = $old.error } } else { $null })
     }
+    foreach ($name in $JournalDetails.Keys) { $journalEntry[$name] = $JournalDetails[$name] }
+    $script:Ledger.operations[$Operation] = $journalEntry
     Save-Ledger
     Start-Sleep -Milliseconds 1050
     try {
@@ -340,6 +346,150 @@ function Select-PublicationScope {
     $script:PublicationKeys = $selected
     $script:Order = @($script:Order | Where-Object { $selected.Contains((Key $_)) })
 }
+
+function Identity-Reference($Identity) {
+    if ($null -eq $Identity) { return $null }
+    $url = if ($Identity.Contains('html_url')) { [string] $Identity.html_url } elseif ($Identity.Contains('url')) { [string] $Identity.url } else { '' }
+    @{
+        id = $Identity.id
+        node_id = [string] $Identity.node_id
+        number = [int] $Identity.number
+        url = $url
+    }
+}
+function Valid-Identity($Identity) {
+    return $null -ne $Identity -and $Identity.id -and -not [string]::IsNullOrWhiteSpace([string] $Identity.node_id) -and [int] $Identity.number -gt 0 -and -not [string]::IsNullOrWhiteSpace([string] $(if ($Identity.Contains('html_url')) { $Identity.html_url } else { $Identity.url }))
+}
+function Same-Identity($Left, $Right) {
+    if (-not (Valid-Identity $Left) -or -not (Valid-Identity $Right)) { return $false }
+    $leftRef = Identity-Reference $Left; $rightRef = Identity-Reference $Right
+    return $leftRef.id -eq $rightRef.id -and $leftRef.node_id -ceq $rightRef.node_id -and $leftRef.number -eq $rightRef.number -and $leftRef.url -ceq $rightRef.url
+}
+function Seed-LedgerIdentityCache {
+    foreach ($ticket in $script:SourceOrder) {
+        $key = Key $ticket
+        if ($null -ne $script:Identities[$key] -or $null -eq $script:Ledger -or -not $script:Ledger.tickets.ContainsKey($key)) { continue }
+        $entry = $script:Ledger.tickets[$key]
+        if ($null -eq $entry -or -not $entry.Contains('id')) { continue }
+        Assert ($entry.id -and $entry.node_id -and $entry.number -gt 0 -and $entry.url) "Incomplete ledger identity for $key."
+        $script:Identities[$key] = @{ id = $entry.id; node_id = [string] $entry.node_id; number = [int] $entry.number; html_url = [string] $entry.url }
+    }
+}
+function Select-CreationBatch {
+    Assert ($script:RequestedMilestones.Count -eq 0) '-CreateMissing cannot be combined with -Milestone; it always uses the full source graph.'
+    Assert ($script:SourceOrder.Count -gt 0) 'Creation batch requires the full validated source order.'
+    Assert ($null -ne $script:Ledger -or (-not $Apply -and -not $VerifyOnly)) 'Creation batch selection requires a loaded ledger outside offline preview.'
+    Seed-LedgerIdentityCache
+    $allKeys = [Collections.Generic.List[string]]::new()
+    $allSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $sourceHashes = @{}
+    foreach ($ticket in $script:SourceOrder) {
+        $key = Key $ticket
+        Assert ($allSet.Add($key)) "Duplicate key in full source order: $key"
+        $allKeys.Add($key)
+        $sourceHashes[$key] = [string] $ticket._source_hash
+    }
+    $batch = if ($null -ne $script:Ledger -and $script:Ledger.ContainsKey('creation_batch')) { $script:Ledger.creation_batch } else { $null }
+    if ($null -ne $batch) {
+        Assert ($batch -is [Collections.IDictionary] -and $batch.schema_version -eq 1 -and $batch.state -ceq 'pinned' -and $batch.pinned_at) 'Invalid pinned creation_batch in ledger.'
+        Assert ((@($batch.source_order) -join "`n") -ceq ($allKeys.ToArray() -join "`n")) 'Pinned creation batch source order differs from current validated source.'
+        Assert ((Same-Set @($batch.source_hashes.Keys) $allKeys.ToArray())) 'Pinned creation batch source hash keys differ from current validated source.'
+        foreach ($key in $allKeys) { Assert ([string] $batch.source_hashes[$key] -ceq [string] $sourceHashes[$key]) "Pinned source identity drift for $key." }
+        Assert ($batch.source_ref -and $batch.source_sha) 'Pinned creation batch is missing its immutable source revision.'
+        if ($Apply -or $VerifyOnly) {
+            Assert ($script:SourceRefRequested -ceq [string] $batch.source_ref -and $script:SourceSha -ceq [string] $batch.source_sha) 'Pinned creation batch source reference/SHA differs from the resolved source revision.'
+        } elseif ($SourceRef) {
+            Assert ($SourceRef -ceq [string] $batch.source_ref) "SourceRef '$SourceRef' differs from the pinned creation-batch source '$($batch.source_ref)'."
+        } elseif ($script:Ledger.source_ref) {
+            Assert ([string] $script:Ledger.source_ref -ceq [string] $batch.source_ref) 'Ledger source reference differs from the pinned creation-batch source.'
+        }
+        $mutableSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $protectedSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($key in @($batch.mutable_keys)) { Assert ($allSet.Contains([string] $key) -and $mutableSet.Add([string] $key)) "Invalid or duplicate mutable creation-batch key '$key'." }
+        foreach ($key in @($batch.protected_keys)) { Assert ($allSet.Contains([string] $key) -and $protectedSet.Add([string] $key)) "Invalid or duplicate protected creation-batch key '$key'." }
+        Assert ($mutableSet.Count + $protectedSet.Count -eq $allSet.Count) 'Pinned creation batch does not partition the full source key set.'
+        foreach ($key in $mutableSet) { Assert (-not $protectedSet.Contains($key)) "Creation-batch key is both protected and mutable: $key" }
+        Assert ((Same-Set @($batch.protected_identities.Keys) @($protectedSet))) 'Pinned protected identity keys differ from protected_keys.'
+        foreach ($key in $protectedSet) {
+            $pinnedIdentity = $batch.protected_identities[$key]
+            Assert (Valid-Identity $pinnedIdentity) "Pinned protected identity is incomplete for $key."
+            if ($Apply -or $VerifyOnly) {
+                Assert (Valid-Identity $script:Identities[$key]) "Protected issue $key is missing from current GitHub inventory."
+            } elseif ($null -eq $script:Identities[$key]) {
+                $script:Identities[$key] = @{ id = $pinnedIdentity.id; node_id = [string] $pinnedIdentity.node_id; number = [int] $pinnedIdentity.number; html_url = [string] $pinnedIdentity.url }
+            }
+            Assert (Same-Identity $pinnedIdentity $script:Identities[$key]) "Protected source identity drift for $key."
+        }
+        foreach ($key in $allKeys) {
+            if ($null -ne $script:Identities[$key]) { Assert (Valid-Identity $script:Identities[$key]) "Invalid cached source identity for $key." }
+        }
+        $script:CreationBatchPreviewBasis = 'pinned creation_batch (ledger only; no GitHub discovery)'
+        $script:CreationBatchDraft = $batch
+    } else {
+        Assert (-not $VerifyOnly) '-VerifyOnly -CreateMissing requires a previously pinned creation_batch.'
+        $mutableSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $protectedSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $protectedIdentities = @{}
+        foreach ($ticket in $script:SourceOrder) {
+            $key = Key $ticket; $identity = $script:Identities[$key]
+            if (Valid-Identity $identity) {
+                [void] $protectedSet.Add($key)
+                $protectedIdentities[$key] = Identity-Reference $identity
+            } else {
+                [void] $mutableSet.Add($key)
+            }
+        }
+        Assert ($mutableSet.Count -gt 0) 'No missing source tickets remain to pin.'
+        $script:CreationBatchPreviewBasis = 'ledger identity records only (offline; remote-only identities are undiscovered)'
+        $script:CreationBatchDraft = @{
+            schema_version = 1
+            state = 'pinned'
+            source_ref = [string] $script:SourceRefRequested
+            source_sha = [string] $script:SourceSha
+            source_order = [string[]] $allKeys.ToArray()
+            mutable_keys = [string[]] @($allKeys | Where-Object { $mutableSet.Contains($_) })
+            protected_keys = [string[]] @($allKeys | Where-Object { $protectedSet.Contains($_) })
+            protected_identities = $protectedIdentities
+            source_hashes = $sourceHashes
+        }
+    }
+    $script:ProtectedKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($key in @($script:CreationBatchDraft.protected_keys)) { [void] $script:ProtectedKeys.Add([string] $key) }
+    $mutableKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($key in @($script:CreationBatchDraft.mutable_keys)) { [void] $mutableKeys.Add([string] $key) }
+    $script:PublicationKeys = $allSet
+    $script:ManagedMilestones = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $script:UsedMilestones = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $mutableOrder = [Collections.Generic.List[object]]::new()
+    $identityIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $identityNodes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($ticket in $script:SourceOrder) {
+        $key = Key $ticket
+        [void] $script:UsedMilestones.Add((Milestone-Key $ticket))
+        $identity = $script:Identities[$key]
+        if (Valid-Identity $identity) {
+            Assert ($identityIds.Add([string] $identity.id) -and $identityNodes.Add([string] $identity.node_id)) "Multiple source keys resolve to one GitHub identity at $key."
+        }
+        if ($mutableKeys.Contains($key)) {
+            $mutableOrder.Add($ticket)
+            [void] $script:ManagedMilestones.Add((Milestone-Key $ticket))
+        }
+    }
+    Assert ($mutableOrder.Count -gt 0) 'Pinned creation batch has no mutable tickets.'
+    foreach ($ticket in $mutableOrder) {
+        $key = Key $ticket
+        $references = @($ticket.parent | Where-Object { $_ }) + @($ticket.depends_on)
+        foreach ($reference in $references) {
+            $target = Resolve-Ticket $reference $ticket
+            $targetKey = Key $target
+            if (-not $mutableKeys.Contains($targetKey)) {
+                Assert ($script:ProtectedKeys.Contains($targetKey) -and (Valid-Identity $script:Identities[$targetKey])) "Required protected parent/dependency $targetKey for $key has no valid identity; refusing to proceed."
+            }
+        }
+    }
+    $script:Order = $mutableOrder.ToArray()
+}
+
 
 function Load-Source {
     $script:DerivedLabels = @()
@@ -491,7 +641,14 @@ function Load-Source {
         Assert ($ready.Count -gt 0) "Combined parent/dependency graph has a cycle: $($remaining.Keys -join ', ')"
         foreach ($key in $ready) { $script:Order.Add($remaining[$key]); $complete[$key] = $true; $remaining.Remove($key) }
     }
-    Select-PublicationScope
+    $script:SourceOrder = @($script:Order.ToArray())
+    if ($CreateMissing) {
+        Assert ($script:RequestedMilestones.Count -eq 0) '-CreateMissing cannot be combined with -Milestone; it always uses the full source graph.'
+        $script:PublicationKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($ticket in $script:SourceOrder) { [void] $script:PublicationKeys.Add((Key $ticket)) }
+    } else {
+        Select-PublicationScope
+    }
     Preflight-RenderedBodies
 }
 function Load-Ledger {
@@ -509,7 +666,7 @@ function Refresh-Inventory {
         $script:Inventory[$repository] = @(Read-Pages "repos/$Owner/$repository/issues?state=all" | Where-Object { -not $_.Contains('pull_request') })
     }
 }
-function Find-Identity($Ticket) {
+function Find-Identity($Ticket, [switch] $ReadOnly) {
     $key = Key $Ticket; $marker = Marker $Ticket
     $known = $script:Ledger.tickets[$key]
     $candidates = @($script:Inventory[$Ticket.repository] | Where-Object {
@@ -533,6 +690,7 @@ function Find-Identity($Ticket) {
         Assert ($old.id -eq $identity.id -and $old.node_id -ceq $identity.node_id -and $old.number -eq $identity.number -and $old.url -ceq $identity.html_url) "Ledger identity drift for $key"
     }
     $script:Identities[$key] = $identity
+    if ($ReadOnly) { return $identity }
     if ($Apply) {
         if ($null -eq $old) { $old = @{}; $script:Ledger.tickets[$key] = $old }
         $old.id = $identity.id; $old.node_id = $identity.node_id; $old.number = $identity.number; $old.url = $identity.html_url
@@ -685,6 +843,15 @@ function Require-ProjectSchema {
             }
         }
     }
+    $batchInput = Read-SchemaType 'UpdateProjectV2ItemFieldValueInput'
+    foreach ($requiredInput in @{ projectId = 'ID'; itemId = 'ID'; fieldId = 'ID'; value = 'ProjectV2FieldValue' }.GetEnumerator()) {
+        $field = @($batchInput.inputFields | Where-Object name -eq $requiredInput.Key)
+        Assert ($field.Count -eq 1 -and $field[0].type.kind -ceq 'NON_NULL' -and (Input-TypeName $field[0].type) -ceq $requiredInput.Value) "GitHub schema lacks required non-null UpdateProjectV2ItemFieldValueInput.$($requiredInput.Key): $($requiredInput.Value)."
+    }
+    $mutation = Graph-Read 'query{__type(name:"Mutation"){fields{name args{name type{kind name ofType{kind name}}}}}}'
+    $batchMutation = @($mutation.__type.fields | Where-Object name -ceq 'updateProjectV2ItemFieldValue')
+    $inputArgument = if ($batchMutation.Count -eq 1) { @($batchMutation[0].args | Where-Object name -ceq 'input') } else { @() }
+    Assert ($inputArgument.Count -eq 1 -and (Input-TypeName $inputArgument[0].type) -ceq 'UpdateProjectV2ItemFieldValueInput') 'GitHub schema lacks Mutation.updateProjectV2ItemFieldValue(input: UpdateProjectV2ItemFieldValueInput).'
 }
 function Refresh-Project {
     $script:Fields = @{}
@@ -958,13 +1125,98 @@ function Status-Matches($Actual, $Verified) {
     if ($actualName -and $verifiedName) { return $actualName -ceq $verifiedName }
     return $false
 }
+function Update-ProjectFieldBatch($Ticket, $Item, $ChangedFields, $ActualValues, $DesiredValues) {
+    $key = Key $Ticket
+    $operation = "project:values:$key"
+    [void] $script:CurrentOperations.Add($operation)
+    $old = $script:Ledger.operations[$operation]
+    $changedByName = @{}
+    foreach ($entry in $ChangedFields) { $changedByName[$entry.name] = $entry }
+    $legacyPending = [Collections.Generic.List[string]]::new()
+    foreach ($name in $changedByName.Keys) {
+        $legacyOperation = "project:value:$key/$name"
+        $legacy = $script:Ledger.operations[$legacyOperation]
+        if ($null -ne $legacy -and $legacy.state -in @('intent', 'unknown', 'succeeded', 'verified')) { $legacyPending.Add($legacyOperation) }
+    }
+    if ($legacyPending.Count -gt 0 -and $operation -cnotin $RetryOperation) {
+        throw "Unreconciled legacy project-field operation(s) for $key. Read back the fields; only after proving remaining writes are required, authorize the grouped retry with -RetryOperation '$operation'. Legacy: $($legacyPending -join ', ')."
+    }
+    $expectedValues = @{}
+    $pending = [Collections.Generic.List[object]]::new()
+    if ($null -ne $old) {
+        Assert ($old.Contains('desired_values') -and $old.desired_values -is [Collections.IDictionary] -and $old.desired_values.Count -gt 0) "Journaled project-field batch lacks desired_values for $key; refusing to infer whether aliases applied."
+        foreach ($name in $old.desired_values.Keys) {
+            Assert ($DesiredValues.ContainsKey([string] $name) -and (Json $old.desired_values[$name]) -ceq (Json $DesiredValues[$name])) "Journaled project-field desired value drift for $key/$name."
+            $expectedValues[[string] $name] = $old.desired_values[$name]
+        }
+        $allRecordedMatch = $true
+        foreach ($name in $expectedValues.Keys) {
+            if (-not (Field-Matches $expectedValues[$name] $ActualValues[$name])) {
+                $allRecordedMatch = $false
+                Assert ($changedByName.ContainsKey($name)) "Journaled project field $key/$name differs remotely but is absent from the current readback change set."
+                $pending.Add($changedByName[$name])
+            }
+        }
+        foreach ($entry in $ChangedFields) {
+            if (-not $expectedValues.ContainsKey($entry.name)) {
+                $expectedValues[$entry.name] = $entry.payload
+                $pending.Add($entry)
+            }
+        }
+        if ($allRecordedMatch -and $pending.Count -eq 0) {
+            Set-Reconciled $operation
+            foreach ($name in $DesiredValues.Keys) { Set-Reconciled "project:value:$key/$name" }
+            return
+        }
+        if ($operation -cnotin $RetryOperation) {
+            throw "Unreconciled journaled project-field batch '$operation': refetched values do not exactly match all recorded aliases. Inspect readback; only after proving writes remain, authorize one explicit -RetryOperation '$operation'."
+        }
+    } else {
+        foreach ($entry in $ChangedFields) {
+            $expectedValues[$entry.name] = $entry.payload
+            $pending.Add($entry)
+        }
+        if ($pending.Count -eq 0) {
+            foreach ($name in $DesiredValues.Keys) { Set-Reconciled "project:value:$key/$name" }
+            return
+        }
+    }
+    Assert ($pending.Count -gt 0) "No project-field aliases remain for $key despite an unresolved batch."
+    $definitions = [Collections.Generic.List[string]]::new()
+    $selections = [Collections.Generic.List[string]]::new()
+    $variables = @{}
+    $aliasNames = [Collections.Generic.List[string]]::new()
+    $index = 0
+    foreach ($entry in $pending) {
+        $variable = "input$index"; $alias = "field$index"
+        $definitions.Add("`$$variable`:UpdateProjectV2ItemFieldValueInput!")
+        $selections.Add("$alias`:updateProjectV2ItemFieldValue(input:`$$variable){projectV2Item{id}}")
+        $variables[$variable] = @{
+            projectId = $script:Project.id
+            itemId = $Item.id
+            fieldId = $entry.field.id
+            value = $entry.payload
+        }
+        $aliasNames.Add($alias)
+        $index++
+    }
+    $query = 'mutation(' + ($definitions -join ',') + '){' + ($selections -join ' ') + '}'
+    $payload = @{ query = $query; variables = $variables }
+    $journalDetails = @{ ticket_key = $key; ticket_source_sha256 = [string] $Ticket._source_hash; desired_values = $expectedValues; aliases = [string[]] $aliasNames.ToArray() }
+    $response = Mutate $operation 'POST' 'graphql' $payload $journalDetails
+    foreach ($alias in $aliasNames) {
+        Assert ($response.data[$alias].projectV2Item.id -ceq $Item.id) "GraphQL alias $alias did not confirm the project item for $key."
+    }
+    foreach ($name in $DesiredValues.Keys) { Set-Reconciled "project:value:$key/$name" }
+}
+
 function Ensure-Items {
     Refresh-Items
     $nonNativeFields = @($script:ProjectRegistry.fields | Where-Object { $_.kind -notlike 'NATIVE_*' })
     $statusMatches = @($nonNativeFields | Where-Object { $_.name -ceq 'Status' })
     Assert ($statusMatches.Count -eq 1) 'Project registry is missing required Status field.'
     $statusDesired = $statusMatches[0]
-    $orderedFields = @($statusDesired) + @($nonNativeFields | Where-Object { $_.name -cne 'Status' })
+    $nonStatusFields = @($nonNativeFields | Where-Object { $_.name -cne 'Status' })
     $statusField = $script:Fields['Status']
     Assert ($null -ne $statusField) 'Remote project is missing required Status field.'
     $todoOptions = @((Field-Options $statusField) | Where-Object { $_.name -ceq 'Todo' })
@@ -1005,16 +1257,24 @@ function Ensure-Items {
             }
         }
 
-        $desiredValues = @{}
-        foreach ($desired in $orderedFields) {
+        $statusOperation = "project:value:$key/Status"
+        if (-not (Field-Matches $statusPayload $actualStatus)) {
+            [void] (Graph-Mutate $statusOperation 'mutation($input:UpdateProjectV2ItemFieldValueInput!){updateProjectV2ItemFieldValue(input:$input){projectV2Item{id}}}' @{ input = @{ projectId = $script:Project.id; itemId = $item.id; fieldId = $statusField.id; value = $statusPayload } })
+        } else { Set-Reconciled $statusOperation }
+
+        $desiredValues = @{ Status = $statusPayload }
+        $desiredCustomValues = @{}
+        $changedFields = [Collections.Generic.List[object]]::new()
+        foreach ($desired in $nonStatusFields) {
             $field = $script:Fields[$desired.name]
             $payload = Field-Payload $desired $field $ticket
             $desiredValues[$desired.name] = $payload
-            $op = "project:value:$key/$($desired.name)"
+            $desiredCustomValues[$desired.name] = $payload
             if (-not (Field-Matches $payload $values[$desired.name])) {
-                [void] (Graph-Mutate $op 'mutation($input:UpdateProjectV2ItemFieldValueInput!){updateProjectV2ItemFieldValue(input:$input){projectV2Item{id}}}' @{ input = @{ projectId = $script:Project.id; itemId = $item.id; fieldId = $field.id; value = $payload } })
-            } else { Set-Reconciled $op }
+                $changedFields.Add(@{ name = [string] $desired.name; field = $field; payload = $payload })
+            }
         }
+        Update-ProjectFieldBatch $ticket $item $changedFields $values $desiredCustomValues
         $script:Ledger.tickets[$key].project = @{ item_id = $item.id; state = 'submitted'; fields = $desiredValues }
         Save-Ledger
     }
@@ -1084,6 +1344,14 @@ function Verify-All {
     Verify-Registries
     Refresh-Inventory
     $script:Identities = @{}
+    if ($CreateMissing) {
+        foreach ($protectedTicket in $script:SourceOrder) {
+            $protectedKey = Key $protectedTicket
+            if (-not $script:ProtectedKeys.Contains($protectedKey)) { continue }
+            $identity = Find-Identity $protectedTicket -ReadOnly
+            Assert ((Valid-Identity $identity) -and (Same-Identity $script:CreationBatchDraft.protected_identities[$protectedKey] $identity)) "Protected source identity drift during final verification for $protectedKey."
+        }
+    }
     foreach ($ticket in $script:Order) {
         $identity = Find-Identity $ticket
         if ($null -eq $identity) { Record-Verification (Key $ticket) 'issue missing'; continue }
@@ -1167,7 +1435,16 @@ function Verify-All {
         Save-Ledger
     }
     Assert ($script:Failures.Count -eq 0) ("Exhaustive verification failed:`n" + ($script:Failures -join "`n"))
-    Write-Output (Json @{ mode = $(if ($VerifyOnly) { 'verify-only' } else { 'apply' }); state = 'verified'; tickets = $script:Order.Count; milestones = @($script:RequestedMilestones); project = $script:Project.id; ledger_written = [bool] $Apply })
+    $verificationResult = @{ mode = $(if ($VerifyOnly) { 'verify-only' } else { 'apply' }); state = 'verified'; tickets = $script:Order.Count; milestones = @($script:RequestedMilestones); project = $script:Project.id; ledger_written = [bool] $Apply }
+    if ($CreateMissing) {
+        $verificationResult.create_missing = $true
+        $verificationResult.creation_batch_pinned = $true
+        $verificationResult.protected_tickets = $script:ProtectedKeys.Count
+        $verificationResult.mutable_tickets = $script:Order.Count
+        $verificationResult.protected_keys = @($script:SourceOrder | Where-Object { $script:ProtectedKeys.Contains((Key $_)) } | ForEach-Object { Key $_ })
+        $verificationResult.mutable_keys = @($script:Order | ForEach-Object { Key $_ })
+    }
+    Write-Output (Json $verificationResult)
 }
 
 try {
@@ -1183,9 +1460,18 @@ try {
     $script:SourceSha = 'ffffffffffffffffffffffffffffffffffffffff'
     Load-Source
     if (-not $Apply -and -not $VerifyOnly) {
-        $script:SourceRefRequested = if ($SourceRef) { $SourceRef } else { 'main' }
-        $script:SourceSha = $script:SourceRefRequested
-        Write-Output (Json @{
+        if ($CreateMissing) {
+            Load-Ledger
+            if ($SourceRef -and $script:Ledger.source_ref) { Assert ($SourceRef -ceq [string] $script:Ledger.source_ref) "SourceRef '$SourceRef' conflicts with ledger-pinned revision '$($script:Ledger.source_ref)'." }
+            $script:SourceRefRequested = if ($SourceRef) { $SourceRef } elseif ($script:Ledger.creation_batch.source_ref) { [string] $script:Ledger.creation_batch.source_ref } elseif ($script:Ledger.source_ref) { [string] $script:Ledger.source_ref } else { 'main' }
+            if ($SourceRef -and $script:Ledger.creation_batch.source_ref) { Assert ($SourceRef -ceq [string] $script:Ledger.creation_batch.source_ref) "SourceRef '$SourceRef' conflicts with pinned creation-batch source '$($script:Ledger.creation_batch.source_ref)'." }
+            $script:SourceSha = if ($script:Ledger.creation_batch.source_sha) { [string] $script:Ledger.creation_batch.source_sha } elseif ($script:Ledger.source_sha) { [string] $script:Ledger.source_sha } else { $script:SourceRefRequested }
+            Select-CreationBatch
+        } else {
+            $script:SourceRefRequested = if ($SourceRef) { $SourceRef } else { 'main' }
+            $script:SourceSha = $script:SourceRefRequested
+        }
+        $dryRunResult = @{
             mode = 'dry-run'; offline = $true; backlog_root = $script:BacklogRoot; source_root = $script:RepoRoot
             source_ref = $script:SourceRefRequested
             owner = $Owner; project_number = $ProjectNumber; labels_per_repository = $script:LabelRegistry.Count
@@ -1198,7 +1484,19 @@ try {
                 @{ ticket = Key $ticket; kind = $ticket.kind; native_type = Native-Type $ticket; labels = @(Desired-Labels $ticket); milestone = Milestone-Key $ticket; parent = $ticket.parent; blockers = @($ticket.depends_on); source_sha256 = $ticket._source_hash; initial_body_sha256 = Hash (Render-Body $ticket -Initial); project_values = $projectValues }
             })
             phases = @('registry/schema preflight', 'labels/milestones', 'project fields/repositories', 'identify/create', 'final bodies/metadata', 'native parent/blockers', 'actual project items/fields', 'independent exhaustive verification')
-        })
+        }
+        if ($CreateMissing) {
+            $dryRunResult.create_missing = $true
+            $dryRunResult.preview_basis = $script:CreationBatchPreviewBasis
+            $dryRunResult.creation_batch_pinned = $script:Ledger.ContainsKey('creation_batch')
+            $dryRunResult.protected_tickets = $script:ProtectedKeys.Count
+            $dryRunResult.protected_keys = @($script:SourceOrder | Where-Object { $script:ProtectedKeys.Contains((Key $_)) } | ForEach-Object { Key $_ })
+            $dryRunResult.mutable_tickets = $script:Order.Count
+            $dryRunResult.mutable_keys = @($script:Order | ForEach-Object { Key $_ })
+            $dryRunResult.github_accessed = $false
+            $dryRunResult.ledger_written = $false
+        }
+        Write-Output (Json $dryRunResult)
     } else {
         if ($ExpectedLogin) {
             $principal = Read-Api 'user'
@@ -1224,6 +1522,25 @@ try {
         $script:Ledger.source_ref = $requestedRef
         $script:Ledger.source_sha = $script:SourceSha
         if ($Apply) { Save-Ledger }
+        if ($CreateMissing) {
+            Refresh-Inventory
+            foreach ($ticket in $script:SourceOrder) { [void] (Find-Identity $ticket -ReadOnly) }
+            Select-CreationBatch
+            if ($Apply) {
+                if (-not $script:Ledger.ContainsKey('creation_batch')) {
+                    $script:Ledger.creation_batch = $script:CreationBatchDraft
+                    $script:Ledger.creation_batch.pinned_at = [DateTimeOffset]::UtcNow.ToString('o')
+                    $script:Ledger.creation_batch.source_ref = $script:SourceRefRequested
+                    $script:Ledger.creation_batch.source_sha = $script:SourceSha
+                    Save-Ledger
+                }
+                $script:Ledger.workflow = @{
+                    state = 'in-progress'; phase = 'schema preflight'; started_at = [DateTimeOffset]::UtcNow.ToString('o')
+                    scope = @($script:Order | ForEach-Object { Key $_ }); requested_milestones = @($script:RequestedMilestones); expected_login = $ExpectedLogin
+                }
+                Save-Ledger
+            }
+        }
         if ($VerifyOnly) {
             Verify-All
         } else {
