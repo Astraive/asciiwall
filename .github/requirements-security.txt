@@ -1,0 +1,5 @@
+# CI-only security tooling; application/checker scripts use the Python standard library.
+pip==26.3
+bandit==1.8.6
+pip-audit==2.9.0
+pip-licenses==5.0.0

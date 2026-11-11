@@ -1,0 +1,42 @@
+name: Security analysis
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-static-analysis:
+    name: Python security analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install pinned Python security and license audit tools
+        run: python -m pip install --upgrade --disable-pip-version-check --no-input -r .github/requirements-security.txt
+      - name: Scan actual repository Python sources
+        run: bandit --recursive scripts --severity-level medium --confidence-level medium
+      - name: Audit installed workflow Python dependencies for known vulnerabilities
+        run: pip-audit
+      - name: Report actual workflow Python dependency licenses
+        run: pip-licenses --format=markdown --with-urls
+      # Rust dependency and license auditing is pending: there is no Cargo.toml or Cargo.lock and
+      # no reviewed crate/license policy. Add a pinned cargo-audit/cargo-deny gate only after
+      # those prerequisites are established under SEC-EPIC, REL-002, and REL-009.

@@ -1,0 +1,25 @@
+# Code owners for Astraive/asciiwall.
+# Single-maintainer bootstrap: only verified repository maintainer @NeerajCodz
+# is listed (no invented teams or non-existent crate paths).
+#
+# During single-maintainer bootstrap, GitHub branch protection sets required
+# approvals to 0 because a sole maintainer cannot approve their own PR;
+# explicit review expectations remain documented in GOVERNANCE.md and
+# docs/github-setup.md. Enable CODEOWNERS approval enforcement once additional
+# maintainers hold write access.
+
+*                       @NeerajCodz
+
+/.github/               @NeerajCodz
+/.githooks/             @NeerajCodz
+/docs/                  @NeerajCodz
+/scripts/               @NeerajCodz
+/CHANGELOG.md           @NeerajCodz
+/CODE_OF_CONDUCT.md     @NeerajCodz
+/CONTRIBUTING.md        @NeerajCodz
+/GOVERNANCE.md          @NeerajCodz
+/LICENSE                @NeerajCodz
+/README.md              @NeerajCodz
+/SECURITY.md            @NeerajCodz
+/SUPPORT.md             @NeerajCodz
+/VERSIONING.md          @NeerajCodz

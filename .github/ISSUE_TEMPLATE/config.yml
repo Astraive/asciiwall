@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability (Private Report Only)
+    url: https://github.com/Astraive/asciiwall/security/advisories/new
+    about: Report undisclosed security issues, unsafe parser/archive triggers, or supply-chain concerns privately. Never open a public issue; see SECURITY.md.
+  - name: Wallpaper Submissions & Curated Artwork
+    url: https://github.com/Astraive/asciiwall-library
+    about: Submit wallpaper recipes, previews, and attribution records to the companion Astraive/asciiwall-library repository.
+  - name: Questions, Support & Discussions
+    url: https://github.com/Astraive/asciiwall/discussions
+    about: Ask questions or discuss designs. Read SUPPORT.md first; no executable AsciiWall release exists yet.
+  - name: Documentation & Issue Conventions
+    url: https://github.com/Astraive/asciiwall/blob/main/docs/issue-conventions.md
+    about: Read stable ticket IDs, label taxonomy, and backlog conventions before opening engineering tasks.

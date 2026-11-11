@@ -1,0 +1,93 @@
+name: Feature proposal
+description: Propose a new engine capability, settings control, desktop integration behavior, or workflow improvement.
+title: "[Feature] "
+labels: ["type:feature", "kind:task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Review [Vision and scope](https://github.com/Astraive/asciiwall/blob/main/docs/product/vision-and-scope.md), [Feature catalog](https://github.com/Astraive/asciiwall/blob/main/docs/product/feature-catalog.md), and [Issue conventions](https://github.com/Astraive/asciiwall/blob/main/docs/issue-conventions.md) before opening a proposal.
+        AsciiWall maintains strict non-goals: offline-first core playback, no hosted account/backend requirement, no arbitrary executable code or user shaders in `.asciiwall` v1 packages, and no covert telemetry or screenshots.
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Target milestone
+      options:
+        - Needs triage
+        - M0 — Foundation
+        - M1 — ASCII Engine Prototype
+        - M2 — Native Renderer
+        - M3 — Windows First Wallpaper
+        - M4 — Media and Effects
+        - M5 — Full Desktop Application
+        - M6 — Package Ecosystem
+        - M7 — Cross-Platform Alpha
+        - M8 — Beta
+        - M9 — 1.0 Release
+        - M10 — Post-Launch
+    validations:
+      required: true
+  - type: dropdown
+    id: platforms
+    attributes:
+      label: Target platforms
+      multiple: true
+      options:
+        - all
+        - windows
+        - macos
+        - linux
+        - x11
+        - wayland
+        - kde
+        - gnome
+        - cli
+        - headless
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What user workflow, engine limitation, or platform capability gap does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior and fallback
+      description: Describe requested vs. effective settings behavior, reduced-motion/power behavior, and graceful degradation when a host capability is absent or denied.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      value: |
+        ### In scope
+        -
+
+        ### Out of scope
+        -
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Offline, privacy, and security boundaries
+      description: Confirm how the proposal preserves offline core playback, permission separation, bounded resource usage, and non-executable v1 package safety.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Proposed acceptance criteria
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Links to `docs/` sections or stable ticket IDs (do not fabricate GitHub issue numbers).

@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+    echo "ERROR: commit-msg hook requires the commit message file path." >&2
+    exit 2
+fi
+
+MSG_FILE="$1"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+PYTHON_BIN=""
+for candidate in python python3; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+       "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 12))' >/dev/null 2>&1; then
+        PYTHON_BIN="$candidate"
+        break
+    fi
+done
+if [ -z "$PYTHON_BIN" ]; then
+    echo "ERROR: Python 3.12+ is required to run scripts/check-conventions.py." >&2
+    exit 1
+fi
+
+exec "$PYTHON_BIN" "$REPO_ROOT/scripts/check-conventions.py" --message-file "$MSG_FILE"

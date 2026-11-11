@@ -1,0 +1,119 @@
+name: Bug report
+description: Report a reproducible defect against implemented code, scripts, schemas, or documentation.
+title: "[Bug] "
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        File one bug per issue and search open issues first.
+        - **Security vulnerabilities:** Do **not** file a public bug. Use [private vulnerability reporting](https://github.com/Astraive/asciiwall/security/advisories/new) per [SECURITY.md](https://github.com/Astraive/asciiwall/blob/main/SECURITY.md).
+        - **Current repository scope:** AsciiWall is in a pre-implementation documentation and infrastructure stage. Do not report missing application binaries as runtime regressions; verify against [SUPPORT.md](https://github.com/Astraive/asciiwall/blob/main/SUPPORT.md).
+        - **Privacy:** Never attach secrets, tokens, personal media, proprietary fonts, or unredacted local paths.
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Priority / Impact
+      description: Initial impact classification (`priority:P0` through `priority:P3`); triage may adjust it.
+      options:
+        - P0 · Blocker, data loss, focus/desktop lockout, or security-adjacent
+        - P1 · High-impact failure in a claimed supported capability
+        - P2 · Standard defect with clear workaround or limited scope
+        - P3 · Minor or cosmetic issue
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Target area
+      options:
+        - Documentation & Specifications
+        - Repository / Backlog Scripts (Python / PowerShell)
+        - CI & GitHub Infrastructure
+        - Core Engine / CLI (once implemented)
+        - Desktop Host / UI (once implemented)
+        - Package / Schema Validation (once implemented)
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Version or commit SHA
+      description: Observed commit SHA (or future released version and target triple).
+      placeholder: e.g. commit 3801d37 (or future app v0.x.y)
+    validations:
+      required: true
+  - type: dropdown
+    id: platforms
+    attributes:
+      label: Affected platforms
+      description: Platform targets where the issue reproduces.
+      multiple: true
+      options:
+        - all
+        - windows
+        - macos
+        - linux
+        - x11
+        - wayland
+        - kde
+        - gnome
+        - cli
+        - headless
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment tuple
+      description: Exact OS build, session type, compositor or shell version, GPU/driver, or tool versions (Python/PowerShell). Note whether this fails in preview or desktop placement.
+      placeholder: e.g. Windows 11 24H2 (26100), D3D12, Python 3.12.x / pwsh 7.4.x
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal numbered steps starting from a clean state.
+      value: |
+        1.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Distinguish a regression in a claimed supported capability from an unsupported OS/compositor capability.
+    validations:
+      required: true
+  - type: input
+    id: frequency
+    attributes:
+      label: Reproducibility
+      description: How often the issue reproduces (`x of y` runs).
+      placeholder: e.g. 5 of 5
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics or command output
+      description: Paste redacted command stdout/stderr or sanitized `asciiwall doctor --json` output (once implemented). Never paste full home paths or personal files.
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Minimal rights-cleared fixture or configuration
+      description: Smallest synthetic or rights-cleared input that reproduces the failure. Never attach personal media or third-party fonts without redistribution rights.
+  - type: checkboxes
+    id: privacy-confirm
+    attributes:
+      label: Disclosure safety
+      options:
+        - label: I confirm this report contains no undisclosed security exploit, secrets, personal media, proprietary fonts, or unredacted private host paths.
+          required: true

@@ -1,0 +1,84 @@
+name: Research or risk spike
+description: Time-boxed technical investigation or disposable proof-of-concept ending in observed evidence and a go/no-go decision.
+title: "[Research] "
+labels: ["type:research", "kind:task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Spikes follow [Risks and spikes](https://github.com/Astraive/asciiwall/blob/main/docs/delivery/risks-and-spikes.md) and [Assumptions and open questions](https://github.com/Astraive/asciiwall/blob/main/docs/research/assumptions-and-open-questions.md).
+        A spike answers one bounded question with observed evidence; never promote disposable spike hacks directly as a claimed production feature.
+  - type: input
+    id: ticket
+    attributes:
+      label: Stable ticket ID (optional)
+      placeholder: e.g. WND-001 or MED-001
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Milestone
+      options:
+        - M0 — Foundation
+        - M1 — ASCII Engine Prototype
+        - M2 — Native Renderer
+        - M3 — Windows First Wallpaper
+        - M4 — Media and Effects
+        - M5 — Full Desktop Application
+        - M6 — Package Ecosystem
+        - M7 — Cross-Platform Alpha
+        - M8 — Beta
+        - M9 — 1.0 Release
+        - M10 — Post-Launch
+    validations:
+      required: true
+  - type: dropdown
+    id: platforms
+    attributes:
+      label: Target platforms
+      multiple: true
+      options:
+        - all
+        - windows
+        - macos
+        - linux
+        - x11
+        - wayland
+        - kde
+        - gnome
+        - cli
+        - headless
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Research question
+      description: Single concrete technical, ABI, confinement, or desktop-integration question to settle.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Target environment tuple
+      description: Exact OS build, compositor/shell, GPU backend, toolchain, or dependency versions under test.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Spike boundary and safety guardrails
+      description: What makes this experiment disposable and safe (no production claims, isolated fixtures, no privileged workarounds).
+    validations:
+      required: true
+  - type: textarea
+    id: exit-criteria
+    attributes:
+      label: Pass/fail exit evidence and fallback path
+      description: Observable pass evidence, failure signals, and the documented fallback architecture if the hypothesis fails.
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Primary sources and docs
+      description: Cite `docs/research/source-register.md` IDs (`S01`–`S62`) and relevant `docs/` contracts.

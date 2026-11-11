@@ -1,0 +1,184 @@
+name: Backlog task
+description: Track a concrete implementation, infrastructure, documentation, security, or refactoring deliverable.
+title: "[PREFIX-NNN] "
+labels: ["type:task", "kind:task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Follow [Issue conventions](https://github.com/Astraive/asciiwall/blob/main/docs/issue-conventions.md) and [Contributor workflow](https://github.com/Astraive/asciiwall/blob/main/docs/delivery/contributor-workflow.md).
+        Use a stable ticket identifier (`[PREFIX-NNN]`, e.g. `ENG-001`, `SEC-001`, `DOC-001`). Do not invent GitHub `#N` numbers prior to issue publication.
+  - type: input
+    id: ticket
+    attributes:
+      label: Stable ticket ID
+      description: Unique uppercase prefix and number matching the issue title.
+      placeholder: e.g. ENG-001
+    validations:
+      required: true
+  - type: input
+    id: parent-epic
+    attributes:
+      label: Parent epic
+      description: Stable epic ID (and GitHub issue link once published).
+      placeholder: e.g. ENG-EPIC (pending publication)
+    validations:
+      required: true
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Milestone
+      options:
+        - M0 — Foundation
+        - M1 — ASCII Engine Prototype
+        - M2 — Native Renderer
+        - M3 — Windows First Wallpaper
+        - M4 — Media and Effects
+        - M5 — Full Desktop Application
+        - M6 — Package Ecosystem
+        - M7 — Cross-Platform Alpha
+        - M8 — Beta
+        - M9 — 1.0 Release
+        - M10 — Post-Launch
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Work type
+      description: Canonical `type:*` category; triage updates labels to match.
+      options:
+        - task
+        - feature
+        - enhancement
+        - chore
+        - documentation
+        - security
+        - refactor
+        - performance
+        - maintenance
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0
+        - P1
+        - P2
+        - P3
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      description: Estimated atomic engineering effort (`XL` is reserved for container epics).
+      options:
+        - S (up to 1 person-day)
+        - M (>1 to 3 person-days)
+        - L (>3 to 5 person-days)
+        - XL (up to 8 coordination person-days; containers only)
+    validations:
+      required: true
+  - type: input
+    id: area
+    attributes:
+      label: Canonical area label
+      description: Exact `area:*` label owning this deliverable.
+      placeholder: e.g. area:ascii-conversion
+    validations:
+      required: true
+  - type: dropdown
+    id: platforms
+    attributes:
+      label: Target platforms
+      multiple: true
+      options:
+        - all
+        - windows
+        - macos
+        - linux
+        - x11
+        - wayland
+        - kde
+        - gnome
+        - cli
+        - headless
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What this task delivers in two or three concise sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and source references
+      description: Why this work is needed now and which `docs/` specifications it implements.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      value: |
+        ### In scope
+        -
+
+        ### Out of scope
+        -
+    validations:
+      required: true
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements
+      description: Numbered, testable requirements specifying bounds, failure modes, and proposed thresholds where open.
+      value: |
+        1.
+    validations:
+      required: true
+  - type: textarea
+    id: technical-notes
+    attributes:
+      label: Technical notes
+      description: Crate/process boundaries, capability fallbacks, pinned version constraints, and safety invariants.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Measurable, checkable outcomes that PRs verify with explicit evidence.
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: test-plan
+    attributes:
+      label: Test plan
+      description: Unit/property/integration/fuzz/manual native verification procedures required before closing.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Hard prerequisites and unblocked downstream work using stable ticket IDs.
+      value: |
+        **Depends on**
+        -
+
+        **Unblocks**
+        -
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: References and tracking
+      description: Related `docs/` paths, work units (`E01`–`H08`), edge-case IDs (`EC-*`), and source register entries (`S01`–`S62`).

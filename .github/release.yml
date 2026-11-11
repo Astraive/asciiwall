@@ -1,0 +1,44 @@
+changelog:
+  exclude:
+    labels:
+      - type:duplicate
+  categories:
+    - title: Breaking Changes & Format Migrations
+      labels:
+        - breaking
+    - title: Features
+      labels:
+        - type:feature
+    - title: Bug Fixes
+      labels:
+        - type:bug
+    - title: Security & Hardening
+      labels:
+        - type:security
+    - title: Performance & Power
+      labels:
+        - type:performance
+    - title: Enhancements & Refactoring
+      labels:
+        - type:enhancement
+        - type:refactor
+    - title: Research & Spikes
+      labels:
+        - type:research
+    - title: Quality & Testing
+      labels:
+        - type:test
+    - title: Documentation
+      labels:
+        - type:documentation
+    - title: Dependencies
+      labels:
+        - dependencies
+        - github_actions
+    - title: Infrastructure, Chores & Maintenance
+      labels:
+        - type:chore
+        - type:maintenance
+    - title: Other Changes
+      labels:
+        - "*"
