@@ -1,6 +1,6 @@
 # Requirements traceability summary
 
-> **Planning traceability, not completion:** The **2,915** requirement mappings summarized here connect the 100 original specification documents ([requirements matrix](product/requirements-traceability.md)), 40 work units, 172 settings, 120 edge cases, and 36 starter recipes to **356** local `Backlog` tickets (`0` published remotely). Line-by-line requirement tables live externally in `../.issues/reports/backlog-requirement-traceability.md` and `../.issues/coverage/*.json`.
+> **Planning traceability, not completion:** The **2,915** requirement mappings connect the 100 original specification documents ([requirements matrix](product/requirements-traceability.md)), 40 work units, 172 settings, 120 edge cases, and 36 starter recipes to **356** canonical authoring records. Publication and implementation evidence are separate: authorized remote identities belong in the external publication ledger, while line-by-line mappings stay in `../.issues/reports/backlog-requirement-traceability.md` and `../.issues/coverage/*.json`.
 
 ## Coverage slice summary (2,915 mappings)
 

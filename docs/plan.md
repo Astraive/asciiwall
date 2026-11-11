@@ -1,6 +1,6 @@
 # AsciiWall implementation plan
 
-> **Planning baseline:** All backlog records, milestones, work units, settings, edge cases, and starter wallpaper briefs described here are **proposed planning data only**. Neither `Astraive/asciiwall` nor `Astraive/asciiwall-library` contains an implemented Rust Cargo workspace, application binary, native wallpaper host, or packaged artwork yet, and **0** GitHub issues or Project items have been published (`local-only` status).
+> **Planning baseline:** The records, milestones, work units, settings, edge cases, and wallpaper briefs here are **proposed planning data**, not implementation evidence. Neither repository contains an implemented Rust workspace, application binary, native wallpaper host, or packaged artwork. Authorized issue publication creates coordination records only; actual remote identities and audit results are tracked separately in the external publication ledger.
 
 This guide synthesizes the implementation strategy from the 100 original specification documents, the external local backlog workspace (`../.issues/`), and the four detailed execution plans ([engine plan](plans/engine-implementation-plan.md), [desktop plan](plans/desktop-implementation-plan.md), [packages plan](plans/packages-implementation-plan.md), and [hardening plan](plans/hardening-implementation-plan.md)).
 
@@ -11,7 +11,7 @@ Observed counts across the verified external backlog (`../.issues/reports/backlo
 | Artifact | Verified count | Current state and boundary |
 |---|---|---|
 | Local backlog tickets | **356** (`278` `asciiwall`, `78` `asciiwall-library`) | `300` tasks, `38` epics, `16` gates, `2` roadmaps (`ROADMAP-001`, `LIB-ROADMAP-001`); all `Backlog` |
-| Remote GitHub objects | **0** | No GitHub issues, project items, or native relationship edges have been created |
+| Remote GitHub publication | Authorized batches only | Inspect the external publication ledger and scoped `-VerifyOnly`; the local authoring inventory does not count remote issues or project items |
 | Original source documents | **100** | Frozen design pack across 17 topic folders in `docs/` |
 | Requirement mappings | **2,915** | Mapped across 8 coverage slices in `../.issues/coverage/*.json` (`0` validation errors) |
 | Milestone gates | **16** | `QA-M0` through `QA-M10` (11 app) and `LQA-L0` through `LQA-L4` (5 library) |
