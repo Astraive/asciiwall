@@ -1,6 +1,6 @@
 # AsciiWall master roadmap
 
-> **Status:** All **356** tickets across both repositories are in `Backlog` (`local-only`; **0** remote GitHub issues or Project items exist). Effort figures are estimated engineering person-days, **not calendar dates or delivery schedules**. No native platform or release artifact is currently built or verified.
+> **Status:** The **356** authoring records remain in the external workspace with their proposed Backlog state. Authorized milestone publication does not claim implementation or gate completion; the external ledger records actual remote results separately. Effort is estimated engineering person-days, not a calendar schedule. No native platform or release artifact is built or verified.
 
 This roadmap defines the expanded **M0–M10** application sequence (`ROADMAP-001`, 278 tickets) and independent **L0–L4** community library cadence (`LIB-ROADMAP-001`, 78 tickets) reconciled in `../.issues/milestones.json`, alongside the 18 declarative views defined for GitHub Project 4 (`PVT_kwDOEF_JvM4BrI0s`).
 
@@ -58,4 +58,4 @@ Shared organization Project 4 (`PVT_kwDOEF_JvM4BrI0s`, private, initially `0` it
 - **Portfolio & dependency views:** `Master Roadmap` (`BOARD_LAYOUT` by `Phase`/`Status`), `All Backlog Items`, `Milestone Roadmap` (explicit `TABLE_LAYOUT` fallback because no calendar dates or iteration fields exist), `Epics`, `P0 Critical Path` (`priority:P0` + `path:critical`), `Ready for Development`, `Currently Blocked`, `Completed Work`.
 - **Platform & subsystem views:** `Windows Development`, `macOS Development`, `Linux Development`, `Rust Engine`, `UI and Customization`, `Media Processing`, `QA and Verification`, `Security`, `Library Contributions`, `Release Readiness`.
 
-Remote issue and project-item creation remains **withheld**. In addition, GitHub's `ProjectV2ViewConfigurationInput` GraphQL schema currently exposes `visibleFieldIds` without grouping/sorting inputs, so UI grouping and sorting require manual interactive configuration after authenticated sign-in. See [GitHub setup](github-setup.md) and [backlog publication](backlog-publication.md).
+Issue and project-item creation is limited to explicitly authorized scopes; remaining work stays local. GitHub's `ProjectV2ViewConfigurationInput` exposes visible-field configuration without grouping/sorting setters, so those controls still require authorized interactive sign-in. See [GitHub setup](github-setup.md) and [backlog publication](backlog-publication.md).

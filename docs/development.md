@@ -52,7 +52,7 @@ pwsh -NoProfile -File ./scripts/publish-issues.ps1 -DryRun
 pwsh -NoProfile -File ./scripts/publish-issues.ps1 -BacklogPath ../.issues -DryRun -SourceRef main
 ```
 
-Live issue publication (`-Apply`) remains **withheld**. Do not execute `-Apply` unless explicitly authorized by the project owner, and do not copy local report files into `docs/` or commit `../.issues/` contents.
+Live issue publication (`-Apply`) requires explicit authorization for its scope. For the authorized application foundation batch, use `-Milestone asciiwall/M0 -ExpectedLogin NeerajCodz`; omit no scope flag accidentally, because unscoped Apply targets the full backlog. Inspect the external ledger and use scoped `-VerifyOnly` for actual remote results. Never copy local reports or `../.issues/` contents into Git.
 
 ## Opt-in Git hooks and commit rules
 

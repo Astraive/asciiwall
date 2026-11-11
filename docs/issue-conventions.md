@@ -1,6 +1,6 @@
 # Backlog and issue conventions
 
-> **Publication state:** All **356** backlog tickets exist **only** in the external local workspace `../.issues/` (`publication_status: "local-only"`). **0** GitHub issues, pull-request linkages, or Project items have been created remotely. Stable ticket IDs (such as `PRJ-001`, `AST-001`, `QA-M0`) are **not** GitHub issue numbers—never invent placeholder `#123` issue URLs or fabricated `-SourceRef` commit SHAs.
+> **Publication state:** The **356** canonical authoring records stay external in `../.issues/`, even when an authorized batch is published. Remote identities, actual project items, and verification belong in the separate publication ledger; `publication_status: "local-only"` in source records is not a remote inventory. Stable IDs such as `PRJ-001`, `AST-001`, and `QA-M0` are not GitHub issue numbers.
 
 ## External backlog isolation and publication status
 
@@ -10,7 +10,7 @@ Planning records (`issue.json`, `CONTENT.md`, coverage slices, and derived repor
 |---|---|---|
 | Purpose | Static labels, milestone goals/gates, Project 4 field & view schema | Canonical `356` ticket records, `8` coverage slices, `5` derived reports, reference audit |
 | Ticket bodies & membership | Excluded intentionally | Stored in `../.issues/asciiwall/<ID>/` (`278`) and `../.issues/asciiwall-library/<ID>/` (`78`) |
-| Publication status | Applied only to repo settings/labels/milestones/fields/views via [configure-github.ps1](../scripts/configure-github.ps1) | Issue/relationship/item creation via [publish-issues.ps1](../scripts/publish-issues.ps1) `-Apply` remains **withheld** |
+| Publication status | Infrastructure configuration only via [configure-github.ps1](../scripts/configure-github.ps1) | Authorized batches via [publish-issues.ps1](../scripts/publish-issues.ps1) with explicit `-Milestone` and account checks; actual results recorded in the publication ledger |
 
 See [backlog validation](backlog-validation.md), [backlog publication](backlog-publication.md), and [GitHub setup](github-setup.md) for isolation rules, validation guarantees, and Project configuration details.
 
