@@ -4,6 +4,8 @@ This repository keeps a **static configuration definition** in `.github/project-
 
 The registries are definitions, not a shadow planning model or a snapshot of project items. Milestone summaries intentionally omit the full ticket-membership lists. `path:critical` is a static derived-label rule/meaning, not a committed list of its member tickets. No calendar dates, completed work, native issue relationships, or platform-support claims are inferred by these files.
 
+Observed remote settings, CI evidence, local inventory breakdowns, and the exact remaining UI operations are recorded in the [setup audit](setup-audit.md). The audit separates verified API configuration from unavailable interactive grouping/sorting.
+
 ## Safe configuration model
 
 `scripts/configure-github.ps1` is a PowerShell 7 tool limited to repository settings, topics, security feature settings, labels, milestones, branch protection, and the Project V2 title, repository links, fields, and views. It never calls the issue publisher. Its GitHub mutations are limited to these infrastructure APIs; it does not change repository visibility, names, commit history, issue metadata, issue labels, project items/drafts, or native issue relationships. It preserves unrelated label/topic objects and existing project select options wherever changes are made.

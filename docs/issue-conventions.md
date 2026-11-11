@@ -20,7 +20,7 @@ Tickets use globally unique uppercase `PREFIX-NNN` (or `PREFIX-EPIC` / `ROADMAP-
 
 - **Roadmaps (`2`, `kind:roadmap`):** `ROADMAP-001` (`asciiwall`, `M0`, `P0`) and `LIB-ROADMAP-001` (`asciiwall-library`, `L0`, `P1`).
 - **Epics (`38`, `kind:epic`):** `31` main-app domain epics under `ROADMAP-001` and `7` library epics (`LIB-EPIC`, `CAT-EPIC`, `AST-EPIC`, `LCOM-EPIC`, `LLEG-EPIC`, `LQA-EPIC`, `LREL-EPIC`) under `LIB-ROADMAP-001`.
-- **Atomic implementation tasks (`300`, `kind:task`):** `241` in `asciiwall` and `59` in `asciiwall-library`; sized `S`/`M`/`L` (`<= 5` person-days each).
+- **Atomic implementation tasks (`300`, `kind:task`):** `235` in `asciiwall` and `65` in `asciiwall-library`; sized `S`/`M`/`L` (`<= 5` person-days each).
 - **Milestone gates (`16`, `kind:gate`):** `QA-M0`–`QA-M10` (`2` days each) and `LQA-L0`–`LQA-L4` (`3` days each), one evidence-bearing gate per milestone.
 
 Every local `CONTENT.md` validated by [validate-backlog.py](../scripts/validate-backlog.py) follows 20 mandatory headings (`Metadata`, `Summary`, `Context`, `Why It Matters`, `Scope`, `In Scope`, `Out of Scope`, `Where to Look`, `Assets and Dependencies`, `Requirements`, `Technical Notes`, `Acceptance Criteria`, `Test Plan`, `Negative Cases and Edge Cases`, `References`, `Dependencies`, `Depends On`, `Blocks / Unblocks`, `Related Issues`, `Tracking`). Hard execution blockers use explicit ticket Markdown links under `Depends On` (`depends_on` in `issue.json`), while `Related Issues` captures non-blocking soft context only.
