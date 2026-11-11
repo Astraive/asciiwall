@@ -10,6 +10,8 @@ param(
     [string] $Owner = 'Astraive',
     [int] $ProjectNumber = 4,
     [string] $SourceRef = '',
+    [string[]] $Milestone = @(),
+    [string] $ExpectedLogin = '',
     [ValidateRange(1, 10)][int] $ReadAttempts = 4,
     [ValidateRange(1, 3600)][int] $CommandTimeoutSeconds = 180,
     [string[]] $RetryOperation = @()
@@ -36,6 +38,11 @@ $script:AttemptedOperations = @{}
 $script:DerivedLabels = @()
 $script:DerivedLabelSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $script:DerivedTicketLabels = [hashtable]::new([StringComparer]::Ordinal)
+$script:PublicationKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$script:UsedMilestones = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$script:ManagedMilestones = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$script:CurrentOperations = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$script:RequestedMilestones = [string[]] @($Milestone)
 
 function Json($Value) { ConvertTo-Json -InputObject $Value -Depth 100 -Compress }
 function Hash([string] $Text) {
@@ -174,14 +181,14 @@ function Save-Ledger {
         $stream.Write($bytes, 0, $bytes.Length)
         $stream.Flush($true)
         $stream.Dispose(); $stream = $null
-        if ([IO.File]::Exists($script:LedgerPath)) { [IO.File]::Replace($temp, $script:LedgerPath, $null) }
-        else { [IO.File]::Move($temp, $script:LedgerPath) }
+        [IO.File]::Move($temp, $script:LedgerPath, $true)
     } finally {
         if ($null -ne $stream) { $stream.Dispose() }
         if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) }
     }
 }
 function Set-Reconciled([string] $Operation) {
+    [void] $script:CurrentOperations.Add($Operation)
     if ($Apply -and $script:Ledger.operations.ContainsKey($Operation)) {
         $script:Ledger.operations[$Operation].state = 'reconciled'
         $script:Ledger.operations[$Operation].resolved_at = [DateTimeOffset]::UtcNow.ToString('o')
@@ -189,6 +196,7 @@ function Set-Reconciled([string] $Operation) {
     }
 }
 function Mutate([string] $Operation, [string] $Method, [string] $Endpoint, $Payload) {
+    [void] $script:CurrentOperations.Add($Operation)
     Assert ([bool] $Apply) "Read-only mode requires pending operation: $Operation $Method $Endpoint $(Json $Payload)"
     Assert (-not $script:AttemptedOperations.ContainsKey($Operation)) "A mutation for '$Operation' was already attempted in this process; refusing a second request."
     $old = $script:Ledger.operations[$Operation]
@@ -202,6 +210,7 @@ function Mutate([string] $Operation, [string] $Method, [string] $Endpoint, $Payl
         previous_attempt = $(if ($old) { @{ state = $old.state; started_at = $old.started_at; payload_sha256 = $old.payload_sha256; error = $old.error } } else { $null })
     }
     Save-Ledger
+    Start-Sleep -Milliseconds 1050
     try {
         $response = Invoke-Api $Method $Endpoint $Payload
         $script:Ledger.operations[$Operation].state = 'succeeded'
@@ -298,6 +307,40 @@ function Preflight-RenderedBodies {
         }
     } finally { $script:Identities = $saved }
 }
+function Select-PublicationScope {
+    $selected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($key in $script:RequestedMilestones) {
+        Assert ($script:MilestoneRegistry.ContainsKey($key)) "Unknown milestone '$key'; use a qualified key such as asciiwall/M0."
+        [void] $script:ManagedMilestones.Add($key)
+    }
+    foreach ($ticket in $script:Order) {
+        if ($script:RequestedMilestones.Count -eq 0 -or (Milestone-Key $ticket) -cin $script:RequestedMilestones) { [void] $selected.Add((Key $ticket)) }
+    }
+    Assert ($selected.Count -gt 0) 'Publication scope contains no tickets.'
+    foreach ($key in @($selected)) {
+        $ticket = $script:Tickets[$key]
+        while ($ticket.parent) {
+            $ticket = Resolve-Ticket $ticket.parent $ticket
+            Assert ($ticket.kind -cin @('epic', 'roadmap')) "Required ancestor $(Key $ticket) is not a tracking container."
+            [void] $selected.Add((Key $ticket))
+        }
+    }
+    foreach ($key in $selected) {
+        $ticket = $script:Tickets[$key]
+        foreach ($dependency in $ticket.depends_on) {
+            $required = Resolve-Ticket $dependency $ticket
+            Assert ($selected.Contains((Key $required))) "Scope omits hard dependency $(Key $required) for $key; explicitly include its milestone. No later task is published automatically."
+        }
+        [void] $script:UsedMilestones.Add((Milestone-Key $ticket))
+    }
+    if ($script:RequestedMilestones.Count -eq 0) {
+        foreach ($key in $script:MilestoneRegistry.Keys) { [void] $script:ManagedMilestones.Add($key) }
+        foreach ($key in $script:MilestoneRegistry.Keys) { [void] $script:UsedMilestones.Add($key) }
+    }
+    $script:PublicationKeys = $selected
+    $script:Order = @($script:Order | Where-Object { $selected.Contains((Key $_)) })
+}
+
 function Load-Source {
     $script:DerivedLabels = @()
     $script:DerivedLabelSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -448,6 +491,7 @@ function Load-Source {
         Assert ($ready.Count -gt 0) "Combined parent/dependency graph has a cycle: $($remaining.Keys -join ', ')"
         foreach ($key in $ready) { $script:Order.Add($remaining[$key]); $complete[$key] = $true; $remaining.Remove($key) }
     }
+    Select-PublicationScope
     Preflight-RenderedBodies
 }
 function Load-Ledger {
@@ -554,6 +598,9 @@ function Convert-UnfencedLinks([string] $Body, $Ticket, [switch] $Initial) {
                 $destinations = if ($null -ne $script:TicketsByDirectory -and $script:TicketsByDirectory.ContainsKey($directory)) { $script:TicketsByDirectory[$directory] } else { @() }
                 $destination = if ($destinations.Count -eq 1) { $destinations[0] } else { Resolve-Ticket $id $Ticket }
                 $identity = $script:Identities[(Key $destination)]
+                if ($null -eq $identity -and -not $script:PublicationKeys.Contains((Key $destination))) {
+                    return ($match.Value -replace '\]\([^)]*\)$', ']' -replace '^!?\[', '' -replace '\]$', '') + ' (local backlog; not published in this batch)'
+                }
                 if ($null -eq $identity -and $Initial) { return ($match.Value -replace '\]\([^)]*\)$', ']' -replace '^!?\[', '' -replace '\]$', '') }
                 Assert ($null -ne $identity) "Cannot render unpublished ticket $(Key $destination) in $(Key $Ticket)"
                 return $match.Groups['open'].Value + $identity.html_url + $fragment + $match.Groups['title'].Value + $match.Groups['close'].Value
@@ -581,10 +628,16 @@ function Ensure-Registries {
         }
         $milestones = @(Read-Pages "repos/$Owner/$repository/milestones?state=all")
         foreach ($key in @($script:MilestoneRegistry.Keys | Sort-Object)) {
+            if (-not $script:UsedMilestones.Contains($key)) { continue }
             $desired = $script:MilestoneRegistry[$key]
             if ($desired.repository -ne $repository) { continue }
             $matches = @($milestones | Where-Object { $_.title -ceq $desired.title })
             Assert ($matches.Count -le 1) "Ambiguous milestone '$($desired.title)' in $repository"
+            if (-not $script:ManagedMilestones.Contains($key)) {
+                Assert ($matches.Count -eq 1) "Required ancestor milestone '$key' does not exist; refusing to create a milestone outside the requested scope."
+                $script:Milestones[$key] = $matches[0]
+                continue
+            }
             $op = "milestone:$key"
             if ($matches.Count -eq 0) {
                 $remote = Mutate $op 'POST' "repos/$Owner/$repository/milestones" @{ title = $desired.title; description = $desired.description }
@@ -976,12 +1029,13 @@ function Verify-Registries {
         }
         $milestones = @(Read-Pages "repos/$Owner/$repository/milestones?state=all")
         foreach ($key in $script:MilestoneRegistry.Keys) {
+            if (-not $script:UsedMilestones.Contains($key)) { continue }
             $desired = $script:MilestoneRegistry[$key]
             if ($desired.repository -ne $repository) { continue }
             $actual = @($milestones | Where-Object { $_.title -ceq $desired.title })
             if ($actual.Count -ne 1) { Record-Verification $key 'missing or ambiguous milestone'; continue }
             $script:Milestones[$key] = $actual[0]
-            if ([string] $actual[0].description -cne [string] $desired.description) { Record-Verification $key 'milestone description mismatch' }
+            if ($script:ManagedMilestones.Contains($key) -and [string] $actual[0].description -cne [string] $desired.description) { Record-Verification $key 'milestone description mismatch' }
         }
     }
     Refresh-Project
@@ -1020,8 +1074,11 @@ function Verify-Registries {
 function Verify-All {
     $script:Failures.Clear()
     if ($Apply) {
-        $script:Ledger.verification = @{ state = 'in-progress'; started_at = [DateTimeOffset]::UtcNow.ToString('o') }
-        foreach ($entry in $script:Ledger.tickets.Values) { $entry.verification = @{ state = 'in-progress' } }
+        $script:Ledger.verification = @{ state = 'in-progress'; started_at = [DateTimeOffset]::UtcNow.ToString('o'); scope = @($script:Order | ForEach-Object { Key $_ }) }
+        foreach ($ticket in $script:Order) {
+            $entry = $script:Ledger.tickets[(Key $ticket)]
+            if ($null -ne $entry) { $entry.verification = @{ state = 'in-progress' } }
+        }
         Save-Ledger
     }
     Verify-Registries
@@ -1040,6 +1097,7 @@ function Verify-All {
         $key = Key $ticket; $remote = $script:Identities[$key]
         if ($null -eq $remote) { continue }
         if ($remote.title -cne $ticket.title) { Record-Verification $key 'title mismatch' }
+        if ($ExpectedLogin -and $remote.user.login -cne $ExpectedLogin) { Record-Verification $key "issue author is not $ExpectedLogin" }
         try {
             $body = Render-Body $ticket
             if ([string] $remote.body -cne $body -or (Hash ([string] $remote.body)) -cne (Hash $body)) { Record-Verification $key 'final body/hash mismatch' }
@@ -1091,14 +1149,16 @@ function Verify-All {
         }
     }
     if ($Apply) {
-        foreach ($entry in $script:Ledger.tickets.Values) {
+        foreach ($ticket in $script:Order) {
+            $entry = $script:Ledger.tickets[(Key $ticket)]
             if ($entry.verification.state -eq 'in-progress') { $entry.verification.state = 'failed' }
         }
-        $script:Ledger.verification = @{ state = $(if ($script:Failures.Count -eq 0) { 'verified' } else { 'failed' }); checked_at = [DateTimeOffset]::UtcNow.ToString('o'); failures = @($script:Failures.ToArray()) }
+        $script:Ledger.verification = @{ state = $(if ($script:Failures.Count -eq 0) { 'verified' } else { 'failed' }); checked_at = [DateTimeOffset]::UtcNow.ToString('o'); scope = @($script:Order | ForEach-Object { Key $_ }); failures = @($script:Failures.ToArray()) }
         if ($script:Failures.Count -eq 0) {
-            foreach ($operation in $script:Ledger.operations.Values) { $operation.state = 'verified' }
-            foreach ($registry in @($script:Ledger.registries.labels, $script:Ledger.registries.milestones)) {
-                foreach ($entry in $registry.Values) { $entry.state = 'verified' }
+            foreach ($key in $script:CurrentOperations) { if ($script:Ledger.operations.ContainsKey($key)) { $script:Ledger.operations[$key].state = 'verified' } }
+            foreach ($entry in $script:Ledger.registries.labels.Values) { $entry.state = 'verified' }
+            foreach ($key in $script:ManagedMilestones) {
+                if ($script:Ledger.registries.milestones.ContainsKey($key)) { $script:Ledger.registries.milestones[$key].state = 'verified' }
             }
             $script:Ledger.project.state = 'verified'
             $script:Ledger.workflow.state = 'verified'
@@ -1107,7 +1167,7 @@ function Verify-All {
         Save-Ledger
     }
     Assert ($script:Failures.Count -eq 0) ("Exhaustive verification failed:`n" + ($script:Failures -join "`n"))
-    Write-Output (Json @{ mode = $(if ($VerifyOnly) { 'verify-only' } else { 'apply' }); state = 'verified'; tickets = $script:Tickets.Count; project = $script:Project.id; ledger_written = [bool] $Apply })
+    Write-Output (Json @{ mode = $(if ($VerifyOnly) { 'verify-only' } else { 'apply' }); state = 'verified'; tickets = $script:Order.Count; milestones = @($script:RequestedMilestones); project = $script:Project.id; ledger_written = [bool] $Apply })
 }
 
 try {
@@ -1129,7 +1189,7 @@ try {
             mode = 'dry-run'; offline = $true; backlog_root = $script:BacklogRoot; source_root = $script:RepoRoot
             source_ref = $script:SourceRefRequested
             owner = $Owner; project_number = $ProjectNumber; labels_per_repository = $script:LabelRegistry.Count
-            milestones = $script:MilestoneRegistry.Count; tickets = $script:Tickets.Count; ledger = $script:LedgerPath
+            milestones = $script:UsedMilestones.Count; requested_milestones = @($script:RequestedMilestones); tickets = $script:Order.Count; source_tickets = $script:Tickets.Count; ledger = $script:LedgerPath
             derived_labels = @($script:DerivedLabels | ForEach-Object { @{ name = $_.name; ticket_ids = [string[]] @($_.ticket_ids); source = $_.source; meaning = $_.meaning } })
             creation_order = @($script:Order | ForEach-Object { Key $_ })
             operations = @($script:Order | ForEach-Object {
@@ -1140,12 +1200,16 @@ try {
             phases = @('registry/schema preflight', 'labels/milestones', 'project fields/repositories', 'identify/create', 'final bodies/metadata', 'native parent/blockers', 'actual project items/fields', 'independent exhaustive verification')
         })
     } else {
+        if ($ExpectedLogin) {
+            $principal = Read-Api 'user'
+            Assert ($principal.login -ceq $ExpectedLogin) "Authenticated account is '$($principal.login)', not '$ExpectedLogin'; no mutation attempted."
+        }
         if ($Apply) {
             try { $script:Lock = [IO.FileStream]::new((Join-Path $script:BacklogRoot 'publication-ledger.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
             catch { throw 'Another publisher holds the external publication lock; no remote mutation attempted.' }
         }
         Load-Ledger
-        if ($Apply) { $script:Ledger.workflow = @{ state = 'in-progress'; phase = 'schema preflight'; started_at = [DateTimeOffset]::UtcNow.ToString('o') } }
+        if ($Apply) { $script:Ledger.workflow = @{ state = 'in-progress'; phase = 'schema preflight'; started_at = [DateTimeOffset]::UtcNow.ToString('o'); scope = @($script:Order | ForEach-Object { Key $_ }); requested_milestones = @($script:RequestedMilestones); expected_login = $ExpectedLogin } }
         Require-ProjectSchema
         $requestedRef = if ($SourceRef) { $SourceRef } elseif ($script:Ledger.source_ref) { [string] $script:Ledger.source_ref } else { 'main' }
         if ($SourceRef -and $script:Ledger.source_ref -and $SourceRef -cne $script:Ledger.source_ref) {
@@ -1183,7 +1247,8 @@ try {
             $script:Ledger.last_failure = @{ at = [DateTimeOffset]::UtcNow.ToString('o'); error = $_.Exception.Message }
             if ($null -ne $script:Ledger.workflow) { $script:Ledger.workflow.state = 'failed' }
             if ($script:Ledger.verification.state -eq 'in-progress') { $script:Ledger.verification.state = 'failed' }
-            foreach ($entry in $script:Ledger.tickets.Values) {
+            foreach ($ticket in $script:Order) {
+                $entry = $script:Ledger.tickets[(Key $ticket)]
                 if ($entry.verification.state -eq 'in-progress') { $entry.verification.state = 'failed' }
             }
             Save-Ledger

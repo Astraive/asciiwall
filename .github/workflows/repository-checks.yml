@@ -37,6 +37,9 @@ jobs:
       - name: Parse all repository PowerShell scripts without executing them
         shell: pwsh
         run: ./scripts/check-powershell.ps1
+      - name: Exercise durable publication ledger creation and replacement
+        shell: pwsh
+        run: ./scripts/test-publisher-ledger.ps1
       - name: Check pull request title, body, and commit trailers
         if: github.event_name == 'pull_request'
         env:
