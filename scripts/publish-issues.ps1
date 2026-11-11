@@ -850,7 +850,7 @@ function Require-ProjectSchema {
     }
     $mutation = Graph-Read 'query{__type(name:"Mutation"){fields{name args{name type{kind name ofType{kind name}}}}}}'
     $batchMutation = @($mutation.__type.fields | Where-Object name -ceq 'updateProjectV2ItemFieldValue')
-    $inputArgument = if ($batchMutation.Count -eq 1) { @($batchMutation[0].args | Where-Object name -ceq 'input') } else { @() }
+    $inputArgument = @(if ($batchMutation.Count -eq 1) { $batchMutation[0].args | Where-Object name -ceq 'input' })
     Assert ($inputArgument.Count -eq 1 -and (Input-TypeName $inputArgument[0].type) -ceq 'UpdateProjectV2ItemFieldValueInput') 'GitHub schema lacks Mutation.updateProjectV2ItemFieldValue(input: UpdateProjectV2ItemFieldValueInput).'
 }
 function Refresh-Project {
