@@ -1,15 +1,26 @@
 # Repository and project setup audit
 
-Snapshot: **2026-11-11**, after live infrastructure configuration and before the foundation PR merges. This records observed setup state, not application readiness. Subsequent audit-only commits must pass the same protected-branch checks before merge.
+Publication audit: **2026-11-12**, after full 356-issue backlog publication and independent REST/GraphQL audit; view layout verification: **2026-11-13**, after the authorized UI save/reload and fresh GraphQL readback. The **2026-11-11** pre-publication infrastructure baseline is preserved below. This records observed setup and planning-publication state, not application readiness. Subsequent audit-only commits must pass the same protected-branch checks before merge.
 
-## Scope and publication hold
+## Current scope and full publication audit (2026-11-12)
 
-- Application: [`Astraive/asciiwall`](https://github.com/Astraive/asciiwall).
-- Community library: [`Astraive/asciiwall-library`](https://github.com/Astraive/asciiwall-library).
-- Shared private project: [AsciiWall — Master Development Roadmap](https://github.com/orgs/Astraive/projects/4), `PVT_kwDOEF_JvM4BrI0s`.
+- Application: [`Astraive/asciiwall`](https://github.com/Astraive/asciiwall) (**278** published canonical issues).
+- Community library: [`Astraive/asciiwall-library`](https://github.com/Astraive/asciiwall-library) (**78** published canonical issues).
+- Shared private project: [AsciiWall — Master Development Roadmap](https://github.com/orgs/Astraive/projects/4), `PVT_kwDOEF_JvM4BrI0s` (**356** real issue items, **0** drafts).
 - Both repositories remain public with their original MIT licenses and history preserved. Project visibility remains private.
-- **Zero GitHub issues and zero project items/drafts were published.** The issue publisher's live `-Apply` mode was not run. No publication ledger or lock was created.
-- Detailed tickets, coverage, publication state, and generated reports remain in the workspace sibling `../.issues`, outside both Git repositories. Only static configuration definitions and summary documentation are version controlled.
+- Detailed tickets, coverage, publication ledger (`../.issues/publication-ledger.json`), and generated reports remain in the workspace sibling `../.issues`, outside both Git repositories. Only static configuration definitions and summary documentation are version controlled.
+
+### Publication and independent REST/GraphQL audit results
+
+- **Published issue inventory:** All **356** planned backlog tickets are published across both repositories (`278` `Astraive/asciiwall` + `78` `Astraive/asciiwall-library`). The initial **39**-issue foundation batch (`37` `asciiwall/M0` members plus parent containers `CFG-EPIC` in `M5` and `WND-EPIC` in `M3`) stayed protected read-only, while **317** remaining tickets (`239` `asciiwall`, `78` `asciiwall-library`, including all `17` canonical `asciiwall/M1` tickets in `M1 — ASCII Engine Prototype`) were created and verified via `-Apply -CreateMissing` with creator login `NeerajCodz`.
+- **Independent native graph and preservation audit:** Fresh independent REST + GraphQL verification (`../.issues/reports/full-publication-native-graph.json` and `../.issues/reports/remaining-project-after.json`) passed with:
+  - **356** canonical issues and **356** real Project 4 issue items (**0** drafts).
+  - **354** native parent/sub-issue edges (`sub_issues`).
+  - **576** native hard-blocker edges (`dependencies/blocked_by`), including **38** cross-repository blockers.
+  - **317** newly created issues all authored by `NeerajCodz`.
+  - All **39** protected issue bodies, titles, states, milestones, label names, and assignees verified **exact unchanged**; all **39** project `Status` values and **all** custom project field IDs and values unchanged.
+- **Exact ledger preservation:** All **39** protected ticket records now match their original snapshot exactly, including timestamp strings. PowerShell's default JSON reader had rewritten only their `verification.checked_at` UTC offsets without changing the instants; the original strings were restored under the exclusive ledger lock. An actual publisher JSON-read/atomic-write smoke passed, and independent comparison confirmed that all **317** new records and the mutation journal were unchanged. The publisher now requires PowerShell 7.5+ and uses `ConvertFrom-Json -DateKind String` for lossless ledger and opaque text values. Combined evidence: `../.issues/reports/full-publication-audit.json`.
+- **Merged publication PRs:** [Application PR #46](https://github.com/Astraive/asciiwall/pull/46) (`ef3097520db6af902d213ff3b12d3c16f0c74957`, all required CI checks green) and [Application PR #47](https://github.com/Astraive/asciiwall/pull/47) (`8d7878b`, schema-guard fix, all required CI checks green).
 
 ## Local inventory and coverage
 
@@ -31,7 +42,9 @@ python scripts/validate-backlog.py --write-reports --json
 
 The five derived backlog reports remain under `../.issues/reports/`; do not copy them into Git.
 
-## Observed remote infrastructure
+## Historical pre-publication baseline (2026-11-11)
+
+The table and summary below preserve the **2026-11-11** zero-issue infrastructure snapshot taken after live repository/project configuration and before foundation PR merge or issue publication:
 
 | Surface | Application | Library |
 |---|---:|---:|
@@ -60,21 +73,26 @@ All **20 managed field definitions** were read back successfully. The project ha
 - Priority, Size, Kind, 41 Area choices, native multi-select Platform, Repo role, 16 Phase choices, Blocked, text Target release, and numeric Effort are configured.
 - GitHub reserves `Type` for native issue types. Detailed classification uses **Work type** with all 14 planned values, sourced from unchanged ticket `type` metadata. Native Task/Bug/Feature types remain separate; no alias or shadow native Type field was created.
 - Repository, Milestone, Assignees, Title, Labels, Parent issue, Sub-issues progress, and Updated remain native.
-- All **18 views** have their declared names, supported layouts, filters, and visible-field IDs configured and re-fetched. The original View 1 ID was reused for Master Roadmap. Milestone Roadmap uses the documented table fallback because no schedule dates were approved.
+- All **18 views** have their declared names, supported layouts, filters, and visible-field IDs configured and re-fetched. The original View 1 ID was reused for `Master Roadmap`. `Milestone Roadmap` uses the documented table fallback because no schedule dates were approved.
 
-### Exact pending UI operation
+### Project view layout cutover and API-vs-UI verification
 
-**Primary grouping, secondary grouping, and sorting for each of the 18 views remain pending.** The public schema exposes those settings for reading but provides no mutation setters; view configuration input supports visible-field IDs only. The private project was inaccessible in the signed-out browser. The harness browser relay was unavailable, with no adoptable authenticated fallback. No credentials were injected and privacy was not relaxed.
+GitHub Projects tables support a single `group_by` field (`groupByFields`) and expose the approved secondary dimension through the interactive **Slice by** sidebar (`slice_by`), whereas boards support both Columns (`verticalGroupByFields`) and Swimlanes (`groupByFields`). Because `ProjectV2View` exposes `groupByFields`, `verticalGroupByFields`, and ordered `sortByFields` for readback—and exposes **no** public GraphQL read or write field for `Slice by`—the view registry and `configure-github.ps1 -VerifyOnly` distinguish API-verifiable layout axes from UI-only `Slice by` state:
 
-1. Sign in through an authorized browser session and open [Project 4](https://github.com/orgs/Astraive/projects/4).
-2. For each named entry in the [static view registry](../.github/project-management/project.json), apply its `group_by`, `secondary_group_by`, and ordered `sort_by` fields using the UI. Save each view and visually inspect it. Record any UI limitation instead of substituting a different configuration silently.
-3. Run the read-only audit below. It deliberately exits nonzero while any requested setting differs or remains manual-only; it never edits issues or items.
+| View scope | Registry axes | Native GraphQL readback (`view-api:<view>`) | `Slice by` (`view-slice:<view>`) | Current observed state |
+|---|---|---|---|---|
+| `Master Roadmap` (`BOARD_LAYOUT`) | `group_by: "Phase"`, `secondary_group_by: "Status"`, `slice_by: null`, `sort_by: ["Priority", "Milestone"]` | `verticalGroupByFields` -> `primary_group_by` (`Phase`); `groupByFields` -> `secondary_group_by` (`Status`); ordered `sortByFields` (`Priority`, `Milestone`) | `null` | **Saved in UI and API-verified** |
+| 17 table views (`TABLE_LAYOUT`) | Single `group_by`, `secondary_group_by: null`, approved secondary moved to `slice_by`, two ordered `sort_by` fields | `groupByFields` -> `primary_group_by`; `secondary_group_by: null`; ordered `sortByFields` | `manual-only-unverifiable-by-api` (`observed: null`) | **Saved and reloaded in authenticated Orca UI; all 17 slices observed in UI; all native group/sort fields API-verified** |
+
+1. All 17 `TABLE_LAYOUT` views are configured, saved, and reloaded in the authenticated Orca embedded browser session. The reloaded UI showed each registry `slice_by`; ProjectV2 API readback matched the registry's layout-specific grouping and ordered sorts.
+2. Per-view screenshot paths, SHA-256 hashes, sizes, slice listbox reads, and API grouping/sort results are recorded outside the repository in `../.issues/reports/project-view-ui-verification.json`; PNGs are in `../.issues/reports/project-view-ui-verification/`.
+3. Run the read-only API audit below. `view-api:<view>` checks native grouping and ordered sorts; table `view-slice:<view>` remains `manual-only-unverifiable-by-api` because GitHub exposes no public Slice by read/write. The manual-only result is deliberate, and `-VerifyOnly` exits nonzero while such operations or other mismatches remain.
 
 ```powershell
 pwsh -NoProfile -File scripts/configure-github.ps1 -VerifyOnly
 ```
 
-Filters were re-fetched without inserting trial issues. Native parent/sub-issue, blocker, and project-item population remain withheld with issue publication; they are implemented by the separate publisher, not claimed as existing remote relationships.
+Do not re-run full `configure-github.ps1 -Apply` over populated milestones or manually saved views, as it overwrites native milestone descriptions with static summaries.
 
 ## Exercised verification
 
@@ -86,7 +104,7 @@ Filters were re-fetched without inserting trial issues. Native parent/sub-issue,
 - Library art/package/catalog inputs fail closed even if prerequisite-shaped files exist. Real pinned-engine builds, integrity/rights validation, previews, and catalog/signing gates remain blocked on implementation, not represented by skipped-green workflows.
 - Bandit scanned the actual application-repository Python tooling without findings. The installed workflow dependency audit found zero known vulnerabilities after the pinned pip bootstrap was upgraded; the license inventory was emitted.
 
-### GitHub CI evidence at this snapshot
+### Historical GitHub CI evidence (2026-11-11 baseline)
 
 | PR / head | Observed passing checks |
 |---|---|
