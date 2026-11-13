@@ -34,17 +34,49 @@ The [repository layout](../architecture/repository-structure.md) defines crate b
 
 ## E01: Core frame and budget contracts
 
-**Files:** Create or modify `crates/ascii-core/src/{frame.rs,budget.rs,error.rs}`. Test file: `crates/ascii-core/tests/frame_contract.rs`. Any necessary crate manifest/setup belongs to this unit, not an untestable separate scaffold ticket.
+**Files:** Create or modify `crates/ascii-core/src/{lib.rs,frame.rs,budget.rs,error.rs}`. Integration test: `crates/ascii-core/tests/frame_contract.rs`. No dependency or I/O setup is required.
 
-**Consumes and owns:** None; defines AsciiFrame, RasterFrameView, Budget, Error, CancellationToken and validated constructors.
+**Consumes and owns:** None; defines `AsciiCell`, immutable `AsciiFrame` and `FrameMetadata`, fixed-width `GlyphTableId`, borrowed `RasterFrameView`, `Budget`, typed `Error`, and `CancellationToken`.
 
-**Produces:** `validate_frame(frame: &AsciiFrame, glyph_count: u32, budget: &Budget) -> Result<(), Error>`
+**Produces:**
+The following Rust signatures omit function bodies:
+```rust
+pub fn validate_grid_budget(
+    size: GridSize,
+    budget: &Budget,
+    cancellation: &CancellationToken,
+) -> Result<GridBudget, Error>
+
+pub fn validate_frame(
+    frame: &AsciiFrame,
+    expected_glyph_table_id: GlyphTableId,
+    glyph_count: u32,
+    budget: &Budget,
+    cancellation: &CancellationToken,
+) -> Result<(), Error>
+
+pub fn validate_raster_frame<'a>(
+    view: RasterFrameView<'a>,
+    budget: &Budget,
+    cancellation: &CancellationToken,
+) -> Result<ValidatedRasterFrameView<'a>, Error>
+```
+
+`AsciiFrame::try_new` takes `FrameMetadata` and an already allocated `Vec<AsciiCell>`. It validates
+shape, cell bounds, capacity, cancellation, and byte/work limits without allocating. Consumers use
+`validate_frame` to compare the declared glyph-table identity with their expected table. Producers
+call `validate_grid_budget` first; it checks platform `usize` conversion, checked cell bytes,
+Rust's `isize::MAX` allocation-layout limit, byte budget, and work budget. The exact `u32 × u32`
+cell count fits in `u64`; test checked byte or platform-size overflow instead. `into_parts` returns
+the original cell vector for allocation reuse.
+
+Raster validation supports top-down 8-bit Gray/RGB/RGBA with sRGB primaries and transfer. It rejects unsupported sample depth, orientation, color/transfer/alpha metadata, undersized stride, and backing shorter than `(height - 1) * row_stride + row_bytes`; trailing bytes and unused final-row padding are allowed. It returns a borrowed validated view, performs no pixel copies, and checks raster-byte/work budgets and cancellation.
 
 **Dependencies:** none.
 
-- [ ] Write the failing contract test in `crates/ascii-core/tests/frame_contract.rs`. Assertions: Reject 4x4 grid with 15 cells; reject glyph 8 for an 8-entry table; accept 16 valid cells; reject checked multiplication overflow.
+- [ ] Add behavior-focused tests in `crates/ascii-core/tests/frame_contract.rs`: exact cell counts and glyph bounds/table identity; preflight byte/work limits and checked byte/platform-size overflow; over-budget vector capacity; cancellation; padded stride; one-byte-short backing; trailing bytes; zero dimensions; unsupported raster metadata; and typed malformed/unsupported/budget/cancellation errors.
 - [ ] Run `cargo test -p ascii-core --test frame_contract -- --nocapture` and confirm the new assertion fails for the intended missing behavior, not an unrelated environment/setup failure. Native-only evidence uses an ignored/feature-gated test plus the named manual script; do not fabricate a CI pass.
-- [ ] Implement the stated interface in the owned files with validated inputs, explicit error categories, cancellation/resource limits where relevant, and no package-controlled OS/network actions.
+- [ ] Implement the stated interfaces with explicit error categories and bounded validation. The core must remain `no_std`, `forbid(unsafe_code)`, dependency-free, and free of I/O.
 - [ ] Run `cargo test -p ascii-core --test frame_contract -- --nocapture` again, then affected workspace regressions. Expected: all applicable assertions pass; record unsupported native environments separately, not as success.
 - [ ] Review the diff and commit this independently testable unit with its fixtures/spec changes. Do not amend a failing unrelated test merely to make the suite green.
 
