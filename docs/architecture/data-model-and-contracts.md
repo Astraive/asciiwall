@@ -2,43 +2,80 @@
 
 ## Core types
 
-The following is conceptual Rust, not a ready-to-compile public API.
+`ascii-core` provides these portable models with private fields and read-only accessors. It is `no_std`, forbids unsafe code, and uses `alloc` only for the owned cells of `AsciiFrame`.
+The signatures below are contract summaries rather than a standalone Rust module; constructors and accessor details are defined by `crates/ascii-core`.
 
 ```rust
+pub struct GlyphTableId([u8; 32]);
+
 pub struct AsciiCell {
-    pub glyph: u32,
-    pub fg_srgba8: [u8; 4],
-    pub bg_srgba8: [u8; 4],
+    glyph: u32,
+    fg_srgba8: [u8; 4],
+    bg_srgba8: [u8; 4],
+}
+
+pub struct FrameMetadata {
+    glyph_table_id: GlyphTableId,
+    frame_id: u64,
+    generation: u64,
+    pts_us: i64,
+    duration_us: u64,
 }
 
 pub struct AsciiFrame {
-    pub columns: u32,
-    pub rows: u32,
-    pub glyph_table_id: GlyphTableId,
-    pub frame_id: u64,
-    pub generation: u64,
-    pub pts_us: i64,
-    pub duration_us: u64,
-    pub cells: Vec<AsciiCell>,
+    size: GridSize,
+    metadata: FrameMetadata,
+    cells: alloc::vec::Vec<AsciiCell>,
 }
 
 pub struct RasterFrameView<'a> {
-    pub width: u32,
-    pub height: u32,
-    pub row_stride: usize,
-    pub format: PixelFormat,
-    pub color: ColorDescription,
-    pub pixels: &'a [u8],
+    width: u32,
+    height: u32,
+    row_stride: usize,
+    format: PixelFormat,
+    color: ColorDescription,
+    orientation: RasterOrientation,
+    pixels: &'a [u8],
 }
+
+pub fn validate_grid_budget(
+    size: GridSize,
+    budget: &Budget,
+    cancellation: &CancellationToken,
+) -> Result<GridBudget, Error>;
+
+pub fn validate_frame(
+    frame: &AsciiFrame,
+    expected_glyph_table_id: GlyphTableId,
+    glyph_count: u32,
+    budget: &Budget,
+    cancellation: &CancellationToken,
+) -> Result<(), Error>;
+
+pub fn validate_raster_frame<'a>(
+    view: RasterFrameView<'a>,
+    budget: &Budget,
+    cancellation: &CancellationToken,
+) -> Result<ValidatedRasterFrameView<'a>, Error>;
 ```
+
+`AsciiFrame::try_new` takes `FrameMetadata` and an already-owned cell vector. It validates shape,
+glyph bounds, actual vector capacity, cancellation, and explicit byte/work budgets without
+allocating. Consumers use `validate_frame` to compare the declared table identity with the expected
+table. Producers call the allocation-free `validate_grid_budget` before allocation; it checks the
+minimum storage and Rust's `isize::MAX` allocation-layout bound. `into_parts` returns the original
+cell vector for reuse without copying. Grid work is one unit per cell; raster work is one unit per
+pixel. Budgets are explicit; there is no implicit unlimited default.
+
+A frame's `pts_us` is signed media presentation time and `duration_us` is media duration. `AsciiFrame` contains no monotonic runtime clock; pacing time belongs to the runtime contract and must not be encoded as media PTS.
 
 A Rust struct is not a wire format. Explicit encoders define byte order, padding, field sizes, bounds, and versioning. Do not serialize native memory layouts, pointers, `usize`, or compiler-dependent enum representations.
 
 ## Invariants
 
-`columns * rows` uses checked arithmetic and must equal the cell count. Every glyph index must exist in the referenced immutable glyph table. A glyph table contains normalized, supported display symbols and a font fingerprint; it is not a set of arbitrary terminal escape sequences. Colors identify encoded sRGB plus alpha; the renderer converts to linear-light values for blending as required.
+The exact `u32 × u32` cell count fits in `u64`; do not treat that product as overflow-prone. Convert it to platform `usize`, compute cell bytes with checked arithmetic, and reject storage beyond `isize::MAX` before allocation. Every frame has a nonzero grid, exactly one row-major cell per grid position, the expected fixed-width glyph-table identity, and glyph indices below the supplied table count. Colors identify encoded sRGBA8; the renderer converts to linear-light values for blending as required.
 
-A raster view validates stride, dimensions, sample depth, orientation, transfer characteristics, and available bytes. Stride is not assumed to equal width times channels. A frame keeps owned/shared backing storage alive while any consumer uses the view.
+The raster validator accepts top-down 8-bit Gray, RGB, or RGBA with sRGB primaries and the sRGB transfer function. It rejects unsupported sample depth, channel layouts, orientation, color/transfer metadata, and alpha semantics instead of silently transforming them. It checks `row_stride >= row_bytes` and the exact readable extent `(height - 1) * row_stride + row_bytes` with checked arithmetic. Padding after the last row is not required; trailing backing bytes are allowed. The validated view borrows the original byte slice, exposes only its required readable extent when requested, and cannot outlive that backing storage. No pixel copy or I/O occurs.
 
 ## Identity and versioning
 

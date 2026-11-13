@@ -1,14 +1,28 @@
 //! Dependency-free, portable base crate for AsciiWall.
 //!
-//! API-level frame, raster, budget, cancellation, and error contracts are owned by COR-001.
+//! Bounded frame, borrowed raster, budget, cancellation, and typed error contracts.
 #![no_std]
 #![forbid(unsafe_code)]
+
+extern crate alloc;
+
+mod budget;
+mod error;
+mod frame;
+
+pub use budget::{Budget, CancellationToken, GridBudget, validate_grid_budget};
+pub use error::{BudgetKind, Error, MalformedReason, UnsupportedReason};
+pub use frame::{
+    AlphaMode, AsciiCell, AsciiFrame, ColorDescription, ColorPrimaries, FrameMetadata,
+    GlyphTableId, PixelChannels, PixelFormat, RasterFrameView, RasterOrientation, TransferFunction,
+    ValidatedRasterFrameView, validate_frame, validate_raster_frame,
+};
 #[cfg(test)]
 extern crate std;
 /// The dimensions of an ASCII cell grid.
 ///
-/// The dimensions remain independent of any allocation; callers must apply their
-/// own resource limits before materializing a grid.
+/// The dimensions remain independent of any allocation; use `validate_grid_budget`
+/// to check resource limits before materializing a grid.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GridSize {
     columns: u32,
