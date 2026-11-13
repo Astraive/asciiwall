@@ -59,3 +59,33 @@ jobs:
           PR_COMMIT_BODIES="$(git log --format=%B "${BASE_SHA}..${HEAD_SHA}")"
           export PR_COMMIT_BODIES
           python scripts/check-conventions.py --coauthor-check-env PR_COMMIT_BODIES
+
+  core-portability:
+    name: Portable core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+      - name: Record installed compiler versions
+        run: |
+          rustc --version
+          cargo --version
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Run Rust Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Check portable core target
+        run: cargo check --locked --package ascii-core --no-default-features
+      - name: Run core-only tests
+        run: cargo test --locked --package ascii-core --no-default-features
+      - name: Inspect core dependency boundary
+        run: cargo tree --locked --package ascii-core --edges all
