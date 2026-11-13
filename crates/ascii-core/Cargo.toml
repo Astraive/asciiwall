@@ -1,0 +1,5 @@
+[package]
+name = "ascii-core"
+version.workspace = true
+edition.workspace = true
+publish = false
