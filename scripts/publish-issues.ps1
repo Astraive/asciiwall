@@ -1,4 +1,4 @@
-#requires -Version 7.0
+#requires -Version 7.5
 [CmdletBinding()]
 param(
     [string] $BacklogPath = (Join-Path $PSScriptRoot '../../.issues'),
@@ -54,7 +54,7 @@ function Hash([string] $Text) {
     try { [BitConverter]::ToString($algorithm.ComputeHash($script:Utf8.GetBytes($Text))).Replace('-', '').ToLowerInvariant() }
     finally { $algorithm.Dispose() }
 }
-function Read-Json([string] $Path) { Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable }
+function Read-Json([string] $Path) { Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable -DateKind String }
 function Escape-Segment([string] $Value) { [Uri]::EscapeDataString($Value) }
 function Key($Ticket) { "$($Ticket.repository)/$($Ticket.id)" }
 function Marker($Ticket) { "<!-- asciiwall-backlog:v1 repository=$($Ticket.repository) ticket=$($Ticket.id) -->" }
@@ -134,7 +134,7 @@ function Invoke-Api([string] $Method, [string] $Endpoint, $Payload = $null, [swi
         if ($AllowNotFound -and $status -eq 404) { return $null }
         $body = $null
         if (-not [string]::IsNullOrWhiteSpace($text)) {
-            try { $body = $text | ConvertFrom-Json -AsHashtable -NoEnumerate }
+            try { $body = $text | ConvertFrom-Json -AsHashtable -NoEnumerate -DateKind String }
             catch { if ($status -ge 200 -and $status -lt 300) { throw "Non-JSON gh response for $Method $Endpoint (HTTP $status): $text" } }
         }
         $graphErrors = $null -ne $body -and $body -is [Collections.IDictionary] -and $body.Contains('errors')
@@ -509,7 +509,7 @@ function Load-Source {
         $path = Join-Path $script:BacklogRoot $repository
         foreach ($file in Get-ChildItem -LiteralPath $path -Filter issue.json -Recurse -File) {
             $metadataText = Get-Content -LiteralPath $file.FullName -Raw -Encoding utf8
-            $ticket = $metadataText | ConvertFrom-Json -AsHashtable
+            $ticket = $metadataText | ConvertFrom-Json -AsHashtable -DateKind String
             Assert ($ticket.repository -ceq $repository -and $file.Directory.Name -ceq $ticket.id -and $file.Directory.Parent.FullName -eq $path) "Unexpected ticket identity/path: $($file.FullName)"
             $key = Key $ticket
             Assert (-not $script:Tickets.ContainsKey($key)) "Duplicate ticket $key"

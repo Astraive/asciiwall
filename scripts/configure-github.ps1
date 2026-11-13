@@ -53,7 +53,20 @@ function Validate-Definitions($Labels,$Milestones,$Project) {
     Assert ((@($Project.views.name|Sort-Object -Unique).Count) -eq 18) 'Project view registry contains duplicate names.'
     $fieldNames=@($Project.fields.name)
     foreach($field in $Project.fields){Assert ($field.kind -in @('SINGLE_SELECT','MULTI_SELECT','TEXT','NUMBER','NATIVE_REPOSITORY','NATIVE_MILESTONE','NATIVE_ASSIGNEES','NATIVE_TITLE','NATIVE_LABELS','NATIVE_PARENT_ISSUE','NATIVE_SUB_ISSUES_PROGRESS','NATIVE_UPDATED')) "Invalid field kind '$($field.kind)'.";Assert ((@($field.options|Sort-Object -Unique).Count) -eq @($field.options).Count) "Field '$($field.name)' has duplicate options."}
-    foreach($view in $Project.views){Assert ($view.layout -in @('TABLE_LAYOUT','BOARD_LAYOUT')) "Unsupported view layout '$($view.layout)'.";Assert (@($view.visible_fields|Where-Object{$_ -notin $fieldNames}).Count -eq 0) "View '$($view.name)' names a field absent from the field registry."}
+    foreach($view in $Project.views){
+        Assert ($view.layout -in @('TABLE_LAYOUT','BOARD_LAYOUT')) "Unsupported view layout '$($view.layout)'."
+        Assert (@($view.visible_fields|Where-Object{$_ -notin $fieldNames}).Count -eq 0) "View '$($view.name)' names a visible field absent from the field registry."
+        Assert (@($view.Keys|Where-Object{$_ -in @('group_by','secondary_group_by','slice_by','sort_by')}).Count -eq 4) "View '$($view.name)' must use exactly the current grouping and sorting keys."
+        Assert (@($view.Keys|Where-Object{($_ -match '(?i)(group|slice|sort)') -and $_ -notin @('group_by','secondary_group_by','slice_by','sort_by')}).Count -eq 0) "View '$($view.name)' contains an unsupported legacy grouping or sorting alias."
+        Assert ([string]$view.group_by -in $fieldNames) "View '$($view.name)' names a primary grouping field absent from the field registry."
+        Assert (@($view.sort_by).Count -eq 2 -and @($view.sort_by|Sort-Object -Unique).Count -eq 2) "View '$($view.name)' must name two distinct ordered sort fields."
+        Assert (@($view.sort_by|Where-Object{$_ -notin $fieldNames}).Count -eq 0) "View '$($view.name)' names a sort field absent from the field registry."
+        if($view.layout -eq 'TABLE_LAYOUT'){
+            Assert ($null -eq $view.secondary_group_by -and [string]$view.slice_by -in $fieldNames) "TABLE view '$($view.name)' must use one primary group, null secondary_group_by, and a registered slice_by field."
+        }else{
+            Assert ([string]$view.secondary_group_by -in $fieldNames -and $null -eq $view.slice_by) "BOARD view '$($view.name)' must use primary and secondary grouping and null slice_by."
+        }
+    }
     Assert ([bool]($Project.fields|Where-Object{$_.name -eq 'Platform' -and $_.kind -eq 'MULTI_SELECT'})) 'Platform must remain a native multi-select definition.'
 }
 function Invoke-Gh([string[]] $Arguments, [string] $InputText = '') {
@@ -84,6 +97,11 @@ function Canonical($Value) {
         return '[' + ($parts -join ',') + ']'
     }
     return Json $Value
+}
+function Canonical-OrderedVector($Value) {
+    if ($null -eq $Value) { return Canonical $null }
+    if ($Value -is [Collections.IEnumerable] -and $Value -isnot [string]) { return Canonical $Value }
+    return '[' + (Canonical $Value) + ']'
 }
 function Assert-SingleMutation([string] $Query) {
     # Every supported mutation passes values through variables, never string literals.
@@ -234,7 +252,10 @@ function Get-Project {
     }
     foreach ($view in $project.views.nodes) {
         $view.configuration.visibleFieldIds = @($view.configuration.visibleFields.nodes | ForEach-Object id)
-        $view.groupByFields = @(@($view.groupByFields.nodes) + @($view.verticalGroupByFields.nodes) | ForEach-Object { @{field=$_} })
+        # Keep the native vectors separate: TABLE groupByFields is primary;
+        # BOARD verticalGroupByFields is primary and groupByFields is secondary.
+        $view.groupByFields = @($view.groupByFields.nodes)
+        $view.verticalGroupByFields = @($view.verticalGroupByFields.nodes)
         $view.sortByFields = @($view.sortByFields.nodes)
     }
     $script:ProjectFieldIds=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -390,14 +411,29 @@ function Set-ProjectView($Project, $View) {
     }
     $operation=$script:Operations|Where-Object{$_.name -eq $key -and $_.target -eq $script:ProjectId}|Select-Object -Last 1
     if($Apply -and $operation.state -eq 'applied-awaiting-refetch'){Refetch-Verify $key $script:ProjectId $desired {$latest=Get-Project;$v=@($latest.views.nodes|Where-Object name -ceq $View.name|Select-Object -First 1)[0];@{name=$v.name;layout=$v.layout;filter=[string]$v.filter;visibleFieldIds=@($v.configuration.visibleFieldIds)}}}
-    $desiredGroup=@($View.group_by)+@($View.secondary_group_by|Where-Object{$_})
-    $actualGroup=if($existing){@($existing.groupByFields|ForEach-Object{$_.field.name})}else{@()}
-    $desiredSort=@($View.sort_by)
-    $actualSort=if($existing){@($existing.sortByFields|ForEach-Object{$_.field.name})}else{@()}
-    $uiDesired=@{group_by=$desiredGroup;sort_by=$desiredSort};$uiObserved=@{group_by=$actualGroup;sort_by=$actualSort}
-    $uiState=if((Canonical $uiDesired) -ceq (Canonical $uiObserved)){'verified'}else{'pending-manual'}
-    [void]$script:Operations.Add([pscustomobject]@{name="view-ui:$($View.name)";target=$script:ProjectId;state=$uiState;desired=$uiDesired;observed=$uiObserved})
-    if($uiState -ne 'verified'){$script:PendingManual.Add("View '$($View.name)': in the authorized project UI use Group by '$($View.group_by)' then '$($View.secondary_group_by)' and sort by '$($View.sort_by -join ', ')'.")}
+    if($layout -eq 'BOARD_LAYOUT'){
+        $primaryField=$View.group_by;$secondaryField=$View.secondary_group_by
+        $actualPrimary=@(if($existing){$existing.verticalGroupByFields|ForEach-Object{$_.name}})
+        $actualSecondary=@(if($existing){$existing.groupByFields|ForEach-Object{$_.name}})
+    }else{
+        $primaryField=$View.group_by;$secondaryField=$null
+        $actualPrimary=@(if($existing){$existing.groupByFields|ForEach-Object{$_.name}})
+        $actualSecondary=@(if($existing){$existing.verticalGroupByFields|ForEach-Object{$_.name}})
+    }
+    $expectedSort=@($View.sort_by)
+    $actualSort=@(if($existing){$existing.sortByFields|ForEach-Object{$_.field.name}})
+    $secondaryExpected=$null
+    if($secondaryField){$secondaryExpected=@($secondaryField)}
+    if($layout -eq 'TABLE_LAYOUT' -and $existing -and $actualSecondary.Count -eq 0){$actualSecondary=$null}
+    $apiDesired=@{primary_group_by=@($primaryField);secondary_group_by=$secondaryExpected;sort_by=$expectedSort}
+    $apiObserved=@{primary_group_by=$actualPrimary;secondary_group_by=$actualSecondary;sort_by=$actualSort}
+    $apiState=if($existing -and (Canonical-OrderedVector $apiDesired.primary_group_by) -ceq (Canonical-OrderedVector $apiObserved.primary_group_by) -and (Canonical-OrderedVector $apiDesired.secondary_group_by) -ceq (Canonical-OrderedVector $apiObserved.secondary_group_by) -and (Canonical-OrderedVector $apiDesired.sort_by) -ceq (Canonical-OrderedVector $apiObserved.sort_by)){'verified'}else{'pending'}
+    [void]$script:Operations.Add([pscustomobject]@{name="view-api:$($View.name)";target=$script:ProjectId;state=$apiState;desired=$apiDesired;observed=$apiObserved})
+    if($apiState -ne 'verified'){$script:PendingManual.Add("View '$($View.name)': native API grouping or ordered sort fields differ.")}
+    if($View.slice_by){
+        [void]$script:Operations.Add([pscustomobject]@{name="view-slice:$($View.name)";target=$script:ProjectId;state='manual-only-unverifiable-by-api';desired=@{slice_by=$View.slice_by};observed=$null;verification='Must be checked manually in the authorized GitHub UI after save and reload; no public API read/write exposes Slice by.'})
+        $script:PendingManual.Add("View '$($View.name)': manually verify Slice by '$($View.slice_by)' in the authorized GitHub UI after saving and reloading; no public API can verify this setting.")
+    }
 }
 function Get-SecurityEnabled([string] $RepositorySlug,[string] $Feature,$RepositoryState) {
     if($Feature -eq 'secret_scanning'){return $RepositoryState.security_and_analysis.secret_scanning.status -eq 'enabled'}
@@ -499,7 +535,15 @@ $script:ProjectViewNames=@($definition.views.name)
         }
         foreach($m in $milestones){$target=if($m.repository -eq $LibraryRepository){$script:LibrarySlug}else{$script:RepoSlug};[void]$script:Operations.Add([pscustomobject]@{name="milestone:$($m.id)";target=$target;state='planned';desired=@{title=$m.title;gate_id=$m.gate;goal=$m.goal;entry=$m.entry_conditions;exit=$m.exit_conditions;evidence_plan=$m.quality_gate;signoff=$m.signoff;target_release=$m.target_release;effort_days=$m.effort_days}})}
         foreach($f in $definition.fields){[void]$script:Operations.Add([pscustomobject]@{name="field:$($f.name)";target=$script:ProjectId;state='planned';desired=@{name=$f.name;kind=$f.kind;options=$f.options}})}
-        foreach($v in $definition.views){[void]$script:Operations.Add([pscustomobject]@{name="view:$($v.name)";target=$script:ProjectId;state='planned';desired=@{name=$v.name;layout=$v.layout;filter=$v.filter;visible_fields=$v.visible_fields}});[void]$script:Operations.Add([pscustomobject]@{name="view-ui:$($v.name)";target=$script:ProjectId;state='pending-manual';desired=@{group_by=@($v.group_by,$v.secondary_group_by|Where-Object{$_});sort_by=$v.sort_by}});$script:PendingManual.Add("View '$($v.name)': in the authorized project UI set Group by '$($v.group_by)' then '$($v.secondary_group_by)' and sort by '$($v.sort_by -join ', ')'.")}
+        foreach($v in $definition.views){
+            [void]$script:Operations.Add([pscustomobject]@{name="view:$($v.name)";target=$script:ProjectId;state='planned';desired=@{name=$v.name;layout=$v.layout;filter=$v.filter;visible_fields=$v.visible_fields}})
+            $plannedSecondary=if($v.secondary_group_by){@($v.secondary_group_by)}else{$null}
+            [void]$script:Operations.Add([pscustomobject]@{name="view-api:$($v.name)";target=$script:ProjectId;state='pending';desired=@{primary_group_by=@($v.group_by);secondary_group_by=$plannedSecondary;sort_by=@($v.sort_by)};observed=$null})
+            if($v.slice_by){
+                [void]$script:Operations.Add([pscustomobject]@{name="view-slice:$($v.name)";target=$script:ProjectId;state='manual-only-unverifiable-by-api';desired=@{slice_by=$v.slice_by};observed=$null;verification='Must be checked manually in the authorized GitHub UI after save and reload; no public API read/write exposes Slice by.'})
+                $script:PendingManual.Add("View '$($v.name)': manually verify Slice by '$($v.slice_by)' in the authorized GitHub UI after saving and reloading; no public API can verify this setting.")
+            }
+        }
         [void]$script:Operations.Add([pscustomobject]@{name='project:title';target=$script:ProjectId;state='planned';desired=$definition.project.desired_title})
         foreach($repoDef in $repoDefinitions){[void]$script:Operations.Add([pscustomobject]@{name="project-link:$($repoDef.slug)";target=$script:ProjectId;state='planned';desired=$repoDef.slug})}
         if($ConfigureBranchProtection){foreach($repoDef in $repoDefinitions){[void]$script:Operations.Add([pscustomobject]@{name='branch-protection:main';target=$repoDef.slug;state='requires-apply-and-required-checks';desired=$RequiredCheck})}}
@@ -535,7 +579,12 @@ $script:ProjectViewNames=@($definition.views.name)
 $report.operations=@($script:Operations)
 $report.manual_steps=@($script:PendingManual)
 if($VerifyOnly){
-    foreach($operation in $script:Operations){if($operation.state -notin @('verified')){[void]$script:Failures.Add("Verification differs or remains pending: $($operation.name) [$($operation.state)]")}}
+    foreach($operation in $script:Operations){
+        if($operation.state -eq 'verified'){continue}
+        if($operation.state -eq 'manual-only-unverifiable-by-api'){$message="Manual-only verification unavailable via API: $($operation.name) cannot be verified through the public API."}
+        else{$message="Verification differs or remains pending: $($operation.name) [$($operation.state)]"}
+        [void]$script:Failures.Add($message)
+    }
 }
 $report.failures=@($script:Failures)
 $report.finished_at=[DateTime]::UtcNow.ToString('o')

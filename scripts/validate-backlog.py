@@ -270,6 +270,71 @@ class Audit:
             self.error(self.label(path), f"Invalid JSON: {exc}")
             return _LOAD_FAILED
 
+    def validate_project_views(self) -> None:
+        path = self.backlog_root / "project.json"
+        location = self.label(path)
+        project = self.load(path)
+        if not isinstance(project, dict):
+            self.error(location, "Missing or invalid project registry object")
+            return
+        fields = project.get("fields")
+        views = project.get("views")
+        if not isinstance(fields, list) or not isinstance(views, list):
+            self.error(location, "Project registry must contain fields and views arrays")
+            return
+        field_names = {field.get("name") for field in fields if isinstance(field, dict) and isinstance(field.get("name"), str)}
+        if len(field_names) != len(fields):
+            self.error(location, "Project field registry contains invalid or duplicate field names")
+        if len(views) != 18:
+            self.error(location, f"Project registry must contain 18 views, found {len(views)}")
+        counts = Counter(view.get("layout") for view in views
+                         if isinstance(view, dict) and isinstance(view.get("layout"), str))
+        if counts != Counter({"TABLE_LAYOUT": 17, "BOARD_LAYOUT": 1}):
+            self.error(location, f"Expected 17 table views and 1 board view, found {dict(counts)}")
+        names = [view.get("name") for view in views if isinstance(view, dict) and isinstance(view.get("name"), str)]
+        if len(set(names)) != len(names):
+            self.error(location, "Project view registry contains duplicate names")
+        current_group_keys = {"group_by", "secondary_group_by", "slice_by", "sort_by"}
+        for index, view in enumerate(views):
+            item_location = f"{location}.views[{index}]"
+            if not isinstance(view, dict):
+                self.error(item_location, "View must be an object")
+                continue
+            if not current_group_keys.issubset(view):
+                self.error(item_location, "View must declare group_by, secondary_group_by, slice_by, and sort_by")
+            legacy_aliases = {"secondary_grouping", "secondary_grouping_by", "secondary_group_by_legacy",
+                              "grouping_by", "grouping", "slice", "slice_field", "slice_by_field",
+                              "group_by_secondary", "group_by_fields", "sort_fields"}
+            legacy = sorted(key for key in view if key in legacy_aliases)
+            if legacy:
+                self.error(item_location, f"Unsupported legacy grouping/sorting aliases: {', '.join(legacy)}")
+            layout = view.get("layout")
+            primary = view.get("group_by")
+            secondary = view.get("secondary_group_by")
+            slice_by = view.get("slice_by")
+            sort_by = view.get("sort_by")
+            if not isinstance(primary, str) or primary not in field_names:
+                self.error(item_location, f"Unknown primary grouping field {primary!r}")
+            if not isinstance(sort_by, list) or len(sort_by) != 2 or any(not isinstance(field, str) for field in sort_by) or len(set(sort_by)) != 2:
+                self.error(item_location, "sort_by must contain exactly two distinct fields in explicit order")
+            elif any(field not in field_names for field in sort_by):
+                self.error(item_location, "sort_by references a field absent from the field registry")
+            if layout == "TABLE_LAYOUT":
+                if secondary is not None:
+                    self.error(item_location, "TABLE_LAYOUT requires secondary_group_by: null; its secondary field belongs in slice_by")
+                if not isinstance(slice_by, str) or slice_by not in field_names:
+                    self.error(item_location, f"Unknown table slice_by field {slice_by!r}")
+            elif layout == "BOARD_LAYOUT":
+                if not isinstance(secondary, str) or secondary not in field_names:
+                    self.error(item_location, f"Unknown board secondary grouping field {secondary!r}")
+                if slice_by is not None:
+                    self.error(item_location, "BOARD_LAYOUT requires slice_by: null")
+            else:
+                self.error(item_location, f"Unsupported layout {layout!r}")
+            visible = view.get("visible_fields")
+            if not isinstance(visible, list) or any(not isinstance(field, str) or field not in field_names for field in visible):
+                self.error(item_location, "visible_fields must reference only registered fields")
+
     def schema(self, value, rule: dict, location: str, root: dict, emit: bool = True) -> bool:
         """Interpret exactly the Draft 2020-12 vocabulary used by schema.json.
 
@@ -716,6 +781,7 @@ class Audit:
         backlog_ok = self.validate_backlog_root()
         if not (source_ok and backlog_ok):
             return
+        self.validate_project_views()
         for path in sorted(ORIGINAL_DOCS):
             doc_path = self.source_root / path
             if doc_path.is_symlink():

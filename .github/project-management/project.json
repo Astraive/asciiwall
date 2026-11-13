@@ -291,6 +291,7 @@
       "filter": "",
       "group_by": "Phase",
       "secondary_group_by": "Status",
+      "slice_by": null,
       "sort_by": [
         "Priority",
         "Milestone"
@@ -320,7 +321,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "status:Backlog",
       "group_by": "Repository",
-      "secondary_group_by": "Milestone",
+      "secondary_group_by": null,
+      "slice_by": "Milestone",
       "sort_by": [
         "Priority",
         "Size"
@@ -349,7 +351,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "",
       "group_by": "Milestone",
-      "secondary_group_by": "Repository",
+      "secondary_group_by": null,
+      "slice_by": "Repository",
       "sort_by": [
         "Phase",
         "Priority"
@@ -379,7 +382,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "label:\"kind:epic\" -label:\"kind:roadmap\"",
       "group_by": "Repository",
-      "secondary_group_by": "Milestone",
+      "secondary_group_by": null,
+      "slice_by": "Milestone",
       "sort_by": [
         "Area",
         "Priority"
@@ -408,7 +412,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "label:\"priority:P0\" label:\"path:critical\" -status:Done",
       "group_by": "Milestone",
-      "secondary_group_by": "Blocked",
+      "secondary_group_by": null,
+      "slice_by": "Blocked",
       "sort_by": [
         "Phase",
         "Effort"
@@ -437,7 +442,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "status:Ready Blocked:No",
       "group_by": "Area",
-      "secondary_group_by": "Repository",
+      "secondary_group_by": null,
+      "slice_by": "Repository",
       "sort_by": [
         "Priority",
         "Size"
@@ -464,7 +470,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "Blocked:Yes -status:Done",
       "group_by": "Milestone",
-      "secondary_group_by": "Area",
+      "secondary_group_by": null,
+      "slice_by": "Area",
       "sort_by": [
         "Priority",
         "Repository"
@@ -491,7 +498,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "platform:windows",
       "group_by": "Milestone",
-      "secondary_group_by": "Area",
+      "secondary_group_by": null,
+      "slice_by": "Area",
       "sort_by": [
         "Priority",
         "Status"
@@ -518,7 +526,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "platform:macos",
       "group_by": "Milestone",
-      "secondary_group_by": "Area",
+      "secondary_group_by": null,
+      "slice_by": "Area",
       "sort_by": [
         "Priority",
         "Status"
@@ -545,7 +554,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "platform:linux",
       "group_by": "Milestone",
-      "secondary_group_by": "Area",
+      "secondary_group_by": null,
+      "slice_by": "Area",
       "sort_by": [
         "Priority",
         "Status"
@@ -572,7 +582,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "repo:Astraive/asciiwall label:\"area:architecture\",\"area:runtime\",\"area:ascii-conversion\",\"area:fonts\",\"area:image-decoding\",\"area:rendering\",\"area:scene-graph\",\"area:scene-effects\",\"area:procedural-scenes\",\"area:performance\",\"area:media\",\"area:package-format\"",
       "group_by": "Area",
-      "secondary_group_by": "Milestone",
+      "secondary_group_by": null,
+      "slice_by": "Milestone",
       "sort_by": [
         "Priority",
         "Status"
@@ -599,7 +610,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "label:\"area:native-ui\",\"area:settings\",\"area:interactions\",\"area:accessibility\",\"area:transitions\"",
       "group_by": "Area",
-      "secondary_group_by": "Milestone",
+      "secondary_group_by": null,
+      "slice_by": "Milestone",
       "sort_by": [
         "Priority",
         "Status"
@@ -626,7 +638,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "repo:Astraive/asciiwall label:\"area:image-decoding\",\"area:media\",\"area:ascii-conversion\",\"area:rendering\",\"area:performance\",\"area:scene-effects\",\"area:transitions\"",
       "group_by": "Area",
-      "secondary_group_by": "Milestone",
+      "secondary_group_by": null,
+      "slice_by": "Milestone",
       "sort_by": [
         "Priority",
         "Status"
@@ -653,7 +666,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "label:\"type:test\",\"kind:gate\",\"area:quality\",\"area:diagnostics\",\"area:performance\",\"area:provenance\"",
       "group_by": "Milestone",
-      "secondary_group_by": "Repository",
+      "secondary_group_by": null,
+      "slice_by": "Repository",
       "sort_by": [
         "Priority",
         "Status"
@@ -682,7 +696,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "label:\"type:security\",\"area:security\",\"area:privacy\",\"area:ipc\",\"area:provenance\",\"area:catalog\"",
       "group_by": "Milestone",
-      "secondary_group_by": "Repository",
+      "secondary_group_by": null,
+      "slice_by": "Repository",
       "sort_by": [
         "Priority",
         "Status"
@@ -711,7 +726,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "repo:Astraive/asciiwall-library",
       "group_by": "Milestone",
-      "secondary_group_by": "Area",
+      "secondary_group_by": null,
+      "slice_by": "Area",
       "sort_by": [
         "Priority",
         "Status"
@@ -738,7 +754,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "label:\"kind:gate\",\"area:release-engineering\",\"area:native-packaging\",\"area:licensing\",\"area:provenance\",\"area:library-release\",\"area:library-quality\" -status:Done",
       "group_by": "Milestone",
-      "secondary_group_by": "Repository",
+      "secondary_group_by": null,
+      "slice_by": "Repository",
       "sort_by": [
         "Priority",
         "Blocked"
@@ -769,7 +786,8 @@
       "layout": "TABLE_LAYOUT",
       "filter": "status:Done",
       "group_by": "Milestone",
-      "secondary_group_by": "Repository",
+      "secondary_group_by": null,
+      "slice_by": "Repository",
       "sort_by": [
         "Area",
         "Updated"
@@ -832,6 +850,12 @@
     "configuration_fields": [
       "visibleFieldIds"
     ],
+    "view_read_fields": [
+      "layout",
+      "groupByFields",
+      "verticalGroupByFields",
+      "sortByFields"
+    ],
     "filter": "updateProjectV2View exposes filter. The configuration tool attempts the static label/status filters only on authorized apply and records exact refetch failures; custom Blocked-field filtering is not inferred.",
     "custom_field_types": [
       "TEXT",
@@ -841,7 +865,7 @@
       "DATE",
       "ITERATION"
     ],
-    "grouping": "No grouping or sorting setter exists in the observed API schema; grouping and sorting remain explicit per-view manual UI steps, not applied by the tool.",
+    "grouping": "GraphQL exposes groupByFields, verticalGroupByFields, and ordered sortByFields for view reads, but no grouping or sorting setter exists in the observed API schema. For TABLE_LAYOUT, groupByFields is primary and verticalGroupByFields must be empty; for BOARD_LAYOUT, verticalGroupByFields is primary and groupByFields is secondary. Slice by has no public API read or write field and requires manual UI verification.",
     "roadmap_dates": "No start/end, due dates, DATE fields or ITERATION fields are present. Milestone Roadmap uses TABLE_LAYOUT until real schedule data exists; no dates are invented."
   }
 }

@@ -43,6 +43,9 @@ jobs:
       - name: Exercise create-missing scope selection and read-only preservation
         shell: pwsh
         run: ./scripts/test-publisher-scope.ps1
+      - name: Exercise project view audit layout orientation and vector canonicalization
+        shell: pwsh
+        run: ./scripts/test-project-view-audit.ps1
       - name: Check pull request title, body, and commit trailers
         if: github.event_name == 'pull_request'
         env:

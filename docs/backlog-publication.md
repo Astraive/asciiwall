@@ -4,11 +4,11 @@ The publication source is the **external workspace** `../.issues`, relative to t
 
 `scripts/publish-issues.ps1` is a PowerShell 7 publisher for the existing `Astraive/asciiwall`, `Astraive/asciiwall-library`, and organization Project 4. Publication creates planning records, **not implementations or passing gates**. Bodies and project Status retain the source Backlog/unimplemented state. Checkbox completion, acceptance criteria, test claims, assignees, and issue open/closed state are not advanced by publication.
 
-The publisher was initially authored without live issue writes. Live publication now requires explicit authorization for its requested scope; the external publication ledger, not this guide or the local authoring inventory, records actual remote results.
+The publisher was initially authored without live issue writes. Live publication requires explicit authorization for its requested scope; the external publication ledger (`../.issues/publication-ledger.json`), independent remote verification (`-VerifyOnly`), and external audit snapshots—not this guide or the local authoring inventory—record actual remote results.
 
 ## Modes and prerequisites
 
-Use PowerShell 7, Python 3 compatible with `scripts/validate-backlog.py`, and GitHub CLI `gh`. The Python validator is run before GitHub access, lock creation, or ledger writes, with exactly:
+Use **PowerShell 7.5 or later** (`pwsh` 7.5+), Python 3 compatible with `scripts/validate-backlog.py`, and GitHub CLI `gh`. `scripts/publish-issues.ps1` requires PowerShell 7.5+ so `ConvertFrom-Json -DateKind String` preserves ISO-8601 UTC timestamp strings verbatim (such as `verification.checked_at` in `../.issues/publication-ledger.json`) during JSON read/save round-trips instead of coercing them to local-offset `DateTime` representations (the separate `scripts/configure-github.ps1` infrastructure tool remains PowerShell 7.0+). The Python validator is run before GitHub access, lock creation, or ledger writes, with exactly:
 
 ```text
 python scripts/validate-backlog.py --backlog-root <external-backlog> --source-root <main-repository>
@@ -53,10 +53,11 @@ Omitting `-Milestone` retains the full-backlog behavior. **An unscoped Apply req
 
 When an initial batch of issues already exists remotely, `-CreateMissing` appends only the remaining unpublished tickets while leaving previously published issues and their existing verified ledger records read-only:
 
-- **Foundation batch:** The initial `39` published issues are `37` `asciiwall/M0` members plus required parent containers `CFG-EPIC` (`M5`) and `WND-EPIC` (`M3`). Preserving that batch leaves **317** tickets to create: `239` in `asciiwall` and `78` in `asciiwall-library`. This includes all `17` canonical `asciiwall/M1` tickets (`M1 — ASCII Engine Prototype`); M1 is not the foundation milestone.
+- **Foundation batch (`39` protected):** The initial `39` published issues are `37` `asciiwall/M0` members plus required parent containers `CFG-EPIC` (`M5`) and `WND-EPIC` (`M3`). Preserving that batch leaves **317** tickets for `-CreateMissing`: `239` in `asciiwall` and `78` in `asciiwall-library`, including all `17` canonical `asciiwall/M1` tickets (`M1 — ASCII Engine Prototype`; `M0` was the first batch, not `M1`).
+- **Current publication state (`356` published):** All `317` remaining tickets were created and verified via `-Apply -CreateMissing` (`278` total in `asciiwall` and `78` total in `asciiwall-library`), and an independent fresh REST/GraphQL audit confirmed all `356` issues, `354` native parent edges, `576` native hard-blocker edges (`38` cross-repo), `356` Project 4 issue items (`0` drafts), and exact preservation of all `39` protected issues and project fields (see [setup audit](setup-audit.md)).
 - **Unmodified authoring source:** The `356` external source authoring records (`issue.json` and `CONTENT.md`) are **never rewritten**. Full-source validation (`scripts/validate-backlog.py`), full-backlog DAG topological ordering, derived labels, and body-sizing preflight still cover all `356` tickets. `-CreateMissing` cannot be combined with `-Milestone`.
 
-Actual `-CreateMissing` commands (note: listing these commands does not claim live publication has already run; check the external ledger and `-VerifyOnly` output for real remote state):
+`-CreateMissing` commands (check the external ledger and `-VerifyOnly` output for live remote state):
 
 ```powershell
 # Offline preview from source backlog + local external ledger only (zero gh calls, no lock, no ledger writes)
@@ -82,13 +83,13 @@ Before a future Apply, the operator must authenticate gh with access to **both**
 
 Remote modes introspect the live schema. Native Platform multi-select support must include `ProjectV2MultiSelectField`, `multiSelectOptions`, and `ProjectV2FieldValue.multiSelectOptionIds`. Updating select options must accept existing option IDs. Missing or incompatible native APIs produce a nonzero failure, **not** text fields, draft items, label-only representations, or silently skipped phases. Existing conflicting native fields, parents, blockers, duplicate matches, or option-limit conflicts also require operator resolution; the publisher never destroys unrelated data to make verification pass.
 
-Future read-only remote audit:
+Read-only full-backlog remote audit:
 
 ```powershell
 pwsh -NoProfile -File ./scripts/publish-issues.ps1 -BacklogPath ../.issues -VerifyOnly
 ```
 
-The explicit mutation example below targets only the authorized first milestone. Its outcome must be checked in the external ledger and by a subsequent read-only audit:
+The scoped mutation example below targets only the initial authorized milestone batch (`asciiwall/M0`, plus its required `CFG-EPIC` and `WND-EPIC` parent containers). Always inspect outcomes in the external ledger and via a subsequent read-only audit:
 
 ```powershell
 pwsh -NoProfile -File ./scripts/publish-issues.ps1 -BacklogPath ../.issues -Apply -Milestone asciiwall/M0 -ExpectedLogin NeerajCodz
@@ -109,7 +110,7 @@ Do not run concurrent Apply processes or edit the source backlog while publishin
 Rendered initial and final issue bodies are each checked against the 65,536-character API limit. Before any remote mutation, the publisher also sizes a conservative final-render estimate for every ticket using temporary synthetic issue-number lengths; those values are internal sizing inputs only and are never emitted or published. Oversized requirements are rejected, never truncated.
 Only supported local Markdown destinations are rewritten: repository documentation, external coverage-register references, and ticket links (including optional titles and same-ticket anchors). Links inside fenced code examples are not rewritten; any other local link fails preflight rather than being published as a broken href.
 
-The project registry may also describe preferred views/groupings. The publisher's owned project changes are the existing project's title, repository links, fields/options, real items, and values; it does not delete or rewrite user views or grouping preferences.
+The project registry also describes preferred views, groupings, `Slice by` fields, and sorting. The publisher's owned project changes are the existing project's title, repository links, fields/options, real items, and values; it does not delete or rewrite user views or interactive layout preferences.
 
 ## Derived labels and withheld publication
 
@@ -134,14 +135,14 @@ After interruption, run the normal future Apply command again. It refetches remo
 Only after independently establishing that the exact pending request **did not apply**, an operator may explicitly authorize one attempt for that operation key:
 
 ```powershell
-# Future recovery example; not executed. Use the exact key printed by the publisher.
+# Recovery example; run only after independently confirming the pending operation did not apply remotely. Use the exact key printed by the publisher.
 pwsh -NoProfile -File ./scripts/publish-issues.ps1 -BacklogPath ../.issues -Apply -RetryOperation 'create:asciiwall/PRJ-001'
 ```
 
 For a project item whose non-`Status` custom-field GraphQL alias batch (`project:values:<repo>/<id>`) failed mid-response or timed out, normal resume reconciles the operation **only** if independent readback confirms every desired non-`Status` field value on that item already matches. If any batched field remains unapplied or differs, the publisher stops without retrying and prints the exact pending operation key; authorize one explicit retry only after independently confirming which fields did not apply remotely:
 
 ```powershell
-# Future custom-field batch recovery example; not executed. Use the exact key printed by the publisher.
+# Custom-field batch recovery example; run only after independently confirming which fields did not apply remotely. Use the exact key printed by the publisher.
 pwsh -NoProfile -File ./scripts/publish-issues.ps1 -BacklogPath ../.issues -Apply -CreateMissing -ExpectedLogin NeerajCodz -RetryOperation 'project:values:asciiwall/PRJ-001'
 ```
 
