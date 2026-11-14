@@ -24,6 +24,16 @@ Decode within limits and apply display orientation once in the decoder; then int
 
 The `ascii-media` decoder applies display orientation exactly once and returns top-down pixels. The `ascii-convert` color normalizer requires top-down raster input and never transforms orientation. Interpret supported source color metadata after decoding and before fit, crop, or resampling. A normalized raster is owned linear-premultiplied RGBA, and raster size, stride, input extent, output allocation size, work, and cancellation are checked before and during normalization.
 
+The normalizer's raster-byte ceiling covers the checked sum of the borrowed input's minimum
+readable extent, `(height - 1) * row_stride + row_bytes`, and its requested owned normalized pixel
+storage, `width * height * size_of::<LinearPremultipliedRgba>()`. It includes padding between rows
+but excludes trailing bytes after the last pixel. The view is not a second allocation: its extent
+is counted once alongside the distinct output. This is an operation-local ceiling check, not a
+shared reservation or a process-wide memory cap. Pipeline callers must account for any additional
+concurrently live storage, but must not subtract this input extent from the budget passed to the
+normalizer. Unused backing capacity and allocator overhead or over-allocation are outside this
+extent/request-based check.
+
 ## Alpha
 
 `Alpha` is an independent linear value. Straight RGBA input keeps color unassociated until after

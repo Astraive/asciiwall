@@ -377,6 +377,120 @@ fn output_encoding_is_explicit_srgb8() {
 }
 
 #[test]
+fn raster_budget_counts_input_and_normalized_output_together() {
+    let view = raster(
+        &[0, 0, 0],
+        1,
+        1,
+        3,
+        PixelFormat::rgb8(),
+        ColorDescription::srgb(AlphaMode::Opaque),
+        RasterOrientation::TopDown,
+    );
+    let cancellation = CancellationToken::new();
+
+    // The 3-byte input and 32-byte normalized pixel coexist.
+    for max_bytes in [32, 34] {
+        assert_eq!(
+            normalize_raster(view, &budget(max_bytes, 1), &cancellation),
+            Err(ColorNormalizationError::Raster(Error::BudgetExceeded(
+                BudgetKind::RasterBytes
+            )))
+        );
+    }
+    let normalized = normalize_raster(view, &budget(35, 1), &cancellation)
+        .expect("the exact combined raster budget must suffice");
+    assert_eq!(normalized.pixels().len(), 1);
+    assert_eq!(normalized.pixels()[0].straight_rgb(), LinearRgb::BLACK);
+}
+
+#[test]
+fn raster_budget_counts_inter_row_padding_but_not_trailing_backing() {
+    let pixels = [0, 0, 0, 7, 7, 7, 7, 7, 255, 255, 255, 7, 7, 7, 7, 7];
+    let color = ColorDescription::srgb(AlphaMode::Opaque);
+    let view = raster(
+        &pixels,
+        1,
+        2,
+        8,
+        PixelFormat::rgb8(),
+        color,
+        RasterOrientation::TopDown,
+    );
+    let cancellation = CancellationToken::new();
+
+    // The required input extent is 8 + 3 = 11, plus two 32-byte output pixels.
+    assert_eq!(
+        normalize_raster(view, &budget(74, 2), &cancellation),
+        Err(ColorNormalizationError::Raster(Error::BudgetExceeded(
+            BudgetKind::RasterBytes
+        )))
+    );
+    let normalized = normalize_raster(view, &budget(75, 2), &cancellation)
+        .expect("the exact extent plus output budget must suffice");
+    assert_eq!(normalized.pixels().len(), 2);
+    assert_eq!(normalized.pixels()[0].straight_rgb(), LinearRgb::BLACK);
+    assert_eq!(normalized.pixels()[1].straight_rgb(), LinearRgb::WHITE);
+
+    let short_backing = raster(
+        &pixels[..10],
+        1,
+        2,
+        8,
+        PixelFormat::rgb8(),
+        color,
+        RasterOrientation::TopDown,
+    );
+    assert_eq!(
+        normalize_raster(short_backing, &budget(75, 2), &cancellation),
+        Err(ColorNormalizationError::Raster(Error::Malformed(
+            MalformedReason::RasterBackingTooShort
+        )))
+    );
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn raster_budget_rejects_overflow_in_combined_input_and_output_size() {
+    // The extent fits usize and u64, but adding two output pixels overflows u64.
+    let view = raster(
+        &[],
+        1,
+        2,
+        usize::MAX - 3,
+        PixelFormat::rgb8(),
+        ColorDescription::srgb(AlphaMode::Opaque),
+        RasterOrientation::TopDown,
+    );
+    assert_eq!(
+        normalize_raster(view, &budget(u64::MAX, u64::MAX), &CancellationToken::new()),
+        Err(ColorNormalizationError::Raster(Error::SizeOverflow))
+    );
+}
+
+#[cfg(any(target_pointer_width = "32", target_pointer_width = "64"))]
+#[test]
+fn raster_budget_rejects_overflow_in_output_size() {
+    #[cfg(target_pointer_width = "32")]
+    let (width, height, stride) = (1, 1 << 27, 1);
+    #[cfg(target_pointer_width = "64")]
+    let (width, height, stride) = (u32::MAX, u32::MAX, usize::try_from(u32::MAX).unwrap());
+    let view = raster(
+        &[],
+        width,
+        height,
+        stride,
+        PixelFormat::gray8(),
+        ColorDescription::srgb(AlphaMode::Opaque),
+        RasterOrientation::TopDown,
+    );
+    assert_eq!(
+        normalize_raster(view, &budget(u64::MAX, u64::MAX), &CancellationToken::new()),
+        Err(ColorNormalizationError::Raster(Error::SizeOverflow))
+    );
+}
+
+#[test]
 fn raster_orientation_stride_budgets_and_cancellation_are_checked() {
     let srgb_opaque = ColorDescription::srgb(AlphaMode::Opaque);
     let bottom_up = raster(

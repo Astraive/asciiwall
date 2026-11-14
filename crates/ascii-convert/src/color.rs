@@ -398,6 +398,14 @@ pub fn encode_output(linear: LinearRgb, encoding: OutputEncoding) -> EncodedOutp
 /// fields are assumed to be sRGB and return [`ColorNormalizationWarning::AssumedSrgbForUnknownProfile`].
 /// Display-P3/Rec. 2020 and PQ/HLG are rejected; this function performs no clipping, tone mapping,
 /// wide-gamut conversion, or ICC profile interpretation.
+///
+/// The raster-byte ceiling covers the checked sum of the borrowed input's minimum readable extent
+/// (`(height - 1) * row_stride + row_bytes`) and the requested owned output pixel storage
+/// (`width * height * size_of::<LinearPremultipliedRgba>()`). Inter-row padding is included;
+/// trailing input bytes beyond the final pixel are not. This is an operation-local ceiling check,
+/// not a reservation or process-wide memory limit; unused backing capacity and allocator overhead
+/// or over-allocation are not covered. Callers must account for other concurrently live storage,
+/// but must not subtract this input extent from the budget passed here.
 pub fn normalize_raster(
     view: RasterFrameView<'_>,
     budget: &Budget,
@@ -458,9 +466,6 @@ fn normalize_raster_with_cancel_check(
     if pixel_count > budget.max_work_units() {
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits).into());
     }
-    if view.pixels().len() < required_extent {
-        return Err(Error::Malformed(MalformedReason::RasterBackingTooShort).into());
-    }
 
     let pixel_capacity = usize::try_from(pixel_count).map_err(|_| Error::SizeOverflow)?;
     let output_bytes = pixel_capacity
@@ -470,8 +475,14 @@ fn normalize_raster_with_cancel_check(
         return Err(Error::SizeOverflow.into());
     }
     let output_bytes = u64::try_from(output_bytes).map_err(|_| Error::SizeOverflow)?;
-    if output_bytes > budget.max_raster_bytes() {
+    let total_raster_bytes = input_bytes
+        .checked_add(output_bytes)
+        .ok_or(Error::SizeOverflow)?;
+    if total_raster_bytes > budget.max_raster_bytes() {
         return Err(Error::BudgetExceeded(BudgetKind::RasterBytes).into());
+    }
+    if view.pixels().len() < required_extent {
+        return Err(Error::Malformed(MalformedReason::RasterBackingTooShort).into());
     }
     if is_cancelled() {
         return Err(Error::Cancelled.into());
