@@ -29,6 +29,7 @@
 
 mod buffer_pool;
 mod queues;
+pub mod storage;
 
 pub use buffer_pool::{
     BufferPool, CompletionToken, FillLease, FrameDescriptor, FrameLease, RasterDescriptorMetadata,
