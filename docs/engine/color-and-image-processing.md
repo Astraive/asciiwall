@@ -27,12 +27,14 @@ The `ascii-media` decoder applies display orientation exactly once and returns t
 The normalizer's raster-byte ceiling covers the checked sum of the borrowed input's minimum
 readable extent, `(height - 1) * row_stride + row_bytes`, and its requested owned normalized pixel
 storage, `width * height * size_of::<LinearPremultipliedRgba>()`. It includes padding between rows
-but excludes trailing bytes after the last pixel. The view is not a second allocation: its extent
-is counted once alongside the distinct output. This is an operation-local ceiling check, not a
-shared reservation or a process-wide memory cap. Pipeline callers must account for any additional
-concurrently live storage, but must not subtract this input extent from the budget passed to the
-normalizer. Unused backing capacity and allocator overhead or over-allocation are outside this
-extent/request-based check.
+but excludes trailing bytes after the last pixel. The borrowed input extent is counted once beside
+the distinct output, although the normalizer does not allocate that input buffer. This is an
+operation-local ceiling check: `Budget` stores numeric ceilings only, not a shared reservation or
+process-wide usage. The returned normalized raster remains caller-owned and live after this check;
+any limit across it and other concurrently retained storage belongs to a higher-level owner.
+Unused input backing capacity and allocator overhead or over-allocation are outside this
+extent/request check. The input extent is already included in this operation's calculation and must
+not be subtracted from the budget passed to the normalizer.
 
 ## Alpha
 
@@ -46,8 +48,13 @@ than clipped.
 
 Ordinary opaque wallpaper must be composited over its chosen opaque `LinearRgb` background in
 linear light before matching. `NormalizedRaster::composited_over` provides those colors without an
-intermediate allocation. Transparent layered paths retain linear-premultiplied channels and alpha
-until their layers are composited.
+intermediate allocation. Transparent layers instead use
+`LinearPremultipliedRgba::composite_over_layer`, which applies source-over directly to premultiplied
+linear RGB and returns the resulting alpha:
+`out_rgb = src_rgb + dst_rgb * (1 - src_alpha)` and
+`out_alpha = src_alpha + dst_alpha * (1 - src_alpha)`. The result can be composited over another
+transparent layer without flattening or re-decoding sRGB; zero-alpha output is canonical transparent
+black. Ordinary opaque wallpaper continues to use its existing opaque-background path.
 
 ## Palettes
 
