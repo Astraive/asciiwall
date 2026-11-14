@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://asciiwall.local/schemas/evidence-record.schema.json",
+  "title": "Asciiwall QA evidence record",
+  "description": "A deterministic record for exactly one evidence level. Native/manual evidence remains separate from automated evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_id",
+    "level",
+    "execution",
+    "procedure_id",
+    "ec_ids",
+    "source_hash",
+    "binary_hash",
+    "fixture_hash",
+    "environment",
+    "permissions",
+    "result",
+    "evidence_path",
+    "issue",
+    "reviewer",
+    "date"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "record_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "level": {
+      "type": "string",
+      "enum": ["document-qa", "unit-property", "integration", "fuzz", "benchmark", "native-manual", "release-acceptance"]
+    },
+    "execution": { "type": "string", "enum": ["automated", "manual"] },
+    "procedure_id": { "anyOf": [{ "type": "null" }, { "type": "string", "pattern": "^[A-Z0-9][A-Z0-9._-]{0,79}$" }] },
+    "ec_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^EC-[0-9]{3}$" }
+    },
+    "source_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "binary_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "fixture_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability", "os", "session", "compositor", "gpu"],
+      "properties": {
+        "availability": { "type": "string", "enum": ["present", "absent"] },
+        "os": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "session": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "compositor": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "gpu": { "type": "string", "minLength": 1, "maxLength": 120 }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "items"],
+      "properties": {
+        "state": { "type": "string", "enum": ["granted", "denied", "not-required", "unavailable", "unknown"] },
+        "items": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,39}$" } }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "summary"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "fail", "not-run"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "evidence_path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)[.][.]?(?:/|$))(?!.*//)(?!.*[/]$)(?!.*\\\\)(?!.*:)[A-Za-z0-9._/-]+$"
+    },
+    "issue": { "type": "string", "pattern": "^[A-Z][A-Z0-9]+-[A-Z0-9-]+$" },
+    "reviewer": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$" },
+    "date": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "level": { "const": "native-manual" } }, "required": ["level"] },
+      "then": {
+        "properties": {
+          "execution": { "const": "manual" },
+          "procedure_id": { "type": "string", "pattern": "^[A-Z0-9][A-Z0-9._-]{0,79}$" }
+        }
+      },
+      "else": {
+        "properties": {
+          "execution": { "const": "automated" },
+          "procedure_id": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "environment": { "properties": { "availability": { "const": "absent" } }, "required": ["availability"] } },
+        "required": ["environment"]
+      },
+      "then": {
+        "properties": {
+          "environment": {
+            "properties": {
+              "os": { "const": "not-available" },
+              "session": { "const": "not-available" },
+              "compositor": { "const": "not-available" },
+              "gpu": { "const": "not-available" }
+            }
+          },
+          "result": { "properties": { "status": { "const": "not-run" } }, "required": ["status"] }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "environment": { "properties": { "availability": { "const": "present" } }, "required": ["availability"] } },
+        "required": ["environment"]
+      },
+      "then": {
+        "properties": {
+          "environment": {
+            "properties": {
+              "os": { "not": { "enum": ["not-available", "unknown", "n/a"] } },
+              "session": { "not": { "enum": ["not-available", "unknown", "n/a"] } },
+              "compositor": { "not": { "enum": ["not-available", "unknown", "n/a"] } },
+              "gpu": { "not": { "enum": ["not-available", "unknown", "n/a"] } }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
