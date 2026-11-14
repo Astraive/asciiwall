@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
 - Bounded `ascii-runtime` handoff queues, buffer leases, completion acknowledgements, and shared concurrency/memory budgets ([COR-005](docs/architecture/resource-ownership-and-shutdown.md)).
 - Added COR-008 storage support for platform-specific roots, a versioned atomic JSON install registry, schema-validated configuration with last-good recovery, importer transaction journaling, bounded redacted diagnostics, and privacy-filtered portable exports, with focused storage transaction tests.
+- COR-009 content cache identities for conversion, video, and GPU-derived results; source-observation revalidation, byte-budget LRU eviction with explicit resource leases, disk-space reservations, and loss-safe transactional output with recoverable partial artifacts.
 
 ### Changed
 
