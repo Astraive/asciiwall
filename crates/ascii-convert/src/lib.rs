@@ -1,4 +1,6 @@
-//! Bounded font rasterization and immutable glyph-table primitives.
+//! Bounded conversion primitives for fonts, glyph descriptors, and color normalization.
+
+mod color;
 
 mod font;
 mod font_preflight;
@@ -7,4 +9,12 @@ mod glyphs;
 pub use font::{
     GlyphConfig, GlyphRecord, GlyphRepertoire, GlyphTable, build_glyph_table,
     is_supported_single_cell_scalar,
+};
+
+pub use color::{
+    Alpha, ColorNormalizationError, ColorNormalizationWarning, EncodedOutputColor, EncodedSrgb,
+    InvalidColorSample, LinearPremultipliedRgba, LinearRgb, Luminance, NormalizedRaster,
+    OutputEncoding, SRGB_DECODE_BREAKPOINT, SRGB_ENCODE_BREAKPOINT,
+    SRGB_TRANSFER_CONTINUITY_TOLERANCE, UnsupportedColorReason, decode_srgb, encode_output,
+    encode_srgb, normalize_raster,
 };
