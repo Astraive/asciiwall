@@ -38,6 +38,7 @@
 mod buffer_pool;
 mod queues;
 mod raster_consumer;
+pub mod storage;
 
 pub use buffer_pool::{
     BufferPool, CompletionToken, FillLease, FrameDescriptor, FrameLease, RasterDescriptorMetadata,
