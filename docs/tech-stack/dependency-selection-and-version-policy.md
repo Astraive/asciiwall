@@ -16,6 +16,10 @@ Record the exact FFmpeg source revision, build configuration, enabled codecs/dem
 
 Application crates share workspace dependencies. Use explicit feature flags and disable unnecessary codecs, network protocols, default backends, or optional integrations. Do not pull `latest`, a moving Git branch, or wildcard production versions. Toolchain updates and dependency updates get dedicated pull requests with lockfile diffs and platform tests.
 
+## Current executable dependency pins
+
+`ascii-convert` pins `fontdue = "=0.9.3"` with default features disabled and only `hashbrown` enabled; the default SIMD and parallel features are not active. It pins `sha2 = "=0.10.9"` for glyph-table identity. The workspace `Cargo.lock` records the resolved transitive graph. These pins describe the current glyph-rasterization boundary, not a complete application dependency set or a cross-platform support claim.
+
 Maintain an SBOM and third-party notices for each distributed artifact. Scan Rust and native dependencies; an absence of Rust advisories does not establish FFmpeg or system-library safety. An urgent security update can override normal release cadence, but must still run package parsing and platform smoke tests.
 
 ## Compatibility record
