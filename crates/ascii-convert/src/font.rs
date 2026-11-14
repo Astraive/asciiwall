@@ -259,6 +259,7 @@ pub fn build_glyph_table(
         font_bytes,
         font_settings.collection_index,
         parser_scale,
+        config.raster_size(),
         parser_raster_budget,
         parser_work_budget,
     )?;
@@ -323,10 +324,19 @@ pub fn build_glyph_table(
             return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
         }
         max_bitmap_area = max_bitmap_area.max(bitmap_area);
+        // Each requested scalar is rasterized independently, including aliases.
+        let edge_work = *parser_preflight
+            .raster_edge_work
+            .get(usize::from(glyph_index))
+            .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
+        if edge_work == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
         let glyph_work = u64::try_from(bitmap_area)
             .map_err(|_| Error::SizeOverflow)?
             .checked_add(u64::try_from(metrics.width).map_err(|_| Error::SizeOverflow)?)
             .and_then(|value| value.checked_add(u64::try_from(metrics.height).ok()?))
+            .and_then(|value| value.checked_add(edge_work))
             .ok_or(Error::SizeOverflow)?;
         raster_work = raster_work
             .checked_add(glyph_work)

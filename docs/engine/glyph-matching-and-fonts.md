@@ -14,6 +14,8 @@ The SHA-256 table fingerprint includes a descriptor/rasterizer mode version, fon
 
 Before raster allocation, the builder checks encoded font length, glyph count, cell-mask/table bytes, rasterizer scratch, total work, and cancellation. It returns a complete immutable table or a typed error; it never publishes partial glyphs. The current renderer is a single-scalar mask rasterizer, not a shaping engine, and it does not infer support for grapheme clusters or variable-width text.
 
+Work accounting separately includes parser preflight and rasterization. The preflight follows the pinned parser's outline expansion and curve subdivision, including composite components, and records a checked edge-traversal estimate per glyph at the requested raster size. For each retained line, it bounds the scalar rasterizer's vertical pixel steps, or horizontal plus vertical steps for a diagonal, with allowances for coordinate rounding and the final pixel update. Each requested scalar is charged, including multiple scalars mapping to the same glyph; bitmap-area and cell work are charged separately. Estimates that overflow, or total work above the supplied limit, produce typed errors before rasterization. These are conservative work units for the modeled loops, not a wall-clock guarantee.
+
 Version one supports printable ASCII and curated single-cell Unicode sets such as blocks and braille. Reject control characters, combining sequences, bidirectional controls, and unsupported variable-width/emoji glyphs from strict single-cell packages. Full shaped text, grapheme clusters, CJK width rules, and color emoji require a separate design rather than silently breaking the grid.
 
 ## Density matching
