@@ -2,17 +2,27 @@
 //!
 //! This crate models transport and ownership without claiming an OS shared-memory or GPU API.
 //! The process-local pool is safe Rust storage; a platform adapter must preserve the same bounds,
-//! descriptor checks, and acknowledgements when it maps a real region.
+//! descriptor checks, and acknowledgements when it maps a real region. No native mapping,
+//! disconnect, or device-completion behavior is implemented here.
+//!
+//! Submission, producer writes, raster consumption, and pixel callbacks acquire shared CPU-work
+//! permits. Consumed slots retain a shared output permit until their external completion token is
+//! acknowledged. A decoder outside this crate MUST hold `ResourceBudget::try_acquire_decode` for
+//! its active decode job; this crate supplies no decoder operation to which such a permit could be
+//! applied internally.
 //!
 //! # Locking and callbacks
 //!
 //! The global acquisition order is the [`BoundedHandoff`] operation lock, then an individual
-//! queue, pool, or budget lock. Implementations release each component lock before acquiring a
-//! different component lock; completion signals are atomic. A [`FrameLease::with_pixels`] callback
-//! runs while the pool ownership lock is held and therefore MUST be short CPU-only work: it MUST
-//! NOT call UI/native APIs, re-enter this pool, or wait for decode, presentation, or a settings lock.
-//! Never hold a settings lock while waiting for decode or present. Native owners must arrange their
-//! own thread affinity and completion callbacks outside this crate.
+//! queue, pool, or budget lock. Queue and pool locks are never held simultaneously. Generation
+//! invalidation may release a per-slot budget permit while holding the pool lock (pool -> budget);
+//! budget code never acquires a pool lock. Other cross-component operations release each lock
+//! before acquiring the next. Urgent control flags are atomic; completion acknowledgements update
+//! slot ownership under the pool lock. A [`FrameLease::with_pixels`] callback runs while the pool
+//! ownership lock is held under a shared CPU-work permit, and therefore MUST be short CPU-only
+//! work. It MUST NOT call UI/native APIs, re-enter this pool, or wait for decode, presentation, or
+//! a settings lock. Never hold a settings lock while waiting for decode or present. Native owners
+//! must arrange their own thread affinity and completion callbacks outside this crate.
 //!
 //! A [`CompletionToken`] is an explicit caller attestation that external use (including native or
 //! GPU work) has completed. Reference counts and dropping a lease do not acknowledge completion.
@@ -53,6 +63,8 @@ pub enum RuntimeError {
     CompletionPending,
     /// The lease was invalidated or is no longer the active consumer owner.
     StaleLease,
+    /// A permit belongs to a different aggregate resource ledger.
+    ResourceBudgetMismatch,
     /// A shared concurrency limit has already been reached.
     ConcurrencyLimit(PermitKind),
     /// A CPU/GPU memory reservation would exceed an aggregate budget.
@@ -77,6 +89,9 @@ impl core::fmt::Display for RuntimeError {
                 formatter.write_str("external completion is not acknowledged")
             }
             Self::StaleLease => formatter.write_str("lease is no longer valid"),
+            Self::ResourceBudgetMismatch => {
+                formatter.write_str("resource permit belongs to a different budget")
+            }
             Self::ConcurrencyLimit(kind) => write!(formatter, "{kind:?} concurrency limit reached"),
             Self::MemoryBudgetExceeded => formatter.write_str("aggregate memory budget exceeded"),
             Self::CoreValidation(error) => write!(formatter, "core validation failed: {error}"),
@@ -263,20 +278,27 @@ impl ResourceBudget {
         })
     }
 
-    /// Charges both old and new resources simultaneously for a transition.
+    /// Transfers an existing old-scene charge and reserves only the additional new-scene charge.
     ///
-    /// The returned permit retains both charges until [`TransitionMemoryPermit::complete`] or
-    /// drop. Completing releases the old charge and returns a permit retaining the new charge.
+    /// `old` must be an active permit from this budget. On success it becomes inactive and the
+    /// returned transition owns its charge alongside the newly reserved charge. If the new charge
+    /// cannot be reserved, `old` remains active and continues to account for the old scene.
     pub fn try_begin_transition(
         &self,
-        old: MemoryUsage,
+        old: &mut MemoryPermit,
         new: MemoryUsage,
     ) -> Result<TransitionMemoryPermit, RuntimeError> {
-        let total = old.checked_add(new)?;
-        self.reserve(total)?;
+        if !Arc::ptr_eq(&self.inner, &old.inner) {
+            return Err(RuntimeError::ResourceBudgetMismatch);
+        }
+        if !old.active {
+            return Err(RuntimeError::InvalidState);
+        }
+        self.reserve(new)?;
+        old.active = false;
         Ok(TransitionMemoryPermit {
             inner: Arc::clone(&self.inner),
-            old,
+            old: old.usage,
             new,
             active: true,
         })
