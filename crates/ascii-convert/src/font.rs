@@ -81,8 +81,9 @@ impl GlyphConfig {
     }
 }
 
-/// Measured glyph data. All access is read-only after table construction.
-#[derive(Clone, Debug, PartialEq)]
+/// Measured glyph data. Its owned mask is budgeted once, and this type is intentionally not
+/// `Clone`.
+#[derive(Debug, PartialEq)]
 pub struct GlyphRecord {
     character: char,
     glyph_index: u16,
@@ -137,7 +138,10 @@ impl GlyphRecord {
 }
 
 /// Immutable glyph lookup table identified by its complete rasterization input fingerprint.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// The table is intentionally not `Clone`, so copying all owned masks cannot bypass its
+/// construction budget.
+#[derive(Debug, PartialEq)]
 pub struct GlyphTable {
     fingerprint: [u8; 32],
     cell_width: u32,
@@ -262,6 +266,7 @@ pub fn build_glyph_table(
         config.raster_size(),
         parser_raster_budget,
         parser_work_budget,
+        cancellation,
     )?;
     let base_bytes = base_bytes
         .checked_add(parser_preflight.parser_bytes)
@@ -404,6 +409,9 @@ pub fn build_glyph_table(
             return Err(Error::Cancelled);
         }
         let (metrics, bitmap) = font.rasterize_indexed(glyph_index, config.raster_size());
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         validate_metrics(metrics.advance_width, line_height)?;
         let bitmap_len = metrics
             .width
@@ -476,7 +484,8 @@ pub fn build_glyph_table(
             }
         }
 
-        let (bounds, centroid, mean_coverage, edges) = describe(&mask, width, height);
+        let (bounds, centroid, mean_coverage, edges) =
+            describe(&mask, width, height, cancellation)?;
         glyphs.push(GlyphRecord {
             character,
             glyph_index,
@@ -489,15 +498,25 @@ pub fn build_glyph_table(
         });
     }
 
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     glyphs.sort_unstable_by(|left, right| {
         left.mean_coverage
             .total_cmp(&right.mean_coverage)
             .then_with(|| left.glyph_index.cmp(&right.glyph_index))
             .then_with(|| left.character.cmp(&right.character))
     });
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let fingerprint: [u8; 32] = fingerprint.finalize().into();
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
 
     Ok(GlyphTable {
-        fingerprint: fingerprint.finalize().into(),
+        fingerprint,
         cell_width: config.cell_width(),
         cell_height: config.cell_height(),
         glyphs,
