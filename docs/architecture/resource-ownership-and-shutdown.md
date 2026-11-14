@@ -8,7 +8,7 @@ Core frames use owned/shared backing buffers with explicit lifetime. A borrowed 
 
 ## Bounded handoff
 
-Use bounded channels and shared-buffer pools. A producer obtains a slot, fills it, publishes metadata with generation, and relinquishes ownership only under the protocol. A consumer validates extent/format/generation before use and returns the lease after completion. Stale frames are released, not accumulated for later catch-up.
+Use bounded control/data queues and a fixed shared-buffer pool. Each slot follows `Free -> Filling -> Published -> Consumed -> Released -> Free`. Before exposing bytes, the consumer validates descriptor generation and publication identity, dimensions, row stride, format, byte length, and mapped offset against the local pool and core raster contract. Stale frames are released rather than accumulated for catch-up. A consumed slot cannot be reused until the consumer explicitly releases it after CPU/native/GPU work completes; a Rust reference count or dropped lease does not establish device completion. Generation invalidation may reclaim old slots only after the old mapped region is unavailable to its transport/native owner.
 
 Control events and frame data use separate queues so a flood of frames cannot block Stop or permission revocation. High-rate motion events coalesce; important state changes remain ordered. Avoid holding a settings mutex while waiting for a decoder or presenting a GPU surface.
 
@@ -17,6 +17,8 @@ Control events and frame data use separate queues so a flood of frames cannot bl
 Native APIs have platform thread constraints, especially AppKit and shell-hosted render loops. [S52](../research/source-register.md#s52) [S56](../research/source-register.md#s56) Keep those owners explicit rather than moving every resource into a generic async task. CPU conversion uses a bounded worker pool; additional decoders/outputs share a global concurrency budget.
 
 Prefer message passing between owners. Any shared mutable cache has a documented locking order and cannot call back into UI/native code while locked. Callback handlers enqueue small messages and return quickly.
+
+In `ascii-runtime`, the `BoundedHandoff` operation lock is outermost. Queue locks are released before pool operations, and queue and pool locks are never held simultaneously. Completion signals are atomic. `FrameLease::with_pixels` callbacks run under the pool lock and MUST be short CPU-only work; they MUST NOT call UI/native APIs, re-enter the pool, or wait for decode/presentation. Never hold a settings lock while waiting for decode or presentation. `ResourceBudget` shares CPU, decode, output, and CPU/GPU-memory permits across clones; transition reservations charge old and new resources together and release the old charge only when transition completion is recorded.
 
 ## Cancellation hierarchy
 
