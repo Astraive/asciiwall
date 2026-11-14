@@ -13,13 +13,13 @@ Image codecs supply pixels; our code owns sampling, descriptors, matching, color
 
 ## Grid geometry
 
-Let the fitted source aspect ratio be `W/H` and the actual character cell aspect be `cw/ch`. For a chosen column count `C`, select approximately `R = round(C * H/W * cw/ch)` rows, then apply the documented fit rule. For a 1920x1080 source, 240 columns and 8x16 cells produce about 68 rows. For a fixed target surface, derive both dimensions from the fitted cell size and explicitly handle leftover pixels.
+Let the source aspect ratio be `W/H` and the measured character-cell aspect be `cw/ch`. For a chosen column count `C`, select `R = round-half-up(C * H/W * cw/ch)` rows using exact integer arithmetic; reject a zero-row result. For a fixed pixel surface, floor width and height by the measured cell dimensions; unused right/bottom pixels stay outside the output grid. A 1920x1080 source, 240 columns and 8x16 cells produce exactly 68 rows.
 
 Measure actual glyph advance and line height; do not assume characters are square. Font changes can alter grid geometry and invalidate descriptor/cache data. Crop and fit transformations used by conversion must be the same transforms used for pointer mapping and previews.
 
 ## Analysis stages
 
-Normalize orientation, alpha interpretation, color transfer, and range. Filter source samples over the destination cell area, rather than sampling one pixel and amplifying aliasing. For quality modes, retain a small sub-cell patch, for example 8x16 luminance samples, plus gradient descriptors. Patch dimensions are algorithm parameters and part of the cache key.
+Normalize orientation, alpha interpretation, color transfer, and range first. Box sampling integrates pixel-square overlap weights over each destination-cell footprint in linear light; transparent pixels and contain letterboxes composite against the configured background. Nearest sampling chooses the pixel containing the inverse-mapped sample center using floor boundaries, with exact source right/bottom edges assigned to the final pixel. Quality modes may retain bounded sub-cell luminance patches and gradient descriptors; those dimensions belong in the cache identity.
 
 A fast mode uses calibrated glyph coverage. A quality mode shortlists masks by coverage and edge orientation, then minimizes bounded reconstruction error. A contour mode emphasizes structure and intentionally discards low-contrast texture; it must not be sold as universally more faithful.
 
@@ -27,11 +27,11 @@ A fast mode uses calibrated glyph coverage. A quality mode shortlists masks by c
 
 Independent cell descriptors and candidate evaluation can be split across rows/tiles using a bounded pool. Error-diffusion dithering introduces order dependencies; do not parallelize it as though each pixel/cell were independent. Ordered dithering is a simpler deterministic parallel alternative.
 
-Reuse scratch arrays, glyph descriptors, and output buffers. Check cancellation at tile boundaries. Results include generation ids so an expensive conversion started before a slider change cannot overwrite the latest preview.
+The density path checks cancellation every 32 output cells, every 64 glyph candidates, and every 256 sampling/patch operations. Results carry the caller's original generation, frame and timing identity so stale conversions can be discarded after settings change.
 
 ## Numerical behavior
 
-Define rounding, tie-breaking, NaN handling, and clipping. Use stable glyph-index tie-breaking for deterministic CPU output. Normalize feature weights to documented ranges. Reject nonfinite settings before they enter the pipeline. The initial implementation can use floating-point computation with tolerance-based GPU comparison; do not promise bit-identical output across all hardware.
+Density matching clamps normalized coverage to `[0, 1]` for either foreground/background polarity and resolves equal-distance glyphs by font glyph index, Unicode scalar, then stable table order. Reject empty/overflowing geometry and indistinguishable foreground/background luminance; check cancellation at bounded work intervals. The initial implementation can use floating-point computation with tolerance-based GPU comparison; do not promise bit-identical output across all hardware.
 
 ## Required tests
 
