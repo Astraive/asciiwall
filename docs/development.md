@@ -1,6 +1,6 @@
 # Development workflow and local tooling
 
-> **Current repository state:** Today's `asciiwall` repository contains project governance files, `.github/` configuration/templates, `.githooks/`, documentation, and Python/PowerShell tooling. **There is no Rust `Cargo.toml`, application binary, or buildable installer yet.** Do not interpret future `cargo` or `asciiwall` CLI examples as currently runnable commands.
+> **Current repository state:** The Rust workspace contains portable `ascii-core` and `ascii-runtime` contracts alongside project governance, documentation, and Python/PowerShell tooling. There is no application binary or buildable installer yet; future `asciiwall` CLI examples are not currently runnable.
 
 ## Current repository tooling and prerequisites
 
@@ -62,9 +62,9 @@ Repository hooks live under `.githooks/` (`pre-commit`, `commit-msg`, and `.gith
 - `.githooks/commit-msg` invokes `scripts/check-conventions.py --message-file` to enforce subject format and forbid `Co-authored-by` trailers case-insensitively.
 - **Contributor identity rule:** The maintainer identity `Neeraj Sathish Kumar <neerajcodz@gmail.com>` applies **only** to this initial infrastructure setup operation. Future contributors must use their own standard Git author/committer identity (`user.name` / `user.email`); repository hooks never force or rewrite contributor identities, and no `Co-authored-by` trailers are permitted by project convention.
 
-## Future Rust workspace workflows
+## Rust workspace workflows
 
-Once `PRJ-001` establishes the Cargo workspace and crates described in [architecture](architecture.md), implementation follows the test-first loop in [contributor workflow](delivery/contributor-workflow.md) and [build environment and toolchain](tech-stack/build-environment-and-toolchain.md):
+The workspace uses the Rust toolchain pinned in `rust-toolchain.toml`. Implementation follows the test-first loop in [contributor workflow](delivery/contributor-workflow.md) and [build environment and toolchain](tech-stack/build-environment-and-toolchain.md):
 
 1. Write a failing contract test for the target work unit (`E01`–`E12`, `D01`–`D12`, `P01`–`P08`, `H01`–`H08`) and verify the intended failure.
 2. Implement the minimal complete behavior inside the owning crate without leaking platform `cfg` branches into `ascii-core` or duplicating conversion/validation logic.
