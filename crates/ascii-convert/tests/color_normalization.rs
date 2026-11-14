@@ -219,6 +219,68 @@ fn alpha_semi_transparent_red_edges_composite_in_linear_light_on_dark_and_light_
 }
 
 #[test]
+fn transparent_layers_composite_in_linear_premultiplied_space_and_preserve_alpha() {
+    let front = normalize_one_pixel(
+        &[255, 0, 0, 128],
+        ColorDescription::srgb(AlphaMode::Straight),
+    );
+    let back = normalize_one_pixel(
+        &[0, 0, 255, 128],
+        ColorDescription::srgb(AlphaMode::Straight),
+    );
+
+    let result = front.composite_over_layer(back);
+    let half_alpha = 128.0 / 255.0;
+    let expected_alpha = half_alpha + half_alpha * (1.0 - half_alpha);
+    assert_close(result.alpha().value(), expected_alpha, 1.0e-15);
+    assert_close(result.premultiplied_rgb().red(), half_alpha, 1.0e-15);
+    assert_eq!(result.premultiplied_rgb().green(), 0.0);
+    assert_close(
+        result.premultiplied_rgb().blue(),
+        half_alpha * (1.0 - half_alpha),
+        1.0e-15,
+    );
+    assert_close(
+        result.straight_rgb().red(),
+        half_alpha / expected_alpha,
+        1.0e-15,
+    );
+    assert_close(
+        result.straight_rgb().blue(),
+        half_alpha * (1.0 - half_alpha) / expected_alpha,
+        1.0e-15,
+    );
+}
+
+#[test]
+fn transparent_layer_hidden_rgb_has_no_effect_and_zero_alpha_stays_black() {
+    let hidden_rgb = normalize_one_pixel(
+        &[255, 0, 255, 0],
+        ColorDescription::srgb(AlphaMode::Straight),
+    );
+    let transparent_black =
+        normalize_one_pixel(&[0, 0, 0, 0], ColorDescription::srgb(AlphaMode::Straight));
+    let visible = normalize_one_pixel(
+        &[0, 255, 0, 128],
+        ColorDescription::srgb(AlphaMode::Straight),
+    );
+
+    assert_eq!(
+        hidden_rgb.composite_over_layer(visible),
+        transparent_black.composite_over_layer(visible)
+    );
+    assert_eq!(
+        visible.composite_over_layer(hidden_rgb),
+        visible.composite_over_layer(transparent_black)
+    );
+
+    let result = hidden_rgb.composite_over_layer(transparent_black);
+    assert_eq!(result.alpha(), Alpha::new(0.0).unwrap());
+    assert_eq!(result.premultiplied_rgb(), LinearRgb::BLACK);
+    assert_eq!(result.straight_rgb(), LinearRgb::BLACK);
+}
+
+#[test]
 fn declared_linear_input_is_not_srgb_transfer_decoded_again() {
     let sample = 128.0 / 255.0;
     let color = ColorDescription::new(
