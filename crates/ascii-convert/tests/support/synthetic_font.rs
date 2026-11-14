@@ -11,6 +11,19 @@ pub fn synthetic_font(narrow_b: bool) -> Vec<u8> {
     ];
     font_with_glyphs(glyphs, false)
 }
+/// A Unicode format-4 map coexisting with a legacy format-2 map for the same character.
+/// The Unicode map selects glyph 2 while format 2 maps the character to glyph 3.
+pub fn legacy_format2_font(malformed: bool) -> Vec<u8> {
+    font_with_glyphs_and_cmap(
+        vec![
+            rectangle(600, 800),
+            Vec::new(),
+            rectangle(500, 700),
+            rectangle(350, 700),
+        ],
+        cmap_with_legacy_format2(malformed),
+    )
+}
 
 /// A source-generated font with many long diagonal outline edges.
 pub fn diagonal_font(alias_b: bool) -> Vec<u8> {
@@ -51,7 +64,11 @@ pub fn composite_font() -> Vec<u8> {
     )
 }
 
-fn font_with_glyphs(mut glyphs: Vec<Vec<u8>>, alias_b: bool) -> Vec<u8> {
+fn font_with_glyphs(glyphs: Vec<Vec<u8>>, alias_b: bool) -> Vec<u8> {
+    font_with_glyphs_and_cmap(glyphs, cmap(alias_b))
+}
+
+fn font_with_glyphs_and_cmap(mut glyphs: Vec<Vec<u8>>, cmap_table: Vec<u8>) -> Vec<u8> {
     let mut glyf = Vec::new();
     let mut offsets = Vec::with_capacity(glyphs.len() + 1);
     for glyph in &mut glyphs {
@@ -65,7 +82,7 @@ fn font_with_glyphs(mut glyphs: Vec<Vec<u8>>, alias_b: bool) -> Vec<u8> {
         push_u16(&mut loca, offset);
     }
     let tables = vec![
-        (*b"cmap", cmap(alias_b)),
+        (*b"cmap", cmap_table),
         (*b"glyf", glyf),
         (*b"head", head()),
         (*b"hhea", hhea()),
@@ -261,6 +278,43 @@ fn cmap(alias_b: bool) -> Vec<u8> {
     push_u16(&mut table, 1); // Unicode BMP encoding
     push_u32(&mut table, 12); // subtable offset
     table.extend_from_slice(&subtable);
+    table
+}
+
+fn cmap_with_legacy_format2(malformed: bool) -> Vec<u8> {
+    let mut format2 = Vec::new();
+    push_u16(&mut format2, 2);
+    push_u16(&mut format2, 0); // length, filled below
+    push_u16(&mut format2, 0); // language
+    for _ in 0..256 {
+        push_u16(&mut format2, 0);
+    }
+    push_u16(&mut format2, 65); // firstCode: A
+    push_u16(&mut format2, 1); // entryCount
+    push_u16(&mut format2, 0); // idDelta
+    push_u16(&mut format2, if malformed { 0 } else { 2 }); // idRangeOffset
+    if !malformed {
+        push_u16(&mut format2, 3); // legacy A -> glyph 3
+    }
+    let length = u16::try_from(format2.len()).expect("format-2 fixture length fits");
+    format2[2..4].copy_from_slice(&length.to_be_bytes());
+
+    let format4_cmap = cmap(false);
+    let format4 = &format4_cmap[12..];
+    let format4_offset = 20u32
+        .checked_add(u32::try_from(format2.len()).expect("fixture cmap offset fits"))
+        .expect("fixture cmap offset fits");
+    let mut table = Vec::new();
+    push_u16(&mut table, 0);
+    push_u16(&mut table, 2);
+    push_u16(&mut table, 1); // Macintosh platform
+    push_u16(&mut table, 0); // Roman encoding
+    push_u32(&mut table, 20);
+    push_u16(&mut table, 3); // Windows platform
+    push_u16(&mut table, 1); // Unicode BMP encoding
+    push_u32(&mut table, format4_offset);
+    table.extend_from_slice(&format2);
+    table.extend_from_slice(format4);
     table
 }
 
