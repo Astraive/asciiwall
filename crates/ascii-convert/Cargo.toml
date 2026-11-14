@@ -1,0 +1,12 @@
+[package]
+name = "ascii-convert"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+[dependencies]
+ascii-core = { path = "../ascii-core" }
+fontdue = { version = "=0.9.3", default-features = false, features = ["hashbrown"] }
+ttf-parser = "=0.21.1"
+sha2 = "=0.10.9"
