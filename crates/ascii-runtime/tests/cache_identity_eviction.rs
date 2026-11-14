@@ -53,6 +53,20 @@ fn partial_output_count(directory: &Path) -> usize {
         .count()
 }
 
+fn derived_file_count(cache_root: &Path) -> usize {
+    let mut count = 0usize;
+    for entry in fs::read_dir(cache_root).unwrap().filter_map(Result::ok) {
+        if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+            count += fs::read_dir(entry.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("derived-"))
+                .count();
+        }
+    }
+    count
+}
+
 fn digest(byte: u8) -> ContentDigest {
     ContentDigest([byte; 32])
 }
@@ -446,13 +460,62 @@ fn eviction_only_deletes_generated_files_beneath_the_managed_cache_root() {
     );
     assert!(project_file.exists());
     assert_eq!(fs::read(&project_file).unwrap(), b"user data");
-    let derived_files = fs::read_dir(cache.root())
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("derived-"))
-        .count();
-    assert_eq!(derived_files, 1);
+    assert_eq!(derived_file_count(cache.root()), 1);
     assert_eq!(cache.snapshot().unwrap().used_bytes, 3);
+}
+
+#[test]
+fn unmanaged_root_file_with_a_derived_name_is_never_claimed_or_deleted() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    fs::create_dir(&cache_root).unwrap();
+    let unmanaged = cache_root.join("derived-0000000000000000.bin");
+    fs::write(&unmanaged, b"user-owned content").unwrap();
+
+    let cache = DerivedCache::open(&cache_root, 0).unwrap();
+    assert_eq!(cache.snapshot().unwrap().used_bytes, 0);
+    assert_eq!(fs::read(&unmanaged).unwrap(), b"user-owned content");
+}
+
+#[test]
+fn a_second_cache_instance_cannot_evict_another_instances_live_lease() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    let key = identity(42);
+    first_cache.store(key.clone(), b"leased").unwrap();
+    let lease = first_cache.lease(&key).unwrap();
+    let leased_path = lease.path().to_path_buf();
+
+    assert!(matches!(
+        DerivedCache::open(&cache_root, 0),
+        Err(CacheError::BudgetPinned { .. })
+    ));
+    assert_eq!(fs::read(&leased_path).unwrap(), b"leased");
+
+    lease.acknowledge().unwrap();
+    first_cache.set_budget_bytes(0).unwrap();
+    assert!(!leased_path.exists());
+}
+
+#[test]
+fn store_reconciles_an_entry_evicted_by_another_cache_instance() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    let key = identity(43);
+    first_cache.store(key.clone(), b"original").unwrap();
+
+    let second_cache = DerivedCache::open(&cache_root, 0).unwrap();
+    assert_eq!(second_cache.snapshot().unwrap().used_bytes, 0);
+    drop(second_cache);
+
+    assert_eq!(
+        first_cache.store(key.clone(), b"replacement").unwrap(),
+        StoreOutcome::Inserted
+    );
+    let lease = first_cache.lease(&key).unwrap();
+    assert_eq!(fs::read(lease.path()).unwrap(), b"replacement");
 }
 
 #[test]
@@ -487,6 +550,71 @@ fn disk_reservations_count_expanded_input_scratch_output_and_safety_reserve() {
         .total_bytes()
         .is_err()
     );
+}
+
+#[test]
+fn completed_outputs_remain_charged_and_refresh_replaces_consumed_estimates() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(100, 0);
+    let completed = budget
+        .reserve(DiskRequirements {
+            output_bytes: 60,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let other = budget
+        .reserve(DiskRequirements {
+            output_bytes: 40,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let destination = temp.path().join("retained-output.bin");
+    let payload = [b'x'; 60];
+    registry
+        .write_transactional(identity(43), &destination, &completed, |output| {
+            output.write_all(&payload)
+        })
+        .unwrap();
+    assert_eq!(budget.snapshot().reserved_bytes, 40);
+    assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 60);
+    drop(completed);
+    assert!(
+        budget
+            .reserve(DiskRequirements {
+                output_bytes: 60,
+                ..DiskRequirements::default()
+            })
+            .is_err()
+    );
+    drop(other);
+
+    let refreshed_budget = DiskBudget::new(100, 0);
+    let in_progress = refreshed_budget
+        .reserve(DiskRequirements {
+            output_bytes: 60,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let partial_destination = temp.path().join("partial-output.bin");
+    registry
+        .write_transactional(identity(44), &partial_destination, &in_progress, |output| {
+            output.write_all(b"twenty bytes output")
+        })
+        .unwrap();
+    assert_eq!(refreshed_budget.snapshot().reserved_bytes, 41);
+    assert_eq!(refreshed_budget.snapshot().consumed_bytes_since_refresh, 19);
+    refreshed_budget.refresh_available_bytes(81);
+    assert_eq!(refreshed_budget.snapshot().reserved_bytes, 41);
+    assert_eq!(refreshed_budget.snapshot().consumed_bytes_since_refresh, 0);
+    let extra = refreshed_budget
+        .reserve(DiskRequirements {
+            output_bytes: 40,
+            ..DiskRequirements::default()
+        })
+        .expect("fresh estimate includes bytes already written");
+    drop(extra);
+    drop(in_progress);
 }
 
 #[test]
@@ -754,7 +882,8 @@ fn reserved_output_limit_is_enforced_and_partial_is_not_registered() {
     let destination = temp.path().join("too-large.bin");
     fs::write(&destination, b"original").unwrap();
     let error = registry.write_transactional(key.clone(), &destination, &reservation, |output| {
-        output.write_all(b"four")
+        let _ = output.write_all(b"four");
+        Ok(())
     });
     let error = error.expect_err("output exceeding its reservation fails");
     assert_eq!(error.kind, OutputFailureKind::OutputLimitExceeded);
@@ -781,22 +910,12 @@ fn reopening_cache_accounts_for_generated_files_and_evicts_them_before_unmanaged
     let snapshot = reopened.snapshot().unwrap();
     assert_eq!(snapshot.used_bytes, 3);
     assert_eq!(snapshot.entries, 0);
-    let remaining_derived = fs::read_dir(&cache_root)
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("derived-"))
-        .count();
-    assert_eq!(remaining_derived, 1);
+    assert_eq!(derived_file_count(&cache_root), 1);
     assert_eq!(fs::read(&unmanaged_file).unwrap(), b"leave this alone");
 
     reopened.store(identity(22), b"zz").unwrap();
     assert_eq!(reopened.snapshot().unwrap().used_bytes, 2);
-    let derived_after_store = fs::read_dir(&cache_root)
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("derived-"))
-        .count();
-    assert_eq!(derived_after_store, 1);
+    assert_eq!(derived_file_count(&cache_root), 1);
     assert_eq!(fs::read(&unmanaged_file).unwrap(), b"leave this alone");
 }
 
@@ -968,6 +1087,51 @@ fn case_variant_regular_destination_removes_stale_identity_registration() {
         .unwrap();
     // Some Windows directories opt into case-sensitive names; only exercise the alias when
     // these spellings actually resolve to the same destination entry.
+    if !lower_destination.exists() {
+        return;
+    }
+    registry
+        .write_transactional(
+            second_identity.clone(),
+            &lower_destination,
+            &reservation,
+            |output| output.write_all(b"second"),
+        )
+        .unwrap();
+
+    assert_eq!(registry.registered_path(&first_identity), None);
+    assert_eq!(
+        registry.registered_path(&second_identity),
+        Some(lower_destination)
+    );
+    assert_eq!(fs::read(upper_destination).unwrap(), b"second");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn case_variant_regular_destination_removes_stale_identity_on_case_insensitive_volume() {
+    let temp = TempDir::new();
+    let upper_destination = temp.path().join("Output.bin");
+    let lower_destination = temp.path().join("output.bin");
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 32,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let first_identity = identity(45);
+    let second_identity = identity(46);
+
+    registry
+        .write_transactional(
+            first_identity.clone(),
+            &upper_destination,
+            &reservation,
+            |output| output.write_all(b"first"),
+        )
+        .unwrap();
     if !lower_destination.exists() {
         return;
     }
