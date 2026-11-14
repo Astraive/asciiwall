@@ -14,7 +14,11 @@ from unittest.mock import patch
 
 import evidence
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = (
+    Path(os.path.abspath(__file__)).parents[1]
+    if os.name == "nt"
+    else Path(__file__).resolve().parents[1]
+)
 SCRIPT = ROOT / "scripts" / "evidence.py"
 SCHEMA = ROOT / "tests" / "evidence" / "evidence-record.schema.json"
 GOLDEN = ROOT / "tests" / "evidence" / "goldens" / "cpu-grid-v1.json"
@@ -46,6 +50,22 @@ def base_record(**overrides):
     }
     record.update(overrides)
     return record
+
+
+def _supports_safe_directory_access():
+    if os.name == "nt":
+        return True
+    return (
+        os.name == "posix"
+        and all(
+            operation in getattr(os, "supports_dir_fd", set())
+            for operation in (os.open, os.stat, os.unlink)
+        )
+        and os.scandir in getattr(os, "supports_fd", set())
+        and os.stat in getattr(os, "supports_follow_symlinks", set())
+        and all(hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK"))
+    )
+
 
 
 class EvidenceRecordTests(unittest.TestCase):
@@ -116,24 +136,338 @@ class EvidenceRecordTests(unittest.TestCase):
     def test_privacy_filter_redacts_paths_and_personal_fields(self):
         raw = base_record(result={
             "status": "pass",
-            "summary": 'window_title="Tax return" input_value=secret media_path=C:\\Users\\Alice\\clip.mp4 from /home/alice/private.png',
+            "summary": 'window_title="Tax return" input_value=secret',
         })
         clean = evidence.finalize_record(raw)
         summary = clean["result"]["summary"]
-        self.assertNotIn("Tax return", summary)
-        self.assertNotIn("secret", summary)
-        self.assertNotIn("Alice", summary)
-        self.assertNotIn("/home/alice", summary)
+        for private_value in ("Tax return", "secret"):
+            self.assertNotIn(private_value, summary)
+        self.assertIn("[REDACTED-FIELD]", summary)
         self.assertFalse(evidence.has_private_text(summary))
+        for private_path in (
+            r"opened C:\Users\Alice Smith\Private Documents\Tax return.pdf",
+            "opened file:///home/alice/Private Documents/Tax return.pdf",
+            "opened file://server/share/Private Documents/Tax return.pdf",
+            "opened C:MedicalReport.pdf",
+            "from /home/alice/private.png",
+        ):
+            with self.subTest(path=private_path):
+                self.assertEqual(evidence.sanitize_text(private_path), "[REDACTED-PATH]")
         extra_private_field = base_record(window_title="private")
         with self.assertRaises(evidence.EvidenceError):
             evidence.finalize_record(extra_private_field)
 
-    def test_record_rejects_path_traversal_and_invalid_calendar_date(self):
+    def test_dotted_private_fields_and_drive_paths_are_redacted(self):
+        private_values = (
+            "NestedInputSecretQA004",
+            "NestedWindowSecretQA004",
+            "NestedArraySecretQA004",
+            "DottedInputSecretQA004",
+            "DottedWindowSecretQA004",
+            "DottedArraySecretQA004",
+            "hunter2",
+            "Confidential",
+            "EnvironmentInputSecretQA004",
+            "EnvironmentWindowSecretQA004",
+        )
+        drive_relative_path = "C:MedicalReport.pdf"
+        structured = json.dumps({
+            "input": {"text": private_values[0], "details": [{"value": private_values[2]}]},
+            "window": {"title": private_values[1]},
+        }, separators=(",", ":"))
+        dotted_structured = json.dumps({
+            "metadata": {
+                "input.value": {
+                    "text": private_values[3],
+                    "details": [{"value": private_values[5]}],
+                },
+                "window.title": private_values[4],
+            },
+        }, separators=(",", ":"))
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "nested-private.jsonl"
+            source.write_text(
+                f"input.value={private_values[6]}\n"
+                f"window.title={private_values[7]}\n"
+                f"opened {drive_relative_path}\n"
+                + structured + "\n" + dotted_structured + "\n",
+                encoding="utf-8",
+            )
+            report = evidence.sanitize_log(source)
+            self.assertTrue(evidence.validate_log_report(report))
+            for private_value in (*private_values, drive_relative_path, "MedicalReport.pdf"):
+                self.assertNotIn(private_value, report["content"])
+
+        summary = "\n".join((
+            f"input.value={private_values[6]}",
+            f"window.title={private_values[7]}",
+            f"opened {drive_relative_path}",
+            structured,
+            dotted_structured,
+        ))
+        sanitized_summary = evidence.sanitize_text(summary)
+        for private_value in (*private_values, drive_relative_path, "MedicalReport.pdf"):
+            self.assertNotIn(private_value, sanitized_summary)
+        self.assertFalse(evidence.has_private_text(sanitized_summary))
+
+        environment = {
+            "availability": "present",
+            "os": f"input.value={private_values[8]}",
+            "session": f"window.title={private_values[9]}",
+            "compositor": drive_relative_path,
+            "gpu": "none",
+        }
+        clean = evidence.finalize_record(base_record(
+            result={"status": "pass", "summary": f"input.value={private_values[6]}"},
+            environment=environment,
+        ))
+        clean_summary = clean["result"]["summary"]
+        clean_environment = "\n".join(clean["environment"].values())
+        for private_value in (*private_values, drive_relative_path, "MedicalReport.pdf"):
+            self.assertNotIn(private_value, clean_summary)
+            self.assertNotIn(private_value, clean_environment)
+        self.assertFalse(evidence.has_private_text(clean_summary))
+        self.assertFalse(evidence.has_private_text(clean_environment))
+
+        truncated = '{\n  "input.value": {\n    "text": "TruncatedDottedSecretQA004"\n'
+        self.assertNotIn("TruncatedDottedSecretQA004", evidence.sanitize_text(truncated))
+
+
+    def test_native_manual_cannot_claim_a_synthetic_control_artifact(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            artifact = Path(temporary) / "synthetic-control.json"
+            report = evidence.fake_control("timestamp-fault")
+            artifact.write_bytes(evidence.canonical_json(report))
+            self.assertEqual(report["artifact_type"], "synthetic-control-report")
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id="NATIVE-TEST-001",
+                ec_ids=[],
+                evidence_path=artifact.relative_to(ROOT).as_posix(),
+            )
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.finalize_record(record)
+
+    def test_native_manual_manifest_binds_pass_to_binary_artifact(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            manifest_path = directory / "native-evidence.json"
+            binary_path = directory / "synthetic-screenshot.bin"
+            binary = b"\x00\xff\x89PNG\r\n\x1a\n" + bytes(range(32))
+            binary_path.write_bytes(binary)
+            binary_relative = binary_path.relative_to(ROOT).as_posix()
+            manifest_relative = manifest_path.relative_to(ROOT).as_posix()
+            self.assertIn("/", binary_relative)
+            self.assertNotIn("\\", binary_relative)
+            procedure_id = "NATIVE-TEST-002"
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id=procedure_id,
+                ec_ids=[],
+                evidence_path=manifest_relative,
+            )
+
+            def write_manifest(
+                *,
+                artifact_path=binary_relative,
+                artifact_hash=hashlib.sha256(binary).hexdigest(),
+                manifest_procedure=procedure_id,
+            ):
+                manifest = {
+                    "schema_version": 1,
+                    "artifact_type": "native-manual-evidence",
+                    "execution": "manual",
+                    "procedure_id": manifest_procedure,
+                    "reviewer": record["reviewer"],
+                    "date": record["date"],
+                    "status": "pass",
+                    "artifacts": [{"path": artifact_path, "sha256": artifact_hash}],
+                }
+                manifest_path.write_bytes(evidence.canonical_json(manifest))
+
+            write_manifest()
+            # This verifies artifact/metadata consistency, not reviewer identity or execution.
+            accepted = evidence.finalize_record(record)
+            self.assertEqual(accepted["result"]["status"], "pass")
+
+            synthetic_path = directory / "renamed-control-output.bin"
+            synthetic_report = evidence.fake_control("timestamp-fault")
+            self.assertEqual(synthetic_report["artifact_type"], "synthetic-control-report")
+            synthetic_bytes = evidence.canonical_json(synthetic_report)
+            synthetic_path.write_bytes(synthetic_bytes)
+            write_manifest(
+                artifact_path=synthetic_path.relative_to(ROOT).as_posix(),
+                artifact_hash=hashlib.sha256(synthetic_bytes).hexdigest(),
+            )
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.finalize_record(record)
+
+            golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
+            grid_report = evidence.grid_diff({"grid": golden["grid"]}, golden)
+            self.assertEqual(grid_report["artifact_type"], "cpu-grid-diff")
+            grid_bytes = evidence.canonical_json(grid_report)
+            grid_path = directory / "renamed-grid-diff-output.dat"
+            grid_path.write_bytes(grid_bytes)
+            write_manifest(
+                artifact_path=grid_path.relative_to(ROOT).as_posix(),
+                artifact_hash=hashlib.sha256(grid_bytes).hexdigest(),
+            )
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.finalize_record(record)
+
+            escaped_marker = (
+                r"\u0073\u0079\u006e\u0074\u0068\u0065\u0074\u0069\u0063\u002d"
+                r"\u0063\u006f\u006e\u0074\u0072\u006f\u006c\u002d\u006f\u006e\u006c\u0079"
+            )
+            oversized_json_header = (
+                b' \n{"artifact_type":"' + escaped_marker.encode("ascii") + b'"}'
+            )
+            oversized_json = oversized_json_header + b" " * (
+                evidence.MAX_JSON_BYTES + 1 - len(oversized_json_header)
+            )
+            self.assertEqual(len(oversized_json), evidence.MAX_JSON_BYTES + 1)
+            self.assertNotIn(b"synthetic-control-only", oversized_json_header)
+            escaped_json_path = directory / "unicode-escaped-control.bin"
+            escaped_json_path.write_bytes(oversized_json)
+            write_manifest(
+                artifact_path=escaped_json_path.relative_to(ROOT).as_posix(),
+                artifact_hash=hashlib.sha256(oversized_json).hexdigest(),
+            )
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.finalize_record(record)
+
+            write_manifest(artifact_hash="f" * 64)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.finalize_record(record)
+
+            write_manifest(manifest_procedure="NATIVE-OTHER-002")
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.finalize_record(record)
+
+            windows_path = binary_relative.replace("/", "\\")
+            write_manifest(artifact_path=windows_path)
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.finalize_record(record)
+
+    def test_native_manual_accepts_a_direct_utf8_evidence_artifact(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            artifact = Path(temporary) / "native-observation.txt"
+            artifact.write_text("Native shell displayed the expected window.\n", encoding="utf-8")
+            relative_path = artifact.relative_to(ROOT).as_posix()
+            self.assertNotIn("\\", relative_path)
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id="NATIVE-TEST-003",
+                ec_ids=[],
+                evidence_path=relative_path,
+            )
+
+            accepted = evidence.finalize_record(record)
+
+            self.assertEqual(accepted["result"]["status"], "pass")
+            self.assertEqual(accepted["evidence_path"], relative_path)
+
+    def test_native_manual_manifest_rejects_a_symlinked_binary_artifact(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            target = directory / "artifact.bin"
+            target.write_bytes(b"\x89PNG\r\n\x1a\nbinary evidence")
+            linked = directory / "linked-artifact.bin"
+            try:
+                os.symlink(target, linked)
+            except OSError:
+                self.skipTest("creating a file symlink is unavailable")
+            manifest_path = directory / "native-evidence.json"
+            manifest = {
+                "schema_version": 1,
+                "artifact_type": "native-manual-evidence",
+                "execution": "manual",
+                "procedure_id": "NATIVE-TEST-004",
+                "reviewer": "qa-reviewer",
+                "date": "2026-11-14",
+                "status": "pass",
+                "artifacts": [{
+                    "path": linked.relative_to(ROOT).as_posix(),
+                    "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                }],
+            }
+            manifest_path.write_bytes(evidence.canonical_json(manifest))
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id="NATIVE-TEST-004",
+                ec_ids=[],
+                evidence_path=manifest_path.relative_to(ROOT).as_posix(),
+            )
+
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.finalize_record(record)
+
+    def test_finalized_record_size_is_readable_after_persistence(self):
+        empty = base_record(permissions={"state": "not-required", "items": []})
+        one_item = base_record(permissions={
+            "state": "not-required",
+            "items": ["screen-capture"],
+        })
+        two_items = base_record(permissions={
+            "state": "not-required",
+            "items": ["screen-capture", "screen-capture"],
+        })
+        empty_size = len(evidence.canonical_json(empty))
+        first_item_growth = len(evidence.canonical_json(one_item)) - empty_size
+        further_item_growth = (
+            len(evidence.canonical_json(two_items)) - len(evidence.canonical_json(one_item))
+        )
+        empty_with_id = dict(empty)
+        empty_with_id["record_id"] = evidence.record_identity(empty)
+        identifier_growth = len(evidence.canonical_json(empty_with_id)) - empty_size
+        over_count = (
+            evidence.MAX_JSON_BYTES - empty_size - first_item_growth - identifier_growth
+        ) // further_item_growth + 2
+        over_limit_input = base_record(permissions={
+            "state": "not-required",
+            "items": ["screen-capture"] * over_count,
+        })
+        self.assertLessEqual(len(evidence.canonical_json(over_limit_input)), evidence.MAX_JSON_BYTES)
+        with_id = dict(over_limit_input)
+        with_id["record_id"] = evidence.record_identity(over_limit_input)
+        self.assertGreater(len(evidence.canonical_json(with_id)), evidence.MAX_JSON_BYTES)
         with self.assertRaises(evidence.EvidenceError):
-            evidence.finalize_record(base_record(evidence_path="../../private.json"))
+            evidence.finalize_record(over_limit_input)
+        payload = json.dumps(over_limit_input, separators=(",", ":"))
+        self.assertLessEqual(len(payload.encode("utf-8")), evidence.MAX_JSON_BYTES)
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary)
+            rejected = subprocess.run(
+                [sys.executable, str(SCRIPT), "record", "-", "--archive", str(archive)],
+                cwd=ROOT, input=payload, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(json.loads(rejected.stdout)["status"], "error")
+            self.assertEqual(list(archive.iterdir()), [])
+
+        readable_input = base_record(permissions={
+            "state": "not-required",
+            "items": ["screen-capture"] * (over_count - 10),
+        })
+        readable = evidence.finalize_record(readable_input)
+        encoded = evidence.canonical_json(readable)
+        self.assertLessEqual(len(encoded), evidence.MAX_JSON_BYTES)
+        with tempfile.TemporaryDirectory() as temporary:
+            persisted = Path(temporary) / "bounded-record.json"
+            persisted.write_bytes(encoded)
+            self.assertEqual(evidence.load_record(persisted), readable)
+
+    def test_record_rejects_path_traversal_and_invalid_calendar_date(self):
+        for path in ("../../private.json", r"tests\evidence\run.json", "C:/private/evidence.json"):
+            with self.subTest(path=path), self.assertRaises(evidence.EvidenceError):
+                evidence.finalize_record(base_record(evidence_path=path))
         with self.assertRaises(evidence.EvidenceError):
             evidence.finalize_record(base_record(date="2026-02-31"))
+
 
     def test_record_schema_declares_required_levels_and_closed_fields(self):
         schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
@@ -152,15 +486,23 @@ class EvidenceRecordTests(unittest.TestCase):
             "document-qa", "unit-property", "integration", "fuzz",
             "benchmark", "native-manual", "release-acceptance",
         )
-        for level in levels:
-            with self.subTest(level=level):
-                native = level == "native-manual"
-                record = evidence.finalize_record(base_record(
-                    level=level,
-                    execution="manual" if native else "automated",
-                    procedure_id="NATIVE-001" if native else None,
-                ))
-                self.assertEqual(record["level"], level)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            native_artifact = Path(temporary) / "native-level-evidence.txt"
+            native_artifact.write_text("Native procedure observation.\n", encoding="utf-8")
+            native_evidence_path = native_artifact.relative_to(ROOT).as_posix()
+            for level in levels:
+                with self.subTest(level=level):
+                    native = level == "native-manual"
+                    record_fields = {
+                        "level": level,
+                        "execution": "manual" if native else "automated",
+                        "procedure_id": "NATIVE-001" if native else None,
+                    }
+                    if native:
+                        record_fields["evidence_path"] = native_evidence_path
+                    record = evidence.finalize_record(base_record(**record_fields))
+                    self.assertEqual(record["level"], level)
+
 
     def test_validate_cli_accepts_written_record_and_rejects_bad_record(self):
         record = evidence.finalize_record(base_record())
@@ -285,6 +627,9 @@ class SyntheticControlsTests(unittest.TestCase):
                 "input_value=typed private text\n"
                 "media_path=C:\\\\Users\\\\Alice\\\\clip.mp4\n"
                 'opened /home/alice/personal.png\n'
+                r"opened C:\Users\Alice Smith\Private Documents\Tax return.pdf" "\n"
+                "opened file:///home/alice/Private Documents/Tax return.pdf\n"
+                "opened file://server/share/Private Documents/Tax return.pdf\n"
                 '{"window_title":"Tax return","input_value":"typed private text",'
                 '"media_path":"C:\\\\Users\\\\Alice\\\\clip.mp4"}\n',
                 encoding="utf-8",
@@ -292,8 +637,48 @@ class SyntheticControlsTests(unittest.TestCase):
             report = evidence.sanitize_log(source)
             self.assertTrue(evidence.validate_log_report(report))
             content = report["content"]
-            for private_value in ("Tax return", "typed private text", "Alice", "/home/alice", "\x1b"):
+            for private_value in (
+                "Tax return", "typed private text", "Alice", "/home/alice",
+                "Alice Smith", "Private Documents", "file:///", "file://server", "\x1b",
+            ):
                 self.assertNotIn(private_value, content)
+
+    def test_sanitized_log_preserves_character_after_escape_7(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "escape-7.log"
+            source.write_text("before\x1b" + "7" + "AFTER-ESC-7", encoding="utf-8")
+            report = evidence.sanitize_log(source)
+
+            self.assertEqual(report["content"], "beforeAFTER-ESC-7")
+
+    def test_sanitized_log_requires_st_to_terminate_dcs_but_osc_accepts_bel(self):
+        cases = (
+            (
+                "visible\x1b]title=osc-secret\x07after-osc-bell",
+                "visibleafter-osc-bell",
+                ("osc-secret",),
+            ),
+            (
+                "visible\x1bP1;2;dcs-secret\x07still-private\x1b\\after-dcs-st",
+                "visibleafter-dcs-st",
+                ("dcs-secret", "still-private"),
+            ),
+            (
+                "visible\x1bP1;2;dcs-secret\x1b\\after-dcs-st",
+                "visibleafter-dcs-st",
+                ("dcs-secret",),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "terminated-controls.log"
+            for raw, expected, private_values in cases:
+                with self.subTest(raw=raw):
+                    source.write_text(raw, encoding="utf-8")
+                    report = evidence.sanitize_log(source)
+                    self.assertEqual(report["content"], expected)
+                    for private_value in private_values:
+                        self.assertNotIn(private_value, report["content"])
+
 
     def test_log_report_validator_rejects_c1_controls_and_invalid_unicode(self):
         base_report = {
@@ -363,8 +748,8 @@ class SyntheticControlsTests(unittest.TestCase):
 
 
 class RetentionTests(unittest.TestCase):
-    def test_prune_removes_only_old_valid_tool_records(self):
-        with tempfile.TemporaryDirectory() as temporary:
+    def test_prune_removes_only_old_valid_tool_records_and_skips_malformed_inputs(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
             old = evidence.finalize_record(base_record(date="2026-11-12"))
             recent = evidence.finalize_record(base_record(date="2026-11-14"))
@@ -375,16 +760,248 @@ class RetentionTests(unittest.TestCase):
             unrelated.write_text("keep me", encoding="utf-8")
             malformed = archive / ("qa-evidence-" + "0" * 64 + ".json")
             malformed.write_text("not an evidence record", encoding="utf-8")
-            result = evidence.prune_archive(archive, keep=1)
+            huge_integer = archive / ("qa-evidence-" + "1" * 64 + ".json")
+            huge_integer_payload = '{"value":' + "9" * 5000 + "}"
+            huge_integer.write_text(huge_integer_payload, encoding="utf-8")
+
+            int_limit_getter = getattr(sys, "get_int_max_str_digits", None)
+            int_limit_setter = getattr(sys, "set_int_max_str_digits", None)
+            old_int_limit = (
+                int_limit_getter()
+                if int_limit_getter is not None and int_limit_setter is not None
+                else None
+            )
+            if old_int_limit is not None:
+                int_limit_setter(4300)
+            try:
+                result = evidence.prune_archive(archive, keep=1)
+            finally:
+                if old_int_limit is not None:
+                    int_limit_setter(old_int_limit)
+
             self.assertEqual(result["removed"], 1)
             self.assertEqual(result["removed_names"], [f"qa-evidence-{old['record_id']}.json"])
             self.assertFalse((archive / f"qa-evidence-{old['record_id']}.json").exists())
             self.assertTrue((archive / f"qa-evidence-{recent['record_id']}.json").exists())
             self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me")
             self.assertTrue(malformed.exists())
+            self.assertEqual(huge_integer.read_text(encoding="utf-8"), huge_integer_payload)
+
+    def test_prune_rejects_a_reparse_archive_directory_without_deleting_entries(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            root = Path(temporary)
+            archive = root / "archive"
+            archive.mkdir()
+            old = evidence.finalize_record(base_record(date="2026-11-12"))
+            old_path = archive / f"qa-evidence-{old['record_id']}.json"
+            old_path.write_bytes(evidence.canonical_json(old))
+            reparse_path = root / "archive-link"
+            try:
+                os.symlink(archive, reparse_path, target_is_directory=True)
+            except OSError:
+                self.skipTest("creating a directory symlink is unavailable")
+
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.prune_archive(reparse_path, keep=1)
+
+            self.assertEqual(old_path.read_bytes(), evidence.canonical_json(old))
+
+    def test_prune_entry_limit_fails_before_any_candidate_is_deleted(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            old = evidence.finalize_record(base_record(date="2026-11-12"))
+            recent = evidence.finalize_record(base_record(date="2026-11-14"))
+            old_path = archive / f"qa-evidence-{old['record_id']}.json"
+            recent_path = archive / f"qa-evidence-{recent['record_id']}.json"
+            old_bytes = evidence.canonical_json(old)
+            recent_bytes = evidence.canonical_json(recent)
+            old_path.write_bytes(old_bytes)
+            recent_path.write_bytes(recent_bytes)
+            unrelated = archive / "unrelated.bin"
+            unrelated.write_bytes(b"must remain untouched")
+
+            with patch.object(evidence, "MAX_ARCHIVE_ENTRIES", 2):
+                with self.assertRaisesRegex(evidence.EvidenceError, "too many entries"):
+                    evidence.prune_archive(archive, keep=1)
+
+            self.assertEqual(old_path.read_bytes(), old_bytes)
+            self.assertEqual(recent_path.read_bytes(), recent_bytes)
+            self.assertEqual(unrelated.read_bytes(), b"must remain untouched")
+
+    @unittest.skipUnless(
+        os.name == "posix" and _supports_safe_directory_access(),
+        "parent-replacement injection requires POSIX directory-relative access",
+    )
+    def test_prune_parent_replacement_cannot_redirect_deletion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "archive"
+            archive.mkdir()
+            old = evidence.finalize_record(base_record(date="2026-11-12"))
+            recent = evidence.finalize_record(base_record(date="2026-11-14"))
+            old_name = f"qa-evidence-{old['record_id']}.json"
+            recent_name = f"qa-evidence-{recent['record_id']}.json"
+            (archive / old_name).write_bytes(evidence.canonical_json(old))
+            (archive / recent_name).write_bytes(evidence.canonical_json(recent))
+            replacement = root / "replacement"
+            replacement.mkdir()
+            replacement_entry = replacement / old_name
+            replacement_entry.write_bytes(b"replacement entry must not be deleted")
+            displaced = root / "displaced"
+            original_unlink = os.unlink
+            swapped = False
+
+            def replace_parent_before_unlink(name, *args, **kwargs):
+                nonlocal swapped
+                if not swapped and name == old_name and kwargs.get("dir_fd") is not None:
+                    archive.rename(displaced)
+                    replacement.rename(archive)
+                    swapped = True
+                return original_unlink(name, *args, **kwargs)
+
+            with patch.object(evidence.os, "unlink", side_effect=replace_parent_before_unlink):
+                result = evidence.prune_archive(archive, keep=1)
+
+            self.assertTrue(swapped)
+            self.assertEqual(result["removed_names"], [old_name])
+            self.assertFalse((displaced / old_name).exists())
+            self.assertEqual((archive / old_name).read_bytes(), b"replacement entry must not be deleted")
+            self.assertTrue((displaced / recent_name).is_file())
+
+    @unittest.skipUnless(
+        os.name == "posix" and _supports_safe_directory_access(),
+        "same-directory replacement injection requires POSIX directory-relative access",
+    )
+    def test_prune_skips_same_directory_replacement_before_snapshot_recheck(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            old = evidence.finalize_record(base_record(date="2026-11-12"))
+            recent = evidence.finalize_record(base_record(date="2026-11-14"))
+            old_name = f"qa-evidence-{old['record_id']}.json"
+            recent_name = f"qa-evidence-{recent['record_id']}.json"
+            old_path = archive / old_name
+            recent_path = archive / recent_name
+            old_bytes = evidence.canonical_json(old)
+            recent_bytes = evidence.canonical_json(recent)
+            old_path.write_bytes(old_bytes)
+            recent_path.write_bytes(recent_bytes)
+            replacement_path = archive / "replacement.bin"
+            replacement_bytes = b"unvalidated same-directory replacement"
+            replacement_path.write_bytes(replacement_bytes)
+            displaced_path = archive / "displaced-original.json"
+            original_stat = os.stat
+            replaced = False
+
+            def replace_before_snapshot_recheck(name, *args, **kwargs):
+                nonlocal replaced
+                if (
+                    not replaced
+                    and name == old_name
+                    and kwargs.get("dir_fd") is not None
+                    and kwargs.get("follow_symlinks") is False
+                ):
+                    # Inject before lstat; this does not test the later stat/unlink window.
+                    old_path.rename(displaced_path)
+                    replacement_path.rename(old_path)
+                    replaced = True
+                return original_stat(name, *args, **kwargs)
+
+            with patch.object(evidence.os, "stat", side_effect=replace_before_snapshot_recheck):
+                result = evidence.prune_archive(archive, keep=1)
+
+            self.assertTrue(replaced)
+            self.assertEqual(result["removed"], 0)
+            self.assertEqual(old_path.read_bytes(), replacement_bytes)
+            self.assertEqual(displaced_path.read_bytes(), old_bytes)
+            self.assertEqual(recent_path.read_bytes(), recent_bytes)
+
+
+    @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
+    def test_prune_revalidates_ntfs_entry_after_candidate_replacement(self):
+        import evidence_windows
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            root = Path(temporary)
+            archive = root / "archive"
+            archive.mkdir()
+            old = evidence.finalize_record(base_record(date="2026-11-12"))
+            recent = evidence.finalize_record(base_record(date="2026-11-14"))
+            old_name = f"qa-evidence-{old['record_id']}.json"
+            recent_name = f"qa-evidence-{recent['record_id']}.json"
+            old_path = archive / old_name
+            recent_path = archive / recent_name
+            old_path.write_bytes(evidence.canonical_json(old))
+            recent_bytes = evidence.canonical_json(recent)
+            recent_path.write_bytes(recent_bytes)
+            unrelated = archive / "unrelated.bin"
+            unrelated.write_bytes(b"keep")
+            replacement_path = root / "replacement.bin"
+            replacement_bytes = b"unvalidated replacement entry"
+            replacement_path.write_bytes(replacement_bytes)
+            moved_path = root / "moved-original.json"
+            original_open_file = evidence_windows.Directory.open_file
+            attempted = False
+            mutation_denied = False
+            replaced = False
+
+            def replace_before_delete(directory, name, *, for_delete=False):
+                nonlocal attempted, mutation_denied, replaced
+                if for_delete and name == old_name and not attempted:
+                    attempted = True
+                    try:
+                        old_path.rename(moved_path)
+                        replacement_path.rename(old_path)
+                    except OSError:
+                        mutation_denied = True
+                        if moved_path.exists() and not old_path.exists():
+                            moved_path.rename(old_path)
+                    else:
+                        replaced = True
+                return original_open_file(directory, name, for_delete=for_delete)
+
+            with patch.object(evidence_windows.Directory, "open_file", new=replace_before_delete):
+                result = evidence.prune_archive(archive, keep=1)
+
+            self.assertTrue(attempted)
+            self.assertEqual(recent_path.read_bytes(), recent_bytes)
+            self.assertEqual(unrelated.read_bytes(), b"keep")
+            if replaced:
+                self.assertEqual(old_path.read_bytes(), replacement_bytes)
+                self.assertTrue(moved_path.is_file())
+                self.assertEqual(result["removed"], 0)
+            else:
+                self.assertTrue(mutation_denied)
+                self.assertTrue(replacement_path.is_file())
+
+    @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
+    def test_prune_rejects_duplicate_windows_names_before_deletion(self):
+        import evidence_windows
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            old = evidence.finalize_record(base_record(date="2026-11-12"))
+            recent = evidence.finalize_record(base_record(date="2026-11-14"))
+            old_path = archive / f"qa-evidence-{old['record_id']}.json"
+            recent_path = archive / f"qa-evidence-{recent['record_id']}.json"
+            old_bytes = evidence.canonical_json(old)
+            recent_bytes = evidence.canonical_json(recent)
+            old_path.write_bytes(old_bytes)
+            recent_path.write_bytes(recent_bytes)
+            original_names = evidence_windows.Directory.names
+
+            def duplicate_names(directory, limit):
+                names = original_names(directory, limit)
+                return names + names[:1]
+
+            with patch.object(evidence_windows.Directory, "names", new=duplicate_names):
+                with self.assertRaisesRegex(evidence.EvidenceError, "changed during enumeration"):
+                    evidence.prune_archive(archive, keep=1)
+
+            self.assertEqual(old_path.read_bytes(), old_bytes)
+            self.assertEqual(recent_path.read_bytes(), recent_bytes)
 
     def test_grid_diff_retention_uses_modification_time_for_reviewed_and_unreviewed(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
             golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
             reviewed = evidence.grid_diff(
@@ -411,7 +1028,7 @@ class RetentionTests(unittest.TestCase):
             self.assertTrue(unreviewed_path.exists())
 
     def test_retention_bounds_reports_diffs_and_sanitized_logs_separately(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
             controls = [evidence.fake_control(name) for name in ("timestamp-fault", "surface-failure")]
             for report in controls:
@@ -443,7 +1060,7 @@ class RetentionTests(unittest.TestCase):
                 self.assertEqual(len(list(archive.glob(f"{prefix}*.json"))), 1)
 
     def test_prune_limit_is_bounded_and_requires_existing_archive(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             with self.assertRaises(evidence.EvidenceError):
                 evidence.prune_archive(Path(temporary), 0)
             with self.assertRaises(evidence.EvidenceError):

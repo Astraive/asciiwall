@@ -13,16 +13,35 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import sys
-from typing import Any
+from typing import Any, Callable
 
-ROOT = Path(__file__).resolve().parents[1]
+if os.name == "nt":
+    if __package__:
+        from . import evidence_windows
+    else:
+        import evidence_windows
+
+
+ROOT = Path(os.path.abspath(__file__)).parents[1] if os.name == "nt" else Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "tests" / "evidence" / "evidence-record.schema.json"
 GOLDEN_PATH = ROOT / "tests" / "evidence" / "goldens" / "cpu-grid-v1.json"
 MAX_JSON_BYTES = 1_048_576
 MAX_LOG_BYTES = 262_144
 MAX_GRID_CELLS = 4096
+MAX_NATIVE_ARTIFACT_BYTES = 16_777_216
+MAX_NATIVE_TOTAL_BYTES = 67_108_864
+MAX_NATIVE_ARTIFACTS = 16
 MAX_ARCHIVE_KEEP = 1000
+MAX_ARCHIVE_ENTRIES = 8192
+_SAFE_DIRECTORY_ACCESS = (
+    os.name == "posix"
+    and all(function in os.supports_dir_fd for function in (os.open, os.stat, os.unlink))
+    and os.scandir in os.supports_fd
+    and os.stat in os.supports_follow_symlinks
+    and all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK"))
+)
 CONTROL_LIMIT = 2
 LEVELS = {
     "document-qa", "unit-property", "integration", "fuzz", "benchmark",
@@ -42,19 +61,14 @@ GRID_CHARS = frozenset(" .#*+|-/\\")
 # These filters operate only on free-text metadata, never on the structured,
 # repository-relative evidence_path. They intentionally redact rather than log
 # the sensitive value or the path itself.
-_PRIVATE_LABEL_RE = re.compile(
-    r"(?i)\b(window(?:[ _-]*[a-z0-9]+)*|input(?:[ _-]*[a-z0-9]+)*|"
-    r"media(?:[ _-]*[a-z0-9]+)*|pointer(?:[ _-]*[a-z0-9]+)*)"
-    r"""["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,;{}\r\n]+)"""
-)
-_PRIVATE_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9/])(?:[A-Za-z]:[\\/][^\s,;\"']*|\\\\[^\\/\s]+[\\/][^\s,;\"']*|"
-    r"(?<![A-Za-z0-9:/])/(?!/)[^\s,;\"']+)"
-)
-def _skip_control_string(value: str, index: int) -> int:
+_PRIVATE_LABEL_RE = re.compile(r"(?i)(?:window|input|media|pointer)")
+_PRIVATE_PATH_RE = re.compile(r"(?i)(?:\bfile:|\b[a-z]:|[\\/])")
+
+
+def _skip_control_string(value: str, index: int, *, allow_bel: bool) -> int:
     while index < len(value):
         character = value[index]
-        if character in {"\x07", "\x9c"}:
+        if character == "\x9c" or (allow_bel and character == "\x07"):
             return index + 1
         if character == "\x1b" and index + 1 < len(value) and value[index + 1] == "\\":
             return index + 2
@@ -82,12 +96,15 @@ def _strip_terminal_controls(value: str) -> str:
                         break
                 continue
             if introducer in "]P^_X":
-                index = _skip_control_string(value, index + 1)
+                index = _skip_control_string(value, index + 1, allow_bel=introducer == "]")
                 continue
-            index += 1
-            while index < len(value) and 0x20 <= ord(value[index]) <= 0x2F:
+            if 0x20 <= ord(introducer) <= 0x2F:
                 index += 1
-            if index < len(value) and 0x30 <= ord(value[index]) <= 0x7E:
+                while index < len(value) and 0x20 <= ord(value[index]) <= 0x2F:
+                    index += 1
+                if index < len(value) and 0x30 <= ord(value[index]) <= 0x7E:
+                    index += 1
+            else:
                 index += 1
             continue
         if codepoint == 0x9B:
@@ -99,7 +116,7 @@ def _strip_terminal_controls(value: str) -> str:
                     break
             continue
         if codepoint in {0x90, 0x98, 0x9D, 0x9E, 0x9F}:
-            index = _skip_control_string(value, index + 1)
+            index = _skip_control_string(value, index + 1, allow_bel=codepoint == 0x9D)
             continue
         if codepoint == 0x9C:
             index += 1
@@ -165,18 +182,24 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _decode_json(raw: bytes, invalid_message: str) -> Any:
+    if len(raw) > MAX_JSON_BYTES:
+        raise EvidenceError("JSON input exceeds the 1 MiB limit")
+    try:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=reject_constant)
+    except EvidenceError:
+        raise
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise EvidenceError(invalid_message) from exc
+
+
 def read_json(path: Path) -> Any:
     try:
         with path.open("rb") as stream:
             raw = stream.read(MAX_JSON_BYTES + 1)
     except OSError as exc:
         raise EvidenceError("cannot read JSON input") from exc
-    if len(raw) > MAX_JSON_BYTES:
-        raise EvidenceError("JSON input exceeds the 1 MiB limit")
-    try:
-        return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=reject_constant)
-    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
-        raise EvidenceError("input is not valid UTF-8 JSON") from exc
+    return _decode_json(raw, "input is not valid UTF-8 JSON")
 
 _RECORD_FIELDS = {
     "schema_version", "record_id", "level", "execution", "procedure_id", "ec_ids",
@@ -215,13 +238,76 @@ def load_record_schema() -> dict[str, Any]:
     return schema
 
 
+def _private_value_end(value: str, index: int) -> int:
+    if index >= len(value):
+        return index
+    if value[index] in "\"'":
+        quote = value[index]
+        index += 1
+        while index < len(value):
+            if value[index] == "\\":
+                index += 2
+            elif value[index] == quote:
+                return index + 1
+            else:
+                index += 1
+        return len(value)
+    if value[index] in "[{":
+        closers = ["]" if value[index] == "[" else "}"]
+        index += 1
+        while index < len(value):
+            character = value[index]
+            if character in "\"'":
+                index = _private_value_end(value, index)
+                continue
+            if character in "[{":
+                closers.append("]" if character == "[" else "}")
+            elif character in "]}":
+                if character != closers.pop():
+                    return len(value)
+                if not closers:
+                    return index + 1
+            index += 1
+        return len(value)
+    while index < len(value) and value[index] not in "\r\n":
+        index += 1
+    return index
+
+
 def sanitize_text(value: str) -> str:
-    value = _PRIVATE_LABEL_RE.sub("[REDACTED-FIELD]", value)
-    return _PRIVATE_PATH_RE.sub("[REDACTED-PATH]", value)
+    pieces: list[str] = []
+    copied = search = 0
+    while match := _PRIVATE_LABEL_RE.search(value, search):
+        cursor = match.end()
+        while cursor < len(value) and (
+            value[cursor] in " ._-\t" or value[cursor].isalnum()
+        ):
+            cursor += 1
+        if cursor < len(value) and value[cursor] in "\"'":
+            cursor += 1
+        while cursor < len(value) and value[cursor] in " \t\r\n":
+            cursor += 1
+        if cursor >= len(value) or value[cursor] not in ":=":
+            search = max(cursor, match.end())
+            continue
+        cursor += 1
+        while cursor < len(value) and value[cursor] in " \t\r\n":
+            cursor += 1
+        pieces.append(value[copied:match.start()])
+        pieces.append("[REDACTED-FIELD]")
+        copied = search = _private_value_end(value, cursor)
+    pieces.append(value[copied:])
+    value = "".join(pieces)
+    # Free-text paths have no reliable delimiter: spaces and punctuation can be
+    # part of a component. Drop the entire line rather than retain a fragment.
+    return "\n".join(
+        "[REDACTED-PATH]" if _PRIVATE_PATH_RE.search(line) else line
+        for line in value.split("\n")
+    )
 
 
 def has_private_text(value: str) -> bool:
-    return bool(_PRIVATE_LABEL_RE.search(value) or _PRIVATE_PATH_RE.search(value))
+    return sanitize_text(value) != value
 
 
 def sanitize_record(record: Any) -> Any:
@@ -270,6 +356,266 @@ def _safe_relative_evidence_path(value: Any) -> bool:
         and path.as_posix() == value
         and re.fullmatch(r"[A-Za-z0-9._/-]+", value) is not None
     )
+
+
+def _require_safe_directory_access() -> None:
+    if os.name != "nt" and not _SAFE_DIRECTORY_ACCESS:
+        raise EvidenceError("safe directory-relative access is unsupported on this platform")
+
+
+def _open_directory(path: Path) -> int:
+    _require_safe_directory_access()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(path.anchor if path.is_absolute() else ".", flags)
+    try:
+        parts = path.parts[1:] if path.is_absolute() else path.parts
+        for part in parts:
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _same_file_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev, left.st_ino, left.st_mode, left.st_size, left.st_mtime_ns, left.st_ctime_ns
+    ) == (
+        right.st_dev, right.st_ino, right.st_mode, right.st_size, right.st_mtime_ns, right.st_ctime_ns
+    )
+
+
+def _read_regular_at(directory_fd: int, name: str) -> tuple[bytes, os.stat_result]:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise EvidenceError("evidence artifact must be a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            raw = stream.read(MAX_JSON_BYTES + 1)
+        after = os.fstat(descriptor)
+        if not _same_file_snapshot(before, after):
+            raise EvidenceError("evidence artifact changed while being read")
+        if len(raw) > MAX_JSON_BYTES:
+            raise EvidenceError("evidence artifact exceeds the 1 MiB limit")
+        return raw, after
+    finally:
+        os.close(descriptor)
+
+
+def _read_windows_regular(artifact: evidence_windows.File) -> tuple[bytes, evidence_windows.Snapshot]:
+    before = artifact.snapshot()
+    if before.st_size > MAX_JSON_BYTES:
+        raise EvidenceError("evidence artifact exceeds the 1 MiB limit")
+    raw = bytearray()
+    while chunk := artifact.read(min(65_536, MAX_JSON_BYTES - len(raw) + 1)):
+        raw.extend(chunk)
+        if len(raw) > MAX_JSON_BYTES:
+            raise EvidenceError("evidence artifact exceeds the 1 MiB limit")
+    after = artifact.snapshot()
+    if before != after or after.st_size != len(raw):
+        raise EvidenceError("evidence artifact changed while being read")
+    return bytes(raw), after
+
+
+def _contains_synthetic_marker(value: Any) -> bool:
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            if item.get("claims_product_behavior") is False:
+                return True
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+        elif isinstance(item, str) and any(marker in item.lower() for marker in (
+            "synthetic-control-report", "synthetic-control-only", "cpu-grid-diff"
+        )):
+            return True
+    return False
+
+
+def _looks_like_json(raw: bytes) -> bool | None:
+    prefix = raw.replace(b"\x00", b"").lstrip(b"\xef\xbb\xbf\xff\xfe \t\r\n")
+    return prefix.startswith((b"{", b"[", b'"')) if prefix else None
+
+
+def _hash_native_stream(read: Callable[[int], bytes], limit: int) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    prefix = bytearray()
+    overlap = b""
+    json_prefix: bool | None = None
+    size = 0
+    markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
+    while chunk := read(min(65_536, limit - size + 1)):
+        size += len(chunk)
+        if size > limit:
+            raise EvidenceError("native evidence artifacts exceed their size limit")
+        digest.update(chunk)
+        if json_prefix is None:
+            json_prefix = _looks_like_json(chunk)
+        scan = (overlap + chunk).lower()
+        if any(marker in scan for marker in markers):
+            raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
+        overlap = scan[-max(map(len, markers)) + 1:]
+        remaining = MAX_JSON_BYTES + 1 - len(prefix)
+        if remaining > 0:
+            prefix.extend(chunk[:remaining])
+    if not size:
+        raise EvidenceError("native evidence artifact must not be empty")
+    if size > MAX_JSON_BYTES:
+        if json_prefix:
+            raise EvidenceError("native evidence JSON exceeds the 1 MiB inspection limit")
+    else:
+        try:
+            content = json.loads(bytes(prefix), object_pairs_hook=unique_object, parse_constant=reject_constant)
+        except (ValueError, UnicodeError, RecursionError) as exc:
+            if json_prefix:
+                raise EvidenceError("native evidence JSON must be inspectable") from exc
+        else:
+            if _contains_synthetic_marker(content):
+                raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
+    return digest.hexdigest(), size
+
+
+def _hash_native_artifact(relative_path: str, limit: int) -> tuple[str, int]:
+    if not _safe_relative_evidence_path(relative_path):
+        raise EvidenceError("native evidence artifact path must be safe and repository-relative")
+    _require_safe_directory_access()
+    parts = PurePosixPath(relative_path).parts
+    if os.name == "nt":
+        try:
+            with evidence_windows.open_directory(ROOT.joinpath(*parts[:-1])) as directory:
+                with directory.open_file(parts[-1]) as artifact:
+                    before = artifact.snapshot()
+                    if before.st_size > limit:
+                        raise EvidenceError("native evidence artifacts exceed their size limit")
+                    identity, size = _hash_native_stream(artifact.read, limit)
+                    after = artifact.snapshot()
+                    if before != after or after.st_size != size:
+                        raise EvidenceError("native evidence artifact changed while being read")
+                    return identity, size
+        except OSError as exc:
+            raise EvidenceError(
+                "native evidence artifact is inaccessible or unsafe; "
+                "Windows requires local fixed NTFS without reparse points"
+            ) from exc
+    try:
+        directory_fd = _open_directory(ROOT.joinpath(*parts[:-1]))
+        try:
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(parts[-1], flags, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise EvidenceError("native evidence artifact is inaccessible or a symlink") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise EvidenceError("native evidence artifact must be a regular file")
+        if before.st_size > limit:
+            raise EvidenceError("native evidence artifacts exceed their size limit")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            identity, size = _hash_native_stream(stream.read, limit)
+        after = os.fstat(descriptor)
+        if not _same_file_snapshot(before, after) or after.st_size != size:
+            raise EvidenceError("native evidence artifact changed while being read")
+        return identity, size
+    except OSError as exc:
+        raise EvidenceError("cannot read native evidence artifact") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _validate_native_manifest(content: dict[str, Any], record: dict[str, Any]) -> None:
+    """Check manifest consistency and artifact hashes, not reviewer identity."""
+    if (
+        content.keys() != {
+            "schema_version", "artifact_type", "execution", "procedure_id",
+            "reviewer", "date", "status", "artifacts",
+        }
+        or content.get("schema_version") != 1
+        or isinstance(content.get("schema_version"), bool)
+        or content.get("artifact_type") != "native-manual-evidence"
+        or content.get("execution") != "manual"
+        or content.get("status") != "pass"
+        or any(content.get(key) != record.get(key) for key in ("procedure_id", "reviewer", "date"))
+    ):
+        raise EvidenceError("native-manual evidence manifest metadata does not match the record")
+    artifacts = content.get("artifacts")
+    if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= MAX_NATIVE_ARTIFACTS:
+        raise EvidenceError("native-manual evidence manifest must contain 1 to 16 artifacts")
+    seen: set[str] = set()
+    total = 0
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or artifact.keys() != {"path", "sha256"}:
+            raise EvidenceError("native-manual evidence artifact entry is invalid")
+        path = artifact.get("path")
+        expected = artifact.get("sha256")
+        if not _safe_relative_evidence_path(path) or not isinstance(expected, str) or not HASH_RE.fullmatch(expected):
+            raise EvidenceError("native-manual evidence artifact path or hash is invalid")
+        if path in seen:
+            raise EvidenceError("native-manual evidence artifact paths must be unique")
+        seen.add(path)
+        identity, size = _hash_native_artifact(path, min(MAX_NATIVE_ARTIFACT_BYTES, MAX_NATIVE_TOTAL_BYTES - total))
+        if identity != expected:
+            raise EvidenceError("native-manual evidence artifact hash does not match")
+        total += size
+
+
+def _validate_native_pass_artifact(record: dict[str, Any]) -> None:
+    _require_safe_directory_access()
+    parts = PurePosixPath(record["evidence_path"]).parts
+    try:
+        if os.name == "nt":
+            # Keep the manifest and its ancestor directories pinned while its
+            # referenced artifacts are inspected.
+            with evidence_windows.open_directory(ROOT.joinpath(*parts[:-1])) as directory:
+                with directory.open_file(parts[-1]) as artifact:
+                    raw, _ = _read_windows_regular(artifact)
+                    _inspect_native_pass_content(raw, record)
+            return
+        directory_fd = _open_directory(ROOT.joinpath(*parts[:-1]))
+        try:
+            raw, _ = _read_regular_at(directory_fd, parts[-1])
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        if os.name == "nt":
+            raise EvidenceError(
+                "native-manual pass requires accessible evidence on local fixed NTFS without reparse points"
+            ) from exc
+        raise EvidenceError("native-manual pass requires an accessible non-symlink evidence artifact") from exc
+    _inspect_native_pass_content(raw, record)
+
+
+def _inspect_native_pass_content(raw: bytes, record: dict[str, Any]) -> None:
+    if not raw:
+        raise EvidenceError("native-manual pass requires a non-empty evidence artifact")
+    markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
+    if any(marker in raw.lower() for marker in markers):
+        raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
+    try:
+        content = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeError as decode_error:
+            raise EvidenceError("native-manual evidence type cannot be inspected safely") from decode_error
+        if text.lstrip("\ufeff \t\r\n").startswith(("{", "[", '"')):
+            raise EvidenceError("native-manual JSON evidence must be inspectable") from exc
+        if any(not _is_log_character(character) and character != "\r" for character in text):
+            raise EvidenceError("native-manual evidence type cannot be inspected safely")
+    else:
+        if _contains_synthetic_marker(content):
+            raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
+        if isinstance(content, dict) and content.get("artifact_type") == "native-manual-evidence":
+            _validate_native_manifest(content, record)
+        elif not validate_log_report(content):
+            raise EvidenceError("native-manual JSON evidence must be a native manifest or sanitized log")
 
 
 def validate_record(record: Any, *, check_identity: bool = True) -> list[str]:
@@ -362,8 +708,14 @@ def validate_record(record: Any, *, check_identity: bool = True) -> list[str]:
         errors.append("absent environments must be recorded as not-run")
     if record.get("level") == "native-manual" and environment.get("availability") == "absent" and status != "not-run":
         errors.append("unavailable native/manual environments can never pass")
-    if not _safe_relative_evidence_path(record.get("evidence_path")):
+    evidence_path = record.get("evidence_path")
+    if not _safe_relative_evidence_path(evidence_path):
         errors.append("evidence_path must be a safe repository-relative path")
+    elif level == "native-manual" and status == "pass":
+        try:
+            _validate_native_pass_artifact(record)
+        except EvidenceError as exc:
+            errors.append(str(exc))
     if not isinstance(record.get("issue"), str) or not ISSUE_RE.fullmatch(record["issue"]):
         errors.append("issue must be a ticket identifier")
     if not isinstance(record.get("reviewer"), str) or not REVIEWER_RE.fullmatch(record["reviewer"]):
@@ -393,6 +745,8 @@ def finalize_record(value: Any) -> dict[str, Any]:
     if has_supplied_id and supplied_id != generated_id:
         raise EvidenceError("supplied record_id does not match canonical record content")
     record["record_id"] = generated_id
+    if len(canonical_json(record)) > MAX_JSON_BYTES:
+        raise EvidenceError("final record exceeds the 1 MiB limit")
     errors = validate_record(record)
     if errors:
         raise EvidenceError("; ".join(errors))
@@ -743,7 +1097,7 @@ def sanitize_log(path: Path) -> dict[str, Any]:
         raise EvidenceError("log input is not valid UTF-8") from exc
     text = _strip_terminal_controls(text).replace("\r\n", "\n").replace("\r", "\n")
     text = "".join(character for character in text if _is_log_character(character))
-    content = "\n".join(sanitize_text(line) for line in text.split("\n"))
+    content = sanitize_text(text)
     if len(content.encode("utf-8")) > MAX_LOG_BYTES:
         raise EvidenceError("sanitized log exceeds the 256 KiB limit")
     if has_private_text(content):
@@ -790,67 +1144,125 @@ def store_artifact(report: dict[str, Any], prefix: str, output: Path | None, arc
     write_new(archive / f"{prefix}-{report['artifact_id']}.json", canonical_json(report))
 
 
+def _archive_names(directory_fd: Any) -> list[str]:
+    if os.name == "nt":
+        try:
+            names = directory_fd.names(MAX_ARCHIVE_ENTRIES)
+        except OSError as exc:
+            raise EvidenceError("cannot enumerate archive safely or archive contains too many entries") from exc
+        if len(set(names)) != len(names):
+            raise EvidenceError("archive changed during enumeration")
+        return names
+    names: list[str] = []
+    with os.scandir(directory_fd) as entries:
+        for entry in entries:
+            if len(names) >= MAX_ARCHIVE_ENTRIES:
+                raise EvidenceError("archive contains too many entries to prune safely")
+            names.append(entry.name)
+    return names
+
+
 def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
     if keep < 1 or keep > MAX_ARCHIVE_KEEP:
         raise EvidenceError(f"keep must be between 1 and {MAX_ARCHIVE_KEEP}")
-    if directory.is_symlink() or not directory.is_dir():
-        raise EvidenceError("archive must be an existing non-symlink directory")
-    patterns = (
-        ("evidence", ARCHIVE_RECORD_RE),
-        ("control", ARCHIVE_CONTROL_RE),
-        ("grid-diff", ARCHIVE_DIFF_RE),
-        ("log", ARCHIVE_LOG_RE),
-    )
-    valid: dict[str, list[tuple[str, str, Path]]] = {name: [] for name, _ in patterns}
-    for entry in directory.iterdir():
-        if entry.is_symlink() or not entry.is_file():
-            continue
-        for kind, pattern in patterns:
-            match = pattern.fullmatch(entry.name)
-            if match is None:
-                continue
-            try:
-                content = read_json(entry)
-            except EvidenceError:
-                break
-            identity = match.group(1)
-            if kind == "evidence":
-                accepted = isinstance(content, dict) and content.get("record_id") == identity and not validate_record(content)
-                sort_date = content.get("date", "") if accepted else ""
-            else:
-                validators = {
-                    "control": validate_control_report,
-                    "grid-diff": validate_grid_diff_report,
-                    "log": validate_log_report,
-                }
-                accepted = (
-                    isinstance(content, dict)
-                    and content.get("artifact_id") == identity
-                    and validators[kind](content)
-                )
-                sort_date = ""
-            if accepted:
+    _require_safe_directory_access()
+    try:
+        directory_fd = evidence_windows.open_directory(directory) if os.name == "nt" else _open_directory(directory)
+    except OSError as exc:
+        if os.name == "nt":
+            raise EvidenceError(
+                "archive must be accessible on local fixed NTFS without reparse points"
+            ) from exc
+        raise EvidenceError("archive must be an existing non-symlink directory") from exc
+    try:
+        patterns = (
+            ("evidence", ARCHIVE_RECORD_RE),
+            ("control", ARCHIVE_CONTROL_RE),
+            ("grid-diff", ARCHIVE_DIFF_RE),
+            ("log", ARCHIVE_LOG_RE),
+        )
+        validators = {
+            "control": validate_control_report,
+            "grid-diff": validate_grid_diff_report,
+            "log": validate_log_report,
+        }
+        valid: dict[str, list[tuple[str, str, str, Any, str]]] = {
+            name: [] for name, _ in patterns
+        }
+        for name in _archive_names(directory_fd):
+            for kind, pattern in patterns:
+                match = pattern.fullmatch(name)
+                if match is None:
+                    continue
                 try:
-                    modified = entry.stat().st_mtime_ns
-                except OSError:
+                    if os.name == "nt":
+                        with directory_fd.open_file(name) as artifact:
+                            raw, snapshot = _read_windows_regular(artifact)
+                    else:
+                        raw, snapshot = _read_regular_at(directory_fd, name)
+                    content = _decode_json(raw, "input is not valid UTF-8 JSON")
+                except (EvidenceError, OSError):
                     break
-                # Explicit record dates order evidence; other generated artifacts use
-                # their archive write time because they have no run date.
-                order = sort_date or f"{modified:020d}"
-                valid[kind].append((order, identity, entry))
-            break
-    removed: list[str] = []
-    kept: dict[str, int] = {}
-    for kind, _ in patterns:
-        candidates = sorted(valid[kind], key=lambda item: (item[0], item[1]), reverse=True)
-        kept[kind] = min(len(candidates), keep)
-        for _, _, path in candidates[keep:]:
-            try:
-                path.unlink()
-            except OSError as exc:
-                raise EvidenceError("cannot remove an expired evidence artifact") from exc
-            removed.append(path.name)
-    return {"kept_by_type": kept, "removed": len(removed), "removed_names": sorted(removed)}
+                identity = match.group(1)
+                if kind == "evidence":
+                    accepted = (
+                        isinstance(content, dict)
+                        and content.get("record_id") == identity
+                        and not validate_record(content)
+                    )
+                    sort_date = content.get("date", "") if accepted else ""
+                else:
+                    accepted = (
+                        isinstance(content, dict)
+                        and content.get("artifact_id") == identity
+                        and validators[kind](content)
+                    )
+                    sort_date = ""
+                if accepted:
+                    # Records have explicit dates; generated artifacts use write time.
+                    order = sort_date or f"{snapshot.st_mtime_ns:020d}"
+                    digest = sha256_bytes(raw) if os.name == "nt" else ""
+                    valid[kind].append((order, identity, name, snapshot, digest))
+                break
+        removed: list[str] = []
+        kept: dict[str, int] = {}
+        for kind, _ in patterns:
+            candidates = sorted(valid[kind], key=lambda item: (item[0], item[1]), reverse=True)
+            kept[kind] = min(len(candidates), keep)
+            for _, _, name, snapshot, digest in candidates[keep:]:
+                try:
+                    if os.name == "nt":
+                        # Reopen without write/delete sharing, then re-read through
+                        # the very handle used for deletion. Both the object
+                        # snapshot and the bytes must match the validated scan.
+                        with directory_fd.open_file(name, for_delete=True) as artifact:
+                            try:
+                                raw, current = _read_windows_regular(artifact)
+                            except EvidenceError:
+                                continue
+                            if current != snapshot or sha256_bytes(raw) != digest:
+                                continue
+                            if not artifact.delete(snapshot):
+                                continue
+                    else:
+                        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        if not _same_file_snapshot(snapshot, current):
+                            continue
+                        # The directory descriptor pins the validated archive, even if
+                        # its pathname is concurrently replaced. POSIX has no atomic
+                        # compare-inode-and-unlink primitive for an entry in that directory.
+                        os.unlink(name, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise EvidenceError("cannot remove an expired evidence artifact") from exc
+                removed.append(name)
+        return {"kept_by_type": kept, "removed": len(removed), "removed_names": sorted(removed)}
+    finally:
+        if os.name == "nt":
+            directory_fd.close()
+        else:
+            os.close(directory_fd)
 
 
 def add_store_options(parser: argparse.ArgumentParser, *, required: bool = False) -> None:
@@ -888,12 +1300,7 @@ def make_parser() -> argparse.ArgumentParser:
 def _input_json(argument: str) -> Any:
     if argument == "-":
         raw = sys.stdin.buffer.read(MAX_JSON_BYTES + 1)
-        if len(raw) > MAX_JSON_BYTES:
-            raise EvidenceError("JSON input exceeds the 1 MiB limit")
-        try:
-            return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=reject_constant)
-        except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
-            raise EvidenceError("standard input is not valid UTF-8 JSON") from exc
+        return _decode_json(raw, "standard input is not valid UTF-8 JSON")
     return read_json(Path(argument))
 
 
