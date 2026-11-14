@@ -204,6 +204,34 @@ impl LinearPremultipliedRgba {
             blue: self.blue + background.blue * background_weight,
         }
     }
+
+    /// Composites this pixel as the source layer over a transparent destination layer.
+    ///
+    /// Both operands contain linear-light, premultiplied RGB. The source-over equations are
+    /// `out_a = src_a + dst_a * (1 - src_a)` and
+    /// `out_rgb = src_rgb + dst_rgb * (1 - src_a)`. A zero-alpha result is canonical
+    /// transparent black.
+    #[must_use]
+    pub fn composite_over_layer(self, background: Self) -> Self {
+        let source_alpha = self.alpha.value();
+        let background_weight = 1.0 - source_alpha;
+        let alpha = source_alpha + background.alpha.value() * background_weight;
+        if alpha == 0.0 {
+            return Self {
+                red: 0.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: Alpha(0.0),
+            };
+        }
+
+        Self {
+            red: self.red + background.red * background_weight,
+            green: self.green + background.green * background_weight,
+            blue: self.blue + background.blue * background_weight,
+            alpha: Alpha(alpha),
+        }
+    }
 }
 
 /// The currently supported explicit output encoding. Initial output is SDR sRGB, 8-bit/channel.
@@ -338,7 +366,8 @@ impl NormalizedRaster {
     /// Iterates pixels composited in linear light over the selected opaque background.
     ///
     /// Consume this iterator before matching ordinary opaque wallpaper. No intermediate raster is
-    /// allocated; transparent layered callers can instead retain [`Self::pixels`] and alpha.
+    /// allocated; transparent layered callers can instead composite [`Self::pixels`] with
+    /// [`LinearPremultipliedRgba::composite_over_layer`] and retain the resulting alpha.
     pub fn composited_over(&self, background: LinearRgb) -> impl Iterator<Item = LinearRgb> + '_ {
         self.pixels
             .iter()
@@ -402,10 +431,14 @@ pub fn encode_output(linear: LinearRgb, encoding: OutputEncoding) -> EncodedOutp
 /// The raster-byte ceiling covers the checked sum of the borrowed input's minimum readable extent
 /// (`(height - 1) * row_stride + row_bytes`) and the requested owned output pixel storage
 /// (`width * height * size_of::<LinearPremultipliedRgba>()`). Inter-row padding is included;
-/// trailing input bytes beyond the final pixel are not. This is an operation-local ceiling check,
-/// not a reservation or process-wide memory limit; unused backing capacity and allocator overhead
-/// or over-allocation are not covered. Callers must account for other concurrently live storage,
-/// but must not subtract this input extent from the budget passed here.
+/// trailing input bytes beyond the final pixel are not. The borrowed input extent is counted once
+/// alongside the distinct output even though the normalizer does not allocate the input buffer.
+/// This is an operation-local ceiling check: `Budget` stores numeric ceilings, not shared
+/// reservations or process-wide usage. The returned raster remains owned and live after this call;
+/// callers must enforce any limit across it and other concurrently retained storage. Unused input
+/// backing capacity and allocator overhead or over-allocation are outside this extent/request check.
+/// The input extent is already part of this operation's calculation and must not be subtracted from
+/// the budget passed here.
 pub fn normalize_raster(
     view: RasterFrameView<'_>,
     budget: &Budget,
