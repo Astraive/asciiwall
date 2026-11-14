@@ -6,6 +6,29 @@ Document-schema validation proves that examples match the proposed schema; it do
 
 Tag reports as document QA, unit/property, integration, fuzz, benchmark, native manual, or release acceptance. Record exact source/binary hash and environment. Never merge these into one vague 'tested' badge.
 
+### Offline evidence tooling
+
+Use [`scripts/evidence.py`](../../scripts/evidence.py) to create reproducible records and artifacts. It records evidence metadata and runs only its own synthetic controls; it does not execute the application or native acceptance procedures. JSON is canonical, content-addressed, schema-versioned, bounded, and written without overwriting existing files. The archive directory must already exist. Inputs are limited to 1 MiB, logs to 256 KiB before and after sanitization, grids to 4,096 cells, and pruning to at most 1,000 artifacts per type.
+
+```text
+python -c "from pathlib import Path; Path('tests/evidence/reports').mkdir(parents=True, exist_ok=True)"
+python scripts/evidence.py record evidence-input.json --output evidence-record.json
+python scripts/evidence.py validate evidence-record.json
+python scripts/evidence.py fake-control timestamp-fault --archive tests/evidence/reports
+python scripts/evidence.py grid-diff actual-grid.json --archive tests/evidence/reports
+python scripts/evidence.py sanitize-log run.log --archive tests/evidence/reports
+python scripts/evidence.py prune tests/evidence/reports --keep 100
+python scripts/test_evidence.py
+```
+
+Each record distinguishes document QA, unit/property, integration, fuzz, benchmark, native manual, and release acceptance. Records require source, binary, and fixture SHA-256 hashes; EC IDs when applicable; observed OS/session/compositor/GPU and permission state; result; repository-relative evidence path; issue; reviewer; and date. Native/manual records require a procedure ID. An absent host must use explicit `not-available` environment details and `not-run`; it can never be reported as a pass.
+
+`fake-control` scenarios (`timestamp-fault`, `capability-change`, `surface-failure`, and `cancellation`) exercise only synthetic decoder/host controls. Their reports bound resources, queued frames, and generations and explicitly disclaim product behavior. The small CPU grid golden is synthetic and compared exactly; changed cells are listed in a diff that stays `unreviewed` until reviewer/date metadata is supplied. Raster screenshots are separate and must document platform/font/GPU tolerances.
+
+Native manual procedures remain separate from fake/VM evidence. Evidence for physical mixed-DPI/GPU/power behavior, native shell/permissions, screen-reader accessibility, and installer cleanup is still outstanding: run each procedure on its named host, retain its hashes, environment and permission state, result, evidence path, reviewer, and date, and mark unavailable hosts `not-run`. Do not treat this recorder or a synthetic control report as a receipt for those procedures. Sanitize retained logs; CI artifacts must not contain personal media, window, or input traces.
+
+The `tests/evidence/evidence-record.schema.json` file defines the closed record schema. Offline tests cover required fields, privacy filtering, deterministic controls, exact-grid diffs, sanitized logs, and archive retention; no test outcome is implied by the presence of these tests.
+
 ## Engine correctness
 
 Unit-test color transforms, alpha composition, cell aspect ratio, glyph calibration, deterministic seeds, matcher score normalization, row strides, frame dimensions, timestamp arithmetic, and cache fingerprints. Property tests enforce checked multiplication, no out-of-range glyph IDs, finite values, valid buffers, and deterministic output under identical inputs.
