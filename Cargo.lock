@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "ascii-core"
 version = "0.1.0"
+
+[[package]]
+name = "ascii-runtime"
+version = "0.1.0"
+dependencies = [
+ "ascii-core",
+]
