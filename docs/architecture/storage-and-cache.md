@@ -19,9 +19,11 @@ For the first release, a versioned JSON install registry with atomic replacement
 
 ## Cache identity
 
-A conversion cache key includes content hash, decode/orientation/color pipeline version, conversion algorithm version, font bytes hash, font raster parameters, glyph set/order, grid dimensions, fit/crop, palette, and settings digest. Video caches also include stream selection, time range, rational FPS, temporal algorithm, and seed. GPU-specific caches must additionally include relevant backend/device and shader version data.
+A conversion key is a structural identity over the source content digest (or explicit missing-source state), decode/orientation/color pipeline versions, conversion algorithm version, font-byte digest and raster settings, ordered glyphs, grid, fit/crop, palette, and settings digest. Sampling filter, geometry, patch dimensions, and the sampling identity digest are included as well. Digests are computed by the owning source or rendering pipeline; paths and stat metadata are not key components.
 
-A file path plus modification time is not a trustworthy identity for long-lived derived content. Use a fast stat check as a hint and content hashing when certainty matters. Local external media may move or change; show `missing source` or invalidate, never continue pretending it is the same artwork.
+Video identity adds selected stream, time range, canonical rational FPS, temporal algorithm version, and seed. GPU-derived identity nests its upstream conversion/video identity and adds backend, device, and shader-byte digest. Every behavior-changing input therefore creates a distinct identity; equivalent rational FPS values share one canonical representation.
+
+A `SourceObservation` retains path and stat data only as revalidation hints beside the content identity. A changed path or stat hint for the same digest requires a fresh content validation before reuse; a changed digest naturally selects a different key, while an explicitly missing source is distinct from available content. Entries stored with an observation require the caller to provide the current observation when leasing them. Stat equality is never itself a content proof.
 
 ## Transactions
 
@@ -29,9 +31,9 @@ Write configuration to a new file, flush according to platform guarantees, then 
 
 ## Eviction
 
-Cache has a configurable byte budget, an LRU policy, and pinned active resources. Derived cache can be deleted without losing projects or imported packages. Do not evict a file while a decoder or GPU upload still relies on it; coordinate refcounts/leases and platform file-lock behavior.
+A configurable byte budget evicts least-recently-used derived files only. Active decoder/upload users pin entries through non-cloneable leases; dropping a lease does not signal completion, and the owner must explicitly acknowledge completion before the file becomes eligible for eviction. On reopen, generated files without in-memory identities remain accounted and evictable. Keep the managed cache root private and stable: project directories, imported packages, and unmanaged files are outside the deletion scope.
 
-Low-disk checks include required extraction bytes, conversion scratch, output bytes, and safety reserve. When an export runs out of space, report a partial temporary artifact, preserve the original, and avoid registering the result as valid.
+Disk reservations account for expanded input, scratch, output capacity, and a safety reserve against a host-probed free-space estimate. The estimate can be refreshed, but real writes may still fail. Output is staged beside its destination and becomes registered only after successful flush, sync, and commit. A failed write reports its temporary partial path when one exists, does not commit or register the failed result, and leaves the destination unchanged provided its parent is not concurrently modified by an untrusted actor. Disk-full and quota failures are classified without claiming that a particular filesystem or quota limit was exercised.
 
 ## Privacy
 
