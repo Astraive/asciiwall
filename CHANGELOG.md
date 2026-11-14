@@ -22,8 +22,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Dependency-free `crates/ascii-core` COR-001 contracts for bounded ASCII frames, allocator-safe grid preflight, reusable owned cell storage, cancellation, typed displayable errors, and zero-copy validated raster views, with behavior-focused integration tests; updated the [data model contract](docs/architecture/data-model-and-contracts.md) and [E01 implementation plan](docs/plans/engine-implementation-plan.md).
 - COR-009 content cache identities for conversion, video, and GPU-derived results; source-observation revalidation, byte-budget LRU eviction with explicit resource leases, disk-space reservations, and loss-safe transactional output with recoverable partial artifacts.
 - Bounded `ascii-runtime` handoff queues, buffer leases, completion acknowledgements, and shared concurrency/memory budgets ([COR-005](docs/architecture/resource-ownership-and-shutdown.md)).
+- Added COR-008 storage support for platform-specific roots, a versioned atomic JSON install registry, schema-validated configuration with last-good recovery, importer transaction journaling, bounded redacted diagnostics, and privacy-filtered portable exports, with focused storage transaction tests.
 
 ### Changed
+
+- Hardened portable handoff ownership: pending completion tokens pin their backing pool and dropped leases reclaim only after acknowledgement; one-slot freshness replacement validates before eviction; Stop now takes priority over repeated revocation; existing transition charges transfer without double counting. CPU handoff, slot writes, raster validation, and pixel callbacks now hold shared work permits, while active output leases retain output permits until completion. Native OS/GPU transport remains unimplemented and is not claimed.
 
 - Repaired relative Markdown navigation across existing original root documentation entrypoints (`c321475`, committed after PR `#1` and prior to `[PRJ-004]`).
 - Updated Project 4 registries and audit semantics for layout-specific grouping (`BOARD_LAYOUT` `verticalGroupByFields` columns / `groupByFields` swimlanes; 17 `TABLE_LAYOUT` views with one `group_by`, UI-only `slice_by`, and two ordered sorts). Configured and saved all table views in the authenticated Orca browser, reloaded all 18 views, verified native axes/sorts against GraphQL, and recorded UI slice reads plus screenshots under external `../.issues/reports/project-view-ui-verification.json`.
@@ -35,3 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Project-field schema preflight preserves singleton GraphQL argument collections instead of mistaking a valid input object for multiple arguments.
 - Preserve ISO-looking JSON text and exact protected ledger timestamp strings through repeated reads and atomic writes; the real filesystem regression now exercises lossless reloads.
 - COR-009 cache eviction uses marked ownership scopes and OS file locks; output reservations charge retained bytes, suppressed I/O failures cannot publish partial results, and filesystem file identity clears replaced-output registrations across case aliases.
+- [COR-008] Serialize atomic writes, importer journal transitions, and diagnostic-log rotation by
+  storage directory; clean reserved interrupted-write temporaries, sync newly created directory
+  entries, recover from oversized current configs without replacing last-good data, and redact
+  clipped diagnostics plus portable file URIs and network endpoints.
+- [COR-008] Strip app/application-rule fields from portable exports; they remain available only in explicitly labeled nonportable local backups.

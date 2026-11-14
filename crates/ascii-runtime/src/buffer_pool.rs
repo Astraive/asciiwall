@@ -1,10 +1,11 @@
 //! Fixed-capacity raster slots and explicit producer/consumer ownership transitions.
 //!
 //! Each slot follows `Free -> Filling -> Published -> Consumed -> Released -> Free`. A fill lease
-//! dropped before publication returns its slot to `Free`; a consumer lease dropped without an
-//! explicit completion acknowledgement deliberately leaves its slot `Consumed`. Generation
-//! invalidation is the only alternate reclamation boundary and must only be called by an owner that
-//! has invalidated the mapped transport region, not merely observed a process exit.
+//! dropped before publication returns its slot to `Free`. Dropping a consumer lease without an
+//! acknowledgement leaves it `Consumed`; its completion token pins the pool until acknowledged,
+//! and acknowledgement after lease drop reclaims the slot. A lost unacknowledged token keeps the
+//! slot quarantined until an owner first invalidates the mapped transport region and then changes
+//! generation; invalidation is not inferred from observing a process exit.
 //!
 //! Pool access is serialized by one short-lived mutex. The only API that runs caller code while
 //! holding it is [`FrameLease::with_pixels`]; that callback MUST be short CPU-only work and MUST NOT
@@ -12,7 +13,6 @@
 //! lock while waiting on decode or present. Queue and pool locks are never held simultaneously.
 
 use std::mem::size_of;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ascii_core::{
@@ -20,7 +20,9 @@ use ascii_core::{
     ValidatedRasterFrameView, validate_raster_frame,
 };
 
-use crate::{MemoryPermit, MemoryUsage, ResourceBudget, RuntimeError, lock_unpoisoned};
+use crate::{
+    ConcurrencyPermit, MemoryPermit, MemoryUsage, ResourceBudget, RuntimeError, lock_unpoisoned,
+};
 
 /// Observable state of one fixed shared-buffer slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,7 +35,7 @@ pub enum SlotState {
     Published,
     /// Leased by a consumer; unavailable until completion or generation invalidation.
     Consumed,
-    /// Consumer completion was explicitly acknowledged; waiting for pool reclamation.
+    /// A queued frame was discarded or consumer completion acknowledged; awaiting reclamation.
     Released,
 }
 
@@ -88,12 +90,33 @@ pub struct FrameDescriptor {
     pub publication_id: u64,
 }
 
-#[derive(Debug)]
 struct Slot {
     state: SlotState,
     generation: u64,
     written_len: usize,
     descriptor: Option<FrameDescriptor>,
+    completion_token_issued: bool,
+    completion_acknowledged: bool,
+    lease_attached: bool,
+    completion_pin: Option<Arc<Mutex<PoolInner>>>,
+    output_permit: Option<ConcurrencyPermit>,
+}
+
+impl core::fmt::Debug for Slot {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Slot")
+            .field("state", &self.state)
+            .field("generation", &self.generation)
+            .field("written_len", &self.written_len)
+            .field("descriptor", &self.descriptor)
+            .field("completion_token_issued", &self.completion_token_issued)
+            .field("completion_acknowledged", &self.completion_acknowledged)
+            .field("lease_attached", &self.lease_attached)
+            .field("completion_pin", &self.completion_pin.is_some())
+            .field("output_permit", &self.output_permit.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -114,6 +137,7 @@ struct PoolInner {
 #[derive(Clone, Debug)]
 pub struct BufferPool {
     inner: Arc<Mutex<PoolInner>>,
+    resource_budget: ResourceBudget,
 }
 
 impl BufferPool {
@@ -163,6 +187,11 @@ impl BufferPool {
             generation,
             written_len: 0,
             descriptor: None,
+            completion_token_issued: false,
+            completion_acknowledged: false,
+            lease_attached: false,
+            completion_pin: None,
+            output_permit: None,
         });
 
         Ok(Self {
@@ -174,6 +203,7 @@ impl BufferPool {
                 slots,
                 _memory_permit: memory_permit,
             })),
+            resource_budget: resource_budget.clone(),
         })
     }
 
@@ -200,6 +230,35 @@ impl BufferPool {
     pub fn mapped_region_len(&self) -> usize {
         lock_unpoisoned(&self.inner).region.len()
     }
+    pub(crate) fn validate_frame_input(
+        &self,
+        metadata: RasterDescriptorMetadata,
+        pixels: &[u8],
+        budget: &Budget,
+        cancellation: &CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        let descriptor = FrameDescriptor {
+            slot_id: 0,
+            generation: 1,
+            width: metadata.width,
+            height: metadata.height,
+            row_stride: u64::try_from(metadata.row_stride)
+                .map_err(|_| RuntimeError::SizeOverflow)?,
+            format: metadata.format,
+            color: metadata.color,
+            orientation: metadata.orientation,
+            byte_length: u64::try_from(pixels.len()).map_err(|_| RuntimeError::SizeOverflow)?,
+            mapped_offset: 0,
+            media_timestamp_ns: metadata.media_timestamp_ns,
+            publication_id: 0,
+        };
+        validate_raster(&descriptor, pixels, budget, cancellation)?;
+        let inner = lock_unpoisoned(&self.inner);
+        if inner.next_publication_id.checked_add(1).is_none() {
+            return Err(RuntimeError::SizeOverflow);
+        }
+        Ok(())
+    }
 
     /// Starts filling the first free slot without waiting.
     pub fn begin_fill(&self) -> Result<FillLease, RuntimeError> {
@@ -217,8 +276,12 @@ impl BufferPool {
         slot.generation = generation;
         slot.written_len = 0;
         slot.descriptor = None;
+        slot.completion_token_issued = false;
+        slot.completion_acknowledged = false;
+        slot.lease_attached = false;
         Ok(FillLease {
             inner: Arc::clone(&self.inner),
+            resource_budget: self.resource_budget.clone(),
             slot_id: index as u32,
             generation,
             active: true,
@@ -246,6 +309,27 @@ impl BufferPool {
         budget: &Budget,
         cancellation: &CancellationToken,
     ) -> Result<FrameLease, RuntimeError> {
+        let _cpu_permit = self.resource_budget.try_acquire_cpu()?;
+        {
+            let inner = lock_unpoisoned(&self.inner);
+            if descriptor.generation != inner.generation {
+                return Err(RuntimeError::StaleGeneration);
+            }
+            let index = descriptor.slot_id as usize;
+            let slot = inner
+                .slots
+                .get(index)
+                .ok_or(RuntimeError::InvalidDescriptor)?;
+            let (start, end) = checked_descriptor_range(&inner, descriptor, index)?;
+            if slot.state != SlotState::Published || slot.generation != inner.generation {
+                return Err(RuntimeError::InvalidState);
+            }
+            if slot.descriptor.as_ref() != Some(descriptor) {
+                return Err(RuntimeError::InvalidDescriptor);
+            }
+            validate_raster(descriptor, &inner.region[start..end], budget, cancellation)?;
+        }
+        let output_permit = self.resource_budget.try_acquire_output()?;
         let mut inner = lock_unpoisoned(&self.inner);
         if descriptor.generation != inner.generation {
             return Err(RuntimeError::StaleGeneration);
@@ -255,19 +339,22 @@ impl BufferPool {
             .slots
             .get(index)
             .ok_or(RuntimeError::InvalidDescriptor)?;
-        let (start, end) = checked_descriptor_range(&inner, descriptor, index)?;
         if slot.state != SlotState::Published || slot.generation != inner.generation {
             return Err(RuntimeError::InvalidState);
         }
         if slot.descriptor.as_ref() != Some(descriptor) {
             return Err(RuntimeError::InvalidDescriptor);
         }
-        validate_raster(descriptor, &inner.region[start..end], budget, cancellation)?;
-        inner.slots[index].state = SlotState::Consumed;
+        let slot = &mut inner.slots[index];
+        slot.state = SlotState::Consumed;
+        slot.completion_token_issued = false;
+        slot.completion_acknowledged = false;
+        slot.lease_attached = true;
+        slot.output_permit = Some(output_permit);
         Ok(FrameLease {
             inner: Some(Arc::clone(&self.inner)),
             descriptor: *descriptor,
-            completion: Arc::new(AtomicBool::new(false)),
+            resource_budget: self.resource_budget.clone(),
             completion_token_issued: false,
             released: false,
         })
@@ -299,7 +386,6 @@ impl BufferPool {
         Ok(true)
     }
 
-    /// Returns all acknowledged `Released` slots to `Free` for later producer reuse.
     pub fn reclaim_released(&self) -> usize {
         let mut inner = lock_unpoisoned(&self.inner);
         let mut reclaimed = 0;
@@ -308,6 +394,9 @@ impl BufferPool {
                 slot.state = SlotState::Free;
                 slot.written_len = 0;
                 slot.descriptor = None;
+                slot.completion_token_issued = false;
+                slot.completion_acknowledged = false;
+                slot.lease_attached = false;
                 reclaimed += 1;
             }
         }
@@ -331,10 +420,17 @@ impl BufferPool {
             if slot.state != SlotState::Free {
                 invalidated += 1;
             }
+            // This invalidation boundary is authorized to discard the old consumer lease. Release
+            // its concurrency permit while the pool owner is locked; budget code never locks pools.
+            drop(slot.output_permit.take());
+            slot.completion_pin = None;
             slot.state = SlotState::Free;
             slot.generation = new_generation;
             slot.written_len = 0;
             slot.descriptor = None;
+            slot.completion_token_issued = false;
+            slot.completion_acknowledged = false;
+            slot.lease_attached = false;
         }
         inner.generation = new_generation;
         Ok(invalidated)
@@ -345,6 +441,7 @@ impl BufferPool {
 #[derive(Debug)]
 pub struct FillLease {
     inner: Arc<Mutex<PoolInner>>,
+    resource_budget: ResourceBudget,
     slot_id: u32,
     generation: u64,
     active: bool,
@@ -359,6 +456,15 @@ impl FillLease {
 
     /// Appends bytes to the slot, rejecting any write that exceeds its fixed capacity.
     pub fn write(&mut self, bytes: &[u8]) -> Result<(), RuntimeError> {
+        let _cpu_permit = self.resource_budget.try_acquire_cpu()?;
+        self.write_inner(bytes)
+    }
+
+    pub(crate) fn write_with_cpu_permit(&mut self, bytes: &[u8]) -> Result<(), RuntimeError> {
+        self.write_inner(bytes)
+    }
+
+    fn write_inner(&mut self, bytes: &[u8]) -> Result<(), RuntimeError> {
         let mut inner = lock_unpoisoned(&self.inner);
         if inner.generation != self.generation {
             return Err(RuntimeError::StaleGeneration);
@@ -393,10 +499,26 @@ impl FillLease {
     /// On any error this fill lease is dropped and the slot returns to `Free`; callers cannot
     /// publish an incomplete or invalid raster.
     pub fn publish(
-        mut self,
+        self,
         metadata: RasterDescriptorMetadata,
         budget: &Budget,
         cancellation: &CancellationToken,
+    ) -> Result<FrameDescriptor, RuntimeError> {
+        let _cpu_permit = self.resource_budget.try_acquire_cpu()?;
+        self.publish_inner(metadata, Some((budget, cancellation)))
+    }
+
+    pub(crate) fn publish_prevalidated(
+        self,
+        metadata: RasterDescriptorMetadata,
+    ) -> Result<FrameDescriptor, RuntimeError> {
+        self.publish_inner(metadata, None)
+    }
+
+    fn publish_inner(
+        mut self,
+        metadata: RasterDescriptorMetadata,
+        validation: Option<(&Budget, &CancellationToken)>,
     ) -> Result<FrameDescriptor, RuntimeError> {
         let mut inner = lock_unpoisoned(&self.inner);
         if inner.generation != self.generation {
@@ -432,7 +554,9 @@ impl FillLease {
             media_timestamp_ns: metadata.media_timestamp_ns,
             publication_id: 0,
         };
-        validate_raster(&descriptor, &inner.region[start..end], budget, cancellation)?;
+        if let Some((budget, cancellation)) = validation {
+            validate_raster(&descriptor, &inner.region[start..end], budget, cancellation)?;
+        }
         let publication_id = inner.next_publication_id;
         inner.next_publication_id = publication_id
             .checked_add(1)
@@ -441,6 +565,9 @@ impl FillLease {
         let slot = &mut inner.slots[index];
         slot.state = SlotState::Published;
         slot.descriptor = Some(descriptor);
+        slot.completion_token_issued = false;
+        slot.completion_acknowledged = false;
+        slot.lease_attached = false;
         self.active = false;
         Ok(descriptor)
     }
@@ -467,31 +594,82 @@ impl Drop for FillLease {
 
 /// Caller-owned, explicit attestation that external work using a [`FrameLease`] has completed.
 ///
-/// The runtime permits exactly one token per consumer lease. The caller MUST acknowledge it only
-/// after its own CPU/native/GPU work is actually complete; this type does not wait on or infer any
-/// device semantics.
-#[must_use = "acknowledge the token only after the external work completes"]
-#[derive(Debug)]
+/// The runtime permits exactly one token per consumer lease. The caller MUST keep this token alive
+/// until its CPU/native/GPU work is actually complete, then acknowledge it. The token pins the
+/// process-local pool until acknowledgement. Dropping an unacknowledged token quarantines its slot
+/// and storage until generation invalidation; it never implies completion.
+#[must_use = "keep this token until external work completes, then acknowledge it"]
 pub struct CompletionToken {
-    completed: Arc<AtomicBool>,
+    inner: Arc<Mutex<PoolInner>>,
+    descriptor: FrameDescriptor,
 }
 
-impl CompletionToken {
-    /// Explicitly acknowledges completion to the corresponding frame lease.
-    pub fn acknowledge(self) {
-        self.completed.store(true, Ordering::Release);
+impl core::fmt::Debug for CompletionToken {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("CompletionToken")
+            .field("descriptor", &self.descriptor)
+            .finish_non_exhaustive()
     }
 }
 
-/// Consumer ownership of a validated slot. Dropping this value does not release its slot.
+impl CompletionToken {
+    /// Explicitly acknowledges completion and reclaims a lease already dropped by its consumer.
+    pub fn acknowledge(self) {
+        let (completion_pin, output_permit) = {
+            let mut inner = lock_unpoisoned(&self.inner);
+            if inner.generation != self.descriptor.generation {
+                (None, None)
+            } else {
+                let index = self.descriptor.slot_id as usize;
+                match inner.slots.get_mut(index) {
+                    Some(slot)
+                        if slot.state == SlotState::Consumed
+                            && slot.generation == self.descriptor.generation
+                            && slot.completion_token_issued
+                            && slot.descriptor.is_some_and(|published| {
+                                published.publication_id == self.descriptor.publication_id
+                            }) =>
+                    {
+                        slot.completion_acknowledged = true;
+                        let completion_pin = slot.completion_pin.take();
+                        let output_permit = slot.output_permit.take();
+                        if !slot.lease_attached {
+                            slot.state = SlotState::Free;
+                            slot.written_len = 0;
+                            slot.descriptor = None;
+                            slot.completion_token_issued = false;
+                        }
+                        (completion_pin, output_permit)
+                    }
+                    Some(_) | None => (None, None),
+                }
+            }
+        };
+        drop(completion_pin);
+        drop(output_permit);
+    }
+}
+
+/// Consumer ownership of a validated slot. Dropping this value does not acknowledge completion.
 #[must_use = "release or invalidate the leased slot after external work completes"]
-#[derive(Debug)]
 pub struct FrameLease {
     inner: Option<Arc<Mutex<PoolInner>>>,
     descriptor: FrameDescriptor,
-    completion: Arc<AtomicBool>,
+    resource_budget: ResourceBudget,
     completion_token_issued: bool,
     released: bool,
+}
+
+impl core::fmt::Debug for FrameLease {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("FrameLease")
+            .field("descriptor", &self.descriptor)
+            .field("completion_token_issued", &self.completion_token_issued)
+            .field("released", &self.released)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FrameLease {
@@ -503,27 +681,54 @@ impl FrameLease {
 
     /// Creates the one explicit completion token for the caller's external work.
     ///
-    /// A duplicate request returns `InvalidState`; dropping an unacknowledged token leaves
-    /// completion pending until generation invalidation.
+    /// A duplicate request returns `InvalidState`. Dropping an unacknowledged token leaves the
+    /// consumed slot and its backing storage quarantined until generation invalidation.
     pub fn completion_token(&mut self) -> Result<CompletionToken, RuntimeError> {
         if self.released || self.completion_token_issued {
             return Err(RuntimeError::InvalidState);
         }
+        let pool = Arc::clone(self.inner.as_ref().ok_or(RuntimeError::StaleLease)?);
+        {
+            let mut inner = lock_unpoisoned(&pool);
+            if inner.generation != self.descriptor.generation {
+                return Err(RuntimeError::StaleLease);
+            }
+            let slot = inner
+                .slots
+                .get_mut(self.descriptor.slot_id as usize)
+                .ok_or(RuntimeError::StaleLease)?;
+            if slot.state != SlotState::Consumed
+                || slot.generation != self.descriptor.generation
+                || !slot.lease_attached
+                || slot.completion_token_issued
+                || slot.descriptor.is_none_or(|published| {
+                    published.publication_id != self.descriptor.publication_id
+                })
+            {
+                return Err(RuntimeError::InvalidState);
+            }
+            slot.completion_token_issued = true;
+            slot.completion_acknowledged = false;
+            slot.completion_pin = Some(Arc::clone(&pool));
+        }
         self.completion_token_issued = true;
         Ok(CompletionToken {
-            completed: Arc::clone(&self.completion),
+            inner: pool,
+            descriptor: self.descriptor,
         })
     }
 
     /// Provides a borrow of the leased bytes while the pool ownership lock is held.
     ///
     /// The callback is restricted by contract to short CPU-only work. It MUST NOT call UI/native
-    /// APIs, re-enter this pool, or wait for decode or present while the pool lock is held. Keep the
-    /// lease alive and acknowledge its completion separately after any external work finishes.
+    /// APIs, re-enter this pool, or wait for decode or present while the pool lock is held. The
+    /// callback runs under a shared CPU permit; keep the lease alive and acknowledge its completion
+    /// separately after any external work finishes.
     pub fn with_pixels<R>(&self, use_pixels: impl FnOnce(&[u8]) -> R) -> Result<R, RuntimeError> {
         if self.released {
             return Err(RuntimeError::StaleLease);
         }
+        let _cpu_permit = self.resource_budget.try_acquire_cpu()?;
         let pool = self.inner.as_ref().ok_or(RuntimeError::StaleLease)?;
         let inner = lock_unpoisoned(pool);
         if inner.generation != self.descriptor.generation {
@@ -555,13 +760,11 @@ impl FrameLease {
             self.released = true;
             return Ok(());
         };
-        let result = {
+        let (result, completion_pin) = {
             let mut inner = lock_unpoisoned(&pool);
             if inner.generation != self.descriptor.generation {
                 // Generation invalidation already severed this lease from the active mapping.
-                Ok(())
-            } else if !self.completion.load(Ordering::Acquire) {
-                Err(RuntimeError::CompletionPending)
+                (Ok(()), None)
             } else {
                 let index = self.descriptor.slot_id as usize;
                 match inner.slots.get_mut(index) {
@@ -572,19 +775,64 @@ impl FrameLease {
                                 published.publication_id == self.descriptor.publication_id
                             }) =>
                     {
-                        slot.state = SlotState::Released;
-                        Ok(())
+                        if !slot.completion_acknowledged {
+                            (Err(RuntimeError::CompletionPending), None)
+                        } else {
+                            slot.state = SlotState::Released;
+                            slot.lease_attached = false;
+                            (Ok(()), slot.completion_pin.take())
+                        }
                     }
-                    Some(_) | None => Err(RuntimeError::StaleLease),
+                    Some(_) | None => (Err(RuntimeError::StaleLease), None),
                 }
             }
         };
+        drop(completion_pin);
         if result.is_ok() {
             self.released = true;
         } else {
             self.inner = Some(pool);
         }
         result
+    }
+}
+
+impl Drop for FrameLease {
+    fn drop(&mut self) {
+        let Some(pool) = self.inner.take() else {
+            return;
+        };
+        let (completion_pin, output_permit) = {
+            let mut inner = lock_unpoisoned(&pool);
+            if inner.generation != self.descriptor.generation {
+                (None, None)
+            } else {
+                let index = self.descriptor.slot_id as usize;
+                match inner.slots.get_mut(index) {
+                    Some(slot)
+                        if slot.state == SlotState::Consumed
+                            && slot.generation == self.descriptor.generation
+                            && slot.descriptor.is_some_and(|published| {
+                                published.publication_id == self.descriptor.publication_id
+                            }) =>
+                    {
+                        slot.lease_attached = false;
+                        if slot.completion_acknowledged {
+                            slot.state = SlotState::Free;
+                            slot.written_len = 0;
+                            slot.descriptor = None;
+                            slot.completion_token_issued = false;
+                            (slot.completion_pin.take(), slot.output_permit.take())
+                        } else {
+                            (None, None)
+                        }
+                    }
+                    Some(_) | None => (None, None),
+                }
+            }
+        };
+        drop(completion_pin);
+        drop(output_permit);
     }
 }
 

@@ -18,8 +18,8 @@ use ascii_core::{Budget, CancellationToken, Error as CoreError};
 
 use crate::lock_unpoisoned;
 use crate::{
-    BufferPool, FrameDescriptor, FrameLease, MemoryPermit, MemoryUsage, RasterDescriptorMetadata,
-    ResourceBudget, RuntimeError,
+    BufferPool, FrameDescriptor, FrameLease, MemoryPermit, MemoryUsage, PermitKind,
+    RasterDescriptorMetadata, ResourceBudget, RuntimeError,
 };
 
 const URGENT_STOP: u8 = 0b01;
@@ -179,7 +179,7 @@ impl ControlQueue {
         }
     }
 
-    /// Receives urgent revocation/Stop first, then ordinary FIFO controls.
+    /// Receives urgent Stop first, then revocation, then ordinary FIFO controls.
     pub fn try_recv(&self) -> Option<ControlEvent> {
         if let Some(event) = self.take_urgent() {
             return Some(event);
@@ -190,10 +190,10 @@ impl ControlQueue {
     fn take_urgent(&self) -> Option<ControlEvent> {
         loop {
             let pending = self.urgent.load(Ordering::Acquire);
-            let (bit, event) = if pending & URGENT_REVOKE != 0 {
-                (URGENT_REVOKE, ControlEvent::RevokePermissions)
-            } else if pending & URGENT_STOP != 0 {
+            let (bit, event) = if pending & URGENT_STOP != 0 {
                 (URGENT_STOP, ControlEvent::Stop)
+            } else if pending & URGENT_REVOKE != 0 {
+                (URGENT_REVOKE, ControlEvent::RevokePermissions)
             } else {
                 return None;
             };
@@ -210,13 +210,14 @@ impl ControlQueue {
 
 /// Coordinated latest-frame handoff with separate urgent control and fixed buffer slots.
 ///
-/// The coordinator first publishes a valid replacement into a free slot, then discards older
-/// descriptors and reclaims their slots. A cancelled or invalid replacement leaves the queued
-/// frame available; without a free slot, submission fails without evicting queued frames. A
-/// consumed lease is never evicted or reused without its completion acknowledgement.
+/// The coordinator publishes a valid replacement before discarding older queued frames whenever
+/// a free slot exists. If all slots are occupied by queued frames, it validates the replacement
+/// before reclaiming the oldest queued frame to make room; consumed slots remain pinned until
+/// completion acknowledgement or generation invalidation.
 #[derive(Debug)]
 pub struct BoundedHandoff {
     operation: Mutex<()>,
+    resource_budget: ResourceBudget,
     pool: BufferPool,
     frames: FrameQueue,
     controls: ControlQueue,
@@ -234,6 +235,7 @@ impl BoundedHandoff {
     ) -> Result<Self, RuntimeError> {
         Ok(Self {
             operation: Mutex::new(()),
+            resource_budget: resource_budget.clone(),
             pool: BufferPool::new(resource_budget, generation, slot_count, bytes_per_slot)?,
             frames: FrameQueue::new(resource_budget, frame_queue_capacity)?,
             controls: ControlQueue::new(resource_budget, control_queue_capacity)?,
@@ -287,17 +289,50 @@ impl BoundedHandoff {
         F: FnOnce(),
     {
         let _operation = lock_unpoisoned(&self.operation);
+        let _cpu_permit = self.resource_budget.try_acquire_cpu()?;
         if pixels.len() > self.pool.bytes_per_slot() {
             return Err(RuntimeError::MappingBounds);
         }
         if cancellation.is_cancelled() {
             return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
         }
+        self.pool
+            .validate_frame_input(metadata, pixels, budget, cancellation)?;
         self.pool.reclaim_released();
-        let mut fill = self.pool.begin_fill()?;
-        fill.write(pixels)?;
-        before_publish();
-        let descriptor = fill.publish(metadata, budget, cancellation)?;
+        let fill = match self.pool.begin_fill() {
+            Ok(mut fill) => {
+                fill.write_with_cpu_permit(pixels)?;
+                before_publish();
+                if cancellation.is_cancelled() {
+                    return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
+                }
+                fill
+            }
+            Err(RuntimeError::NoFreeSlots) => {
+                before_publish();
+                if cancellation.is_cancelled() {
+                    return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
+                }
+                loop {
+                    let Some(stale) = self.frames.try_recv() else {
+                        return Err(RuntimeError::NoFreeSlots);
+                    };
+                    if self.pool.discard(&stale)? {
+                        self.pool.reclaim_released();
+                    }
+                    match self.pool.begin_fill() {
+                        Ok(mut fill) => {
+                            fill.write_with_cpu_permit(pixels)?;
+                            break fill;
+                        }
+                        Err(RuntimeError::NoFreeSlots) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        let descriptor = fill.publish_prevalidated(metadata)?;
         while let Some(stale) = self.frames.try_recv() {
             let _ = self.pool.discard(&stale)?;
         }
@@ -381,7 +416,7 @@ fn is_retryable_receive_error(error: RuntimeError) -> bool {
             ascii_core::Error::Cancelled
                 | ascii_core::Error::BudgetExceeded(_)
                 | ascii_core::Error::TemporarilyUnavailable
-        )
+        ) | RuntimeError::ConcurrencyLimit(PermitKind::Cpu | PermitKind::Output)
     )
 }
 
@@ -389,7 +424,8 @@ fn is_retryable_receive_error(error: RuntimeError) -> bool {
 mod tests {
     use super::BoundedHandoff;
     use crate::{
-        RasterDescriptorMetadata, ResourceBudget, ResourceLimits, RuntimeError, SlotState,
+        PermitKind, RasterDescriptorMetadata, ResourceBudget, ResourceLimits, RuntimeError,
+        SlotState,
     };
     use ascii_core::{
         AlphaMode, Budget, CancellationToken, ColorDescription, PixelFormat, RasterOrientation,
@@ -447,5 +483,59 @@ mod tests {
         assert_eq!(lease.descriptor().media_timestamp_ns, 1);
         lease.completion_token().unwrap().acknowledge();
         lease.release().unwrap();
+    }
+
+    #[test]
+    fn cancelled_one_slot_replacement_keeps_the_previous_queued_frame() {
+        let resource_budget = resource_budget();
+        let handoff = BoundedHandoff::new(&resource_budget, 1, 1, 3, 1, 1).unwrap();
+        let limits = budget();
+        handoff
+            .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
+            .unwrap();
+        let cancellation = CancellationToken::new();
+
+        assert_eq!(
+            handoff.submit_frame_before_publish(
+                metadata(2),
+                &[4, 5, 6],
+                &limits,
+                &cancellation,
+                || cancellation.cancel(),
+            ),
+            Err(RuntimeError::CoreValidation(ascii_core::Error::Cancelled))
+        );
+        assert_eq!(handoff.queued_frames(), 1);
+        assert_eq!(handoff.slot_state(0).unwrap(), SlotState::Published);
+        let mut lease = handoff
+            .receive_frame(&limits, &CancellationToken::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.descriptor().media_timestamp_ns, 1);
+        lease.completion_token().unwrap().acknowledge();
+        lease.release().unwrap();
+    }
+    #[test]
+    fn cpu_submission_permit_is_shared_and_nonblocking() {
+        let resource_budget = ResourceBudget::new(ResourceLimits::new(1, 1, 1, u64::MAX, u64::MAX));
+        let handoff = BoundedHandoff::new(&resource_budget, 1, 1, 3, 1, 1).unwrap();
+        let limits = budget();
+
+        handoff
+            .submit_frame_before_publish(
+                metadata(1),
+                &[1, 2, 3],
+                &limits,
+                &CancellationToken::new(),
+                || {
+                    assert_eq!(
+                        resource_budget.try_acquire_cpu().unwrap_err(),
+                        RuntimeError::ConcurrencyLimit(PermitKind::Cpu)
+                    );
+                },
+            )
+            .unwrap();
+
+        assert_eq!(resource_budget.snapshot().cpu_jobs, 0);
     }
 }

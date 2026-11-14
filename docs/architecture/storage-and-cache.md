@@ -2,20 +2,29 @@
 
 ## Storage classes
 
-Keep configuration, installed immutable content, derived cache, temporary staging, logs, and runtime IPC separate. On Linux, use XDG-style config/data/cache/runtime locations; on Windows use the appropriate per-user application directories; on macOS use standard Application Support and Caches conventions. Paths are computed by a platform-aware library, not hard-coded usernames.
+Resolve each storage class independently from platform directories, rather than embedding user
+names or runtime endpoints in portable data. Linux uses absolute XDG config, data, and cache
+directories, falling back to the standard per-user locations when an XDG value is absent or
+relative; runtime uses absolute `XDG_RUNTIME_DIR` or falls back to `data/runtime` when unset.
+macOS uses `~/Library/Application Support/<app>` for config and data, `~/Library/Caches/<app>`
+for cache, and `data/runtime` for runtime state. Windows keeps config in Roaming AppData and
+other local state in Local AppData.
 
 ```text
-config/     settings.toml, display-assignments.json, permissions.json
+config/     settings.json and settings.json.last-good
+data/       install-registry.json (the sole authoritative install index)
 library/    packages/<package-id>/<version>/<digest>/
 projects/   user-created editable project directories
 catalogs/   installed catalog snapshots and trust metadata
 cache/      thumbnails, glyph-atlases, converted-images, clips
-staging/    incomplete imports and export workspaces
+staging/    private incomplete imports, export workspaces, and import journals
 logs/       bounded redacted diagnostic files
 runtime/    session locks, local IPC endpoints, shared-memory metadata
 ```
 
-For the first release, a versioned JSON install registry with atomic replacement is sufficient. A later SQLite index is acceptable as an embedded local file, not a server, but must have an explicit migration and recovery plan. Avoid two competing authoritative registries.
+The first release persists one versioned JSON install registry with atomic replacement. A later
+SQLite index is acceptable as an embedded local file only with an explicit migration and recovery
+plan; never keep two competing authoritative registries.
 
 ## Cache identity
 
@@ -27,7 +36,18 @@ A `SourceObservation` retains path and stat data only as revalidation hints besi
 
 ## Transactions
 
-Write configuration to a new file, flush according to platform guarantees, then atomically replace. Keep a last-good backup. Package imports extract into a private staging directory, validate completely, and commit an immutable directory plus registry update. A crash-recovery journal distinguishes staged, verified, committed, and abandoned work.
+Configuration is parsed and accepted by the owning schema validator before persistence. Write a
+bounded sibling temporary file, flush and sync it, then atomically replace the destination under a
+directory-scoped lock; remove the operation's reserved temporary on failure and before retrying an
+interrupted write. Sync the containing directory after replacement and sync each newly created
+directory entry before reporting a first write as durable on platforms that support directory sync.
+Keep `settings.json.last-good` only when the previous file also passes privacy checks and the current
+schema validator; malformed, schema-invalid, and oversized current files do not replace a known-good
+backup and do not prevent a valid replacement. Import-journal begin and state transitions serialize
+callers sharing a journal directory, accepting only staged→verified/abandoned and
+verified→committed/abandoned transitions. Recovery classifies interrupted work without silently
+changing journal state. Importers own the transitions and commit their validated immutable content
+plus registry update.
 
 ## Eviction
 
@@ -37,4 +57,11 @@ Disk reservations account for expanded input, scratch, output capacity, and a sa
 
 ## Privacy
 
-Do not store cursor histories or window geometry histories. Diagnostic logs rotate and redact home directories and media filenames by default. Content exports strip machine-specific paths, monitor identifiers, permission grants, and application rules unless a clearly labeled nonportable local backup is requested.
+Never persist cursor histories or window geometry histories; both portable and explicitly
+labeled nonportable local-backup exports omit them. Diagnostic logs use bounded rotation, cap each
+record independently of each file, serialize writers targeting the same directory, and redact home
+directories and media-bearing messages by default. A clipped message is redacted as a whole because
+the truncated prefix cannot prove whether a path or filename is private. Portable exports strip
+machine-specific paths, file URIs, network endpoints (including host-and-port strings and IP
+addresses), monitor/display identifiers, permission grants, application rules, and user/home data;
+only an explicitly labeled nonportable local backup may retain those values.
