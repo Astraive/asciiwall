@@ -687,8 +687,7 @@ impl From<Error> for ColorNormalizationError {
 mod tests {
     use super::{ColorNormalizationError, normalize_raster_with_cancel_check};
     use ascii_core::{
-        AlphaMode, Budget, ColorDescription, Error, PixelFormat, RasterFrameView,
-        RasterOrientation,
+        AlphaMode, Budget, ColorDescription, Error, PixelFormat, RasterFrameView, RasterOrientation,
     };
 
     #[test]
@@ -714,7 +713,10 @@ mod tests {
             },
         );
 
-        assert_eq!(result, Err(ColorNormalizationError::Raster(Error::Cancelled)));
+        assert_eq!(
+            result,
+            Err(ColorNormalizationError::Raster(Error::Cancelled))
+        );
         assert_eq!(polls, 5);
     }
 }
