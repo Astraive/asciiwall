@@ -4,6 +4,16 @@
 
 Build an immutable glyph table from a font fingerprint, raster size, cell dimensions, baseline, glyph repertoire, and rendering mode. Rasterize masks with the chosen font library, then store coverage, bounding box, centroid, edge-orientation features, and the mask itself. Rasterization support is not equivalent to text shaping support. [S26](../research/source-register.md#s26)
 
+### Executable font-table contract
+
+`ascii-convert::build_glyph_table(font_bytes, charset, config, budget, cancellation)` builds one row-major, 8-bit coverage mask per requested Unicode scalar. It maps scalars through the font's character map without shaping; duplicate/control scalars and missing glyphs are typed errors. `GlyphConfig` requires finite positive raster size, nonzero cell dimensions, and a baseline no lower than the cell's bottom edge.
+
+Each glyph is rasterized with pinned `fontdue 0.9.3` (default features disabled; `hashbrown` enabled, SIMD disabled), centered by advance width and positioned at the configured baseline, then clipped to the cell. Space remains a real measured blank mask. Bounds, coverage-weighted centroid, normalized mean coverage, and four gradient-orientation energy bins come from the resulting mask. The immutable table sorts by measured coverage, then font glyph index, then Unicode scalar.
+
+The SHA-256 table fingerprint includes a descriptor/rasterizer mode version, font bytes, raster size's IEEE-754 bits, cell width/height, baseline, and the canonical sorted scalar repertoire. Reordering the same repertoire does not change the fingerprint. Exact dependency versions and enabled features are recorded in `crates/ascii-convert/Cargo.toml` and `Cargo.lock`.
+
+Before raster allocation, the builder checks encoded font length, glyph count, cell-mask/table bytes, rasterizer scratch, total work, and cancellation. It returns a complete immutable table or a typed error; it never publishes partial glyphs. The current renderer is a single-scalar mask rasterizer, not a shaping engine, and it does not infer support for grapheme clusters or variable-width text.
+
 Version one supports printable ASCII and curated single-cell Unicode sets such as blocks and braille. Reject control characters, combining sequences, bidirectional controls, and unsupported variable-width/emoji glyphs from strict single-cell packages. Full shaped text, grapheme clusters, CJK width rules, and color emoji require a separate design rather than silently breaking the grid.
 
 ## Density matching
