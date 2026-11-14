@@ -18,8 +18,8 @@
 //! GPU work) has completed. Reference counts and dropping a lease do not acknowledge completion.
 
 mod buffer_pool;
+pub mod cache;
 mod queues;
-
 pub use buffer_pool::{
     BufferPool, CompletionToken, FillLease, FrameDescriptor, FrameLease, RasterDescriptorMetadata,
     SlotState,
