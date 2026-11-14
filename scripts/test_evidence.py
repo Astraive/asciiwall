@@ -833,7 +833,7 @@ class RetentionTests(unittest.TestCase):
         "parent-replacement injection requires POSIX directory-relative access",
     )
     def test_prune_parent_replacement_cannot_redirect_deletion(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             root = Path(temporary)
             archive = root / "archive"
             archive.mkdir()
