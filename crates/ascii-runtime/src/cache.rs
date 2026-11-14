@@ -7,11 +7,16 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+const CACHE_INSTANCE_DIR: &str = ".asciiwall-cache-v1";
+const CACHE_OWNER_FILE: &str = ".asciiwall-owner";
+const CACHE_OWNER_MARKER: &[u8] = b"AsciiWall derived cache ownership v1\n";
+const CACHE_OPERATIONS_LOCK: &str = ".operations.lock";
 
 /// A caller-computed cryptographic digest of content or shader bytes.
 ///
@@ -416,27 +421,30 @@ struct CacheState {
     lru_clock: u64,
     entries: HashMap<CacheIdentity, CacheEntry>,
     orphaned_files: Vec<OrphanedFile>,
+    active_lease_files: HashMap<CacheIdentity, Vec<File>>,
 }
 
 #[derive(Debug)]
 struct CacheInner {
     root: PathBuf,
+    managed_dir: PathBuf,
     state: Mutex<CacheState>,
 }
 
-/// Thread-safe byte-bounded LRU containing only files it creates beneath its canonical private
-/// root. The caller must keep that root private and stable while the cache is in use; portable
-/// path APIs cannot defend against a hostile concurrent root-directory replacement.
+/// Thread-safe byte-bounded LRU containing generated files in marked, cache-owned subdirectories
+/// beneath its canonical private root. Active leases hold portable OS shared file locks; deletion
+/// obtains an exclusive file lock and fails closed while any instance holds a lease. The caller
+/// must keep the root private and stable; portable path APIs cannot defend against a hostile
+/// concurrent root-directory replacement.
 #[derive(Clone, Debug)]
 pub struct DerivedCache {
     inner: Arc<CacheInner>,
 }
 
 impl DerivedCache {
-    /// Creates the private cache root if needed, canonicalizes it once, and accounts for
-    /// generated files left by an earlier cache instance. The caller must keep that root private
-    /// and stable while the cache is in use; portable path APIs cannot defend against a hostile
-    /// concurrent root-directory replacement.
+    /// Creates the private cache root if needed, canonicalizes it once, and creates or reuses a
+    /// marked cache-owned subdirectory while accounting for generated files left by earlier
+    /// instances. An unmarked reserved-name collision is rejected without modifying its contents.
     pub fn open(root: impl AsRef<Path>, budget_bytes: u64) -> Result<Self, CacheError> {
         fs::create_dir_all(root.as_ref())?;
         let root = fs::canonicalize(root.as_ref())?;
@@ -446,6 +454,8 @@ impl DerivedCache {
                 "cache root is not a directory",
             )));
         }
+        let managed_dir = create_cache_instance_dir(&root)?;
+        let _operations_lock = lock_cache_directory(&root, &managed_dir)?;
         let (orphaned_files, used_bytes, next_file_id, lru_clock) = scan_orphaned_files(&root)?;
         let mut state = CacheState {
             budget_bytes,
@@ -454,11 +464,13 @@ impl DerivedCache {
             lru_clock,
             entries: HashMap::new(),
             orphaned_files,
+            active_lease_files: HashMap::new(),
         };
         trim_to_budget(&root, &mut state)?;
         Ok(Self {
             inner: Arc::new(CacheInner {
                 root,
+                managed_dir,
                 state: Mutex::new(state),
             }),
         })
@@ -496,15 +508,39 @@ impl DerivedCache {
     ) -> Result<StoreOutcome, CacheError> {
         let entry_bytes = u64::try_from(bytes.len()).map_err(|_| CacheError::ArithmeticOverflow)?;
         let mut state = lock_unpoisoned(&self.inner.state);
-        if state.entries.contains_key(&identity) {
-            let tick = next_tick(&mut state)?;
-            if let Some(entry) = state.entries.get_mut(&identity) {
-                entry.last_used = tick;
-                if observation.is_some() {
-                    entry.source_observation = observation;
+        let operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
+        if let Some((path, active_leases)) = state
+            .entries
+            .get(&identity)
+            .map(|entry| (entry.path.clone(), entry.active_leases))
+        {
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    let tick = next_tick(&mut state)?;
+                    if let Some(entry) = state.entries.get_mut(&identity) {
+                        entry.last_used = tick;
+                        if observation.is_some() {
+                            entry.source_observation = observation;
+                        }
+                    }
+                    return Ok(StoreOutcome::AlreadyPresent);
                 }
+                Ok(_) => return Err(CacheError::UnsafeDerivedPath(path)),
+                Err(error) if error.kind() == ErrorKind::NotFound && active_leases == 0 => {
+                    let removed = state
+                        .entries
+                        .remove(&identity)
+                        .ok_or(CacheError::NotFound)?;
+                    state.used_bytes = state
+                        .used_bytes
+                        .checked_sub(removed.bytes)
+                        .ok_or(CacheError::ArithmeticOverflow)?;
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    return Err(CacheError::NotFound);
+                }
+                Err(error) => return Err(CacheError::Io(error)),
             }
-            return Ok(StoreOutcome::AlreadyPresent);
         }
         if entry_bytes > state.budget_bytes {
             return Err(CacheError::EntryExceedsBudget {
@@ -518,7 +554,9 @@ impl DerivedCache {
             .checked_add(entry_bytes)
             .ok_or(CacheError::ArithmeticOverflow)?;
         let tick = next_tick(&mut state)?;
-        let (path, mut file) = create_derived_file(&self.inner.root, &mut state)?;
+        let (path, mut file) =
+            create_derived_file(&self.inner.root, &self.inner.managed_dir, &mut state)?;
+        drop(operations_lock);
         if let Err(error) = file.write_all(bytes).and_then(|()| file.flush()) {
             drop(file);
             delete_managed_file(&self.inner.root, &path)?;
@@ -566,6 +604,7 @@ impl DerivedCache {
     ) -> Result<CacheLease, CacheError> {
         verify_managed_root(&self.inner.root)?;
         let mut state = lock_unpoisoned(&self.inner.state);
+        let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
         let entry = state.entries.get(identity).ok_or(CacheError::NotFound)?;
         match (current_observation, entry.source_observation.as_ref()) {
             (Some(current), Some(stored)) => {
@@ -591,6 +630,8 @@ impl DerivedCache {
             }
             Err(error) => return Err(CacheError::Io(error)),
         }
+        let lease_file = File::open(&path)?;
+        lease_file.try_lock_shared().map_err(io::Error::from)?;
         let tick = next_tick(&mut state)?;
         let entry = state
             .entries
@@ -601,6 +642,11 @@ impl DerivedCache {
             .checked_add(1)
             .ok_or(CacheError::ArithmeticOverflow)?;
         entry.last_used = tick;
+        state
+            .active_lease_files
+            .entry(identity.clone())
+            .or_default()
+            .push(lease_file);
         Ok(CacheLease {
             inner: Arc::clone(&self.inner),
             identity: identity.clone(),
@@ -613,6 +659,7 @@ impl DerivedCache {
     /// that completion acknowledgements are needed before it can be met.
     pub fn set_budget_bytes(&self, budget_bytes: u64) -> Result<(), CacheError> {
         let mut state = lock_unpoisoned(&self.inner.state);
+        let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
         state.budget_bytes = budget_bytes;
         trim_to_budget(&self.inner.root, &mut state)
     }
@@ -620,6 +667,7 @@ impl DerivedCache {
     /// Retries eviction after an owner boundary or other external state change.
     pub fn trim_to_budget(&self) -> Result<(), CacheError> {
         let mut state = lock_unpoisoned(&self.inner.state);
+        let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
         trim_to_budget(&self.inner.root, &mut state)
     }
 
@@ -659,6 +707,7 @@ impl CacheLease {
 
     pub fn acknowledge(self) -> Result<(), CacheError> {
         let mut state = lock_unpoisoned(&self.inner.state);
+        let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
         let active_leases = state
             .entries
             .get(&self.identity)
@@ -673,6 +722,15 @@ impl CacheLease {
             .ok_or(CacheError::InvalidLease)?;
         entry.active_leases = active_leases;
         entry.last_used = tick;
+        let handles = state
+            .active_lease_files
+            .get_mut(&self.identity)
+            .ok_or(CacheError::InvalidLease)?;
+        let handle = handles.pop().ok_or(CacheError::InvalidLease)?;
+        if handles.is_empty() {
+            state.active_lease_files.remove(&self.identity);
+        }
+        drop(handle);
         trim_to_budget(&self.inner.root, &mut state)
     }
 }
@@ -716,69 +774,85 @@ fn trim_to_budget(root: &Path, state: &mut CacheState) -> Result<(), CacheError>
 }
 
 fn evict_oldest_file(root: &Path, state: &mut CacheState) -> Result<bool, CacheError> {
-    let entry_victim = state
-        .entries
-        .iter()
-        .filter(|(_, entry)| entry.active_leases == 0)
-        .min_by_key(|(_, entry)| entry.last_used)
-        .map(|(identity, entry)| (entry.last_used, identity));
-    let orphan_victim = state
-        .orphaned_files
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, file)| file.last_used)
-        .map(|(index, file)| (file.last_used, index));
-    match (entry_victim, orphan_victim) {
-        (Some((entry_tick, identity)), Some((orphan_tick, _index)))
-            if entry_tick <= orphan_tick =>
-        {
-            let identity = identity.clone();
-            remove_entry(root, state, &identity)?;
+    let mut last_examined_tick = 0u64;
+    loop {
+        let entry_victim = state
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.active_leases == 0 && entry.last_used > last_examined_tick)
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(identity, entry)| (entry.last_used, identity));
+        let orphan_victim = state
+            .orphaned_files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| file.last_used > last_examined_tick)
+            .min_by_key(|(_, file)| file.last_used)
+            .map(|(index, file)| (file.last_used, index));
+        match (entry_victim, orphan_victim) {
+            (Some((entry_tick, identity)), Some((orphan_tick, _))) if entry_tick <= orphan_tick => {
+                let identity = identity.clone();
+                if remove_entry(root, state, &identity)? {
+                    return Ok(true);
+                }
+                last_examined_tick = entry_tick;
+            }
+            (Some((tick, identity)), None) => {
+                let identity = identity.clone();
+                if remove_entry(root, state, &identity)? {
+                    return Ok(true);
+                }
+                last_examined_tick = tick;
+            }
+            (_, Some((tick, index))) => {
+                if remove_orphaned_file(root, state, index)? {
+                    return Ok(true);
+                }
+                last_examined_tick = tick;
+            }
+            (None, None) => return Ok(false),
         }
-        (Some((_, identity)), None) => {
-            let identity = identity.clone();
-            remove_entry(root, state, &identity)?;
-        }
-        (_, Some((_, index))) => remove_orphaned_file(root, state, index)?,
-        (None, None) => return Ok(false),
     }
-    Ok(true)
 }
 
 fn remove_orphaned_file(
     root: &Path,
     state: &mut CacheState,
     index: usize,
-) -> Result<(), CacheError> {
+) -> Result<bool, CacheError> {
     let orphan = state
         .orphaned_files
         .get(index)
         .ok_or(CacheError::NotFound)?;
-    delete_managed_file(root, &orphan.path)?;
+    if !delete_managed_file(root, &orphan.path)? {
+        return Ok(false);
+    }
     let removed = state.orphaned_files.remove(index);
     state.used_bytes = state
         .used_bytes
         .checked_sub(removed.bytes)
         .ok_or(CacheError::ArithmeticOverflow)?;
-    Ok(())
+    Ok(true)
 }
 
 fn remove_entry(
     root: &Path,
     state: &mut CacheState,
     identity: &CacheIdentity,
-) -> Result<(), CacheError> {
+) -> Result<bool, CacheError> {
     let entry = state.entries.get(identity).ok_or(CacheError::NotFound)?;
     if entry.active_leases != 0 {
         return Err(CacheError::InvalidLease);
     }
-    delete_managed_file(root, &entry.path)?;
+    if !delete_managed_file(root, &entry.path)? {
+        return Ok(false);
+    }
     let removed = state.entries.remove(identity).ok_or(CacheError::NotFound)?;
     state.used_bytes = state
         .used_bytes
         .checked_sub(removed.bytes)
         .ok_or(CacheError::ArithmeticOverflow)?;
-    Ok(())
+    Ok(true)
 }
 
 fn verify_managed_root(root: &Path) -> Result<(), CacheError> {
@@ -790,38 +864,147 @@ fn verify_managed_root(root: &Path) -> Result<(), CacheError> {
     Ok(())
 }
 
-fn create_derived_file(root: &Path, state: &mut CacheState) -> Result<(PathBuf, File), CacheError> {
+fn cache_instance_is_owned(root: &Path, managed_dir: &Path) -> Result<bool, CacheError> {
+    if managed_dir.parent() != Some(root)
+        || managed_dir.file_name() != Some(OsStr::new(CACHE_INSTANCE_DIR))
+    {
+        return Ok(false);
+    }
+    let directory_metadata = match fs::symlink_metadata(managed_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(CacheError::Io(error)),
+    };
+    if !directory_metadata.file_type().is_dir()
+        || fs::canonicalize(managed_dir)?.as_path() != managed_dir
+    {
+        return Ok(false);
+    }
+    let marker_path = managed_dir.join(CACHE_OWNER_FILE);
+    let marker_metadata = match fs::symlink_metadata(&marker_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(CacheError::Io(error)),
+    };
+    if !marker_metadata.file_type().is_file() {
+        return Ok(false);
+    }
+    Ok(fs::read(marker_path)? == CACHE_OWNER_MARKER)
+}
+
+fn verify_owned_cache_dir(root: &Path, managed_dir: &Path) -> Result<(), CacheError> {
     verify_managed_root(root)?;
+    if !cache_instance_is_owned(root, managed_dir)? {
+        return Err(CacheError::UnsafeDerivedPath(managed_dir.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn write_cache_owner_marker(directory: &Path) -> Result<(), CacheError> {
+    let mut marker = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(directory.join(CACHE_OWNER_FILE))?;
+    marker.write_all(CACHE_OWNER_MARKER)?;
+    marker.sync_all()?;
+    Ok(())
+}
+
+fn create_cache_instance_dir(root: &Path) -> Result<PathBuf, CacheError> {
+    verify_managed_root(root)?;
+    let managed_dir = root.join(CACHE_INSTANCE_DIR);
+    match fs::create_dir(&managed_dir) {
+        Ok(()) => {
+            if let Err(error) = write_cache_owner_marker(&managed_dir) {
+                let _ = fs::remove_file(managed_dir.join(CACHE_OWNER_FILE));
+                let _ = fs::remove_dir(&managed_dir);
+                return Err(error);
+            }
+            Ok(managed_dir)
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            if cache_instance_is_owned(root, &managed_dir)? {
+                Ok(managed_dir)
+            } else {
+                Err(CacheError::UnsafeDerivedPath(managed_dir))
+            }
+        }
+        Err(error) => Err(CacheError::Io(error)),
+    }
+}
+
+fn lock_cache_directory(root: &Path, managed_dir: &Path) -> Result<File, CacheError> {
+    verify_owned_cache_dir(root, managed_dir)?;
+    let lock_path = managed_dir.join(CACHE_OPERATIONS_LOCK);
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(&lock_path)?;
+            if !metadata.file_type().is_file() {
+                return Err(CacheError::UnsafeDerivedPath(lock_path));
+            }
+            OpenOptions::new().read(true).write(true).open(lock_path)?
+        }
+        Err(error) => return Err(CacheError::Io(error)),
+    };
+    file.lock()?;
+    Ok(file)
+}
+
+fn create_derived_file(
+    root: &Path,
+    managed_dir: &Path,
+    state: &mut CacheState,
+) -> Result<(PathBuf, File), CacheError> {
+    verify_owned_cache_dir(root, managed_dir)?;
     loop {
         let id = state.next_file_id;
         state.next_file_id = state
             .next_file_id
             .checked_add(1)
             .ok_or(CacheError::ArithmeticOverflow)?;
-        let path = root.join(format!("derived-{id:016x}.bin"));
+        let path = managed_dir.join(format!("derived-{id:016x}.bin"));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((path, file)),
+            Ok(file) => {
+                file.try_lock().map_err(io::Error::from)?;
+                return Ok((path, file));
+            }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(CacheError::Io(error)),
         }
     }
 }
 
-fn delete_managed_file(root: &Path, path: &Path) -> Result<(), CacheError> {
+fn delete_managed_file(root: &Path, path: &Path) -> Result<bool, CacheError> {
     verify_managed_root(root)?;
+    let Some(managed_dir) = path.parent() else {
+        return Err(CacheError::UnsafeDerivedPath(path.to_path_buf()));
+    };
     let filename_is_managed = path
         .file_name()
         .map(|name| derived_file_id(name).is_some())
         .unwrap_or(false);
-    if path.parent() != Some(root) || !filename_is_managed {
+    if !filename_is_managed {
         return Err(CacheError::UnsafeDerivedPath(path.to_path_buf()));
     }
+    verify_owned_cache_dir(root, managed_dir)?;
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => {
-            fs::remove_file(path).map_err(CacheError::Io)
+            let file = File::open(path)?;
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(TryLockError::WouldBlock) => return Ok(false),
+                Err(TryLockError::Error(error)) => return Err(CacheError::Io(error)),
+            }
+            fs::remove_file(path).map(|()| true).map_err(CacheError::Io)
         }
         Ok(_) => Err(CacheError::UnsafeDerivedPath(path.to_path_buf())),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
         Err(error) => Err(CacheError::Io(error)),
     }
 }
@@ -838,24 +1021,31 @@ fn derived_file_id(file_name: &OsStr) -> Option<u64> {
 fn scan_orphaned_files(root: &Path) -> Result<(Vec<OrphanedFile>, u64, u64, u64), CacheError> {
     let mut discovered = Vec::new();
     let mut next_file_id = 0u64;
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let Some(file_id) = derived_file_id(&entry.file_name()) else {
-            continue;
-        };
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if !metadata.file_type().is_file() {
+    for directory_entry in fs::read_dir(root)? {
+        let directory_entry = directory_entry?;
+        let managed_dir = directory_entry.path();
+        if !cache_instance_is_owned(root, &managed_dir)? {
             continue;
         }
-        next_file_id = next_file_id.max(
-            file_id
-                .checked_add(1)
-                .ok_or(CacheError::ArithmeticOverflow)?,
-        );
-        discovered.push((file_id, path, metadata.len()));
+        for entry in fs::read_dir(&managed_dir)? {
+            let entry = entry?;
+            let Some(file_id) = derived_file_id(&entry.file_name()) else {
+                continue;
+            };
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_file() {
+                continue;
+            }
+            next_file_id = next_file_id.max(
+                file_id
+                    .checked_add(1)
+                    .ok_or(CacheError::ArithmeticOverflow)?,
+            );
+            discovered.push((file_id, path, metadata.len()));
+        }
     }
-    discovered.sort_by_key(|(file_id, _, _)| *file_id);
+    discovered.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 
     let mut used_bytes = 0u64;
     let mut lru_clock = 0u64;
@@ -927,6 +1117,7 @@ impl std::error::Error for DiskReservationError {}
 struct DiskBudgetState {
     available_bytes: u64,
     reserved_bytes: u64,
+    consumed_bytes_since_refresh: u64,
 }
 
 #[derive(Debug)]
@@ -936,7 +1127,8 @@ struct DiskBudgetInner {
 }
 
 /// Shared reservation ledger. The host supplies available bytes from its platform disk-space
-/// probe; every reservation holds back the configured safety reserve.
+/// probe; every reservation holds back the configured safety reserve. Output bytes written since
+/// the last refresh are charged until a fresh host probe includes them.
 #[derive(Clone, Debug)]
 pub struct DiskBudget {
     inner: Arc<DiskBudgetInner>,
@@ -950,15 +1142,19 @@ impl DiskBudget {
                 state: Mutex::new(DiskBudgetState {
                     available_bytes,
                     reserved_bytes: 0,
+                    consumed_bytes_since_refresh: 0,
                 }),
             }),
         }
     }
 
-    /// Refreshes the host-probed free-space estimate before future reservations. Existing
-    /// reservations are never revoked; their writes may still receive a typed disk-full error.
+    /// Refreshes the host-probed free-space estimate before future reservations. The fresh
+    /// estimate supersedes output bytes recorded since the previous refresh; outstanding
+    /// reservations retain only their unwritten capacity and are never revoked.
     pub fn refresh_available_bytes(&self, available_bytes: u64) {
-        lock_unpoisoned(&self.inner.state).available_bytes = available_bytes;
+        let mut state = lock_unpoisoned(&self.inner.state);
+        state.available_bytes = available_bytes;
+        state.consumed_bytes_since_refresh = 0;
     }
 
     pub fn reserve(
@@ -967,8 +1163,11 @@ impl DiskBudget {
     ) -> Result<DiskReservation, DiskReservationError> {
         let requested_bytes = requirements.total_bytes()?;
         let mut state = lock_unpoisoned(&self.inner.state);
-        let with_request = state
+        let currently_accounted = state
             .reserved_bytes
+            .checked_add(state.consumed_bytes_since_refresh)
+            .ok_or(DiskReservationError::ArithmeticOverflow)?;
+        let with_request = currently_accounted
             .checked_add(requested_bytes)
             .ok_or(DiskReservationError::ArithmeticOverflow)?;
         let allocatable = state
@@ -978,11 +1177,14 @@ impl DiskBudget {
             return Err(DiskReservationError::InsufficientSpace {
                 available_bytes: state.available_bytes,
                 safety_reserve_bytes: self.inner.safety_reserve_bytes,
-                currently_reserved_bytes: state.reserved_bytes,
+                currently_reserved_bytes: currently_accounted,
                 requested_bytes,
             });
         }
-        state.reserved_bytes = with_request;
+        state.reserved_bytes = state
+            .reserved_bytes
+            .checked_add(requested_bytes)
+            .ok_or(DiskReservationError::ArithmeticOverflow)?;
         Ok(DiskReservation {
             inner: Arc::clone(&self.inner),
             requirements,
@@ -997,6 +1199,7 @@ impl DiskBudget {
             available_bytes: state.available_bytes,
             safety_reserve_bytes: self.inner.safety_reserve_bytes,
             reserved_bytes: state.reserved_bytes,
+            consumed_bytes_since_refresh: state.consumed_bytes_since_refresh,
         }
     }
 }
@@ -1006,10 +1209,11 @@ pub struct DiskBudgetSnapshot {
     pub available_bytes: u64,
     pub safety_reserve_bytes: u64,
     pub reserved_bytes: u64,
+    pub consumed_bytes_since_refresh: u64,
 }
 
-/// RAII accounting for expanded input, scratch, and output capacity. Dropping it releases the
-/// reservation; all successful output writes using it share the reserved `output_bytes` limit.
+/// RAII accounting for expanded input, scratch, and output capacity. Dropping it releases
+/// unwritten capacity; bytes already written remain charged until a host-space refresh.
 #[derive(Debug)]
 pub struct DiskReservation {
     inner: Arc<DiskBudgetInner>,
@@ -1022,14 +1226,42 @@ impl DiskReservation {
     pub fn requirements(&self) -> DiskRequirements {
         self.requirements
     }
+
+    fn record_output_bytes(
+        &self,
+        output_written_bytes: &mut u64,
+        written_bytes: u64,
+    ) -> io::Result<()> {
+        let next_output_written = output_written_bytes
+            .checked_add(written_bytes)
+            .ok_or_else(|| io::Error::other("written output byte accounting overflowed"))?;
+        let mut state = lock_unpoisoned(&self.inner.state);
+        let next_reserved = state
+            .reserved_bytes
+            .checked_sub(written_bytes)
+            .ok_or_else(|| io::Error::other("disk reservation accounting invariant violated"))?;
+        let next_consumed = state
+            .consumed_bytes_since_refresh
+            .checked_add(written_bytes)
+            .ok_or_else(|| io::Error::other("consumed output byte accounting overflowed"))?;
+        state.reserved_bytes = next_reserved;
+        state.consumed_bytes_since_refresh = next_consumed;
+        *output_written_bytes = next_output_written;
+        Ok(())
+    }
 }
 
 impl Drop for DiskReservation {
     fn drop(&mut self) {
+        let output_written_bytes = lock_unpoisoned(&self.output_written_bytes);
+        let unwritten_reserved_bytes = self
+            .reserved_bytes
+            .checked_sub(*output_written_bytes)
+            .expect("disk reservation output accounting invariant violated");
         let mut state = lock_unpoisoned(&self.inner.state);
         state.reserved_bytes = state
             .reserved_bytes
-            .checked_sub(self.reserved_bytes)
+            .checked_sub(unwritten_reserved_bytes)
             .expect("disk reservation accounting invariant violated");
     }
 }
@@ -1098,6 +1330,7 @@ struct OutputRegistryState {
 struct RegisteredOutput {
     path: PathBuf,
     canonical_path: PathBuf,
+    file_identity: Option<OutputFileIdentity>,
 }
 
 /// Valid-output registry. A key is inserted only after its staged file has been flushed, synced,
@@ -1148,11 +1381,23 @@ impl OutputRegistry {
             };
             OutputWriteError::new(kind, None, Some(error))
         })?;
-        let (write_result, limit_exceeded) = {
+        let (write_result, limit_exceeded, underlying_error) = {
             let mut limited = LimitedWriter::new(&mut file, reservation);
             let write_result = writer(&mut limited);
-            (write_result, limited.limit_exceeded)
+            (
+                write_result,
+                limited.limit_exceeded,
+                limited.underlying_error,
+            )
         };
+        if let Some(error) = underlying_error {
+            let kind = if is_disk_full(&error) {
+                OutputFailureKind::DiskFull
+            } else {
+                OutputFailureKind::Writer
+            };
+            return Err(OutputWriteError::new(kind, Some(temp_path), Some(error)));
+        }
         if limit_exceeded {
             return Err(OutputWriteError::new(
                 OutputFailureKind::OutputLimitExceeded,
@@ -1191,6 +1436,7 @@ impl OutputRegistry {
                 Some(error),
             ));
         }
+        let previous_destination_identity = existing_output_file_identity(destination);
         if let Err(error) = replace_destination(&temp_path, destination) {
             let kind = if is_disk_full(&error) {
                 OutputFailureKind::DiskFull
@@ -1199,44 +1445,67 @@ impl OutputRegistry {
             };
             return Err(OutputWriteError::new(kind, Some(temp_path), Some(error)));
         }
+        let committed_file_identity = output_file_identity_from_file(&file).ok().flatten();
         drop(file);
         let committed_path = destination.to_path_buf();
         let committed_canonical_destination =
             canonical_output_destination(destination).unwrap_or(canonical_destination);
         registry.valid.retain(|_, output| {
             !same_output_destination(&output.canonical_path, &committed_canonical_destination)
+                && !previous_destination_identity
+                    .is_some_and(|file_identity| output.file_identity == Some(file_identity))
         });
         registry.valid.insert(
             identity,
             RegisteredOutput {
                 path: committed_path.clone(),
                 canonical_path: committed_canonical_destination,
+                file_identity: committed_file_identity,
             },
         );
         Ok(committed_path)
     }
 }
 
-struct LimitedWriter<'a> {
-    inner: &'a mut File,
+struct LimitedWriter<'a, W: Write + ?Sized> {
+    inner: &'a mut W,
     reservation: &'a DiskReservation,
     limit_exceeded: bool,
+    underlying_error: Option<io::Error>,
 }
 
-impl<'a> LimitedWriter<'a> {
-    fn new(inner: &'a mut File, reservation: &'a DiskReservation) -> Self {
+impl<'a, W: Write + ?Sized> LimitedWriter<'a, W> {
+    fn new(inner: &'a mut W, reservation: &'a DiskReservation) -> Self {
         Self {
             inner,
             reservation,
             limit_exceeded: false,
+            underlying_error: None,
         }
+    }
+
+    fn remember_io_error(&mut self, error: io::Error) -> io::Error {
+        if self.underlying_error.is_some() {
+            return error;
+        }
+        let returned_error = match error.raw_os_error() {
+            Some(code) => io::Error::from_raw_os_error(code),
+            None => io::Error::new(error.kind(), error.to_string()),
+        };
+        self.underlying_error = Some(error);
+        returned_error
     }
 }
 
-impl Write for LimitedWriter<'_> {
+impl<W: Write + ?Sized> Write for LimitedWriter<'_, W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let count =
-            u64::try_from(bytes.len()).map_err(|_| io::Error::other("write length overflow"))?;
+        let count = match u64::try_from(bytes.len()) {
+            Ok(count) => count,
+            Err(_) => {
+                let error = io::Error::other("write length overflow");
+                return Err(self.remember_io_error(error));
+            }
+        };
         let mut output_written = lock_unpoisoned(&self.reservation.output_written_bytes);
         let remaining = self
             .reservation
@@ -1251,17 +1520,41 @@ impl Write for LimitedWriter<'_> {
             self.limit_exceeded = true;
             return Err(io::Error::other("reserved output capacity exceeded"));
         }
-        let written = self.inner.write(bytes)?;
-        *output_written = output_written
-            .checked_add(
-                u64::try_from(written).map_err(|_| io::Error::other("write length overflow"))?,
-            )
-            .ok_or_else(|| io::Error::other("write length overflow"))?;
+        let written = match self.inner.write(bytes) {
+            Ok(0) if !bytes.is_empty() => {
+                let error = io::Error::new(ErrorKind::WriteZero, "output writer made no progress");
+                drop(output_written);
+                return Err(self.remember_io_error(error));
+            }
+            Ok(written) => written,
+            Err(error) => {
+                drop(output_written);
+                return Err(self.remember_io_error(error));
+            }
+        };
+        let written_bytes = match u64::try_from(written) {
+            Ok(written_bytes) => written_bytes,
+            Err(_) => {
+                let error = io::Error::other("write length overflow");
+                drop(output_written);
+                return Err(self.remember_io_error(error));
+            }
+        };
+        if let Err(error) = self
+            .reservation
+            .record_output_bytes(&mut output_written, written_bytes)
+        {
+            drop(output_written);
+            return Err(self.remember_io_error(error));
+        }
         Ok(written)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
+        match self.inner.flush() {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.remember_io_error(error)),
+        }
     }
 }
 
@@ -1320,6 +1613,66 @@ fn is_disk_full(error: &io::Error) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OutputFileIdentity {
+    volume: u64,
+    file: u64,
+}
+
+#[cfg(unix)]
+fn output_file_identity_from_file(file: &File) -> io::Result<Option<OutputFileIdentity>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    Ok(Some(OutputFileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    }))
+}
+
+#[cfg(windows)]
+fn output_file_identity_from_file(file: &File) -> io::Result<Option<OutputFileIdentity>> {
+    let (volume, file) = windows_file_identity(file)?;
+    Ok(Some(OutputFileIdentity {
+        volume: u64::from(volume),
+        file,
+    }))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn output_file_identity_from_file(_file: &File) -> io::Result<Option<OutputFileIdentity>> {
+    Ok(None)
+}
+
+fn existing_output_file_identity(path: &Path) -> Option<OutputFileIdentity> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        Some(OutputFileIdentity {
+            volume: metadata.dev(),
+            file: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        let file = OpenOptions::new().read(true).open(path).ok()?;
+        let (volume, file) = windows_file_identity(&file).ok()?;
+        Some(OutputFileIdentity {
+            volume: u64::from(volume),
+            file,
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
 fn canonical_output_destination(destination: &Path) -> io::Result<PathBuf> {
     let parent = destination
         .parent()
@@ -1339,36 +1692,35 @@ fn canonical_output_destination(destination: &Path) -> io::Result<PathBuf> {
     Ok(canonical_parent.join(file_name))
 }
 
+#[cfg(not(windows))]
+fn same_output_destination(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
+#[cfg(windows)]
 fn same_output_destination(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
+    use std::os::windows::fs::MetadataExt;
 
-        let (Some(left_parent), Some(right_parent)) = (left.parent(), right.parent()) else {
-            return false;
-        };
-        if left_parent != right_parent {
-            return false;
-        }
-        let (Some(left_name), Some(right_name)) = (left.file_name(), right.file_name()) else {
-            return false;
-        };
-        const FILE_ATTRIBUTE_CASE_SENSITIVE_DIR: u32 = 0x1000_0000;
-        let Ok(parent_metadata) = fs::metadata(left_parent) else {
-            return false;
-        };
-        if parent_metadata.file_attributes() & FILE_ATTRIBUTE_CASE_SENSITIVE_DIR != 0 {
-            left_name == right_name
-        } else {
-            windows_filename_eq_ordinal_ignore_case(left_name, right_name)
-        }
+    let (Some(left_parent), Some(right_parent)) = (left.parent(), right.parent()) else {
+        return false;
+    };
+    if left_parent != right_parent {
+        return false;
+    }
+    let (Some(left_name), Some(right_name)) = (left.file_name(), right.file_name()) else {
+        return false;
+    };
+    const FILE_ATTRIBUTE_CASE_SENSITIVE_DIR: u32 = 0x1000_0000;
+    let Ok(parent_metadata) = fs::metadata(left_parent) else {
+        return false;
+    };
+    if parent_metadata.file_attributes() & FILE_ATTRIBUTE_CASE_SENSITIVE_DIR != 0 {
+        left_name == right_name
+    } else {
+        windows_filename_eq_ordinal_ignore_case(left_name, right_name)
     }
 }
 
@@ -1603,4 +1955,101 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DiskFullAfterPrefix {
+        remaining_bytes: usize,
+    }
+
+    impl Write for DiskFullAfterPrefix {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.remaining_bytes == 0 {
+                return Err(io::Error::new(
+                    ErrorKind::StorageFull,
+                    "injected underlying disk-full error",
+                ));
+            }
+            let written = self.remaining_bytes.min(bytes.len());
+            self.remaining_bytes -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn swallowed_underlying_disk_full_write_error_is_retained() {
+        let budget = DiskBudget::new(100, 0);
+        let reservation = budget
+            .reserve(DiskRequirements {
+                output_bytes: 8,
+                ..DiskRequirements::default()
+            })
+            .unwrap();
+        let mut file = DiskFullAfterPrefix { remaining_bytes: 4 };
+        let (callback_result, underlying_error) = {
+            let mut limited = LimitedWriter::new(&mut file, &reservation);
+            let callback_result: io::Result<()> = {
+                let output: &mut dyn Write = &mut limited;
+                let _ = output.write_all(b"abcdefgh");
+                Ok(())
+            };
+            (callback_result, limited.underlying_error.take())
+        };
+
+        assert!(callback_result.is_ok());
+        let error = underlying_error.expect("the swallowed write failure remains latched");
+        assert_eq!(error.kind(), ErrorKind::StorageFull);
+        assert!(is_disk_full(&error));
+        assert_eq!(budget.snapshot().reserved_bytes, 4);
+        assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 4);
+    }
+    struct DiskFullOnFlush;
+
+    impl Write for DiskFullOnFlush {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(
+                ErrorKind::StorageFull,
+                "injected underlying disk-full flush error",
+            ))
+        }
+    }
+
+    #[test]
+    fn swallowed_underlying_disk_full_flush_error_is_retained() {
+        let budget = DiskBudget::new(100, 0);
+        let reservation = budget
+            .reserve(DiskRequirements {
+                output_bytes: 8,
+                ..DiskRequirements::default()
+            })
+            .unwrap();
+        let mut file = DiskFullOnFlush;
+        let (callback_result, underlying_error) = {
+            let mut limited = LimitedWriter::new(&mut file, &reservation);
+            let callback_result: io::Result<()> = {
+                let output: &mut dyn Write = &mut limited;
+                let _ = output.flush();
+                Ok(())
+            };
+            (callback_result, limited.underlying_error.take())
+        };
+
+        assert!(callback_result.is_ok());
+        let error = underlying_error.expect("the swallowed flush failure remains latched");
+        assert_eq!(error.kind(), ErrorKind::StorageFull);
+        assert!(is_disk_full(&error));
+        assert_eq!(budget.snapshot().reserved_bytes, 8);
+        assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 0);
+    }
 }
