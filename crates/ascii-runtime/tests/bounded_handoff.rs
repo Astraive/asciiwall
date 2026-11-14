@@ -6,7 +6,8 @@ use ascii_core::{
 };
 use ascii_runtime::{
     BoundedHandoff, BufferPool, ControlEvent, ControlQueue, FrameDescriptor, FrameQueue,
-    MemoryUsage, RasterDescriptorMetadata, ResourceBudget, ResourceLimits, RuntimeError, SlotState,
+    MemoryUsage, PermitKind, RasterDescriptorMetadata, ResourceBudget, ResourceLimits,
+    RuntimeError, SlotState,
 };
 
 fn budget() -> Budget {
@@ -97,11 +98,11 @@ fn frame_flood_stays_bounded_and_stop_bypasses_full_control_queue() {
         .controls()
         .try_send(ControlEvent::RevokePermissions)
         .unwrap();
+    assert_eq!(handoff.controls().try_recv(), Some(ControlEvent::Stop));
     assert_eq!(
         handoff.controls().try_recv(),
         Some(ControlEvent::RevokePermissions)
     );
-    assert_eq!(handoff.controls().try_recv(), Some(ControlEvent::Stop));
     assert_eq!(handoff.controls().try_recv(), Some(ControlEvent::Refresh));
     assert_eq!(handoff.queued_frames(), 1);
     let published_slots = (0..2)
@@ -119,6 +120,76 @@ fn frame_flood_stays_bounded_and_stop_bypasses_full_control_queue() {
     assert_eq!(latest.descriptor().media_timestamp_ns, 127);
     latest.completion_token().unwrap().acknowledge();
     latest.release().unwrap();
+}
+#[test]
+fn one_slot_handoff_replaces_the_queued_frame_with_the_latest_frame() {
+    let handoff = BoundedHandoff::new(&runtime_budget(), 1, 1, 3, 1, 1).unwrap();
+    let limits = budget();
+
+    let first = handoff
+        .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
+        .unwrap();
+    let latest = handoff
+        .submit_frame(metadata(2), &[4, 5, 6], &limits, &CancellationToken::new())
+        .unwrap();
+
+    assert_ne!(first.publication_id, latest.publication_id);
+    assert_eq!(handoff.queued_frames(), 1);
+    let mut lease = handoff
+        .receive_frame(&limits, &CancellationToken::new())
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.descriptor().media_timestamp_ns, 2);
+    assert_eq!(
+        lease.with_pixels(|pixels| pixels.to_vec()).unwrap(),
+        vec![4, 5, 6]
+    );
+    lease.completion_token().unwrap().acknowledge();
+    lease.release().unwrap();
+}
+
+#[test]
+fn invalid_one_slot_replacement_preserves_the_queued_frame() {
+    let handoff = BoundedHandoff::new(&runtime_budget(), 1, 1, 3, 1, 1).unwrap();
+    let limits = budget();
+    handoff
+        .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
+        .unwrap();
+    let mut invalid = metadata(2);
+    invalid.width = 0;
+
+    assert_eq!(
+        handoff.submit_frame(invalid, &[4, 5, 6], &limits, &CancellationToken::new()),
+        Err(RuntimeError::CoreValidation(CoreError::Malformed(
+            MalformedReason::EmptyDimensions
+        )))
+    );
+    assert_eq!(handoff.queued_frames(), 1);
+    let mut lease = handoff
+        .receive_frame(&limits, &CancellationToken::new())
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.descriptor().media_timestamp_ns, 1);
+    assert_eq!(
+        lease.with_pixels(|pixels| pixels.to_vec()).unwrap(),
+        vec![1, 2, 3]
+    );
+    lease.completion_token().unwrap().acknowledge();
+    lease.release().unwrap();
+}
+
+#[test]
+fn stop_is_delivered_before_repeated_permission_revocation() {
+    let controls = ControlQueue::new(&runtime_budget(), 1).unwrap();
+    controls.try_send(ControlEvent::RevokePermissions).unwrap();
+    controls.try_send(ControlEvent::Stop).unwrap();
+    for _ in 0..1024 {
+        controls.try_send(ControlEvent::RevokePermissions).unwrap();
+    }
+
+    assert_eq!(controls.try_recv(), Some(ControlEvent::Stop));
+    assert_eq!(controls.try_recv(), Some(ControlEvent::RevokePermissions));
+    assert!(controls.is_empty());
 }
 
 #[test]
@@ -201,7 +272,8 @@ fn slot_ownership_requires_explicit_completion_and_release() {
 
 #[test]
 fn dropped_unacknowledged_completion_token_keeps_lease_pending() {
-    let pool = BufferPool::new(&runtime_budget(), 1, 1, 3).unwrap();
+    let resources = runtime_budget();
+    let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
     let descriptor = publish(&pool, 1);
     let mut lease = pool
         .consume(&descriptor, &budget(), &CancellationToken::new())
@@ -214,10 +286,52 @@ fn dropped_unacknowledged_completion_token_keeps_lease_pending() {
     );
     assert_eq!(lease.release(), Err(RuntimeError::CompletionPending));
     assert_eq!(pool.slot_state(0).unwrap(), SlotState::Consumed);
+    assert_eq!(resources.snapshot().outputs, 1);
 
     assert_eq!(pool.invalidate_generation(2).unwrap(), 1);
+    assert_eq!(resources.snapshot().outputs, 0);
     lease.release().unwrap();
     assert_eq!(pool.slot_state(0).unwrap(), SlotState::Free);
+}
+
+#[test]
+fn acknowledgement_reclaims_a_slot_after_its_lease_was_dropped() {
+    let resources = runtime_budget();
+    let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
+    let descriptor = publish(&pool, 1);
+    let mut lease = pool
+        .consume(&descriptor, &budget(), &CancellationToken::new())
+        .unwrap();
+    let token = lease.completion_token().unwrap();
+    drop(lease);
+    assert_eq!(pool.slot_state(0).unwrap(), SlotState::Consumed);
+    assert_eq!(resources.snapshot().outputs, 1);
+
+    token.acknowledge();
+
+    assert_eq!(pool.slot_state(0).unwrap(), SlotState::Free);
+    assert_eq!(resources.snapshot().outputs, 0);
+    drop(pool.begin_fill().unwrap());
+}
+
+#[test]
+fn pending_completion_token_pins_pool_until_external_acknowledgement() {
+    let resources = runtime_budget();
+    let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
+    let descriptor = publish(&pool, 1);
+    let charged_memory = resources.snapshot().memory;
+    let mut lease = pool
+        .consume(&descriptor, &budget(), &CancellationToken::new())
+        .unwrap();
+    let token = lease.completion_token().unwrap();
+    drop(lease);
+    drop(pool);
+
+    assert_eq!(resources.snapshot().memory, charged_memory);
+    assert_eq!(resources.snapshot().outputs, 1);
+    token.acknowledge();
+    assert_eq!(resources.snapshot().memory, MemoryUsage::default());
+    assert_eq!(resources.snapshot().outputs, 0);
 }
 
 #[test]
@@ -290,7 +404,7 @@ fn raster_dimensions_stride_format_and_length_use_core_validation() {
 }
 
 #[test]
-fn crash_generation_invalidation_severs_an_outstanding_lease() {
+fn logical_generation_invalidation_severs_an_outstanding_lease() {
     let handoff = BoundedHandoff::new(&runtime_budget(), 1, 1, 3, 1, 1).unwrap();
     handoff
         .submit_frame(
@@ -360,6 +474,57 @@ fn completed_lease_releases_its_pool_pin_without_dropping_the_handle() {
         lease.with_pixels(|pixels| pixels.len()),
         Err(RuntimeError::StaleLease)
     );
+}
+
+#[test]
+fn active_handoff_output_holds_the_shared_output_permit_until_completion() {
+    let resources = runtime_budget();
+    let handoff = BoundedHandoff::new(&resources, 1, 1, 3, 1, 1).unwrap();
+    handoff
+        .submit_frame(
+            metadata(1),
+            &[1, 2, 3],
+            &budget(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let mut lease = handoff
+        .receive_frame(&budget(), &CancellationToken::new())
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(resources.snapshot().outputs, 1);
+    assert_eq!(
+        lease
+            .with_pixels(|pixels| {
+                assert_eq!(pixels.len(), 3);
+                resources.try_acquire_cpu().unwrap_err()
+            })
+            .unwrap(),
+        RuntimeError::ConcurrencyLimit(PermitKind::Cpu)
+    );
+    assert_eq!(
+        resources.try_acquire_output().unwrap_err(),
+        RuntimeError::ConcurrencyLimit(PermitKind::Output)
+    );
+    lease.completion_token().unwrap().acknowledge();
+    assert_eq!(resources.snapshot().outputs, 0);
+    lease.release().unwrap();
+}
+
+#[test]
+fn shared_cpu_limit_is_enforced_across_worker_threads() {
+    let resources = runtime_budget();
+    let held = resources.try_acquire_cpu().unwrap();
+    let worker_resources = resources.clone();
+
+    let competing = std::thread::spawn(move || worker_resources.try_acquire_cpu().unwrap_err())
+        .join()
+        .unwrap();
+    assert_eq!(competing, RuntimeError::ConcurrencyLimit(PermitKind::Cpu));
+
+    drop(held);
+    assert_eq!(resources.try_acquire_cpu().unwrap().kind(), PermitKind::Cpu);
 }
 
 #[test]
@@ -534,6 +699,10 @@ fn fixed_bounds_and_aggregate_permits_are_enforced_and_released() {
         Err(RuntimeError::ConcurrencyLimit(_))
     ));
     let decode = clone.try_acquire_decode().unwrap();
+    assert_eq!(
+        budget.try_acquire_decode().unwrap_err(),
+        RuntimeError::ConcurrencyLimit(PermitKind::Decode)
+    );
     let output = budget.try_acquire_output().unwrap();
     assert_eq!(budget.snapshot().cpu_jobs, 1);
     assert_eq!(budget.snapshot().decode_jobs, 1);
@@ -546,15 +715,42 @@ fn fixed_bounds_and_aggregate_permits_are_enforced_and_released() {
     assert_eq!(budget.snapshot().decode_jobs, 0);
     assert_eq!(budget.snapshot().outputs, 0);
 
+    let mut old_scene = budget.try_reserve_memory(MemoryUsage::new(6, 6)).unwrap();
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(6, 6));
     assert_eq!(
         budget
-            .try_begin_transition(MemoryUsage::new(6, 6), MemoryUsage::new(5, 5))
+            .try_begin_transition(&mut old_scene, MemoryUsage::new(5, 5))
             .unwrap_err(),
         RuntimeError::MemoryBudgetExceeded
     );
-    let transition = budget
-        .try_begin_transition(MemoryUsage::new(4, 4), MemoryUsage::new(5, 5))
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(6, 6));
+    drop(old_scene);
+    assert_eq!(budget.snapshot().memory, MemoryUsage::default());
+
+    let other_budget = runtime_budget();
+    let mut foreign_old = other_budget
+        .try_reserve_memory(MemoryUsage::new(1, 0))
         .unwrap();
+    assert_eq!(
+        budget
+            .try_begin_transition(&mut foreign_old, MemoryUsage::default())
+            .unwrap_err(),
+        RuntimeError::ResourceBudgetMismatch
+    );
+    assert_eq!(budget.snapshot().memory, MemoryUsage::default());
+    assert_eq!(
+        other_budget.snapshot().memory,
+        MemoryUsage::new(1, 0),
+        "a failed cross-budget transfer leaves the source permit intact"
+    );
+    drop(foreign_old);
+
+    let mut old_scene = budget.try_reserve_memory(MemoryUsage::new(4, 4)).unwrap();
+    let transition = budget
+        .try_begin_transition(&mut old_scene, MemoryUsage::new(5, 5))
+        .unwrap();
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
+    drop(old_scene);
     assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
     assert_eq!(
         budget
