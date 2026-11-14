@@ -3,12 +3,55 @@
 /// Glyphs 0, 2, and 3 are single rectangular outlines; glyph 1 is the blank space glyph. With
 /// `narrow_b`, glyph 3 has a narrower outline so the font bytes and measured table both change.
 pub fn synthetic_font(narrow_b: bool) -> Vec<u8> {
-    let mut glyphs = vec![
+    let glyphs = vec![
         rectangle(600, 800),
         Vec::new(),
         rectangle(500, 700),
         rectangle(if narrow_b { 350 } else { 500 }, 700),
     ];
+    font_with_glyphs(glyphs, false)
+}
+
+/// A source-generated font with many long diagonal outline edges.
+pub fn diagonal_font(alias_b: bool) -> Vec<u8> {
+    font_with_glyphs(
+        vec![
+            rectangle(600, 800),
+            Vec::new(),
+            outline_heavy(false),
+            rectangle(500, 700),
+        ],
+        alias_b,
+    )
+}
+
+/// A source-generated font whose outline contains many quadratic curves.
+pub fn quadratic_font() -> Vec<u8> {
+    font_with_glyphs(
+        vec![
+            rectangle(600, 800),
+            Vec::new(),
+            outline_heavy(true),
+            rectangle(500, 700),
+        ],
+        false,
+    )
+}
+
+/// A composite glyph containing the same outline-heavy component twice.
+pub fn composite_font() -> Vec<u8> {
+    font_with_glyphs(
+        vec![
+            rectangle(600, 800),
+            Vec::new(),
+            composite(),
+            outline_heavy(false),
+        ],
+        false,
+    )
+}
+
+fn font_with_glyphs(mut glyphs: Vec<Vec<u8>>, alias_b: bool) -> Vec<u8> {
     let mut glyf = Vec::new();
     let mut offsets = Vec::with_capacity(glyphs.len() + 1);
     for glyph in &mut glyphs {
@@ -22,7 +65,7 @@ pub fn synthetic_font(narrow_b: bool) -> Vec<u8> {
         push_u16(&mut loca, offset);
     }
     let tables = vec![
-        (*b"cmap", cmap()),
+        (*b"cmap", cmap(alias_b)),
         (*b"glyf", glyf),
         (*b"head", head()),
         (*b"hhea", hhea()),
@@ -33,6 +76,56 @@ pub fn synthetic_font(narrow_b: bool) -> Vec<u8> {
         (*b"maxp", maxp()),
     ];
     sfnt(tables)
+}
+
+fn outline_heavy(quadratic: bool) -> Vec<u8> {
+    let contours = if quadratic { 128u16 } else { 256u16 };
+    let points = if quadratic {
+        [(0i16, 0i16), (0, 700), (500, 700), (500, 0)]
+    } else {
+        [(0i16, 20i16), (500, 720), (500, 700), (0, 0)]
+    };
+    let mut glyph = Vec::new();
+    push_i16(
+        &mut glyph,
+        i16::try_from(contours).expect("contour count fits"),
+    );
+    for bound in [0, 0, 500, if quadratic { 700 } else { 720 }] {
+        push_i16(&mut glyph, bound);
+    }
+    for contour in 0..contours {
+        push_u16(&mut glyph, contour * 4 + 3);
+    }
+    push_u16(&mut glyph, 0); // no instructions
+    for _ in 0..contours {
+        glyph.extend_from_slice(if quadratic { &[1, 0, 1, 0] } else { &[1; 4] });
+    }
+    for axis in 0..2 {
+        let mut previous = 0i16;
+        for _ in 0..contours {
+            for &(x, y) in &points {
+                let coordinate = if axis == 0 { x } else { y };
+                push_i16(&mut glyph, coordinate - previous);
+                previous = coordinate;
+            }
+        }
+    }
+    glyph
+}
+
+fn composite() -> Vec<u8> {
+    let mut glyph = Vec::new();
+    push_i16(&mut glyph, -1); // composite
+    for bound in [0, 0, 500, 720] {
+        push_i16(&mut glyph, bound);
+    }
+    for flags in [0x0023, 0x0003] {
+        push_u16(&mut glyph, flags); // word-sized XY offsets; first has another component
+        push_u16(&mut glyph, 3);
+        push_i16(&mut glyph, 0);
+        push_i16(&mut glyph, 0);
+    }
+    glyph
 }
 
 fn rectangle(width: u16, height: u16) -> Vec<u8> {
@@ -118,11 +211,13 @@ fn maxp() -> Vec<u8> {
     let mut table = Vec::with_capacity(32);
     push_u32(&mut table, 0x0001_0000); // TrueType outlines
     push_u16(&mut table, 4);
-    table.resize(32, 0); // no composite glyphs or additional limits
+    for value in [1024, 256, 2048, 512, 1, 0, 0, 0, 0, 0, 0, 2, 1] {
+        push_u16(&mut table, value);
+    }
     table
 }
 
-fn cmap() -> Vec<u8> {
+fn cmap(alias_b: bool) -> Vec<u8> {
     let mut subtable = Vec::new();
     push_u16(&mut subtable, 4); // format 4
     push_u16(&mut subtable, 0); // length, filled below
@@ -138,10 +233,24 @@ fn cmap() -> Vec<u8> {
     for start in [0x0020, 0x0041, 0xffff] {
         push_u16(&mut subtable, start);
     }
-    for delta in [1u16.wrapping_sub(0x0020), 2u16.wrapping_sub(0x0041), 1] {
+    for delta in [
+        1u16.wrapping_sub(0x0020),
+        if alias_b {
+            0
+        } else {
+            2u16.wrapping_sub(0x0041)
+        },
+        1,
+    ] {
         push_u16(&mut subtable, delta);
     }
-    subtable.extend_from_slice(&[0; 6]); // idRangeOffset for each segment
+    for offset in [0, if alias_b { 4 } else { 0 }, 0] {
+        push_u16(&mut subtable, offset);
+    }
+    if alias_b {
+        push_u16(&mut subtable, 2);
+        push_u16(&mut subtable, 2);
+    }
     let length = u16::try_from(subtable.len()).expect("fixture cmap length fits");
     subtable[2..4].copy_from_slice(&length.to_be_bytes());
 

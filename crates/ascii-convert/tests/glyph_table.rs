@@ -4,7 +4,7 @@ use ascii_convert::{GlyphConfig, build_glyph_table};
 use ascii_core::{
     Budget, BudgetKind, CancellationToken, Error, MalformedReason, UnsupportedReason,
 };
-use support::synthetic_font::synthetic_font;
+use support::synthetic_font::{composite_font, diagonal_font, quadratic_font, synthetic_font};
 
 fn config() -> GlyphConfig {
     GlyphConfig::new(8.0, 8, 12, 9).expect("fixture geometry is valid")
@@ -172,6 +172,83 @@ fn resource_limits_and_cancellation_fail_before_publishing_a_table() {
     assert_eq!(
         build_glyph_table(&font, "A", &config(), &budget(1_000_000, 1_000_000), &token),
         Err(Error::Cancelled)
+    );
+}
+
+#[test]
+fn outline_raster_work_is_bounded_at_the_requested_size() {
+    let token = CancellationToken::new();
+    let small = GlyphConfig::new(8.0, 8, 12, 9).expect("valid small raster");
+    let large = GlyphConfig::new(128.0, 8, 12, 9).expect("valid large raster");
+    let raster_bytes = 2_000_000;
+
+    let diagonal = diagonal_font(false);
+    let parsed = fontdue::Font::from_bytes(
+        diagonal.as_slice(),
+        fontdue::FontSettings {
+            load_substitutions: false,
+            ..fontdue::FontSettings::default()
+        },
+    )
+    .expect("the outline-heavy fixture is a valid font");
+    let metrics = parsed.metrics_indexed(2, large.raster_size());
+    // The former estimate counted two font scans, the cell, cmap lookups,
+    // two parser passes (one cmap record, three mappings, 256 six-callback
+    // contours and two six-callback rectangles), and bitmap area + dimensions.
+    let previous_work = 2 * diagonal.len()
+        + 8 * 12
+        + parsed.chars().len().max(1)
+        + 2 * (4 + 6 * (256 + 2))
+        + metrics.width * metrics.height
+        + metrics.width
+        + metrics.height;
+    assert!(previous_work < 40_000);
+
+    // 512 long diagonal edges cross roughly 64 by 90 pixels each, so
+    // their traversal alone exceeds the same limit.
+    let fixtures = [
+        (diagonal, 40_000),
+        (quadratic_font(), 90_000),
+        (composite_font(), 55_000),
+    ];
+    for (font, limit) in fixtures {
+        build_glyph_table(&font, "A", &small, &budget(raster_bytes, limit), &token)
+            .expect("the same outline fits when rasterized small");
+        assert_eq!(
+            build_glyph_table(&font, "A", &large, &budget(raster_bytes, limit), &token),
+            Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
+        );
+        build_glyph_table(&font, "A", &large, &budget(raster_bytes, 1_000_000), &token)
+            .expect("the outline is valid with sufficient raster work");
+    }
+
+    build_glyph_table(
+        &synthetic_font(false),
+        "A",
+        &large,
+        &budget(raster_bytes, 40_000),
+        &token,
+    )
+    .expect("a normal simple outline still fits the tight work limit");
+}
+
+#[test]
+fn aliases_are_charged_for_each_rasterization() {
+    let font = diagonal_font(true);
+    let config = GlyphConfig::new(128.0, 8, 12, 9).expect("valid raster geometry");
+    let token = CancellationToken::new();
+    let limit = budget(2_000_000, 150_000);
+
+    build_glyph_table(&font, "A", &config, &limit, &token).expect("one copy of the outline fits");
+    assert_eq!(
+        build_glyph_table(&font, "AB", &config, &limit, &token),
+        Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
+    );
+    let table = build_glyph_table(&font, "AB", &config, &budget(2_000_000, 1_000_000), &token)
+        .expect("both aliases work with sufficient budget");
+    assert_eq!(
+        table.glyphs()[0].glyph_index(),
+        table.glyphs()[1].glyph_index()
     );
 }
 
