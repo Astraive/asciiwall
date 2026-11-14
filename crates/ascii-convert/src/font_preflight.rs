@@ -18,10 +18,11 @@ const CURVE_STACK_BYTES: u64 = 4096;
 const GLYPH_SET_BITS: usize = u64::BITS as usize;
 const UNICODE_SCALAR_LIMIT: u32 = 0x11_0000;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub(crate) struct FontPreflight {
     pub(crate) parser_bytes: u64,
     pub(crate) work_units: u64,
+    pub(crate) raster_edge_work: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -41,6 +42,7 @@ pub(crate) fn preflight_font(
     bytes: &[u8],
     collection_index: u32,
     scale: f32,
+    raster_size: f32,
     max_raster_bytes: u64,
     max_work_units: u64,
 ) -> Result<FontPreflight, Error> {
@@ -56,6 +58,7 @@ pub(crate) fn preflight_font(
     if glyph_count == 0 {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
+    let glyph_count_u64 = u64::try_from(glyph_count).map_err(|_| Error::SizeOverflow)?;
 
     let cmap_stats = raw_face
         .table(Tag::from_bytes(b"cmap"))
@@ -76,14 +79,22 @@ pub(crate) fn preflight_font(
         .checked_add(kern_stats.work_units)
         .ok_or(Error::SizeOverflow)?;
     let double_pass_work = pass_work.checked_mul(2).ok_or(Error::SizeOverflow)?;
-    if double_pass_work > max_work_units || double_pass_work > MAX_FONT_PARSER_WORK {
+    let fixed_work = double_pass_work
+        .checked_add(glyph_count_u64)
+        .ok_or(Error::SizeOverflow)?;
+    if fixed_work > max_work_units || fixed_work > MAX_FONT_PARSER_WORK {
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
     }
 
     let face = Face::parse(bytes, collection_index)
         .map_err(|_| Error::Malformed(MalformedReason::InvalidEncodedData))?;
     let units_per_em = face.units_per_em();
-    if !(16..=16_384).contains(&units_per_em) || !scale.is_finite() || scale <= 0.0 {
+    if !(16..=16_384).contains(&units_per_em)
+        || !scale.is_finite()
+        || scale <= 0.0
+        || !raster_size.is_finite()
+        || raster_size <= 0.0
+    {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
     let max_area = 6.0 * (f32::from(units_per_em) / scale);
@@ -99,8 +110,12 @@ pub(crate) fn preflight_font(
         .map_err(|_| Error::SizeOverflow)?
         .checked_mul(u64::try_from(core::mem::size_of::<u64>()).map_err(|_| Error::SizeOverflow)?)
         .ok_or(Error::SizeOverflow)?;
+    let raster_edge_bytes = glyph_count_u64
+        .checked_mul(u64::try_from(core::mem::size_of::<u64>()).map_err(|_| Error::SizeOverflow)?)
+        .ok_or(Error::SizeOverflow)?;
     let fixed_scratch_bytes = glyph_set_bytes
         .checked_add(CURVE_STACK_BYTES)
+        .and_then(|value| value.checked_add(raster_edge_bytes))
         .ok_or(Error::SizeOverflow)?;
     if fixed_scratch_bytes > max_raster_bytes || fixed_scratch_bytes > MAX_FONT_PARSER_BYTES {
         return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
@@ -110,6 +125,11 @@ pub(crate) fn preflight_font(
         .try_reserve_exact(glyph_set_len)
         .map_err(|_| Error::AllocationFailed)?;
     glyph_set.resize(glyph_set_len, 0u64);
+    let mut raster_edge_work = Vec::new();
+    raster_edge_work
+        .try_reserve_exact(glyph_count)
+        .map_err(|_| Error::AllocationFailed)?;
+    raster_edge_work.resize(glyph_count, 0u64);
     glyph_set[0] = 1;
     let mut mapped_codepoints = 0u64;
     let mut invalid_mapping = false;
@@ -138,15 +158,20 @@ pub(crate) fn preflight_font(
     }
 
     let remaining_work = max_work_units
-        .checked_sub(double_pass_work)
+        .checked_sub(fixed_work)
         .ok_or(Error::BudgetExceeded(BudgetKind::WorkUnits))?
-        .min(MAX_FONT_PARSER_WORK.saturating_sub(double_pass_work));
+        .min(MAX_FONT_PARSER_WORK.saturating_sub(fixed_work));
     let outline_work_limit = remaining_work / 2;
-    let mut outlines = OutlineEstimate::new(max_area, outline_work_limit);
+    let mut outlines = OutlineEstimate::new(
+        max_area,
+        outline_work_limit,
+        raster_size / f32::from(units_per_em),
+    );
     for index in 0..glyph_count {
         if glyph_set[index / GLYPH_SET_BITS] & (1u64 << (index % GLYPH_SET_BITS)) == 0 {
             continue;
         }
+        outlines.raster_edge_work = 0;
         face.outline_glyph(
             GlyphId(u16::try_from(index).map_err(|_| Error::SizeOverflow)?),
             &mut outlines,
@@ -154,8 +179,11 @@ pub(crate) fn preflight_font(
         if outlines.exceeded {
             return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
         }
+        if outlines.invalid {
+            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+        }
+        raster_edge_work[index] = outlines.raster_edge_work;
     }
-    let glyph_count_u64 = u64::try_from(glyph_count).map_err(|_| Error::SizeOverflow)?;
     let font_len = u64::try_from(bytes.len()).map_err(|_| Error::SizeOverflow)?;
     let hash_entries = glyph_count_u64
         .max(mapped_codepoints)
@@ -189,7 +217,7 @@ pub(crate) fn preflight_font(
         .work_units
         .checked_mul(2)
         .ok_or(Error::SizeOverflow)?;
-    let work_units = double_pass_work
+    let work_units = fixed_work
         .checked_add(outline_double_pass)
         .ok_or(Error::SizeOverflow)?;
     if work_units > max_work_units || work_units > MAX_FONT_PARSER_WORK {
@@ -199,6 +227,7 @@ pub(crate) fn preflight_font(
     Ok(FontPreflight {
         parser_bytes,
         work_units,
+        raster_edge_work,
     })
 }
 
@@ -521,11 +550,14 @@ struct OutlineEstimate {
     work_limit: u64,
     work_units: u64,
     line_count: u64,
+    raster_scale: f64,
+    raster_edge_work: u64,
+    invalid: bool,
     exceeded: bool,
 }
 
 impl OutlineEstimate {
-    fn new(max_area: f32, work_limit: u64) -> Self {
+    fn new(max_area: f32, work_limit: u64, raster_scale: f32) -> Self {
         Self {
             previous: Point::default(),
             start: Point::default(),
@@ -533,6 +565,9 @@ impl OutlineEstimate {
             work_limit,
             work_units: 0,
             line_count: 0,
+            raster_scale: f64::from(raster_scale),
+            raster_edge_work: 0,
+            invalid: false,
             exceeded: false,
         }
     }
@@ -548,11 +583,47 @@ impl OutlineEstimate {
     }
 
     fn push_line(&mut self, start: Point, end: Point) {
+        if self.exceeded || self.invalid {
+            return;
+        }
+        if !start.x.is_finite() || !start.y.is_finite() || !end.x.is_finite() || !end.y.is_finite()
+        {
+            self.invalid = true;
+            return;
+        }
         if start.y.to_bits() != end.y.to_bits() {
             match self.line_count.checked_add(1) {
                 Some(count) => self.line_count = count,
                 None => self.exceeded = true,
             }
+
+            // fontdue's v_line walks Y, and m_line walks X plus Y, then each
+            // performs a final add. With the caller's 16,384-pixel dimension
+            // limit, repositioning, f32 scaling/offset and one-ULP nudging
+            // introduce less than one pixel of error per axis. Four extra
+            // steps per axis also cover truncation to pixel coordinates.
+            let y = self.scaled_span(start.y, end.y);
+            let edge_work = if start.x.to_bits() == end.x.to_bits() {
+                y.and_then(|value| value.checked_add(5))
+            } else {
+                self.scaled_span(start.x, end.x)
+                    .and_then(|x| y.and_then(|y| x.checked_add(y)))
+                    .and_then(|value| value.checked_add(9))
+            };
+            // An unrequested glyph may overflow this estimate. Preserve that
+            // fact per glyph; the caller returns SizeOverflow if it is used.
+            self.raster_edge_work = edge_work
+                .and_then(|value| self.raster_edge_work.checked_add(value))
+                .unwrap_or(u64::MAX);
+        }
+    }
+
+    fn scaled_span(&self, start: f32, end: f32) -> Option<u64> {
+        let span = ((f64::from(start) - f64::from(end)).abs() * self.raster_scale).ceil();
+        if !span.is_finite() || span >= u64::MAX as f64 {
+            None
+        } else {
+            Some(span as u64)
         }
     }
 
@@ -709,4 +780,44 @@ fn cubic_point(origin: Point, first: Point, second: Point, end: Point, t: f32) -
         a * origin.x + b * first.x + c * second.x + d * end.x,
         a * origin.y + b * first.y + c * second.y + d * end.y,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OutlineBuilder, OutlineEstimate, Point};
+
+    #[test]
+    fn raster_edge_estimate_covers_both_line_kinds_and_closing_edges() {
+        let mut outline = OutlineEstimate::new(150.0, 100, 1.0);
+        outline.move_to(0.0, 0.0);
+        outline.line_to(8.0, 12.0);
+        outline.line_to(8.0, 20.0);
+        outline.line_to(2.0, 20.0); // horizontal edges are not retained
+        outline.close();
+
+        assert_eq!(outline.line_count, 3);
+        assert_eq!(outline.raster_edge_work, 29 + 13 + 31);
+    }
+
+    #[test]
+    fn cubic_segments_are_charged_at_the_requested_scale() {
+        let mut small = OutlineEstimate::new(150.0, 10_000, 0.008);
+        let mut large = OutlineEstimate::new(150.0, 10_000, 0.128);
+        for outline in [&mut small, &mut large] {
+            outline.move_to(0.0, 0.0);
+            outline.curve_to(0.0, 700.0, 500.0, 700.0, 500.0, 0.0);
+            outline.close();
+        }
+        assert!(small.line_count > 1);
+        assert_eq!(small.line_count, large.line_count);
+        assert!(large.raster_edge_work > small.raster_edge_work);
+        assert!(!small.exceeded && !large.exceeded);
+    }
+
+    #[test]
+    fn overflowing_edge_estimate_is_preserved_for_the_requested_glyph() {
+        let mut outline = OutlineEstimate::new(150.0, 10, 256.0);
+        outline.push_line(Point::new(0.0, 0.0), Point::new(f32::MAX, f32::MAX));
+        assert_eq!(outline.raster_edge_work, u64::MAX);
+    }
 }
