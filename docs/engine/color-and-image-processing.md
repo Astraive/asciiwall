@@ -2,19 +2,59 @@
 
 ## Color semantics
 
-Treat encoded sRGB, linear-light RGB, luminance, alpha, and display output as distinct quantities. Decode/normalize metadata before matching and blend in a consistent linear-light representation. W3C's color specification documents sRGB and linear-light conversion; it is a useful primary reference for transfer functions. [S37](../research/source-register.md#s37)
+Keep encoded sRGB, linear-light RGB, relative luminance, alpha, and output encoding distinct.
+`ascii-convert` exposes typed `EncodedSrgb`, `LinearRgb`, `Luminance`, `Alpha`, and
+`OutputEncoding` boundaries; its owned normalized pixels are linear-premultiplied RGBA. For
+normalized encoded sRGB channel `c`, decode with `c/12.92` at and below the exact `0.04045`
+breakpoint and `((c+0.055)/1.055)^2.4` above it. Inverse encoding uses `12.92*c` at and below
+`0.0031308`, and `1.055*c^(1/2.4)-0.055` above it. The rounded standard breakpoints are tested for continuity within `1e-7` absolute channel value. Linear relative luminance is
+`Y=0.2126R+0.7152G+0.0722B`. Physical transfer conversion happens once; user-selected artistic
+gamma is a separate later effect and must not be folded into transfer decoding or applied twice.
+The current explicit output encoding is SDR sRGB at 8 bits per channel.
 
-For normalized sRGB channel `c`, use `c/12.92` below the standard breakpoint and `((c+0.055)/1.055)^2.4` above it. For normalized linear RGB, a standard relative-luminance approximation is `Y=0.2126R+0.7152G+0.0722B`. Document the exact numeric thresholds/constants in code and fixtures. Never apply a user gamma curve accidentally twice.
+Unknown source profile fields may use an sRGB assumption for SDR input, but normalization returns
+a material `AssumedSrgbForUnknownProfile` warning. This is not HDR detection or full color
+management: explicit PQ/HLG input returns a typed unsupported-HDR failure, and explicit Display-P3
+or Rec. 2020 primaries return a typed unsupported-wide-gamut failure. There is no implicit tone map,
+wide-gamut conversion, clipping, or complete ICC-profile claim.
 
 ## Image preprocessing order
 
-Decode within limits, apply EXIF/display orientation, interpret source color metadata, decide alpha compositing background, select crop/contain/cover, resample, then apply artistic adjustments such as exposure, contrast, gamma, saturation, and edge emphasis. Distinguish physical color conversion from user-selected artistic distortion.
+Decode within limits and apply display orientation once in the decoder; then interpret source color metadata, decide alpha compositing background, select crop/contain/cover, resample, and apply artistic adjustments such as exposure, contrast, gamma, saturation, and edge emphasis. Distinguish physical color conversion from user-selected artistic distortion.
 
-For unknown profiles, document an sRGB assumption and provide a warning where material. Do not market complete ICC/HDR accuracy until a chosen color-management implementation is integrated and tested. Initial wallpaper output is SDR; HDR video is either explicitly tone-mapped by a supported path or rejected with a useful explanation. Silent clipping is not a quality feature.
+The `ascii-media` decoder applies display orientation exactly once and returns top-down pixels. The `ascii-convert` color normalizer requires top-down raster input and never transforms orientation. Interpret supported source color metadata after decoding and before fit, crop, or resampling. A normalized raster is owned linear-premultiplied RGBA, and raster size, stride, input extent, output allocation size, work, and cancellation are checked before and during normalization.
+
+The normalizer's raster-byte ceiling covers the checked sum of the borrowed input's minimum
+readable extent, `(height - 1) * row_stride + row_bytes`, and its requested owned normalized pixel
+storage, `width * height * size_of::<LinearPremultipliedRgba>()`. It includes padding between rows
+but excludes trailing bytes after the last pixel. The borrowed input extent is counted once beside
+the distinct output, although the normalizer does not allocate that input buffer. This is an
+operation-local ceiling check: `Budget` stores numeric ceilings only, not a shared reservation or
+process-wide usage. The returned normalized raster remains caller-owned and live after this check;
+any limit across it and other concurrently retained storage belongs to a higher-level owner.
+Unused input backing capacity and allocator overhead or over-allocation are outside this
+extent/request check. The input extent is already included in this operation's calculation and must
+not be subtracted from the budget passed to the normalizer.
 
 ## Alpha
 
-Transparent pixels must not contribute invisible RGB garbage to average colors. Use a documented straight/premultiplied convention at each boundary. For ordinary opaque wallpaper, composite the source over the selected background before matching. Transparent multi-layer scenes need linear premultiplied compositing and tests for colored fringes.
+`Alpha` is an independent linear value. Straight RGBA input keeps color unassociated until after
+transfer decoding, then multiplies linear RGB by alpha. Premultiplied sRGB input is interpreted as
+associated in the encoded sRGB domain: for nonzero alpha, unassociate there, decode to linear, and
+premultiply in linear light. Premultiplied linear input is already associated in linear light.
+Alpha-zero pixels always normalize to transparent black without division, so invisible RGB cannot
+affect averages. Nonfinite, out-of-range, and invalid premultiplied samples are rejected rather
+than clipped.
+
+Ordinary opaque wallpaper must be composited over its chosen opaque `LinearRgb` background in
+linear light before matching. `NormalizedRaster::composited_over` provides those colors without an
+intermediate allocation. Transparent layers instead use
+`LinearPremultipliedRgba::composite_over_layer`, which applies source-over directly to premultiplied
+linear RGB and returns the resulting alpha:
+`out_rgb = src_rgb + dst_rgb * (1 - src_alpha)` and
+`out_alpha = src_alpha + dst_alpha * (1 - src_alpha)`. The result can be composited over another
+transparent layer without flattening or re-decoding sRGB; zero-alpha output is canonical transparent
+black. Ordinary opaque wallpaper continues to use its existing opaque-background path.
 
 ## Palettes
 
@@ -29,3 +69,5 @@ Area/box sampling is a practical baseline for shrink-heavy conversion. Compare a
 ## Input coverage
 
 Start with PNG/JPEG and add WebP, GIF, APNG, and other formats only when the actual codec feature set and animation semantics are tested. Extensions are not codec guarantees. Check dimensions and allocation limits before large buffers; the image crate's limits are one layer of defense, not a substitute for process budgets. [S27](../research/source-register.md#s27) [S28](../research/source-register.md#s28)
+
+The `ascii-media` decoder accepts caller-owned seekable streams and sniffs PNG/JPEG content; it does not open paths or URLs or select a codec from a suffix. It bounds the encoded extent from the stream's current position, applies display orientation once, and returns owned top-down RGB/RGBA with 8-bit samples labeled sRGB. If the image decoder reports an embedded ICC profile, `ascii-media` rejects the input rather than interpreting or converting that profile. The sRGB label does not establish ICC/profile conversion or guarantee wide-gamut, HDR, or high-precision color management. Unsupported formats and malformed encoded data remain distinct errors. Codec-local image limits supplement, but do not replace, the caller's pixel/work budget.
