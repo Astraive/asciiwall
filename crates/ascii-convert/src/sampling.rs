@@ -16,7 +16,9 @@
 use std::mem::size_of;
 use std::vec::Vec;
 
-use ascii_core::{Budget, BudgetKind, CancellationToken, Error, GridSize, MalformedReason};
+use ascii_core::{
+    Budget, BudgetKind, CancellationToken, Error, GridSize, MalformedReason, RasterFrameView,
+};
 use sha2::{Digest, Sha256};
 
 use crate::color::{LinearPremultipliedRgba, LinearRgb, NormalizedRaster};
@@ -539,6 +541,9 @@ impl QualityPatches {
         patch_value_count: usize,
         cancellation: &CancellationToken,
     ) -> Result<Self, Error> {
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         let mut luminance = Vec::new();
         luminance
             .try_reserve_exact(patch_value_count)
@@ -809,8 +814,7 @@ impl SamplingPlan {
 /// Preflights allocation, retained storage, and a conservative pixel-overlap work bound.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_sampling(
-    source_width: u32,
-    source_height: u32,
+    source: &RasterFrameView<'_>,
     grid: GridSize,
     cell_width: u32,
     cell_height: u32,
@@ -818,6 +822,8 @@ pub(crate) fn prepare_sampling(
     matching_work: u64,
     budget: &Budget,
 ) -> Result<SamplingPlan, Error> {
+    let source_width = source.width();
+    let source_height = source.height();
     let display_width = u64::from(grid.columns())
         .checked_mul(u64::from(cell_width))
         .ok_or(Error::SizeOverflow)?;
@@ -880,7 +886,16 @@ pub(crate) fn prepare_sampling(
     let source_pixel_count = u64::from(source_width)
         .checked_mul(u64::from(source_height))
         .ok_or(Error::SizeOverflow)?;
-    let total_work = source_pixel_count
+    let normalization_passes =
+        if source.color().alpha_mode() == ascii_core::AlphaMode::Premultiplied {
+            2
+        } else {
+            1
+        };
+    let normalization_work = source_pixel_count
+        .checked_mul(normalization_passes)
+        .ok_or(Error::SizeOverflow)?;
+    let total_work = normalization_work
         .checked_add(matching_work)
         .and_then(|work| work.checked_add(sample_work))
         .and_then(|work| work.checked_add(descriptor_work))
@@ -914,8 +929,29 @@ pub(crate) fn prepare_sampling(
     } else {
         0
     };
-    let whole_raster_bytes = normalized_bytes
-        .checked_add(retained_patch_bytes)
+    let bytes_per_pixel = match source.format().channels() {
+        ascii_core::PixelChannels::Gray => 1usize,
+        ascii_core::PixelChannels::Rgb => 3,
+        ascii_core::PixelChannels::Rgba => 4,
+        ascii_core::PixelChannels::Other(_) => return Err(Error::SizeOverflow),
+    };
+    let row_bytes = usize::try_from(source.width())
+        .map_err(|_| Error::SizeOverflow)?
+        .checked_mul(bytes_per_pixel)
+        .ok_or(Error::SizeOverflow)?;
+    if source.row_stride() < row_bytes {
+        return Err(Error::Malformed(MalformedReason::RowStrideTooSmall));
+    }
+    let readable_extent = usize::try_from(source.height())
+        .map_err(|_| Error::SizeOverflow)?
+        .checked_sub(1)
+        .and_then(|last_row| last_row.checked_mul(source.row_stride()))
+        .and_then(|prior_rows| prior_rows.checked_add(row_bytes))
+        .ok_or(Error::SizeOverflow)?;
+    let readable_input_bytes = u64::try_from(readable_extent).map_err(|_| Error::SizeOverflow)?;
+    let whole_raster_bytes = readable_input_bytes
+        .checked_add(normalized_bytes)
+        .and_then(|bytes| bytes.checked_add(retained_patch_bytes))
         .ok_or(Error::SizeOverflow)?;
     if whole_raster_bytes > budget.max_raster_bytes() {
         return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
@@ -1076,8 +1112,24 @@ fn patch_descriptors(
 
 #[cfg(test)]
 mod tests {
-    use super::{CropRect, FitMode, FitTransform};
-    use ascii_core::{Error, MalformedReason};
+    use super::{CropRect, FitMode, FitTransform, PatchDimensions, QualityPatches};
+    use ascii_core::{CancellationToken, Error, MalformedReason};
+
+    #[test]
+    fn patch_allocation_observes_preexisting_cancellation() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert_eq!(
+            QualityPatches::allocate(
+                PatchDimensions::new(1, 1).expect("one-sample patch is valid"),
+                1,
+                1,
+                &cancellation,
+            )
+            .err(),
+            Some(Error::Cancelled)
+        );
+    }
 
     #[test]
     fn invalid_normalized_crop_and_empty_transform_are_rejected() {

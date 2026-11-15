@@ -475,6 +475,75 @@ fn patch_zero_initialization_is_charged_to_the_work_budget() {
 }
 
 #[test]
+fn premultiplied_validation_pass_is_charged_to_the_work_budget() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    );
+    let premultiplied = RasterFrameView::new(
+        1,
+        1,
+        4,
+        PixelFormat::rgba8(),
+        ColorDescription::srgb(AlphaMode::Premultiplied),
+        RasterOrientation::TopDown,
+        &[128, 128, 128, 255],
+    );
+    let opaque = raster(&[128], 1, 1, 1);
+    let exact_work = Budget::new(8_000_000, 64_000_000, 8);
+
+    assert_eq!(
+        convert_density_detailed(premultiplied, &table, &conversion_settings, &exact_work),
+        Err(DensityConversionError::Core(Error::BudgetExceeded(
+            BudgetKind::WorkUnits
+        )))
+    );
+    assert!(convert_density_detailed(opaque, &table, &conversion_settings, &exact_work).is_ok());
+}
+
+#[test]
+fn patch_memory_budget_includes_readable_input_extent_but_not_trailing_padding() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::Contain,
+        SamplingFilter::Nearest,
+        Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
+    ));
+    // Two readable rows: 64 bytes per row including inter-row padding, plus 32 trailing bytes.
+    let mut pixels = vec![128; 160];
+    pixels[64] = 129;
+    let padded = raster(&pixels, 1, 2, 64);
+    let normalized_and_patch_only = Budget::new(8_000_000, 136, 16_000_000);
+
+    assert_eq!(
+        convert_density_detailed(
+            padded,
+            &table,
+            &conversion_settings,
+            &normalized_and_patch_only
+        ),
+        Err(DensityConversionError::Core(Error::BudgetExceeded(
+            BudgetKind::RasterBytes
+        )))
+    );
+    let exact_extent = Budget::new(8_000_000, 201, 16_000_000);
+    assert!(convert_density_detailed(padded, &table, &conversion_settings, &exact_extent).is_ok());
+}
+
+#[test]
 fn shared_normalizer_failures_keep_their_typed_color_reason() {
     let table = build_table();
     let cancellation = CancellationToken::new();
@@ -586,5 +655,29 @@ fn settings_reject_empty_geometry_and_indistinguishable_luminance() {
         )
         .err(),
         Some(Error::Malformed(MalformedReason::InvalidConfiguration))
+    );
+    let near_equal = LinearRgb::new(0.5001, 0.5001, 0.5001).expect("normalized linear gray");
+    let mid_gray = LinearRgb::new(0.5, 0.5, 0.5).expect("normalized linear gray");
+    assert_eq!(
+        ConversionSettings::new(
+            GridSizing::fixed_pixel_surface(8, 12),
+            metadata(&table),
+            &cancellation,
+            mid_gray,
+            near_equal,
+        )
+        .err(),
+        Some(Error::Malformed(MalformedReason::InvalidConfiguration))
+    );
+    let distinguishable = LinearRgb::new(0.51, 0.51, 0.51).expect("normalized linear gray");
+    assert!(
+        ConversionSettings::new(
+            GridSizing::fixed_pixel_surface(8, 12),
+            metadata(&table),
+            &cancellation,
+            mid_gray,
+            distinguishable,
+        )
+        .is_ok()
     );
 }
