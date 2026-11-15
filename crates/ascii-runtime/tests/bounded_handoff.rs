@@ -1,4 +1,11 @@
-use std::mem::size_of;
+use std::{
+    mem::size_of,
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, Error as CoreError,
@@ -193,6 +200,46 @@ fn stop_is_delivered_before_repeated_permission_revocation() {
 }
 
 #[test]
+fn concurrent_revocations_do_not_starve_a_pending_stop() {
+    let controls = Arc::new(ControlQueue::new(&runtime_budget(), 1).unwrap());
+    let stop_flood = Arc::new(AtomicBool::new(false));
+    let start = Arc::new(Barrier::new(2));
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+
+    let sender_controls = Arc::clone(&controls);
+    let sender_stop_flood = Arc::clone(&stop_flood);
+    let sender_start = Arc::clone(&start);
+    let sender = std::thread::spawn(move || {
+        sender_start.wait();
+        for _ in 0..1_024 {
+            sender_controls
+                .try_send(ControlEvent::RevokePermissions)
+                .unwrap();
+        }
+        ready_tx.send(()).unwrap();
+        while !sender_stop_flood.load(Ordering::Acquire) {
+            sender_controls
+                .try_send(ControlEvent::RevokePermissions)
+                .unwrap();
+            std::thread::yield_now();
+        }
+    });
+
+    controls.try_send(ControlEvent::Stop).unwrap();
+    start.wait();
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("revocation flood should make progress while Stop is pending");
+    let first = controls.try_recv();
+    stop_flood.store(true, Ordering::Release);
+    sender.join().unwrap();
+
+    assert_eq!(first, Some(ControlEvent::Stop));
+    assert_eq!(controls.try_recv(), Some(ControlEvent::RevokePermissions));
+    assert!(controls.is_empty());
+}
+
+#[test]
 fn retryable_receive_failures_retain_published_frame_for_later_receive() {
     let handoff = BoundedHandoff::new(&runtime_budget(), 1, 1, 3, 1, 1).unwrap();
     handoff
@@ -308,6 +355,36 @@ fn acknowledgement_reclaims_a_slot_after_its_lease_was_dropped() {
     assert_eq!(resources.snapshot().outputs, 1);
 
     token.acknowledge();
+
+    assert_eq!(pool.slot_state(0).unwrap(), SlotState::Free);
+    assert_eq!(resources.snapshot().outputs, 0);
+    drop(pool.begin_fill().unwrap());
+}
+
+#[test]
+fn concurrent_lease_drop_and_completion_ack_reclaim_the_slot() {
+    let resources = runtime_budget();
+    let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
+    let descriptor = publish(&pool, 1);
+    let mut lease = pool
+        .consume(&descriptor, &budget(), &CancellationToken::new())
+        .unwrap();
+    let token = lease.completion_token().unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+
+    let drop_barrier = Arc::clone(&barrier);
+    let drop_lease = std::thread::spawn(move || {
+        drop_barrier.wait();
+        drop(lease);
+    });
+    let ack_barrier = Arc::clone(&barrier);
+    let acknowledge = std::thread::spawn(move || {
+        ack_barrier.wait();
+        token.acknowledge();
+    });
+    barrier.wait();
+    drop_lease.join().unwrap();
+    acknowledge.join().unwrap();
 
     assert_eq!(pool.slot_state(0).unwrap(), SlotState::Free);
     assert_eq!(resources.snapshot().outputs, 0);
