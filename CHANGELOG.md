@@ -40,5 +40,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Project-field schema preflight preserves singleton GraphQL argument collections instead of mistaking a valid input object for multiple arguments.
 - Preserve ISO-looking JSON text and exact protected ledger timestamp strings through repeated reads and atomic writes; the real filesystem regression now exercises lossless reloads.
 - Hardened FNT-001 cancellation through parser preflight, glyph description, rasterization, and final sorting; prevented implicit deep clones of budgeted tables, validated legacy cmap format 2 beside Unicode maps, fixed one-pixel edge descriptors, expanded fingerprint invalidation coverage, and documented the checked parser-allocation envelope.
-- Collect COR-005 generation-invalidation output permits under the buffer-pool lock and release them only after unlocking; document the non-nested pool/budget lock order.
+- Collect COR-005 output permits under the buffer-pool lock, fallibly reserve for only live permits outside it, then release after unlocking; document the non-nested pool/budget lock order.
 - Dropping a staged COR-005 transition now releases only its candidate charge while preserving the active old-scene memory permit.
+- Recheck urgent Stop/revocation flags under the ordinary control-queue lock before popping a FIFO event.
+- Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
