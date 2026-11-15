@@ -4,5 +4,7 @@ mod font;
 mod font_preflight;
 mod glyphs;
 
-pub use font::{GlyphConfig, GlyphRecord, GlyphTable, build_glyph_table};
-pub use glyphs::{Centroid, EdgeOrientation, GlyphBounds, GlyphMetrics};
+pub use font::{
+    GlyphConfig, GlyphRecord, GlyphRepertoire, GlyphTable, build_glyph_table,
+    is_supported_single_cell_scalar,
+};
