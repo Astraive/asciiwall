@@ -330,7 +330,15 @@ impl fmt::Display for ColorNormalizationError {
 impl std::error::Error for ColorNormalizationError {}
 
 /// An owned, top-down raster normalized to linear-premultiplied RGBA.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `NormalizedRaster` intentionally does not implement `Clone`; copying the pixel buffer outside a
+/// budgeted, cancellable operation could exceed raster limits or fail allocation infallibly.
+///
+/// ```compile_fail
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ascii_convert::NormalizedRaster>();
+/// ```
+#[derive(Debug, PartialEq)]
 pub struct NormalizedRaster {
     width: u32,
     height: u32,
