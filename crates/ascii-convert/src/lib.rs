@@ -19,11 +19,12 @@ pub use density::{
     convert_density_detailed,
 };
 pub use font::{
-    GlyphConfig, GlyphRecord, GlyphRepertoire, GlyphTable, build_glyph_table,
+    GlyphConfig, GlyphPreview, GlyphPreviewStatus, GlyphRecord, GlyphRepertoire,
+    GlyphRepertoirePreset, GlyphTable, build_glyph_preview, build_glyph_table,
     is_supported_single_cell_scalar,
 };
 
-pub use glyphs::{Centroid, EdgeOrientation, GlyphBounds, GlyphMetrics};
+pub use glyphs::{Centroid, EdgeOrientation, GlyphBounds, GlyphCellClassification, GlyphMetrics};
 pub use sampling::{
     CropRect, FitMode, FitTransform, PatchDescriptors, PatchDimensions, QualityPatches,
     SamplingFilter, SamplingIdentity, SamplingOptions, SamplingRect,
