@@ -21,9 +21,10 @@
 //! classifies persisted work without mutating it: staged work must be revalidated, verified work may
 //! retry commit, committed work is complete, and abandoned work is eligible for cleanup.
 //! [`PortableExport::from_value`] removes local paths, file URIs, network endpoints, display/monitor,
-//! permission, application-rule, user/home, and history data; local backups are explicitly labeled
-//! nonportable. [`DiagnosticLog`] rotates within [`LogLimits`], coordinates writers targeting the
-//! same directory, and redacts home paths, media-bearing and clipped messages by default.
+//! permission, application-rule, user/home, and history data; it rejects inputs beyond fixed traversal
+//! and serialized-output limits. Local backups are explicitly labeled nonportable. [`DiagnosticLog`]
+//! rotates within [`LogLimits`], coordinates writers targeting the same directory, and redacts home
+//! paths, media-bearing and clipped messages by default.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,6 +42,13 @@ const CONFIG_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const REGISTRY_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const JOURNAL_MAX_BYTES: u64 = 1024 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 128;
+const PORTABLE_EXPORT_MAX_BYTES: usize = 1024 * 1024;
+const PORTABLE_EXPORT_MAX_NODES: usize = 16_384;
+const PORTABLE_EXPORT_MAX_DEPTH: usize = 64;
+const PORTABLE_EXPORT_MAX_STRING_BYTES: usize = 16 * 1024;
+const PORTABLE_EXPORT_MAX_KEY_BYTES: usize = 256;
+const MAX_LOG_FILE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LOG_RECORD_BYTES: usize = 64 * 1024;
 static DIRECTORY_LOCKS: LazyLock<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
@@ -676,12 +684,6 @@ impl Storage {
     }
 }
 
-fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>, StorageError> {
-    let mut bytes = serde_json::to_vec_pretty(value)?;
-    bytes.push(b'\n');
-    Ok(bytes)
-}
-
 struct BoundedJsonWriter {
     bytes: Vec<u8>,
     max_bytes: usize,
@@ -1178,17 +1180,22 @@ pub struct PortableExport {
 }
 
 impl PortableExport {
-    pub fn from_value(value: &Value, mode: ExportMode) -> Self {
+    /// Filters an export within fixed work and output bounds.
+    ///
+    /// Returns [`StorageError::DocumentTooLarge`] if the input exceeds its traversal, string, key,
+    /// or serialized-output budget; it never returns a partial export.
+    pub fn from_value(value: &Value, mode: ExportMode) -> Result<Self, StorageError> {
         let label = match mode {
             ExportMode::Portable => "portable",
             ExportMode::NonportableLocalBackup => "nonportable-local-backup",
         };
-        let content = filter_export(value, mode).unwrap_or(Value::Null);
-        Self {
+        let mut budget = ExportBudget::new();
+        let content = filter_export(value, mode, &mut budget, 0)?.unwrap_or(Value::Null);
+        Ok(Self {
             schema_version: 1,
             mode: label,
             content,
-        }
+        })
     }
 
     pub fn schema_version(&self) -> u32 {
@@ -1204,35 +1211,117 @@ impl PortableExport {
     }
 
     pub fn to_json(&self) -> Result<Vec<u8>, StorageError> {
-        json_bytes(self)
+        json_bytes_bounded(self, PORTABLE_EXPORT_MAX_BYTES as u64)
     }
 }
 
-fn filter_export(value: &Value, mode: ExportMode) -> Option<Value> {
+struct ExportBudget {
+    visited_nodes: usize,
+    estimated_output_bytes: usize,
+}
+
+impl ExportBudget {
+    fn new() -> Self {
+        Self {
+            visited_nodes: 0,
+            estimated_output_bytes: 256,
+        }
+    }
+
+    fn visit_node(&mut self, depth: usize) -> Result<(), StorageError> {
+        if depth > PORTABLE_EXPORT_MAX_DEPTH || self.visited_nodes >= PORTABLE_EXPORT_MAX_NODES {
+            return Err(StorageError::DocumentTooLarge);
+        }
+        self.visited_nodes += 1;
+        let indentation = depth.checked_mul(2).ok_or(StorageError::DocumentTooLarge)?;
+        self.account(32usize.saturating_add(indentation))
+    }
+
+    fn visit_entry(&mut self) -> Result<(), StorageError> {
+        if self.visited_nodes >= PORTABLE_EXPORT_MAX_NODES {
+            return Err(StorageError::DocumentTooLarge);
+        }
+        self.visited_nodes += 1;
+        Ok(())
+    }
+
+    fn account_string(&mut self, bytes: usize) -> Result<(), StorageError> {
+        let escaped = bytes
+            .checked_mul(6)
+            .and_then(|size| size.checked_add(2))
+            .ok_or(StorageError::DocumentTooLarge)?;
+        self.account(escaped)
+    }
+
+    fn account_key(&mut self, bytes: usize, depth: usize) -> Result<(), StorageError> {
+        let indentation = depth.checked_mul(2).ok_or(StorageError::DocumentTooLarge)?;
+        let escaped = bytes
+            .checked_mul(6)
+            .and_then(|size| size.checked_add(16))
+            .and_then(|size| size.checked_add(indentation))
+            .ok_or(StorageError::DocumentTooLarge)?;
+        self.account(escaped)
+    }
+
+    fn account(&mut self, bytes: usize) -> Result<(), StorageError> {
+        self.estimated_output_bytes = self
+            .estimated_output_bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= PORTABLE_EXPORT_MAX_BYTES)
+            .ok_or(StorageError::DocumentTooLarge)?;
+        Ok(())
+    }
+}
+
+fn filter_export(
+    value: &Value,
+    mode: ExportMode,
+    budget: &mut ExportBudget,
+    depth: usize,
+) -> Result<Option<Value>, StorageError> {
+    budget.visit_node(depth)?;
     match value {
         Value::Object(object) => {
             let mut filtered = serde_json::Map::new();
             for (key, nested) in object {
+                budget.visit_entry()?;
+                if key.len() > PORTABLE_EXPORT_MAX_KEY_BYTES {
+                    return Err(StorageError::DocumentTooLarge);
+                }
                 if is_history_key(key) || (mode == ExportMode::Portable && is_nonportable_key(key))
                 {
                     continue;
                 }
-                if let Some(nested) = filter_export(nested, mode) {
+                if let Some(nested) = filter_export(nested, mode, budget, depth + 1)? {
+                    budget.account_key(key.len(), depth)?;
                     filtered.insert(key.clone(), nested);
                 }
             }
-            Some(Value::Object(filtered))
+            Ok(Some(Value::Object(filtered)))
         }
-        Value::Array(items) => Some(Value::Array(
-            items
-                .iter()
-                .filter_map(|item| filter_export(item, mode))
-                .collect(),
-        )),
-        Value::String(text) if mode == ExportMode::Portable && is_machine_local_string(text) => {
-            None
+        Value::Array(items) => {
+            let mut filtered = Vec::new();
+            for item in items {
+                if let Some(item) = filter_export(item, mode, budget, depth + 1)? {
+                    filtered.push(item);
+                }
+            }
+            Ok(Some(Value::Array(filtered)))
         }
-        _ => Some(value.clone()),
+        Value::String(text) => {
+            if text.len() > PORTABLE_EXPORT_MAX_STRING_BYTES {
+                return Err(StorageError::DocumentTooLarge);
+            }
+            budget.account_string(text.len())?;
+            if mode == ExportMode::Portable && is_machine_local_string(text) {
+                Ok(None)
+            } else {
+                Ok(Some(Value::String(text.clone())))
+            }
+        }
+        Value::Number(number) => Ok(Some(Value::Number(number.clone()))),
+        Value::Bool(value) => Ok(Some(Value::Bool(*value))),
+        Value::Null => Ok(Some(Value::Null)),
     }
 }
 
@@ -1331,12 +1420,9 @@ fn looks_like_network_endpoint(token: &str) -> bool {
     if port.parse::<u16>().is_err() {
         return false;
     }
-    let host = host.trim_matches(|character| matches!(character, '[' | ']'));
-    !host.is_empty()
-        && (host.contains('.')
-            || host.contains('-')
-            || host.contains(':')
-            || host.eq_ignore_ascii_case("localhost"))
+    !host
+        .trim_matches(|character| matches!(character, '[' | ']'))
+        .is_empty()
 }
 
 /// Hard caps for the diagnostic log and each individual record.
@@ -1354,10 +1440,12 @@ impl LogLimits {
         max_record_bytes: usize,
     ) -> Result<Self, StorageError> {
         if max_file_bytes == 0
+            || max_file_bytes > MAX_LOG_FILE_BYTES
             || max_files == 0
             || max_files > 16
             || max_record_bytes == 0
             || max_record_bytes > max_file_bytes
+            || max_record_bytes > MAX_LOG_RECORD_BYTES
         {
             return Err(StorageError::InvalidLogLimits);
         }
