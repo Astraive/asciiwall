@@ -409,20 +409,25 @@ impl BufferPool {
     /// from aliasing newly published slots.
     pub fn invalidate_generation(&self, new_generation: u64) -> Result<usize, RuntimeError> {
         let mut output_permits = Vec::new();
-        let mut inner = lock_unpoisoned(&self.inner);
-        if new_generation <= inner.generation {
-            return Err(RuntimeError::StaleGeneration);
-        }
-        if inner.slots.iter().any(|slot| slot.output_permit.is_some()) {
-            let slot_count = inner.slots.len();
-            drop(inner);
-            // The fixed slot count bounds the permits, so reserve before reacquiring the pool lock.
-            output_permits.reserve(slot_count);
-            inner = lock_unpoisoned(&self.inner);
+        let mut inner = loop {
+            let inner = lock_unpoisoned(&self.inner);
             if new_generation <= inner.generation {
                 return Err(RuntimeError::StaleGeneration);
             }
-        }
+            let active_permit_count = inner
+                .slots
+                .iter()
+                .filter(|slot| slot.output_permit.is_some())
+                .count();
+            if active_permit_count <= output_permits.capacity() {
+                break inner;
+            }
+            drop(inner);
+            // Reserve only for live permits outside the pool lock, then recheck after reacquiring.
+            output_permits
+                .try_reserve_exact(active_permit_count)
+                .map_err(|_| RuntimeError::AllocationFailed)?;
+        };
         let mut invalidated = 0;
         for slot in &mut inner.slots {
             if slot.state != SlotState::Free {
