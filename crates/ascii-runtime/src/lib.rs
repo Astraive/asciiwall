@@ -15,7 +15,7 @@
 //!
 //! The global acquisition order is the [`BoundedHandoff`] operation lock, then an individual
 //! queue, pool, or budget lock. Queue and pool locks are never held simultaneously. Generation
-//! invalidation may release a per-slot budget permit while holding the pool lock (pool -> budget);
+//! invalidation takes per-slot output permits under the pool lock, then drops them after unlocking;
 //! budget code never acquires a pool lock. Other cross-component operations release each lock
 //! before acquiring the next. Urgent control flags are atomic; completion acknowledgements update
 //! slot ownership under the pool lock. A [`FrameLease::with_pixels`] callback runs while the pool
