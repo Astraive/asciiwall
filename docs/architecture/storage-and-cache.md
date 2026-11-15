@@ -41,11 +41,16 @@ interrupted write. Sync the containing directory after replacement and sync each
 directory entry before reporting a first write as durable on platforms that support directory sync.
 Keep `settings.json.last-good` only when the previous file also passes privacy checks and the current
 schema validator; malformed, schema-invalid, and oversized current files do not replace a known-good
-backup and do not prevent a valid replacement. Import-journal begin and state transitions serialize
-callers sharing a journal directory, accepting only staged→verified/abandoned and
-verified→committed/abandoned transitions. Recovery classifies interrupted work without silently
-changing journal state. Importers own the transitions and commit their validated immutable content
-plus registry update.
+backup and do not prevent a valid replacement. Hook-injected failures cover temporary creation,
+temporary sync, backup replacement, and destination replacement; tests check complete valid current
+and last-good documents, owned-temporary cleanup, and subsequent successful saves at each boundary.
+Import-journal begin and state transitions serialize callers sharing a journal directory, accepting
+only staged→verified/abandoned and verified→committed/abandoned transitions. Recovery classifies
+interrupted work without silently changing journal state. Importers own the transitions and commit
+their validated immutable content plus registry update.
+
+The failure hooks model returned in-process errors; they do not establish process-kill or OS power-loss
+recovery guarantees. Parent-directory sync is implemented on Unix and is a no-op on other targets.
 
 ## Eviction
 
@@ -55,11 +60,14 @@ Low-disk checks include required extraction bytes, conversion scratch, output by
 
 ## Privacy
 
-Never persist cursor histories or window geometry histories; both portable and explicitly
-labeled nonportable local-backup exports omit them. Diagnostic logs use bounded rotation, cap each
-record independently of each file, serialize writers targeting the same directory, and redact home
-directories and media-bearing messages by default. A clipped message is redacted as a whole because
-the truncated prefix cannot prove whether a path or filename is private. Portable exports strip
-machine-specific paths, file URIs, network endpoints (including host-and-port strings and IP
-addresses), monitor/display identifiers, permission grants, application rules, and user/home data;
-only an explicitly labeled nonportable local backup may retain those values.
+Never persist cursor histories or window geometry histories; both portable and explicitly labeled
+nonportable local-backup exports omit them. Diagnostic logs use at most 16 files of 16 MiB each,
+with each record capped at 64 KiB. Their input is bounded before redaction, clipped messages are
+redacted as a whole because a truncated prefix cannot prove whether a path or filename is private,
+and writers targeting the same directory are serialized. Home paths, media-bearing messages, and
+path-like values are redacted by default. Portable exports strip machine-specific paths, file URIs,
+network endpoints (including single-label host-and-port strings and IP addresses), monitor/display
+identifiers, permission grants, application rules, and user/home data; only an explicitly labeled
+nonportable local backup may retain those values. Export traversal is capped at 16,384 node/key
+visits and depth 64; keys are limited to 256 bytes, strings to 16 KiB, and encoded JSON to 1 MiB.
+An over-budget export fails with `DocumentTooLarge` instead of returning a partial export.
