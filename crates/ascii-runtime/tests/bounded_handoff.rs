@@ -342,6 +342,36 @@ fn dropped_unacknowledged_completion_token_keeps_lease_pending() {
 }
 
 #[test]
+fn dropping_last_owner_releases_unacknowledged_pool_resources_without_invalidation() {
+    let resources = runtime_budget();
+    let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
+    let descriptor = publish(&pool, 1);
+    let mut lease = pool
+        .consume(&descriptor, &budget(), &CancellationToken::new())
+        .unwrap();
+    let token = lease.completion_token().unwrap();
+
+    let outstanding = resources.snapshot();
+    assert!(outstanding.memory.cpu_bytes > 0);
+    assert_eq!(outstanding.outputs, 1);
+
+    drop(pool);
+    let while_lease_and_token_live = resources.snapshot();
+    assert_eq!(while_lease_and_token_live.memory, outstanding.memory);
+    assert_eq!(while_lease_and_token_live.outputs, 1);
+
+    drop(lease);
+    let while_token_live = resources.snapshot();
+    assert_eq!(while_token_live.memory, outstanding.memory);
+    assert_eq!(while_token_live.outputs, 1);
+
+    drop(token);
+    let after_last_owner_drop = resources.snapshot();
+    assert_eq!(after_last_owner_drop.memory, MemoryUsage::default());
+    assert_eq!(after_last_owner_drop.outputs, 0);
+}
+
+#[test]
 fn acknowledgement_reclaims_a_slot_after_its_lease_was_dropped() {
     let resources = runtime_budget();
     let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
@@ -392,7 +422,7 @@ fn concurrent_lease_drop_and_completion_ack_reclaim_the_slot() {
 }
 
 #[test]
-fn pending_completion_token_pins_pool_until_external_acknowledgement() {
+fn live_completion_token_owns_pool_until_external_acknowledgement() {
     let resources = runtime_budget();
     let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
     let descriptor = publish(&pool, 1);
@@ -532,7 +562,7 @@ fn logical_generation_invalidation_severs_an_outstanding_lease() {
 }
 
 #[test]
-fn completed_lease_releases_its_pool_pin_without_dropping_the_handle() {
+fn releasing_completed_lease_drops_its_pool_handle() {
     let resources = runtime_budget();
     let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
     let descriptor = publish(&pool, 1);
@@ -743,6 +773,28 @@ fn handoff_constructor_releases_earlier_permits_when_control_queue_charge_fails(
 }
 
 #[test]
+fn dropping_staged_transition_releases_candidate_charge_and_keeps_old_scene_active() {
+    let budget = ResourceBudget::new(ResourceLimits::new(1, 1, 1, 10, 10));
+    let mut old_scene = budget.try_reserve_memory(MemoryUsage::new(4, 4)).unwrap();
+    let transition = budget
+        .try_begin_transition(&mut old_scene, MemoryUsage::new(5, 5))
+        .unwrap();
+
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
+    drop(transition);
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(4, 4));
+    assert_eq!(
+        budget
+            .try_reserve_memory(MemoryUsage::new(7, 7))
+            .unwrap_err(),
+        RuntimeError::MemoryBudgetExceeded
+    );
+
+    old_scene.release();
+    assert_eq!(budget.snapshot().memory, MemoryUsage::default());
+}
+
+#[test]
 fn fixed_bounds_and_aggregate_permits_are_enforced_and_released() {
     assert_eq!(
         BufferPool::new(&runtime_budget(), 0, 1, 4).unwrap_err(),
@@ -827,15 +879,10 @@ fn fixed_bounds_and_aggregate_permits_are_enforced_and_released() {
         .try_begin_transition(&mut old_scene, MemoryUsage::new(5, 5))
         .unwrap();
     assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
-    drop(old_scene);
-    assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
-    assert_eq!(
-        budget
-            .try_reserve_memory(MemoryUsage::new(2, 0))
-            .unwrap_err(),
-        RuntimeError::MemoryBudgetExceeded
-    );
     let new_scene = transition.complete();
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(5, 5));
+    assert_eq!(old_scene.usage(), MemoryUsage::default());
+    drop(old_scene);
     assert_eq!(budget.snapshot().memory, MemoryUsage::new(5, 5));
     drop(new_scene);
     assert_eq!(budget.snapshot().memory, MemoryUsage::default());

@@ -1,0 +1,504 @@
+mod support;
+
+use ascii_convert::{
+    GlyphConfig, GlyphRepertoire, build_glyph_table, is_supported_single_cell_scalar,
+};
+use ascii_core::{
+    Budget, BudgetKind, CancellationToken, Error, MalformedReason, UnsupportedReason,
+};
+use support::synthetic_font::{
+    composite_font, diagonal_font, legacy_format2_font, quadratic_font, synthetic_font,
+};
+
+fn config() -> GlyphConfig {
+    GlyphConfig::new(8.0, 8, 12, 9).expect("fixture geometry is valid")
+}
+
+fn budget(max_raster_bytes: u64, max_work_units: u64) -> Budget {
+    Budget::new(1024, max_raster_bytes, max_work_units)
+}
+
+fn repertoire(input: &str) -> GlyphRepertoire {
+    GlyphRepertoire::new(input).expect("fixture repertoire is supported")
+}
+
+#[test]
+fn measured_masks_retain_space_and_order_equal_coverage_by_font_index() {
+    let font = synthetic_font(false);
+    let token = CancellationToken::new();
+    let table = build_glyph_table(
+        &font,
+        &repertoire("BA "),
+        &config(),
+        &budget(1_000_000, 1_000_000),
+        &token,
+    )
+    .expect("valid fixture font builds a complete table");
+    let reversed = build_glyph_table(
+        &font,
+        &repertoire(" AB"),
+        &config(),
+        &budget(1_000_000, 1_000_000),
+        &token,
+    )
+    .expect("canonical repertoire ordering is independent of input order");
+
+    assert_eq!(table.fingerprint(), reversed.fingerprint());
+    assert_eq!(table.cell_width(), 8);
+    assert_eq!(table.cell_height(), 12);
+    assert_eq!(table.glyphs().len(), 3);
+    assert_eq!(table.glyphs()[0].character(), ' ');
+    assert!(
+        table.glyphs()[0]
+            .mask()
+            .iter()
+            .all(|coverage| *coverage == 0)
+    );
+    assert!(table.glyphs()[0].metrics().advance() > 0.0);
+    assert!(table.glyphs()[0].centroid().is_none());
+
+    let a = &table.glyphs()[1];
+    let b = &table.glyphs()[2];
+    assert_eq!((a.character(), b.character()), ('A', 'B'));
+    assert_eq!((a.glyph_index(), b.glyph_index()), (2, 3));
+    assert_eq!(a.mean_coverage(), b.mean_coverage());
+    assert!(a.mean_coverage() > 0.0);
+    assert_eq!(a.mask().len(), 8 * 12);
+    assert!(a.bounds().width() > 0 && a.bounds().height() > 0);
+    assert!(
+        a.centroid()
+            .is_some_and(|center| center.x() < 8.0 && center.y() < 12.0)
+    );
+    assert_eq!(a.metrics().baseline(), 9);
+    assert!(a.metrics().line_height() > 0.0);
+    let edges = a.edge_orientation();
+    let edge_sum = edges.horizontal()
+        + edges.vertical()
+        + edges.diagonal_positive()
+        + edges.diagonal_negative();
+    assert!((edge_sum - 1.0).abs() < 0.0001);
+    assert!(
+        table
+            .glyphs()
+            .windows(2)
+            .all(|pair| { pair[0].mean_coverage() <= pair[1].mean_coverage() })
+    );
+}
+
+#[test]
+fn fingerprint_covers_font_raster_geometry_and_normalized_repertoire() {
+    let font = synthetic_font(false);
+    let other_font = synthetic_font(true);
+    let token = CancellationToken::new();
+    let generous = budget(1_000_000, 1_000_000);
+    let original = build_glyph_table(&font, &repertoire("AB"), &config(), &generous, &token)
+        .expect("fixture builds");
+    let different_font =
+        build_glyph_table(&other_font, &repertoire("AB"), &config(), &generous, &token)
+            .expect("second fixture builds");
+    let different_config = GlyphConfig::new(9.0, 8, 12, 9).expect("valid alternate raster size");
+    let different_raster = build_glyph_table(
+        &font,
+        &repertoire("AB"),
+        &different_config,
+        &generous,
+        &token,
+    )
+    .expect("alternate raster size builds");
+    let different_width_config =
+        GlyphConfig::new(8.0, 9, 12, 9).expect("valid alternate cell width");
+    let different_width = build_glyph_table(
+        &font,
+        &repertoire("AB"),
+        &different_width_config,
+        &generous,
+        &token,
+    )
+    .expect("alternate cell width builds");
+    let different_height_config =
+        GlyphConfig::new(8.0, 8, 13, 9).expect("valid alternate cell height");
+    let different_height = build_glyph_table(
+        &font,
+        &repertoire("AB"),
+        &different_height_config,
+        &generous,
+        &token,
+    )
+    .expect("alternate cell height builds");
+    let different_baseline_config =
+        GlyphConfig::new(8.0, 8, 12, 8).expect("valid alternate baseline");
+    let different_baseline = build_glyph_table(
+        &font,
+        &repertoire("AB"),
+        &different_baseline_config,
+        &generous,
+        &token,
+    )
+    .expect("alternate baseline builds");
+    let different_repertoire =
+        build_glyph_table(&font, &repertoire("A"), &config(), &generous, &token)
+            .expect("repertoire builds");
+
+    assert_ne!(original.fingerprint(), different_font.fingerprint());
+    assert_ne!(original.fingerprint(), different_raster.fingerprint());
+    assert_ne!(original.fingerprint(), different_width.fingerprint());
+    assert_ne!(original.fingerprint(), different_height.fingerprint());
+    assert_ne!(original.fingerprint(), different_baseline.fingerprint());
+    assert_ne!(original.fingerprint(), different_repertoire.fingerprint());
+}
+
+#[test]
+fn invalid_and_missing_repertoires_return_typed_errors() {
+    let font = synthetic_font(false);
+    let token = CancellationToken::new();
+    let generous = budget(1_000_000, 1_000_000);
+
+    for invalid in [
+        "", "A\n", "AA", "\u{202e}", "\u{0301}", "\u{fe0f}", "界", "😀",
+    ] {
+        assert_eq!(
+            GlyphRepertoire::new(invalid),
+            Err(Error::Malformed(MalformedReason::InvalidConfiguration))
+        );
+    }
+    for accepted in [' ', 'A', '\u{2580}', '\u{259f}', '\u{2800}', '\u{28ff}'] {
+        assert!(is_supported_single_cell_scalar(accepted));
+        assert_eq!(
+            GlyphRepertoire::new(&accepted.to_string())
+                .expect("supported scalar makes a repertoire")
+                .characters(),
+            &[accepted]
+        );
+    }
+    assert_eq!(
+        build_glyph_table(&font, &repertoire("C"), &config(), &generous, &token),
+        Err(Error::Unsupported(UnsupportedReason::GlyphUnavailable))
+    );
+    assert_eq!(
+        build_glyph_table(&[0, 1, 2], &repertoire("A"), &config(), &generous, &token),
+        Err(Error::Malformed(MalformedReason::InvalidEncodedData))
+    );
+    assert_eq!(
+        GlyphConfig::new(0.0, 8, 12, 9),
+        Err(Error::Malformed(MalformedReason::InvalidConfiguration))
+    );
+    assert_eq!(
+        GlyphConfig::new(8.0, 8, 12, 13),
+        Err(Error::Malformed(MalformedReason::InvalidConfiguration))
+    );
+    let oversized_charset = "A".repeat(4097);
+    assert_eq!(
+        GlyphRepertoire::new(&oversized_charset),
+        Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
+    );
+}
+
+#[test]
+fn resource_limits_and_cancellation_fail_before_publishing_a_table() {
+    let font = synthetic_font(false);
+    let token = CancellationToken::new();
+    let oversized_font = vec![0; 16 * 1024 * 1024 + 1];
+    assert_eq!(
+        build_glyph_table(
+            &oversized_font,
+            &repertoire("A"),
+            &config(),
+            &budget(1_000_000, 1_000_000),
+            &token
+        ),
+        Err(Error::BudgetExceeded(BudgetKind::EncodedBytes))
+    );
+    let large_cell = GlyphConfig::new(8.0, 20_000, 20_000, 10_000)
+        .expect("valid but intentionally over-budget geometry");
+    assert_eq!(
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &large_cell,
+            &budget(1_000_000, 1_000_000),
+            &token
+        ),
+        Err(Error::BudgetExceeded(BudgetKind::RasterBytes))
+    );
+
+    let table_bytes = u64::try_from(
+        8 * 12
+            + core::mem::size_of::<ascii_convert::GlyphRecord>()
+            + core::mem::size_of::<char>()
+            + core::mem::size_of::<u16>(),
+    )
+    .expect("fixture table size fits");
+    let base_bytes = u64::try_from(font.len())
+        .expect("fixture font size fits")
+        .checked_add(table_bytes)
+        .expect("fixture byte total fits");
+    // This leaves room for the 4 KiB preflight stack and its vectors, but not the
+    // additional parser-owned glyph, name, map, and outline allocations.
+    let parser_limited_bytes = base_bytes
+        .checked_add(4_200)
+        .expect("fixture byte budget fits");
+    assert_eq!(
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &config(),
+            &budget(parser_limited_bytes, 1_000_000),
+            &token
+        ),
+        Err(Error::BudgetExceeded(BudgetKind::RasterBytes))
+    );
+    assert_eq!(
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &config(),
+            &budget(1_000_000, 1),
+            &token
+        ),
+        Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
+    );
+
+    token.cancel();
+    assert_eq!(
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &config(),
+            &budget(1_000_000, 1_000_000),
+            &token
+        ),
+        Err(Error::Cancelled)
+    );
+
+    let recovered = build_glyph_table(
+        &font,
+        &repertoire("A"),
+        &config(),
+        &budget(1_000_000, 1_000_000),
+        &CancellationToken::new(),
+    )
+    .expect("a subsequent uncancelled operation remains usable");
+    assert_eq!(recovered.glyphs().len(), 1);
+}
+
+#[test]
+fn outline_raster_work_is_bounded_at_the_requested_size() {
+    let token = CancellationToken::new();
+    let small = GlyphConfig::new(8.0, 8, 12, 9).expect("valid small raster");
+    let large = GlyphConfig::new(128.0, 8, 12, 9).expect("valid large raster");
+    let raster_bytes = 2_000_000;
+
+    let diagonal = diagonal_font(false);
+    let parsed = fontdue::Font::from_bytes(
+        diagonal.as_slice(),
+        fontdue::FontSettings {
+            load_substitutions: false,
+            ..fontdue::FontSettings::default()
+        },
+    )
+    .expect("the outline-heavy fixture is a valid font");
+    let metrics = parsed.metrics_indexed(2, large.raster_size());
+    // The former estimate counted two font scans, the cell, cmap lookups,
+    // two parser passes (one cmap record, three mappings, 256 six-callback
+    // contours and two six-callback rectangles), and bitmap area + dimensions.
+    let previous_work = 2 * diagonal.len()
+        + 8 * 12
+        + parsed.chars().len().max(1)
+        + 2 * (4 + 6 * (256 + 2))
+        + metrics.width * metrics.height
+        + metrics.width
+        + metrics.height;
+    assert!(previous_work < 40_000);
+
+    // 512 long diagonal edges cross roughly 64 by 90 pixels each, so
+    // their traversal alone exceeds the same limit.
+    let fixtures = [
+        (diagonal, 40_000),
+        (quadratic_font(), 90_000),
+        (composite_font(), 55_000),
+    ];
+    for (font, limit) in fixtures {
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &small,
+            &budget(raster_bytes, limit),
+            &token,
+        )
+        .expect("the same outline fits when rasterized small");
+        assert_eq!(
+            build_glyph_table(
+                &font,
+                &repertoire("A"),
+                &large,
+                &budget(raster_bytes, limit),
+                &token
+            ),
+            Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
+        );
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &large,
+            &budget(raster_bytes, 1_000_000),
+            &token,
+        )
+        .expect("the outline is valid with sufficient raster work");
+    }
+
+    build_glyph_table(
+        &synthetic_font(false),
+        &repertoire("A"),
+        &large,
+        &budget(raster_bytes, 40_000),
+        &token,
+    )
+    .expect("a normal simple outline still fits the tight work limit");
+}
+
+#[test]
+fn aliases_are_charged_for_each_rasterization() {
+    let font = diagonal_font(true);
+    let config = GlyphConfig::new(128.0, 8, 12, 9).expect("valid raster geometry");
+    let token = CancellationToken::new();
+    let limit = budget(2_000_000, 150_000);
+
+    build_glyph_table(&font, &repertoire("A"), &config, &limit, &token)
+        .expect("one copy of the outline fits");
+    assert_eq!(
+        build_glyph_table(&font, &repertoire("AB"), &config, &limit, &token),
+        Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
+    );
+    let table = build_glyph_table(
+        &font,
+        &repertoire("AB"),
+        &config,
+        &budget(2_000_000, 1_000_000),
+        &token,
+    )
+    .expect("both aliases work with sufficient budget");
+    assert_eq!(
+        table.glyphs()[0].glyph_index(),
+        table.glyphs()[1].glyph_index()
+    );
+}
+
+fn replace_table(font: &mut Vec<u8>, tag: &[u8; 4], table: &[u8]) {
+    let count = usize::from(u16::from_be_bytes([font[4], font[5]]));
+    let record = (0..count)
+        .map(|index| 12 + index * 16)
+        .find(|&record| &font[record..record + 4] == tag)
+        .expect("fixture table exists");
+    let offset = u32::try_from(font.len()).expect("fixture offset fits");
+    font.extend_from_slice(table);
+    font[record + 8..record + 12].copy_from_slice(&offset.to_be_bytes());
+    font[record + 12..record + 16].copy_from_slice(
+        &u32::try_from(table.len())
+            .expect("fixture table length fits")
+            .to_be_bytes(),
+    );
+}
+
+fn cmap_format_12(start: u32, end: u32) -> Vec<u8> {
+    let mut cmap = vec![0, 0, 0, 1, 0, 3, 0, 10, 0, 0, 0, 12];
+    cmap.extend_from_slice(&12u16.to_be_bytes());
+    cmap.extend_from_slice(&0u16.to_be_bytes());
+    cmap.extend_from_slice(&28u32.to_be_bytes());
+    cmap.extend_from_slice(&0u32.to_be_bytes());
+    cmap.extend_from_slice(&1u32.to_be_bytes());
+    cmap.extend_from_slice(&start.to_be_bytes());
+    cmap.extend_from_slice(&end.to_be_bytes());
+    cmap.extend_from_slice(&1u32.to_be_bytes());
+    cmap
+}
+
+#[test]
+fn malformed_format_twelve_scalar_ranges_are_rejected_before_fontdue() {
+    for (start, end) in [(0xd7ff, 0xe000), (0x10ffff, 0x110000)] {
+        let mut font = synthetic_font(false);
+        replace_table(&mut font, b"cmap", &cmap_format_12(start, end));
+        assert_eq!(
+            build_glyph_table(
+                &font,
+                &repertoire("A"),
+                &config(),
+                &budget(1_000_000, 1_000_000),
+                &CancellationToken::new(),
+            ),
+            Err(Error::Malformed(MalformedReason::InvalidEncodedData))
+        );
+    }
+}
+
+#[test]
+fn large_valid_format_twelve_range_fails_work_budget_before_fontdue() {
+    let mut font = synthetic_font(false);
+    replace_table(&mut font, b"cmap", &cmap_format_12(0x10000, 0x10ffff));
+    assert_eq!(
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &config(),
+            &budget(1_000_000, 1_000_000),
+            &CancellationToken::new(),
+        ),
+        Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
+    );
+}
+
+#[test]
+fn horizontal_kern_format_three_is_rejected_before_fontdue() {
+    let mut font = synthetic_font(false);
+    // Version 0, one horizontal format-3 subtable with an empty body.
+    replace_table(&mut font, b"kern", &[0, 0, 0, 1, 0, 0, 0, 6, 3, 1]);
+    assert_eq!(
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &config(),
+            &budget(1_000_000, 1_000_000),
+            &CancellationToken::new(),
+        ),
+        Err(Error::Unsupported(UnsupportedReason::UnsupportedFormat))
+    );
+}
+
+#[test]
+fn legacy_format_two_coexists_with_unicode_cmap_and_malformed_tables_fail() {
+    let token = CancellationToken::new();
+    let generous = budget(1_000_000, 1_000_000);
+    let legacy = legacy_format2_font(false);
+    let table = build_glyph_table(&legacy, &repertoire("A"), &config(), &generous, &token)
+        .expect("valid cmaps build");
+    assert_eq!(table.glyphs()[0].glyph_index(), 2);
+
+    let malformed = legacy_format2_font(true);
+    assert_eq!(
+        build_glyph_table(&malformed, &repertoire("A"), &config(), &generous, &token),
+        Err(Error::Malformed(MalformedReason::InvalidEncodedData))
+    );
+}
+
+#[test]
+fn one_pixel_cells_have_nonzero_normalized_edge_descriptors() {
+    let font = synthetic_font(false);
+    let config = GlyphConfig::new(8.0, 1, 1, 1).expect("valid one-pixel cell");
+    let token = CancellationToken::new();
+    let table = build_glyph_table(
+        &font,
+        &repertoire("A"),
+        &config,
+        &budget(1_000_000, 1_000_000),
+        &token,
+    )
+    .expect("one-pixel table builds");
+    let glyph = &table.glyphs()[0];
+
+    assert_eq!(glyph.mask().len(), 1);
+    assert_ne!(glyph.mask()[0], 0);
+    assert_eq!((glyph.bounds().width(), glyph.bounds().height()), (1, 1));
+    let edges = glyph.edge_orientation();
+    assert!(edges.horizontal() > 0.0);
+    assert!(edges.vertical() > 0.0);
+    assert!((edges.horizontal() + edges.vertical() - 1.0).abs() < 0.0001);
+}

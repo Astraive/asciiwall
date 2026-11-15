@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace contains portable `ascii-core` and bounded `ascii-runtime` contracts. **No application binary or published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace contains portable `ascii-core` and bounded `ascii-runtime` contracts, plus the `ascii-convert` glyph-table implementation. **No application binary or published release tag exists yet.**
 
 ### Added
 
@@ -22,10 +22,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Dependency-free `crates/ascii-core` COR-001 contracts for bounded ASCII frames, allocator-safe grid preflight, reusable owned cell storage, cancellation, typed displayable errors, and zero-copy validated raster views, with behavior-focused integration tests; updated the [data model contract](docs/architecture/data-model-and-contracts.md) and [E01 implementation plan](docs/plans/engine-implementation-plan.md).
 - Bounded `ascii-runtime` handoff queues, buffer leases, completion acknowledgements, and shared concurrency/memory budgets ([COR-005](docs/architecture/resource-ownership-and-shutdown.md)).
 - Added COR-008 storage support for platform-specific roots, a versioned atomic JSON install registry, schema-validated configuration with last-good recovery, importer transaction journaling, bounded redacted diagnostics, and privacy-filtered portable exports, with focused storage transaction tests.
+- Bounded `ascii-convert` glyph tables with measured cell-clipped masks, descriptors, deterministic fingerprints, and typed font-validation failures ([FNT-001](docs/engine/glyph-matching-and-fonts.md)).
+- Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 
 ### Changed
 
-- Hardened portable handoff ownership: pending completion tokens pin their backing pool and dropped leases reclaim only after acknowledgement; one-slot freshness replacement validates before eviction; Stop now takes priority over repeated revocation; existing transition charges transfer without double counting. CPU handoff, slot writes, raster validation, and pixel callbacks now hold shared work permits, while active output leases retain output permits until completion. Focused regressions also race concurrent lease drop with completion acknowledgement and sustain concurrent revocation traffic while Stop is pending. Native OS/GPU transport remains unimplemented and is not claimed.
+- Hardened portable handoff ownership: live completion tokens own a strong pool handle without slot-to-pool self-pinning; unacknowledged slots stay quarantined while any pool handle remains and until generation invalidation, while dropping the last handle releases pool memory and output permits. Dropped leases reclaim only after acknowledgement; one-slot freshness replacement validates before eviction; Stop now takes priority over repeated revocation; existing transition charges transfer without double counting. CPU handoff, slot writes, raster validation, and pixel callbacks now hold shared work permits, while active output leases retain output permits until acknowledgement, generation invalidation, or pool destruction. Focused regressions also race concurrent lease drop with completion acknowledgement and sustain concurrent revocation traffic while Stop is pending. Native OS/GPU transport remains unimplemented and is not claimed.
 
 - Recorded the COR-005 integration blocker: this workspace has no application, decoder, scene-transition manager, or transport-owner interface to wire decode/transition permits or validate native lifecycle behavior; production consumers and native transport/device evidence remain prerequisites, so issue `#73` stays open.
 
@@ -50,3 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   and redact single-label host-and-port endpoints such as `buildhost:9000`.
 - [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
   explicitly labeled nonportable local backups.
+- Hardened FNT-001 cancellation through parser preflight, glyph description, rasterization, and final sorting; prevented implicit deep clones of budgeted tables, validated legacy cmap format 2 beside Unicode maps, fixed one-pixel edge descriptors, expanded fingerprint invalidation coverage, and documented the checked parser-allocation envelope.
+- Collect COR-005 output permits under the buffer-pool lock, fallibly reserve for only live permits outside it, then release after unlocking; document the non-nested pool/budget lock order.
+- Keep the active old-scene COR-005 memory permit borrowed while a transition is staged; abort releases only the candidate charge, while completion releases the old charge once and deactivates the original permit.
+- Recheck urgent Stop/revocation flags under the ordinary control-queue lock before popping a FIFO event.
+- Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
