@@ -31,7 +31,7 @@ The density path checks cancellation every 32 output cells, every 64 glyph candi
 
 ## Numerical behavior
 
-Density matching clamps normalized coverage to `[0, 1]` for either foreground/background polarity and resolves equal-distance glyphs by font glyph index, Unicode scalar, then stable table order. Reject empty/overflowing geometry and indistinguishable foreground/background luminance; check cancellation at bounded work intervals. The initial implementation can use floating-point computation with tolerance-based GPU comparison; do not promise bit-identical output across all hardware.
+Density matching clamps normalized coverage to `[0, 1]` for either foreground/background polarity and resolves equal-distance glyphs by font glyph index, Unicode scalar, then stable table order. Reject empty/overflowing geometry and foreground/background colors that are indistinguishable by linear luminance or output sRGB8 encoding; check cancellation at bounded work intervals. The initial implementation can use floating-point computation with tolerance-based GPU comparison; do not promise bit-identical output across all hardware.
 
 ## Required tests
 
