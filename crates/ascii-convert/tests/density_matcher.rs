@@ -377,7 +377,7 @@ fn source_metadata_is_propagated_exactly_and_mismatched_identity_is_rejected() {
 }
 
 #[test]
-fn pre_cancelled_no_patch_conversion_returns_cancelled() {
+fn pre_cancelled_no_patch_conversion_precedes_frame_budget() {
     let table = build_table();
     let source = [255];
     let cancellation = CancellationToken::new();
@@ -394,13 +394,14 @@ fn pre_cancelled_no_patch_conversion_returns_cancelled() {
         None,
     ));
     cancellation.cancel();
+    let insufficient_frame_budget = Budget::new(0, 64_000_000, 16_000_000);
 
     assert_eq!(
         convert_density_detailed(
             raster(&source, 1, 1, 1),
             &table,
             &conversion_settings,
-            &budget(),
+            &insufficient_frame_budget,
         ),
         Err(DensityConversionError::Core(Error::Cancelled))
     );
