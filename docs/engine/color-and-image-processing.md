@@ -24,6 +24,14 @@ Decode within limits and apply display orientation once in the decoder; then int
 
 The `ascii-media` decoder applies display orientation exactly once and returns top-down pixels. The `ascii-convert` color normalizer requires top-down raster input and never transforms orientation. Interpret supported source color metadata after decoding and before fit, crop, or resampling. A normalized raster is owned linear-premultiplied RGBA, and raster size, stride, input extent, output allocation size, work, and cancellation are checked before and during normalization.
 
+`ascii-convert` sizes column grids from the selected source geometry: custom-crop mode uses the
+crop's aspect rather than the full raster, while fixed-pixel surfaces retain floor division and
+right/bottom leftovers. The detailed density-conversion result carries any material warning from
+normalization (including the sRGB assumption for unknown profile fields) alongside the generated
+frame; callers must surface that warning rather than discard it. Optional retained quality patches
+are bounded by the shared raster/work budgets before allocation, and their zero-initialization is
+charged to work and checked for cancellation at bounded intervals.
+
 Premultiplied RGBA is scanned in a cancellable preflight before normalized output is allocated;
 each pixel is charged once for that validation and once for normalization. Straight and opaque
 inputs require only the normalization pass.

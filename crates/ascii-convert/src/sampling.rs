@@ -26,6 +26,7 @@ const MAX_EXACT_F64_INTEGER: u64 = 1_u64 << 53;
 const MAX_PATCH_DIMENSION: u32 = 64;
 const MAX_PATCH_PIXELS: u64 = 4096;
 const SAMPLER_CANCEL_INTERVAL: u64 = 256;
+const PATCH_INITIALIZATION_CANCEL_INTERVAL: usize = 256;
 
 /// A pixel-edge rectangle in source or destination coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -536,16 +537,27 @@ impl QualityPatches {
         dimensions: PatchDimensions,
         cell_count: usize,
         patch_value_count: usize,
+        cancellation: &CancellationToken,
     ) -> Result<Self, Error> {
         let mut luminance = Vec::new();
         luminance
             .try_reserve_exact(patch_value_count)
             .map_err(|_| Error::AllocationFailed)?;
-        luminance.resize(patch_value_count, 0.0);
         let mut descriptors = Vec::new();
         descriptors
             .try_reserve_exact(cell_count)
             .map_err(|_| Error::AllocationFailed)?;
+        for index in 0..patch_value_count {
+            if index.is_multiple_of(PATCH_INITIALIZATION_CANCEL_INTERVAL)
+                && cancellation.is_cancelled()
+            {
+                return Err(Error::Cancelled);
+            }
+            luminance.push(0.0);
+        }
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         Ok(Self {
             dimensions,
             luminance,
@@ -553,10 +565,15 @@ impl QualityPatches {
         })
     }
 
-    pub(crate) fn luminance_for_cell_mut(&mut self, cell_index: usize) -> Result<&mut [f32], Error> {
+    pub(crate) fn luminance_for_cell_mut(
+        &mut self,
+        cell_index: usize,
+    ) -> Result<&mut [f32], Error> {
         let patch_len =
             usize::try_from(self.dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
-        let start = cell_index.checked_mul(patch_len).ok_or(Error::SizeOverflow)?;
+        let start = cell_index
+            .checked_mul(patch_len)
+            .ok_or(Error::SizeOverflow)?;
         let end = start.checked_add(patch_len).ok_or(Error::SizeOverflow)?;
         self.luminance
             .get_mut(start..end)
@@ -585,15 +602,16 @@ impl SamplingPlan {
         self.identity
     }
 
-
     pub(crate) fn allocate_patches(
         self,
         cell_count: usize,
+        cancellation: &CancellationToken,
     ) -> Result<Option<QualityPatches>, Error> {
         let Some(dimensions) = self.options.patch else {
             return Ok(None);
         };
-        let patch_len = usize::try_from(dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
+        let patch_len =
+            usize::try_from(dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
         let value_count = cell_count
             .checked_mul(patch_len)
             .ok_or(Error::SizeOverflow)?;
@@ -601,10 +619,11 @@ impl SamplingPlan {
             dimensions,
             cell_count,
             value_count,
+            cancellation,
         )?))
     }
 
-
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn sample_cell(
         self,
         raster: &NormalizedRaster,
@@ -624,8 +643,10 @@ impl SamplingPlan {
         let display_width = f64::from(cell_width);
         let display_height = f64::from(cell_height);
         if let Some(dimensions) = self.options.patch {
-            let patch_len = usize::try_from(dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
-            let output = patch_output.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+            let patch_len =
+                usize::try_from(dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
+            let output =
+                patch_output.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
             if output.len() != patch_len {
                 return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
             }
@@ -641,7 +662,7 @@ impl SamplingPlan {
                         .checked_mul(patch_width)
                         .and_then(|start| start.checked_add(patch_x))
                         .ok_or(Error::SizeOverflow)?;
-                    if index as u64 % SAMPLER_CANCEL_INTERVAL == 0
+                    if (index as u64).is_multiple_of(SAMPLER_CANCEL_INTERVAL)
                         && cancellation.is_cancelled()
                     {
                         return Err(Error::Cancelled);
@@ -673,20 +694,13 @@ impl SamplingPlan {
             let x1 = display_x + display_width;
             let y1 = display_y + display_height;
             let mut work = 0_u64;
-            let mean = self.sample_rect(
-                raster,
-                x0,
-                y0,
-                x1,
-                y1,
-                background,
-                cancellation,
-                &mut work,
-            )?;
+            let mean =
+                self.sample_rect(raster, x0, y0, x1, y1, background, cancellation, &mut work)?;
             Ok((mean, None))
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sample_rect(
         self,
         raster: &NormalizedRaster,
@@ -702,7 +716,9 @@ impl SamplingPlan {
             SamplingFilter::Nearest => {
                 let display_x = (display_x0 + display_x1) * 0.5;
                 let display_y = (display_y0 + display_y1) * 0.5;
-                let (source_x, source_y) = self.transform.source_point_for_display(display_x, display_y);
+                let (source_x, source_y) = self
+                    .transform
+                    .source_point_for_display(display_x, display_y);
                 if source_x < self.transform.source_rect.x
                     || source_y < self.transform.source_rect.y
                     || source_x > self.transform.source_rect.right()
@@ -726,24 +742,30 @@ impl SamplingPlan {
                 };
                 let index = pixel_index(x, y, raster.width())?;
                 *work = work.checked_add(1).ok_or(Error::SizeOverflow)?;
-                if *work % SAMPLER_CANCEL_INTERVAL == 0 && cancellation.is_cancelled() {
+                if (*work).is_multiple_of(SAMPLER_CANCEL_INTERVAL) && cancellation.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
                 Ok(pixel_luminance(raster.pixels()[index], background))
             }
             SamplingFilter::Box => {
-                let (source_x0, source_y0) =
-                    self.transform.source_point_for_display(display_x0, display_y0);
-                let (source_x1, source_y1) =
-                    self.transform.source_point_for_display(display_x1, display_y1);
+                let (source_x0, source_y0) = self
+                    .transform
+                    .source_point_for_display(display_x0, display_y0);
+                let (source_x1, source_y1) = self
+                    .transform
+                    .source_point_for_display(display_x1, display_y1);
                 let full_area = (source_x1 - source_x0) * (source_y1 - source_y0);
                 if !full_area.is_finite() || full_area <= 0.0 {
                     return Err(Error::SizeOverflow);
                 }
                 let clipped_x0 = source_x0.max(self.transform.source_rect.x).max(0.0);
                 let clipped_y0 = source_y0.max(self.transform.source_rect.y).max(0.0);
-                let clipped_x1 = source_x1.min(self.transform.source_rect.right()).min(f64::from(raster.width()));
-                let clipped_y1 = source_y1.min(self.transform.source_rect.bottom()).min(f64::from(raster.height()));
+                let clipped_x1 = source_x1
+                    .min(self.transform.source_rect.right())
+                    .min(f64::from(raster.width()));
+                let clipped_y1 = source_y1
+                    .min(self.transform.source_rect.bottom())
+                    .min(f64::from(raster.height()));
                 let mut covered_area = 0.0;
                 let mut weighted_luminance = 0.0;
                 if clipped_x1 > clipped_x0 && clipped_y1 > clipped_y0 {
@@ -752,31 +774,40 @@ impl SamplingPlan {
                     let end_x = clipped_x1.ceil().min(f64::from(raster.width())) as u32;
                     let end_y = clipped_y1.ceil().min(f64::from(raster.height())) as u32;
                     for y in first_y..end_y {
-                        let overlap_y = clipped_y1.min(f64::from(y + 1)) - clipped_y0.max(f64::from(y));
+                        let overlap_y =
+                            clipped_y1.min(f64::from(y + 1)) - clipped_y0.max(f64::from(y));
                         for x in first_x..end_x {
-                            let overlap_x = clipped_x1.min(f64::from(x + 1)) - clipped_x0.max(f64::from(x));
+                            let overlap_x =
+                                clipped_x1.min(f64::from(x + 1)) - clipped_x0.max(f64::from(x));
                             let area = overlap_x * overlap_y;
                             if area <= 0.0 {
                                 continue;
                             }
                             *work = work.checked_add(1).ok_or(Error::SizeOverflow)?;
-                            if *work % SAMPLER_CANCEL_INTERVAL == 0 && cancellation.is_cancelled() {
+                            if (*work).is_multiple_of(SAMPLER_CANCEL_INTERVAL)
+                                && cancellation.is_cancelled()
+                            {
                                 return Err(Error::Cancelled);
                             }
                             let index = pixel_index(x, y, raster.width())?;
-                            weighted_luminance += pixel_luminance(raster.pixels()[index], background) * area;
+                            weighted_luminance +=
+                                pixel_luminance(raster.pixels()[index], background) * area;
                             covered_area += area;
                         }
                     }
                 }
                 let uncovered_area = (full_area - covered_area).max(0.0);
-                Ok((weighted_luminance + background.luminance().value() * uncovered_area) / full_area)
+                Ok(
+                    (weighted_luminance + background.luminance().value() * uncovered_area)
+                        / full_area,
+                )
             }
         }
     }
 }
 
 /// Preflights allocation, retained storage, and a conservative pixel-overlap work bound.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_sampling(
     source_width: u32,
     source_height: u32,
@@ -841,6 +872,11 @@ pub(crate) fn prepare_sampling(
         Some(_) => sample_count.checked_mul(3).ok_or(Error::SizeOverflow)?,
         None => 0,
     };
+    let initialization_work = if patch_dimensions.is_some() {
+        sample_count
+    } else {
+        0
+    };
     let source_pixel_count = u64::from(source_width)
         .checked_mul(u64::from(source_height))
         .ok_or(Error::SizeOverflow)?;
@@ -848,13 +884,16 @@ pub(crate) fn prepare_sampling(
         .checked_add(matching_work)
         .and_then(|work| work.checked_add(sample_work))
         .and_then(|work| work.checked_add(descriptor_work))
+        .and_then(|work| work.checked_add(initialization_work))
         .ok_or(Error::SizeOverflow)?;
     if total_work > budget.max_work_units() {
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
     }
 
     let normalized_bytes = source_pixel_count
-        .checked_mul(u64::try_from(size_of::<LinearPremultipliedRgba>()).map_err(|_| Error::SizeOverflow)?)
+        .checked_mul(
+            u64::try_from(size_of::<LinearPremultipliedRgba>()).map_err(|_| Error::SizeOverflow)?,
+        )
         .ok_or(Error::SizeOverflow)?;
     let retained_patch_bytes = if patch_dimensions.is_some() {
         let values = sample_count
@@ -862,7 +901,9 @@ pub(crate) fn prepare_sampling(
             .ok_or(Error::SizeOverflow)?;
         let _values_allocation_layout = isize::try_from(values).map_err(|_| Error::SizeOverflow)?;
         let descriptors = cell_count
-            .checked_mul(u64::try_from(size_of::<PatchDescriptors>()).map_err(|_| Error::SizeOverflow)?)
+            .checked_mul(
+                u64::try_from(size_of::<PatchDescriptors>()).map_err(|_| Error::SizeOverflow)?,
+            )
             .ok_or(Error::SizeOverflow)?;
         let _descriptor_allocation_layout =
             isize::try_from(descriptors).map_err(|_| Error::SizeOverflow)?;
@@ -880,13 +921,7 @@ pub(crate) fn prepare_sampling(
         return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
     }
 
-    let identity = sampling_identity(
-        transform,
-        grid,
-        cell_width,
-        cell_height,
-        options,
-    );
+    let identity = sampling_identity(transform, grid, cell_width, cell_height, options);
     Ok(SamplingPlan {
         transform,
         options,
@@ -978,7 +1013,7 @@ fn patch_descriptors(
     }
     let mut mean = 0.0_f64;
     for (index, value) in values.iter().enumerate() {
-        if index as u64 % SAMPLER_CANCEL_INTERVAL == 0 && cancellation.is_cancelled() {
+        if (index as u64).is_multiple_of(SAMPLER_CANCEL_INTERVAL) && cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
         mean += f64::from(*value);
@@ -996,7 +1031,9 @@ fn patch_descriptors(
                 .and_then(|start| start.checked_add(x))
                 .ok_or(Error::SizeOverflow)?;
             derivative_work = derivative_work.checked_add(1).ok_or(Error::SizeOverflow)?;
-            if derivative_work % SAMPLER_CANCEL_INTERVAL == 0 && cancellation.is_cancelled() {
+            if derivative_work.is_multiple_of(SAMPLER_CANCEL_INTERVAL)
+                && cancellation.is_cancelled()
+            {
                 return Err(Error::Cancelled);
             }
             dx += f64::from((values[index + 1] - values[index]).abs());
@@ -1013,7 +1050,9 @@ fn patch_descriptors(
                 .ok_or(Error::SizeOverflow)?;
             let below = index.checked_add(width).ok_or(Error::SizeOverflow)?;
             derivative_work = derivative_work.checked_add(1).ok_or(Error::SizeOverflow)?;
-            if derivative_work % SAMPLER_CANCEL_INTERVAL == 0 && cancellation.is_cancelled() {
+            if derivative_work.is_multiple_of(SAMPLER_CANCEL_INTERVAL)
+                && cancellation.is_cancelled()
+            {
                 return Err(Error::Cancelled);
             }
             dy += f64::from((values[below] - values[index]).abs());
@@ -1022,8 +1061,16 @@ fn patch_descriptors(
     }
     Ok(PatchDescriptors {
         mean_luminance: (mean / expected as f64) as f32,
-        mean_absolute_dx: if dx_count == 0 { 0.0 } else { (dx / dx_count as f64) as f32 },
-        mean_absolute_dy: if dy_count == 0 { 0.0 } else { (dy / dy_count as f64) as f32 },
+        mean_absolute_dx: if dx_count == 0 {
+            0.0
+        } else {
+            (dx / dx_count as f64) as f32
+        },
+        mean_absolute_dy: if dy_count == 0 {
+            0.0
+        } else {
+            (dy / dy_count as f64) as f32
+        },
     })
 }
 
@@ -1046,14 +1093,8 @@ mod tests {
     #[test]
     fn rejects_destination_edges_outside_exact_f64_integer_range() {
         let maximum_exact = 1_u64 << 53;
-        let valid = FitTransform::new(
-            1,
-            1,
-            maximum_exact,
-            maximum_exact,
-            FitMode::Contain,
-        )
-        .unwrap();
+        let valid =
+            FitTransform::new(1, 1, maximum_exact, maximum_exact, FitMode::Contain).unwrap();
         assert_eq!(valid.display_dimensions(), (maximum_exact, maximum_exact));
         assert_eq!(
             FitTransform::new(1, 1, maximum_exact + 1, 1, FitMode::Contain),
@@ -1076,5 +1117,4 @@ mod tests {
             Err(Error::SizeOverflow)
         );
     }
-
 }
