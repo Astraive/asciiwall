@@ -17,6 +17,8 @@ pub enum MalformedReason {
     RasterBackingTooShort,
     /// Caller-supplied input configuration violates its own bounds.
     InvalidConfiguration,
+    /// Encoded input data is empty, unreadable, or structurally invalid.
+    InvalidEncodedData,
 }
 
 /// A supported-core capability that the supplied input requires but this API does not support.
@@ -32,6 +34,8 @@ pub enum UnsupportedReason {
     ColorDescription,
     /// The alpha mode does not match the raster's channel layout.
     AlphaMode,
+    /// The font uses a character-map or kerning format this preflight does not support.
+    UnsupportedFormat,
     /// The requested glyph is not present in the selected font.
     GlyphUnavailable,
 }
@@ -41,6 +45,8 @@ pub enum UnsupportedReason {
 pub enum BudgetKind {
     /// Owned ASCII cell-vector capacity, measured in bytes.
     FrameBytes,
+    /// The size of an encoded input asset, measured in bytes.
+    EncodedBytes,
     /// The minimum readable raster extent, excluding trailing bytes and final-row padding.
     RasterBytes,
     /// The bounded per-cell or per-pixel validation work estimate.

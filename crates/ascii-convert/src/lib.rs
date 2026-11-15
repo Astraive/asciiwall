@@ -2,7 +2,6 @@
 
 mod color;
 mod density;
-
 mod font;
 mod font_preflight;
 mod glyphs;
@@ -12,6 +11,10 @@ pub use density::{
     ConversionSettings, DensityConversion, DensityConversionError, GridSizing, convert_density,
     convert_density_detailed,
 };
+pub use font::{
+    GlyphConfig, GlyphRecord, GlyphRepertoire, GlyphTable, build_glyph_table,
+    is_supported_single_cell_scalar,
+};
 pub use color::{
     Alpha, ColorNormalizationError, ColorNormalizationWarning, EncodedOutputColor, EncodedSrgb,
     InvalidColorSample, LinearPremultipliedRgba, LinearRgb, Luminance, NormalizedRaster,
@@ -20,7 +23,6 @@ pub use color::{
     encode_srgb, normalize_raster,
 };
 
-pub use font::{GlyphConfig, GlyphRecord, GlyphTable, build_glyph_table};
 pub use glyphs::{Centroid, EdgeOrientation, GlyphBounds, GlyphMetrics};
 pub use sampling::{
     CropRect, FitMode, FitTransform, PatchDescriptors, PatchDimensions, QualityPatches,

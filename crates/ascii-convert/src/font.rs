@@ -23,6 +23,59 @@ const MAX_CHARSET_BYTES: usize = MAX_GLYPHS * 4;
 const DESCRIPTOR_VERSION: u32 = 1;
 const RENDERING_MODE: &[u8] = b"fontdue-0.9.3-gray8-no-gsub-v1";
 
+/// A nonempty, unique repertoire restricted to scalars supported in one terminal cell.
+///
+/// Its private storage ensures glyph-table construction cannot bypass repertoire validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlyphRepertoire {
+    characters: Vec<char>,
+}
+
+impl GlyphRepertoire {
+    /// Validates and canonically sorts printable ASCII, block-element, and Braille scalars.
+    pub fn new(input: &str) -> Result<Self, Error> {
+        if input.len() > MAX_CHARSET_BYTES {
+            return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
+        }
+        let glyph_count = input.chars().count();
+        if glyph_count == 0 {
+            return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+        }
+        if glyph_count > MAX_GLYPHS {
+            return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
+        }
+        if input
+            .chars()
+            .any(|character| !is_supported_single_cell_scalar(character))
+        {
+            return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+        }
+
+        let mut characters = Vec::new();
+        characters
+            .try_reserve_exact(glyph_count)
+            .map_err(|_| Error::AllocationFailed)?;
+        characters.extend(input.chars());
+        characters.sort_unstable();
+        if characters.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+        }
+        Ok(Self { characters })
+    }
+
+    /// Returns the canonical sorted scalars in this repertoire.
+    #[must_use]
+    pub fn characters(&self) -> &[char] {
+        &self.characters
+    }
+}
+
+/// Returns whether a scalar belongs to the strict, single-cell v1 repertoire.
+#[must_use]
+pub const fn is_supported_single_cell_scalar(character: char) -> bool {
+    matches!(character as u32, 0x20..=0x7e | 0x2580..=0x259f | 0x2800..=0x28ff)
+}
+
 /// Validated geometry and raster size for a single-cell glyph table.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlyphConfig {
@@ -81,8 +134,9 @@ impl GlyphConfig {
     }
 }
 
-/// Measured glyph data. All access is read-only after table construction.
-#[derive(Clone, Debug, PartialEq)]
+/// Measured glyph data. Its owned mask is budgeted once, and this type is intentionally not
+/// `Clone`.
+#[derive(Debug, PartialEq)]
 pub struct GlyphRecord {
     character: char,
     glyph_index: u16,
@@ -137,7 +191,10 @@ impl GlyphRecord {
 }
 
 /// Immutable glyph lookup table identified by its complete rasterization input fingerprint.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// The table is intentionally not `Clone`, so copying all owned masks cannot bypass its
+/// construction budget.
+#[derive(Debug, PartialEq)]
 pub struct GlyphTable {
     fingerprint: [u8; 32],
     cell_width: u32,
@@ -168,10 +225,11 @@ impl GlyphTable {
     }
 }
 
-/// Builds a fully measured, cell-clipped table. No table is published unless every glyph succeeds.
+/// Builds a fully measured, cell-clipped table from a validated repertoire. No table is
+/// published unless every glyph succeeds.
 pub fn build_glyph_table(
     font_bytes: &[u8],
-    charset: &str,
+    repertoire: &GlyphRepertoire,
     config: &GlyphConfig,
     budget: &Budget,
     cancellation: &CancellationToken,
@@ -185,19 +243,7 @@ pub fn build_glyph_table(
     if font_bytes.len() > MAX_FONT_BYTES {
         return Err(Error::BudgetExceeded(BudgetKind::EncodedBytes));
     }
-    if charset.len() > MAX_CHARSET_BYTES {
-        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
-    }
-    let glyph_count = charset.chars().count();
-    if glyph_count == 0 {
-        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
-    }
-    if glyph_count > MAX_GLYPHS {
-        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
-    }
-    if charset.chars().any(char::is_control) {
-        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
-    }
+    let glyph_count = repertoire.characters.len();
 
     let glyph_count_u64 = u64::try_from(glyph_count).map_err(|_| Error::SizeOverflow)?;
     let font_bytes_len = u64::try_from(font_bytes.len()).map_err(|_| Error::SizeOverflow)?;
@@ -259,8 +305,10 @@ pub fn build_glyph_table(
         font_bytes,
         font_settings.collection_index,
         parser_scale,
+        config.raster_size(),
         parser_raster_budget,
         parser_work_budget,
+        cancellation,
     )?;
     let base_bytes = base_bytes
         .checked_add(parser_preflight.parser_bytes)
@@ -279,11 +327,7 @@ pub fn build_glyph_table(
     characters
         .try_reserve_exact(glyph_count)
         .map_err(|_| Error::AllocationFailed)?;
-    characters.extend(charset.chars());
-    characters.sort_unstable();
-    if characters.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
-    }
+    characters.extend(repertoire.characters.iter().copied());
 
     let font = Font::from_bytes(font_bytes, font_settings)
         .map_err(|_| Error::Malformed(MalformedReason::InvalidEncodedData))?;
@@ -323,10 +367,19 @@ pub fn build_glyph_table(
             return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
         }
         max_bitmap_area = max_bitmap_area.max(bitmap_area);
+        // Each requested scalar is rasterized independently, including aliases.
+        let edge_work = *parser_preflight
+            .raster_edge_work
+            .get(usize::from(glyph_index))
+            .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
+        if edge_work == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
         let glyph_work = u64::try_from(bitmap_area)
             .map_err(|_| Error::SizeOverflow)?
             .checked_add(u64::try_from(metrics.width).map_err(|_| Error::SizeOverflow)?)
             .and_then(|value| value.checked_add(u64::try_from(metrics.height).ok()?))
+            .and_then(|value| value.checked_add(edge_work))
             .ok_or(Error::SizeOverflow)?;
         raster_work = raster_work
             .checked_add(glyph_work)
@@ -394,6 +447,9 @@ pub fn build_glyph_table(
             return Err(Error::Cancelled);
         }
         let (metrics, bitmap) = font.rasterize_indexed(glyph_index, config.raster_size());
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         validate_metrics(metrics.advance_width, line_height)?;
         let bitmap_len = metrics
             .width
@@ -466,7 +522,8 @@ pub fn build_glyph_table(
             }
         }
 
-        let (bounds, centroid, mean_coverage, edges) = describe(&mask, width, height);
+        let (bounds, centroid, mean_coverage, edges) =
+            describe(&mask, width, height, cancellation)?;
         glyphs.push(GlyphRecord {
             character,
             glyph_index,
@@ -479,15 +536,25 @@ pub fn build_glyph_table(
         });
     }
 
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     glyphs.sort_unstable_by(|left, right| {
         left.mean_coverage
             .total_cmp(&right.mean_coverage)
             .then_with(|| left.glyph_index.cmp(&right.glyph_index))
             .then_with(|| left.character.cmp(&right.character))
     });
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let fingerprint: [u8; 32] = fingerprint.finalize().into();
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
 
     Ok(GlyphTable {
-        fingerprint: fingerprint.finalize().into(),
+        fingerprint,
         cell_width: config.cell_width(),
         cell_height: config.cell_height(),
         glyphs,
