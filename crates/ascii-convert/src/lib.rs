@@ -1,7 +1,6 @@
-//! Bounded conversion primitives for fonts, glyph descriptors, and color normalization.
+//! Bounded font rasterization and immutable glyph-table primitives, with typed color normalization and alpha compositing.
 
 mod color;
-
 mod font;
 mod font_preflight;
 mod glyphs;
