@@ -175,7 +175,7 @@ fn rectangle(width: u16, height: u16) -> Vec<u8> {
     glyph
 }
 
-fn head() -> Vec<u8> {
+pub(super) fn head() -> Vec<u8> {
     let mut table = Vec::with_capacity(54);
     push_u32(&mut table, 0x0001_0000); // version
     push_u32(&mut table, 0x0001_0000); // font revision
@@ -318,7 +318,7 @@ fn cmap_with_legacy_format2(malformed: bool) -> Vec<u8> {
     table
 }
 
-fn sfnt(mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+pub(super) fn sfnt(mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
     tables.sort_unstable_by_key(|(tag, _)| *tag);
     let count = u16::try_from(tables.len()).expect("fixture table count fits");
     let power = 1u16 << (u32::from(count).ilog2());
@@ -374,14 +374,14 @@ fn align4(value: usize) -> usize {
     (value + 3) & !3
 }
 
-fn push_u16(bytes: &mut Vec<u8>, value: u16) {
+pub(super) fn push_u16(bytes: &mut Vec<u8>, value: u16) {
     bytes.extend_from_slice(&value.to_be_bytes());
 }
 
-fn push_i16(bytes: &mut Vec<u8>, value: i16) {
+pub(super) fn push_i16(bytes: &mut Vec<u8>, value: i16) {
     bytes.extend_from_slice(&value.to_be_bytes());
 }
 
-fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+pub(super) fn push_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_be_bytes());
 }
