@@ -433,6 +433,8 @@ pub fn encode_output(linear: LinearRgb, encoding: OutputEncoding) -> EncodedOutp
 /// (`width * height * size_of::<LinearPremultipliedRgba>()`). Inter-row padding is included;
 /// trailing input bytes beyond the final pixel are not. The borrowed input extent is counted once
 /// alongside the distinct output even though the normalizer does not allocate the input buffer.
+/// Premultiplied input is validated in a cancellable full-raster preflight before output allocation;
+/// that pass and normalization are both charged to `max_work_units`.
 /// This is an operation-local ceiling check: `Budget` stores numeric ceilings, not shared
 /// reservations or process-wide usage. The returned raster remains owned and live after this call;
 /// callers must enforce any limit across it and other concurrently retained storage. Unused input
@@ -491,12 +493,22 @@ fn normalize_raster_with_cancel_check(
         .and_then(|prior_rows| prior_rows.checked_add(row_bytes))
         .ok_or(Error::SizeOverflow)?;
     let input_bytes = u64::try_from(required_extent).map_err(|_| Error::SizeOverflow)?;
-    let pixel_count = u64::from(view.width()) * u64::from(view.height());
+    let pixel_count = u64::from(view.width())
+        .checked_mul(u64::from(view.height()))
+        .ok_or(Error::SizeOverflow)?;
+    let normalization_passes = if view.color().alpha_mode() == AlphaMode::Premultiplied {
+        2
+    } else {
+        1
+    };
+    let normalization_work = pixel_count
+        .checked_mul(normalization_passes)
+        .ok_or(Error::SizeOverflow)?;
 
     if input_bytes > budget.max_raster_bytes() {
         return Err(Error::BudgetExceeded(BudgetKind::RasterBytes).into());
     }
-    if pixel_count > budget.max_work_units() {
+    if normalization_work > budget.max_work_units() {
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits).into());
     }
 
@@ -519,6 +531,16 @@ fn normalize_raster_with_cancel_check(
     }
     if is_cancelled() {
         return Err(Error::Cancelled.into());
+    }
+    if view.color().alpha_mode() == AlphaMode::Premultiplied {
+        validate_premultiplied_pixels(
+            view,
+            width,
+            height,
+            bytes_per_pixel,
+            row_bytes,
+            &mut is_cancelled,
+        )?;
     }
 
     let mut pixels = Vec::new();
@@ -564,6 +586,53 @@ fn normalize_raster_with_cancel_check(
         pixels,
         warning,
     })
+}
+
+fn validate_premultiplied_pixels(
+    view: RasterFrameView<'_>,
+    width: usize,
+    height: usize,
+    bytes_per_pixel: usize,
+    row_bytes: usize,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<(), ColorNormalizationError> {
+    let mut pixel_index = 0_usize;
+    for y in 0..height {
+        if is_cancelled() {
+            return Err(Error::Cancelled.into());
+        }
+        let row_start = y
+            .checked_mul(view.row_stride())
+            .ok_or(Error::SizeOverflow)?;
+        let row_end = row_start
+            .checked_add(row_bytes)
+            .ok_or(Error::SizeOverflow)?;
+        let row = &view.pixels()[row_start..row_end];
+        for x in 0..width {
+            if pixel_index.is_multiple_of(NORMALIZATION_CANCELLATION_INTERVAL) && is_cancelled() {
+                return Err(Error::Cancelled.into());
+            }
+            let offset = x.checked_mul(bytes_per_pixel).ok_or(Error::SizeOverflow)?;
+            let end = offset
+                .checked_add(bytes_per_pixel)
+                .ok_or(Error::SizeOverflow)?;
+            let sample = row
+                .get(offset..end)
+                .ok_or(Error::Malformed(MalformedReason::RasterBackingTooShort))?;
+            if sample[3] != 0
+                && (sample[0] > sample[3] || sample[1] > sample[3] || sample[2] > sample[3])
+            {
+                return Err(ColorNormalizationError::InvalidSample(
+                    InvalidColorSample::PremultipliedChannelExceedsAlpha,
+                ));
+            }
+            pixel_index = pixel_index.checked_add(1).ok_or(Error::SizeOverflow)?;
+        }
+    }
+    if is_cancelled() {
+        return Err(Error::Cancelled.into());
+    }
+    Ok(())
 }
 
 fn validate_alpha_layout(
@@ -632,32 +701,25 @@ fn normalize_pixel(
     let green = f64::from(rgba[1]) / f64::from(u8::MAX);
     let blue = f64::from(rgba[2]) / f64::from(u8::MAX);
     let (red, green, blue) = match alpha_mode {
-        AlphaMode::Premultiplied => {
-            if red > alpha.value() || green > alpha.value() || blue > alpha.value() {
-                return Err(ColorNormalizationError::InvalidSample(
-                    InvalidColorSample::PremultipliedChannelExceedsAlpha,
-                ));
+        AlphaMode::Premultiplied => match transfer {
+            TransferFunction::Linear => (red, green, blue),
+            TransferFunction::Srgb => {
+                let straight = EncodedSrgb {
+                    red: red / alpha.value(),
+                    green: green / alpha.value(),
+                    blue: blue / alpha.value(),
+                };
+                let linear = decode_srgb(straight);
+                (
+                    linear.red * alpha.value(),
+                    linear.green * alpha.value(),
+                    linear.blue * alpha.value(),
+                )
             }
-            match transfer {
-                TransferFunction::Linear => (red, green, blue),
-                TransferFunction::Srgb => {
-                    let straight = EncodedSrgb {
-                        red: red / alpha.value(),
-                        green: green / alpha.value(),
-                        blue: blue / alpha.value(),
-                    };
-                    let linear = decode_srgb(straight);
-                    (
-                        linear.red * alpha.value(),
-                        linear.green * alpha.value(),
-                        linear.blue * alpha.value(),
-                    )
-                }
-                TransferFunction::Pq | TransferFunction::Hlg | TransferFunction::Other(_) => {
-                    unreachable!("transfer metadata is resolved before pixel normalization")
-                }
+            TransferFunction::Pq | TransferFunction::Hlg | TransferFunction::Other(_) => {
+                unreachable!("transfer metadata is resolved before pixel normalization")
             }
-        }
+        },
         AlphaMode::Straight | AlphaMode::Opaque => {
             let linear = match transfer {
                 TransferFunction::Srgb => decode_srgb(EncodedSrgb { red, green, blue }),
@@ -743,6 +805,36 @@ mod tests {
             512,
             PixelFormat::gray8(),
             ColorDescription::srgb(AlphaMode::Opaque),
+            RasterOrientation::TopDown,
+            &pixels,
+        );
+        let mut polls = 0;
+
+        let result = normalize_raster_with_cancel_check(
+            raster,
+            &Budget::new(1 << 20, 1 << 20, 1 << 20),
+            || {
+                polls += 1;
+                polls == 5
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(ColorNormalizationError::Raster(Error::Cancelled))
+        );
+        assert_eq!(polls, 5);
+    }
+
+    #[test]
+    fn cancellation_is_polled_during_premultiplied_preflight() {
+        let pixels = [128_u8; 2_048];
+        let raster = RasterFrameView::new(
+            512,
+            1,
+            2_048,
+            PixelFormat::rgba8(),
+            ColorDescription::srgb(AlphaMode::Premultiplied),
             RasterOrientation::TopDown,
             &pixels,
         );

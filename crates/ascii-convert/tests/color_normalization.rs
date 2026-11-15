@@ -467,6 +467,30 @@ fn raster_budget_counts_input_and_normalized_output_together() {
 }
 
 #[test]
+fn premultiplied_validation_pass_is_charged_to_work_budget() {
+    let view = raster(
+        &[128, 0, 0, 128],
+        1,
+        1,
+        4,
+        PixelFormat::rgba8(),
+        ColorDescription::srgb(AlphaMode::Premultiplied),
+        RasterOrientation::TopDown,
+    );
+    let cancellation = CancellationToken::new();
+
+    assert_eq!(
+        normalize_raster(view, &budget(1024, 1), &cancellation),
+        Err(ColorNormalizationError::Raster(Error::BudgetExceeded(
+            BudgetKind::WorkUnits
+        )))
+    );
+    let normalized = normalize_raster(view, &budget(1024, 2), &cancellation)
+        .expect("one preflight and one normalization pass fit the work budget");
+    assert_eq!(normalized.pixels().len(), 1);
+}
+
+#[test]
 fn raster_budget_counts_inter_row_padding_but_not_trailing_backing() {
     let pixels = [0, 0, 0, 7, 7, 7, 7, 7, 255, 255, 255, 7, 7, 7, 7, 7];
     let color = ColorDescription::srgb(AlphaMode::Opaque);
