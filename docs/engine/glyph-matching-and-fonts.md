@@ -6,7 +6,7 @@ Build an immutable glyph table from a font fingerprint, raster size, cell dimens
 
 ### Executable font-table contract
 
-`ascii-convert::build_glyph_table(font_bytes, charset, config, budget, cancellation)` builds one row-major, 8-bit coverage mask per requested Unicode scalar. It maps scalars through the font's character map without shaping; duplicate/control scalars and missing glyphs are typed errors. `GlyphConfig` requires finite positive raster size, nonzero cell dimensions, and a baseline no lower than the cell's bottom edge.
+`ascii-convert::build_glyph_table(font_bytes, &repertoire, config, budget, cancellation)` builds one row-major, 8-bit coverage mask per requested Unicode scalar. `GlyphRepertoire::new(&str)` validates a nonempty, duplicate-free repertoire and stores it privately; its only accepted scalars are printable ASCII (including space), Unicode block elements U+2580–U+259F, and Braille patterns U+2800–U+28FF. The public `is_supported_single_cell_scalar` predicate is the shared contract for future consumers. The builder accepts only `&GlyphRepertoire`, so raw strings cannot bypass validation. Missing font glyphs remain a separate typed error. `GlyphConfig` requires finite positive raster size, nonzero cell dimensions, and a baseline no lower than the cell's bottom edge.
 
 Each glyph is rasterized with pinned `fontdue 0.9.3` (default features disabled; `hashbrown` enabled, SIMD disabled), centered by advance width and positioned at the configured baseline, then clipped to the cell. Space remains a real measured blank mask. Bounds, coverage-weighted centroid, normalized mean coverage, and four gradient-orientation energy bins come from the resulting mask. The immutable table sorts by measured coverage, then font glyph index, then Unicode scalar.
 
@@ -18,7 +18,7 @@ Work accounting separately includes parser preflight and rasterization. The pref
 
 The raster-byte budget is a checked logical-allocation envelope, not a process-RSS or allocator-metadata limit. Encoded input is charged once alongside masks, table records, rasterizer scratch, and parser/preflight storage. For pinned `fontdue 0.9.3`, the preflight conservatively models 128 bytes per glyph record, 32 bytes per hash-map entry (including capacity slack), 128 bytes per retained outline line, and up to three name-capacity bytes per encoded font byte; its glyph/edge vectors and curve stack are also charged. Checked multipliers, per-input caps, and the total budget reject estimates before `fontdue` parsing/rasterization allocations. The allocation envelope follows the pinned parser/rasterizer layouts and must be revisited when those dependency implementations change; physical allocator overhead is outside the modeled limit.
 
-Version one supports printable ASCII and curated single-cell Unicode sets such as blocks and braille. Reject control characters, combining sequences, bidirectional controls, and unsupported variable-width/emoji glyphs from strict single-cell packages. Full shaped text, grapheme clusters, CJK width rules, and color emoji require a separate design rather than silently breaking the grid.
+Version one enforces that repertoire at construction: C0/C1 controls, bidi formatting, combining marks and variation selectors, emoji, CJK, and all other unlisted scalars are rejected before font lookup. Full shaped text, grapheme clusters, CJK width rules, and color emoji require a separate design rather than silently breaking the grid.
 
 ## Density matching
 
