@@ -775,9 +775,7 @@ fn handoff_constructor_releases_earlier_permits_when_control_queue_charge_fails(
 #[test]
 fn dropping_staged_transition_releases_candidate_charge_and_keeps_old_scene_active() {
     let budget = ResourceBudget::new(ResourceLimits::new(1, 1, 1, 10, 10));
-    let mut old_scene = budget
-        .try_reserve_memory(MemoryUsage::new(4, 4))
-        .unwrap();
+    let mut old_scene = budget.try_reserve_memory(MemoryUsage::new(4, 4)).unwrap();
     let transition = budget
         .try_begin_transition(&mut old_scene, MemoryUsage::new(5, 5))
         .unwrap();
