@@ -319,6 +319,97 @@ fn windows_roots_separate_case_aliases_when_final_directories_are_missing() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_filesystem_atomic_save_recovery_smoke() {
+    let temp = TempDir::new();
+    let roots = StorageRoots::resolve(
+        "org.astraive.asciiwall",
+        &DirectoryInputs::Windows {
+            roaming_app_data: temp.path().join("roaming-app-data"),
+            local_app_data: temp.path().join("local-app-data"),
+        },
+    )
+    .expect("resolve native Windows roots");
+    let storage = Storage::new(roots);
+
+    let first = config(json!({"theme": "windows-first"}));
+    storage
+        .save_config(&first, validate_test_config)
+        .expect("write config on native Windows filesystem");
+    let second = config(json!({"theme": "windows-second"}));
+    storage
+        .save_config(&second, validate_test_config)
+        .expect("replace config and establish Windows last-good backup");
+    let replacement = config(json!({"theme": "windows-replacement"}));
+    assert!(matches!(
+        storage.save_config_with_hook(
+            &replacement,
+            validate_test_config,
+            injected_failure(AtomicWriteStage::TargetReplaced)
+        ),
+        Err(StorageError::Io(_))
+    ));
+    assert_eq!(
+        ValidatedConfig::from_json(
+            &fs::read(storage.config_path()).expect("read replaced Windows config"),
+            validate_test_config,
+        )
+        .expect("replacement config remains valid")
+        .value(),
+        replacement.value()
+    );
+    assert_eq!(
+        ValidatedConfig::from_json(
+            &fs::read(storage.config_backup_path()).expect("read Windows last-good backup"),
+            validate_test_config,
+        )
+        .expect("last-good config remains valid")
+        .value(),
+        second.value()
+    );
+    let subsequent = config(json!({"theme": "windows-subsequent"}));
+    storage
+        .save_config(&subsequent, validate_test_config)
+        .expect("subsequent Windows config write succeeds");
+    assert_eq!(
+        storage
+            .load_config(validate_test_config)
+            .expect("load Windows config")
+            .expect("Windows config exists")
+            .value(),
+        subsequent.value()
+    );
+
+    let original_registry = registry("1.0.0");
+    storage
+        .save_registry(&original_registry)
+        .expect("write registry on native Windows filesystem");
+    let replacement_registry = registry("2.0.0");
+    assert!(matches!(
+        storage.save_registry_with_hook(
+            &replacement_registry,
+            injected_failure(AtomicWriteStage::TargetReplaced)
+        ),
+        Err(StorageError::Io(_))
+    ));
+    assert_eq!(
+        storage
+            .load_registry()
+            .expect("load replaced Windows registry"),
+        replacement_registry
+    );
+    storage
+        .save_registry(&original_registry)
+        .expect("subsequent Windows registry write succeeds");
+    assert_eq!(
+        storage
+            .load_registry()
+            .expect("load recovered Windows registry"),
+        original_registry
+    );
+}
+
 #[test]
 fn application_identifiers_reject_path_and_windows_device_names() {
     for valid in ["org.astraive.asciiwall", "ascii-wall_2", "a"] {
@@ -372,22 +463,38 @@ fn registry_is_versioned_atomic_and_failed_replacement_preserves_old_state() {
     for stage in [
         AtomicWriteStage::TemporaryCreated,
         AtomicWriteStage::TemporarySynced,
+        AtomicWriteStage::TargetReplaced,
     ] {
         let error = storage
             .save_registry_with_hook(&changed, injected_failure(stage))
-            .expect_err("interruption before replacement");
+            .expect_err("injected interruption");
         assert!(matches!(error, StorageError::Io(_)));
-        assert_eq!(fs::read(&path).expect("old registry survives"), original);
+        let expected = if stage == AtomicWriteStage::TargetReplaced {
+            &changed
+        } else {
+            &previous
+        };
+        assert_eq!(
+            storage.load_registry().expect("recover complete registry"),
+            *expected
+        );
         assert!(
             !parent
                 .join(".ascii-runtime-install-registry.json.state.tmp")
                 .exists(),
             "failed write removes its owned temporary"
         );
+        storage
+            .save_registry(&previous)
+            .expect("valid write succeeds after injected failure");
+        assert_eq!(
+            storage.load_registry().expect("subsequent registry write"),
+            previous
+        );
     }
     assert_eq!(
-        storage.load_registry().expect("old registry remains valid"),
-        previous
+        fs::read(&path).expect("restored original registry"),
+        original
     );
 
     let mut invalid = changed.clone();
@@ -484,6 +591,98 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
         fs::read(&backup_path).expect("last-good remains previous valid state"),
         previous_second
     );
+}
+
+#[test]
+fn configuration_failures_at_each_atomic_boundary_preserve_valid_recovery() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let config_path = storage.config_path();
+    let backup_path = storage.config_backup_path();
+    let seed = config(json!({"theme": "seed"}));
+    storage
+        .save_config(&seed, validate_test_config)
+        .expect("save initial config");
+
+    for (index, stage) in [
+        AtomicWriteStage::TemporaryCreated,
+        AtomicWriteStage::TemporarySynced,
+        AtomicWriteStage::BackupReplaced,
+        AtomicWriteStage::TargetReplaced,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let baseline = config(json!({"theme": format!("baseline-{index}")}));
+        storage
+            .save_config(&baseline, validate_test_config)
+            .expect("establish valid current and backup before injected failure");
+        let baseline_bytes = fs::read(&config_path).expect("baseline current bytes");
+        let previous_backup_bytes = fs::read(&backup_path).expect("previous last-good bytes");
+        let candidate = config(json!({"theme": format!("candidate-{index}")}));
+
+        let error = storage
+            .save_config_with_hook(&candidate, validate_test_config, injected_failure(stage))
+            .expect_err("injected interruption");
+        assert!(matches!(error, StorageError::Io(_)));
+
+        let expected_current = if stage == AtomicWriteStage::TargetReplaced {
+            candidate.value()
+        } else {
+            baseline.value()
+        };
+        let current_bytes = fs::read(&config_path).expect("current config remains complete");
+        let recovered_current = ValidatedConfig::from_json(&current_bytes, validate_test_config)
+            .expect("current state remains valid");
+        assert_eq!(recovered_current.value(), expected_current);
+
+        let expected_backup = if matches!(
+            stage,
+            AtomicWriteStage::BackupReplaced | AtomicWriteStage::TargetReplaced
+        ) {
+            &baseline_bytes
+        } else {
+            &previous_backup_bytes
+        };
+        let backup_bytes = fs::read(&backup_path).expect("last-good backup remains present");
+        assert_eq!(&backup_bytes, expected_backup);
+        let recovered_backup = ValidatedConfig::from_json(&backup_bytes, validate_test_config)
+            .expect("last-good state remains valid");
+        assert!(recovered_backup.value().is_object());
+
+        let parent = config_path.parent().expect("configuration directory");
+        assert!(
+            !parent
+                .join(".ascii-runtime-settings.json.state.tmp")
+                .exists(),
+            "failed config write removes its owned temporary"
+        );
+        assert!(
+            !parent
+                .join(".ascii-runtime-settings.json.last-good.state.tmp")
+                .exists(),
+            "failed backup write leaves no owned temporary"
+        );
+
+        let subsequent = config(json!({"theme": format!("subsequent-{index}")}));
+        storage
+            .save_config(&subsequent, validate_test_config)
+            .expect("valid config write succeeds after injected failure");
+        assert_eq!(
+            storage
+                .load_config(validate_test_config)
+                .expect("load subsequent config")
+                .expect("subsequent config exists")
+                .value(),
+            subsequent.value()
+        );
+        let replaced_backup = ValidatedConfig::from_json(
+            &fs::read(&backup_path).expect("subsequent write records last-good"),
+            validate_test_config,
+        )
+        .expect("subsequent write preserves valid state");
+        assert_eq!(replaced_backup.value(), expected_current);
+    }
 }
 
 #[test]
@@ -983,10 +1182,93 @@ fn diagnostic_log_instances_share_rotation_limits_and_keep_unowned_files() {
 }
 
 #[test]
+fn concurrent_log_rotation_preserves_every_record_within_retention() {
+    let temp = TempDir::new();
+    let directory = temp.path().join("retained-logs");
+    let logs: Vec<_> = (0..4)
+        .map(|_| {
+            Arc::new(DiagnosticLog::new(
+                directory.clone(),
+                temp.path().join("home"),
+                LogLimits::new(256, 16, 24).expect("valid bounds"),
+            ))
+        })
+        .collect();
+    let barrier = Arc::new(Barrier::new(logs.len()));
+    let writers: Vec<_> = logs
+        .into_iter()
+        .enumerate()
+        .map(|(worker, log)| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                for event in 0..40 {
+                    log.append(&format!("worker-{worker} event-{event:03}"))
+                        .expect("append concurrent retained event");
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().expect("logger thread");
+    }
+
+    let expected: BTreeSet<_> = (0..4)
+        .flat_map(|worker| (0..40).map(move |event| format!("worker-{worker} event-{event:03}")))
+        .collect();
+    let mut actual = BTreeSet::new();
+    let mut rotated_files = 0;
+    for entry in fs::read_dir(&directory).expect("list retained logs") {
+        let entry = entry.expect("log entry");
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        let retained_log = name == "runtime.log"
+            || name
+                .strip_prefix("runtime.log.")
+                .and_then(|suffix| suffix.parse::<usize>().ok())
+                .is_some_and(|index| (1..16).contains(&index));
+        if !retained_log {
+            continue;
+        }
+        let bytes = fs::read(entry.path()).expect("read retained log");
+        assert!(bytes.len() <= 256, "rotation exceeded each file bound");
+        assert_eq!(bytes.last(), Some(&b'\n'), "records remain line-complete");
+        let text = std::str::from_utf8(&bytes).expect("concurrent writes remain UTF-8");
+        for record in text.lines() {
+            assert!(
+                expected.contains(record),
+                "rotation retained a corrupt or partial record: {record:?}"
+            );
+            assert!(
+                actual.insert(record.to_owned()),
+                "duplicate record {record:?}"
+            );
+        }
+        if name != "runtime.log" {
+            rotated_files += 1;
+        }
+    }
+    assert!(
+        rotated_files > 0,
+        "the concurrent workload exercised rotation"
+    );
+    assert_eq!(
+        actual, expected,
+        "rotation loses no record within retention"
+    );
+}
+
+#[test]
+fn diagnostic_limits_reject_unbounded_configured_work() {
+    assert!(LogLimits::new(usize::MAX, 1, 1).is_err());
+    assert!(LogLimits::new(1024 * 1024, 1, 128 * 1024).is_err());
+}
+
+#[test]
 fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
     let source = json!({
         "title": "Example",
-        "profile": "profile:123",
+        "profile": "profile-123",
         "cursor_history": ["private-cursor-position"],
         "window_geometry_history": [{"x": 10, "y": 20}],
         "relative_path": "packages/example/1.0.0/hash",
@@ -999,22 +1281,26 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
         "source": "file:/home/alice/private",
         "address": "localhost:1234",
         "connection": "localhost:1234",
-        "note": "daemon at localhost:1234",
+        "note": "backend at buildhost:9000",
         "nested": {
             "safe": true,
             "machine_value": "C:\\Users\\Alice\\Videos\\private.mp4"
         }
     });
     let portable =
-        ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable);
+        ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
+            .expect("bounded portable export");
     assert_eq!(portable.schema_version(), 1);
     assert_eq!(portable.mode(), "portable");
     let encoded = String::from_utf8(portable.to_json().unwrap()).unwrap();
+    assert!(encoded.len() <= 1024 * 1024);
     for private_value in [
         "source",
         "address",
         "connection",
         "localhost",
+        "buildhost",
+        "9000",
         "file:/home/alice/private",
         "source_path",
         "relative_path",
@@ -1038,12 +1324,13 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
     }
     assert!(encoded.contains("Example"));
     assert!(encoded.contains("\"safe\": true"));
-    assert!(encoded.contains("\"profile\": \"profile:123\""));
+    assert!(encoded.contains("\"profile\": \"profile-123\""));
 
     let backup = ascii_runtime::storage::PortableExport::from_value(
         &source,
         ExportMode::NonportableLocalBackup,
-    );
+    )
+    .expect("bounded local backup");
     assert_eq!(backup.mode(), "nonportable-local-backup");
     let backup_json = String::from_utf8(backup.to_json().unwrap()).unwrap();
     assert!(backup_json.contains("/home/alice/Movies/private.mov"));
@@ -1060,4 +1347,40 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
             "local backup retained forbidden history {private_history}"
         );
     }
+}
+
+#[test]
+fn portable_export_rejects_over_budget_strings_depth_nodes_and_output() {
+    use ascii_runtime::storage::PortableExport;
+
+    let oversized_string = json!({"label": "private".repeat(16 * 1024 + 1)});
+    assert!(matches!(
+        PortableExport::from_value(&oversized_string, ExportMode::Portable),
+        Err(StorageError::DocumentTooLarge)
+    ));
+
+    let mut deeply_nested = json!(true);
+    for _ in 0..66 {
+        deeply_nested = json!([deeply_nested]);
+    }
+    assert!(matches!(
+        PortableExport::from_value(&deeply_nested, ExportMode::Portable),
+        Err(StorageError::DocumentTooLarge)
+    ));
+
+    let too_many_nodes = Value::Array((0..20_000).map(|_| Value::Bool(true)).collect());
+    assert!(matches!(
+        PortableExport::from_value(&too_many_nodes, ExportMode::Portable),
+        Err(StorageError::DocumentTooLarge)
+    ));
+
+    let too_much_output = Value::Array(
+        (0..300)
+            .map(|_| Value::String("output".repeat(1024)))
+            .collect(),
+    );
+    assert!(matches!(
+        PortableExport::from_value(&too_much_output, ExportMode::Portable),
+        Err(StorageError::DocumentTooLarge)
+    ));
 }

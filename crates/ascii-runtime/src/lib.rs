@@ -6,16 +6,16 @@
 //! disconnect, or device-completion behavior is implemented here.
 //!
 //! Submission, producer writes, raster consumption, and pixel callbacks acquire shared CPU-work
-//! permits. Consumed slots retain a shared output permit until their external completion token is
-//! acknowledged. A decoder outside this crate MUST hold `ResourceBudget::try_acquire_decode` for
-//! its active decode job; this crate supplies no decoder operation to which such a permit could be
-//! applied internally.
+//! permits. A consumed slot retains its shared output permit until completion acknowledgement,
+//! generation invalidation, or final pool-owner drop. A decoder outside this crate MUST hold
+//! `ResourceBudget::try_acquire_decode` for its active decode job; this crate supplies no decoder
+//! operation to which such a permit could be applied internally.
 //!
 //! # Locking and callbacks
 //!
 //! The global acquisition order is the [`BoundedHandoff`] operation lock, then an individual
 //! queue, pool, or budget lock. Queue and pool locks are never held simultaneously. Generation
-//! invalidation may release a per-slot budget permit while holding the pool lock (pool -> budget);
+//! invalidation takes per-slot output permits under the pool lock, then drops them after unlocking;
 //! budget code never acquires a pool lock. Other cross-component operations release each lock
 //! before acquiring the next. Urgent control flags are atomic; completion acknowledgements update
 //! slot ownership under the pool lock. A [`FrameLease::with_pixels`] callback runs while the pool
@@ -25,7 +25,10 @@
 //! must arrange their own thread affinity and completion callbacks outside this crate.
 //!
 //! A [`CompletionToken`] is an explicit caller attestation that external use (including native or
-//! GPU work) has completed. Reference counts and dropping a lease do not acknowledge completion.
+//! GPU work) has completed. Callers MUST retain it until external work completes. A live token owns
+//! a strong pool handle, but the slot does not pin its pool after token drop; if no other pool or
+//! lease handle remains, dropping it releases storage and permits. Dropping a token or lease does
+//! not acknowledge completion.
 
 mod buffer_pool;
 pub mod cache;
@@ -46,7 +49,7 @@ pub enum RuntimeError {
     InvalidCapacity,
     /// A checked mapping or memory-size calculation overflowed.
     SizeOverflow,
-    /// An allocation failed while constructing fixed-capacity storage.
+    /// A required allocation failed.
     AllocationFailed,
     /// The buffer pool has no reusable slot.
     NoFreeSlots,
@@ -279,16 +282,18 @@ impl ResourceBudget {
         })
     }
 
-    /// Transfers an existing old-scene charge and reserves only the additional new-scene charge.
+    /// Reserves a candidate charge while keeping the old-scene permit active.
     ///
-    /// `old` must be an active permit from this budget. On success it becomes inactive and the
-    /// returned transition owns its charge alongside the newly reserved charge. If the new charge
-    /// cannot be reserved, `old` remains active and continues to account for the old scene.
-    pub fn try_begin_transition(
+    /// `old` must be an active permit from this budget. On success it remains active and is
+    /// mutably borrowed until the returned transition is completed or dropped. The transition
+    /// owns the additional candidate charge; dropping it releases only that charge and leaves
+    /// `old` active. If reservation fails, `old` remains active and continues to account for the
+    /// old scene.
+    pub fn try_begin_transition<'a>(
         &self,
-        old: &mut MemoryPermit,
+        old: &'a mut MemoryPermit,
         new: MemoryUsage,
-    ) -> Result<TransitionMemoryPermit, RuntimeError> {
+    ) -> Result<TransitionMemoryPermit<'a>, RuntimeError> {
         if !Arc::ptr_eq(&self.inner, &old.inner) {
             return Err(RuntimeError::ResourceBudgetMismatch);
         }
@@ -296,10 +301,9 @@ impl ResourceBudget {
             return Err(RuntimeError::InvalidState);
         }
         self.reserve(new)?;
-        old.active = false;
         Ok(TransitionMemoryPermit {
             inner: Arc::clone(&self.inner),
-            old: old.usage,
+            old,
             new,
             active: true,
         })
@@ -413,22 +417,25 @@ impl Drop for MemoryPermit {
     }
 }
 
-/// A transition reservation holding old and new scene charges concurrently.
+/// A transition reservation keeping the active old scene while staging new memory.
 #[derive(Debug)]
-pub struct TransitionMemoryPermit {
+pub struct TransitionMemoryPermit<'a> {
     inner: Arc<BudgetInner>,
-    old: MemoryUsage,
+    old: &'a mut MemoryPermit,
     new: MemoryUsage,
     active: bool,
 }
 
-impl TransitionMemoryPermit {
+impl TransitionMemoryPermit<'_> {
     /// Releases the old-scene charge and returns a permit retaining the new scene.
     pub fn complete(mut self) -> MemoryPermit {
+        let old_usage = self.old.usage;
         {
             let mut state = lock_unpoisoned(&self.inner.state);
-            state.memory = state.memory.checked_sub(self.old);
+            state.memory = state.memory.checked_sub(old_usage);
         }
+        self.old.active = false;
+        self.old.usage = MemoryUsage::default();
         self.active = false;
         MemoryPermit {
             inner: Arc::clone(&self.inner),
@@ -439,17 +446,15 @@ impl TransitionMemoryPermit {
 
     /// Returns both old and new charges currently held.
     pub fn usage(&self) -> Result<MemoryUsage, RuntimeError> {
-        self.old.checked_add(self.new)
+        self.old.usage.checked_add(self.new)
     }
 }
 
-impl Drop for TransitionMemoryPermit {
+impl Drop for TransitionMemoryPermit<'_> {
     fn drop(&mut self) {
         if self.active {
-            if let Ok(total) = self.old.checked_add(self.new) {
-                let mut state = lock_unpoisoned(&self.inner.state);
-                state.memory = state.memory.checked_sub(total);
-            }
+            let mut state = lock_unpoisoned(&self.inner.state);
+            state.memory = state.memory.checked_sub(self.new);
             self.active = false;
         }
     }

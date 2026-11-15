@@ -1,4 +1,11 @@
-use std::mem::size_of;
+use std::{
+    mem::size_of,
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, Error as CoreError,
@@ -193,6 +200,46 @@ fn stop_is_delivered_before_repeated_permission_revocation() {
 }
 
 #[test]
+fn concurrent_revocations_do_not_starve_a_pending_stop() {
+    let controls = Arc::new(ControlQueue::new(&runtime_budget(), 1).unwrap());
+    let stop_flood = Arc::new(AtomicBool::new(false));
+    let start = Arc::new(Barrier::new(2));
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+
+    let sender_controls = Arc::clone(&controls);
+    let sender_stop_flood = Arc::clone(&stop_flood);
+    let sender_start = Arc::clone(&start);
+    let sender = std::thread::spawn(move || {
+        sender_start.wait();
+        for _ in 0..1_024 {
+            sender_controls
+                .try_send(ControlEvent::RevokePermissions)
+                .unwrap();
+        }
+        ready_tx.send(()).unwrap();
+        while !sender_stop_flood.load(Ordering::Acquire) {
+            sender_controls
+                .try_send(ControlEvent::RevokePermissions)
+                .unwrap();
+            std::thread::yield_now();
+        }
+    });
+
+    controls.try_send(ControlEvent::Stop).unwrap();
+    start.wait();
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("revocation flood should make progress while Stop is pending");
+    let first = controls.try_recv();
+    stop_flood.store(true, Ordering::Release);
+    sender.join().unwrap();
+
+    assert_eq!(first, Some(ControlEvent::Stop));
+    assert_eq!(controls.try_recv(), Some(ControlEvent::RevokePermissions));
+    assert!(controls.is_empty());
+}
+
+#[test]
 fn retryable_receive_failures_retain_published_frame_for_later_receive() {
     let handoff = BoundedHandoff::new(&runtime_budget(), 1, 1, 3, 1, 1).unwrap();
     handoff
@@ -295,6 +342,36 @@ fn dropped_unacknowledged_completion_token_keeps_lease_pending() {
 }
 
 #[test]
+fn dropping_last_owner_releases_unacknowledged_pool_resources_without_invalidation() {
+    let resources = runtime_budget();
+    let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
+    let descriptor = publish(&pool, 1);
+    let mut lease = pool
+        .consume(&descriptor, &budget(), &CancellationToken::new())
+        .unwrap();
+    let token = lease.completion_token().unwrap();
+
+    let outstanding = resources.snapshot();
+    assert!(outstanding.memory.cpu_bytes > 0);
+    assert_eq!(outstanding.outputs, 1);
+
+    drop(pool);
+    let while_lease_and_token_live = resources.snapshot();
+    assert_eq!(while_lease_and_token_live.memory, outstanding.memory);
+    assert_eq!(while_lease_and_token_live.outputs, 1);
+
+    drop(lease);
+    let while_token_live = resources.snapshot();
+    assert_eq!(while_token_live.memory, outstanding.memory);
+    assert_eq!(while_token_live.outputs, 1);
+
+    drop(token);
+    let after_last_owner_drop = resources.snapshot();
+    assert_eq!(after_last_owner_drop.memory, MemoryUsage::default());
+    assert_eq!(after_last_owner_drop.outputs, 0);
+}
+
+#[test]
 fn acknowledgement_reclaims_a_slot_after_its_lease_was_dropped() {
     let resources = runtime_budget();
     let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
@@ -315,7 +392,37 @@ fn acknowledgement_reclaims_a_slot_after_its_lease_was_dropped() {
 }
 
 #[test]
-fn pending_completion_token_pins_pool_until_external_acknowledgement() {
+fn concurrent_lease_drop_and_completion_ack_reclaim_the_slot() {
+    let resources = runtime_budget();
+    let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
+    let descriptor = publish(&pool, 1);
+    let mut lease = pool
+        .consume(&descriptor, &budget(), &CancellationToken::new())
+        .unwrap();
+    let token = lease.completion_token().unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+
+    let drop_barrier = Arc::clone(&barrier);
+    let drop_lease = std::thread::spawn(move || {
+        drop_barrier.wait();
+        drop(lease);
+    });
+    let ack_barrier = Arc::clone(&barrier);
+    let acknowledge = std::thread::spawn(move || {
+        ack_barrier.wait();
+        token.acknowledge();
+    });
+    barrier.wait();
+    drop_lease.join().unwrap();
+    acknowledge.join().unwrap();
+
+    assert_eq!(pool.slot_state(0).unwrap(), SlotState::Free);
+    assert_eq!(resources.snapshot().outputs, 0);
+    drop(pool.begin_fill().unwrap());
+}
+
+#[test]
+fn live_completion_token_owns_pool_until_external_acknowledgement() {
     let resources = runtime_budget();
     let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
     let descriptor = publish(&pool, 1);
@@ -455,7 +562,7 @@ fn logical_generation_invalidation_severs_an_outstanding_lease() {
 }
 
 #[test]
-fn completed_lease_releases_its_pool_pin_without_dropping_the_handle() {
+fn releasing_completed_lease_drops_its_pool_handle() {
     let resources = runtime_budget();
     let pool = BufferPool::new(&resources, 1, 1, 3).unwrap();
     let descriptor = publish(&pool, 1);
@@ -666,6 +773,28 @@ fn handoff_constructor_releases_earlier_permits_when_control_queue_charge_fails(
 }
 
 #[test]
+fn dropping_staged_transition_releases_candidate_charge_and_keeps_old_scene_active() {
+    let budget = ResourceBudget::new(ResourceLimits::new(1, 1, 1, 10, 10));
+    let mut old_scene = budget.try_reserve_memory(MemoryUsage::new(4, 4)).unwrap();
+    let transition = budget
+        .try_begin_transition(&mut old_scene, MemoryUsage::new(5, 5))
+        .unwrap();
+
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
+    drop(transition);
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(4, 4));
+    assert_eq!(
+        budget
+            .try_reserve_memory(MemoryUsage::new(7, 7))
+            .unwrap_err(),
+        RuntimeError::MemoryBudgetExceeded
+    );
+
+    old_scene.release();
+    assert_eq!(budget.snapshot().memory, MemoryUsage::default());
+}
+
+#[test]
 fn fixed_bounds_and_aggregate_permits_are_enforced_and_released() {
     assert_eq!(
         BufferPool::new(&runtime_budget(), 0, 1, 4).unwrap_err(),
@@ -750,15 +879,10 @@ fn fixed_bounds_and_aggregate_permits_are_enforced_and_released() {
         .try_begin_transition(&mut old_scene, MemoryUsage::new(5, 5))
         .unwrap();
     assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
-    drop(old_scene);
-    assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
-    assert_eq!(
-        budget
-            .try_reserve_memory(MemoryUsage::new(2, 0))
-            .unwrap_err(),
-        RuntimeError::MemoryBudgetExceeded
-    );
     let new_scene = transition.complete();
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(5, 5));
+    assert_eq!(old_scene.usage(), MemoryUsage::default());
+    drop(old_scene);
     assert_eq!(budget.snapshot().memory, MemoryUsage::new(5, 5));
     drop(new_scene);
     assert_eq!(budget.snapshot().memory, MemoryUsage::default());

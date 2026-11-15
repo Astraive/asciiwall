@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace contains portable `ascii-core` and bounded `ascii-runtime` contracts. **No application binary or published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace contains portable `ascii-core` and bounded `ascii-runtime` contracts, plus the `ascii-convert` glyph-table implementation. **No application binary or published release tag exists yet.**
 
 ### Added
 
@@ -23,10 +23,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - COR-009 content cache identities for conversion, video, and GPU-derived results; source-observation revalidation, byte-budget LRU eviction with explicit resource leases, shared-root accounting and serialized store publication, disk-space reservations, and loss-safe transactional output with recoverable partial artifacts.
 - Bounded `ascii-runtime` handoff queues, buffer leases, completion acknowledgements, and shared concurrency/memory budgets ([COR-005](docs/architecture/resource-ownership-and-shutdown.md)).
 - Added COR-008 storage support for platform-specific roots, a versioned atomic JSON install registry, schema-validated configuration with last-good recovery, importer transaction journaling, bounded redacted diagnostics, and privacy-filtered portable exports, with focused storage transaction tests.
+- Bounded `ascii-convert` glyph tables with measured cell-clipped masks, descriptors, deterministic fingerprints, and typed font-validation failures ([FNT-001](docs/engine/glyph-matching-and-fonts.md)).
+- Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 
 ### Changed
 
-- Hardened portable handoff ownership: pending completion tokens pin their backing pool and dropped leases reclaim only after acknowledgement; one-slot freshness replacement validates before eviction; Stop now takes priority over repeated revocation; existing transition charges transfer without double counting. CPU handoff, slot writes, raster validation, and pixel callbacks now hold shared work permits, while active output leases retain output permits until completion. Native OS/GPU transport remains unimplemented and is not claimed.
+- Hardened portable handoff ownership: live completion tokens own a strong pool handle without slot-to-pool self-pinning; unacknowledged slots stay quarantined while any pool handle remains and until generation invalidation, while dropping the last handle releases pool memory and output permits. Dropped leases reclaim only after acknowledgement; one-slot freshness replacement validates before eviction; Stop now takes priority over repeated revocation; existing transition charges transfer without double counting. CPU handoff, slot writes, raster validation, and pixel callbacks now hold shared work permits, while active output leases retain output permits until acknowledgement, generation invalidation, or pool destruction. Focused regressions also race concurrent lease drop with completion acknowledgement and sustain concurrent revocation traffic while Stop is pending. Native OS/GPU transport remains unimplemented and is not claimed.
+
+- Recorded the COR-005 integration blocker: this workspace has no application, decoder, scene-transition manager, or transport-owner interface to wire decode/transition permits or validate native lifecycle behavior; production consumers and native transport/device evidence remain prerequisites, so issue `#73` stays open.
 
 - Repaired relative Markdown navigation across existing original root documentation entrypoints (`c321475`, committed after PR `#1` and prior to `[PRJ-004]`).
 - Updated Project 4 registries and audit semantics for layout-specific grouping (`BOARD_LAYOUT` `verticalGroupByFields` columns / `groupByFields` swimlanes; 17 `TABLE_LAYOUT` views with one `group_by`, UI-only `slice_by`, and two ordered sorts). Configured and saved all table views in the authenticated Orca browser, reloaded all 18 views, verified native axes/sorts against GraphQL, and recorded UI slice reads plus screenshots under external `../.issues/reports/project-view-ui-verification.json`.
@@ -39,7 +43,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Preserve ISO-looking JSON text and exact protected ledger timestamp strings through repeated reads and atomic writes; the real filesystem regression now exercises lossless reloads.
 - COR-009 cache eviction uses marked ownership scopes and OS file locks; output reservations charge retained bytes, suppressed I/O failures cannot publish partial results, and filesystem file identity clears replaced-output registrations across case aliases.
 - [COR-008] Serialize atomic writes, importer journal transitions, and diagnostic-log rotation by
-  storage directory; clean reserved interrupted-write temporaries, sync newly created directory
-  entries, recover from oversized current configs without replacing last-good data, and redact
-  clipped diagnostics plus portable file URIs and network endpoints.
-- [COR-008] Strip app/application-rule fields from portable exports; they remain available only in explicitly labeled nonportable local backups.
+  storage directory; clean owned interrupted-write temporaries, sync newly created directory
+  entries where supported, preserve only schema-valid last-good configs, and redact clipped
+  diagnostics plus portable file URIs and network endpoints.
+- [COR-008] Inject failures at every config/registry atomic-write hook boundary and verify recovery
+  yields only complete valid state, cleans owned temporaries, and permits subsequent writes; race
+  retained concurrent log records through rotation without loss or corruption.
+- [COR-008] Bound diagnostic logs to 16 files of at most 16 MiB each and 64 KiB per record; bound
+  portable-export traversal and serialized output, reject over-budget exports without partial data,
+  and redact single-label host-and-port endpoints such as `buildhost:9000`.
+- [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
+  explicitly labeled nonportable local backups.
+- Hardened FNT-001 cancellation through parser preflight, glyph description, rasterization, and final sorting; prevented implicit deep clones of budgeted tables, validated legacy cmap format 2 beside Unicode maps, fixed one-pixel edge descriptors, expanded fingerprint invalidation coverage, and documented the checked parser-allocation envelope.
+- Collect COR-005 output permits under the buffer-pool lock, fallibly reserve for only live permits outside it, then release after unlocking; document the non-nested pool/budget lock order.
+- Keep the active old-scene COR-005 memory permit borrowed while a transition is staged; abort releases only the candidate charge, while completion releases the old charge once and deactivates the original permit.
+- Recheck urgent Stop/revocation flags under the ordinary control-queue lock before popping a FIFO event.
+- Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
