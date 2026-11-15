@@ -434,6 +434,7 @@ impl TransitionMemoryPermit<'_> {
             state.memory = state.memory.checked_sub(old_usage);
         }
         self.old.active = false;
+        self.old.usage = MemoryUsage::default();
         self.active = false;
         MemoryPermit {
             inner: Arc::clone(&self.inner),

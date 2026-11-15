@@ -881,6 +881,7 @@ fn fixed_bounds_and_aggregate_permits_are_enforced_and_released() {
     assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
     let new_scene = transition.complete();
     assert_eq!(budget.snapshot().memory, MemoryUsage::new(5, 5));
+    assert_eq!(old_scene.usage(), MemoryUsage::default());
     drop(old_scene);
     assert_eq!(budget.snapshot().memory, MemoryUsage::new(5, 5));
     drop(new_scene);
