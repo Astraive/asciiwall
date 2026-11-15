@@ -484,7 +484,12 @@ fn premultiplied_validation_pass_is_charged_to_the_work_budget() {
         GridSizing::fixed_pixel_surface(8, 12),
         LinearRgb::WHITE,
         LinearRgb::BLACK,
-    );
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::Contain,
+        SamplingFilter::Nearest,
+        None,
+    ));
     let premultiplied = RasterFrameView::new(
         1,
         1,
@@ -495,7 +500,7 @@ fn premultiplied_validation_pass_is_charged_to_the_work_budget() {
         &[128, 128, 128, 255],
     );
     let opaque = raster(&[128], 1, 1, 1);
-    let exact_work = Budget::new(8_000_000, 64_000_000, 8);
+    let exact_work = Budget::new(8_000_000, 64_000_000, 5);
 
     assert_eq!(
         convert_density_detailed(premultiplied, &table, &conversion_settings, &exact_work),
