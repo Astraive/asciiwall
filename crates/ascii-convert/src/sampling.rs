@@ -558,17 +558,9 @@ impl QualityPatches {
         descriptors
             .try_reserve_exact(cell_count)
             .map_err(|_| Error::AllocationFailed)?;
-        for index in 0..patch_value_count {
-            if index.is_multiple_of(PATCH_INITIALIZATION_CANCEL_INTERVAL)
-                && cancellation.is_cancelled()
-            {
-                return Err(Error::Cancelled);
-            }
-            luminance.push(0.0);
-        }
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
+        zero_fill_patch_values(&mut luminance, patch_value_count, || {
+            cancellation.is_cancelled()
+        })?;
         Ok(Self {
             dimensions,
             luminance,
@@ -594,6 +586,23 @@ impl QualityPatches {
     pub(crate) fn push_descriptor(&mut self, descriptor: PatchDescriptors) {
         self.descriptors.push(descriptor);
     }
+}
+
+fn zero_fill_patch_values(
+    luminance: &mut Vec<f32>,
+    patch_value_count: usize,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<(), Error> {
+    for index in 0..patch_value_count {
+        if index.is_multiple_of(PATCH_INITIALIZATION_CANCEL_INTERVAL) && is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        luminance.push(0.0);
+    }
+    if is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    Ok(())
 }
 
 /// Internal, fully preflighted geometry and sampling identity for one conversion.
@@ -765,8 +774,13 @@ impl SamplingPlan {
                 let (source_x1, source_y1) = self
                     .transform
                     .source_point_for_display(display_x1, display_y1);
-                let full_area = (source_x1 - source_x0) * (source_y1 - source_y0);
-                if !full_area.is_finite() || full_area <= 0.0 {
+                let footprint_width = source_x1 - source_x0;
+                let footprint_height = source_y1 - source_y0;
+                if !footprint_width.is_finite()
+                    || !footprint_height.is_finite()
+                    || footprint_width <= 0.0
+                    || footprint_height <= 0.0
+                {
                     return Err(Error::SizeOverflow);
                 }
                 let clipped_x0 = source_x0.max(self.transform.source_rect.x).max(0.0);
@@ -777,9 +791,12 @@ impl SamplingPlan {
                 let clipped_y1 = source_y1
                     .min(self.transform.source_rect.bottom())
                     .min(f64::from(raster.height()));
-                let mut covered_area = 0.0;
+                let covered_width = (clipped_x1 - clipped_x0).max(0.0);
+                let covered_height = (clipped_y1 - clipped_y0).max(0.0);
+                let covered_fraction_x = (covered_width / footprint_width).clamp(0.0, 1.0);
+                let covered_fraction_y = (covered_height / footprint_height).clamp(0.0, 1.0);
                 let mut weighted_luminance = 0.0;
-                if clipped_x1 > clipped_x0 && clipped_y1 > clipped_y0 {
+                if covered_width > 0.0 && covered_height > 0.0 {
                     let first_x = clipped_x0.floor() as u32;
                     let first_y = clipped_y0.floor() as u32;
                     let end_x = clipped_x1.ceil().min(f64::from(raster.width())) as u32;
@@ -787,11 +804,12 @@ impl SamplingPlan {
                     for y in first_y..end_y {
                         let overlap_y =
                             clipped_y1.min(f64::from(y + 1)) - clipped_y0.max(f64::from(y));
+                        let weight_y = overlap_y / footprint_height;
                         for x in first_x..end_x {
                             let overlap_x =
                                 clipped_x1.min(f64::from(x + 1)) - clipped_x0.max(f64::from(x));
-                            let area = overlap_x * overlap_y;
-                            if area <= 0.0 {
+                            let area_weight = (overlap_x / footprint_width) * weight_y;
+                            if area_weight <= 0.0 {
                                 continue;
                             }
                             *work = work.checked_add(1).ok_or(Error::SizeOverflow)?;
@@ -802,16 +820,12 @@ impl SamplingPlan {
                             }
                             let index = pixel_index(x, y, raster.width())?;
                             weighted_luminance +=
-                                pixel_luminance(raster.pixels()[index], background) * area;
-                            covered_area += area;
+                                pixel_luminance(raster.pixels()[index], background) * area_weight;
                         }
                     }
                 }
-                let uncovered_area = (full_area - covered_area).max(0.0);
-                Ok(
-                    (weighted_luminance + background.luminance().value() * uncovered_area)
-                        / full_area,
-                )
+                let uncovered_fraction = (1.0 - covered_fraction_x * covered_fraction_y).max(0.0);
+                Ok(weighted_luminance + background.luminance().value() * uncovered_fraction)
             }
         }
     }
@@ -1156,7 +1170,9 @@ fn patch_descriptors(
 
 #[cfg(test)]
 mod tests {
-    use super::{CropRect, FitMode, FitTransform, PatchDimensions, QualityPatches};
+    use super::{
+        CropRect, FitMode, FitTransform, PatchDimensions, QualityPatches, zero_fill_patch_values,
+    };
     use ascii_core::{CancellationToken, Error, MalformedReason};
 
     #[test]
@@ -1173,6 +1189,22 @@ mod tests {
             .err(),
             Some(Error::Cancelled)
         );
+    }
+
+    #[test]
+    fn patch_zero_fill_polls_cancellation_every_256_values() {
+        let mut luminance = Vec::with_capacity(1024);
+        let mut polls = 0;
+
+        assert_eq!(
+            zero_fill_patch_values(&mut luminance, 1024, || {
+                polls += 1;
+                polls == 3
+            }),
+            Err(Error::Cancelled)
+        );
+        assert_eq!(polls, 3);
+        assert_eq!(luminance.len(), 512);
     }
 
     #[test]
