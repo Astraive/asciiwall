@@ -773,6 +773,30 @@ fn handoff_constructor_releases_earlier_permits_when_control_queue_charge_fails(
 }
 
 #[test]
+fn dropping_staged_transition_releases_candidate_charge_and_keeps_old_scene_active() {
+    let budget = ResourceBudget::new(ResourceLimits::new(1, 1, 1, 10, 10));
+    let mut old_scene = budget
+        .try_reserve_memory(MemoryUsage::new(4, 4))
+        .unwrap();
+    let transition = budget
+        .try_begin_transition(&mut old_scene, MemoryUsage::new(5, 5))
+        .unwrap();
+
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
+    drop(transition);
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(4, 4));
+    assert_eq!(
+        budget
+            .try_reserve_memory(MemoryUsage::new(7, 7))
+            .unwrap_err(),
+        RuntimeError::MemoryBudgetExceeded
+    );
+
+    old_scene.release();
+    assert_eq!(budget.snapshot().memory, MemoryUsage::default());
+}
+
+#[test]
 fn fixed_bounds_and_aggregate_permits_are_enforced_and_released() {
     assert_eq!(
         BufferPool::new(&runtime_budget(), 0, 1, 4).unwrap_err(),
@@ -857,15 +881,9 @@ fn fixed_bounds_and_aggregate_permits_are_enforced_and_released() {
         .try_begin_transition(&mut old_scene, MemoryUsage::new(5, 5))
         .unwrap();
     assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
-    drop(old_scene);
-    assert_eq!(budget.snapshot().memory, MemoryUsage::new(9, 9));
-    assert_eq!(
-        budget
-            .try_reserve_memory(MemoryUsage::new(2, 0))
-            .unwrap_err(),
-        RuntimeError::MemoryBudgetExceeded
-    );
     let new_scene = transition.complete();
+    assert_eq!(budget.snapshot().memory, MemoryUsage::new(5, 5));
+    drop(old_scene);
     assert_eq!(budget.snapshot().memory, MemoryUsage::new(5, 5));
     drop(new_scene);
     assert_eq!(budget.snapshot().memory, MemoryUsage::default());
