@@ -24,6 +24,10 @@ Decode within limits and apply display orientation once in the decoder; then int
 
 The `ascii-media` decoder applies display orientation exactly once and returns top-down pixels. The `ascii-convert` color normalizer requires top-down raster input and never transforms orientation. Interpret supported source color metadata after decoding and before fit, crop, or resampling. A normalized raster is owned linear-premultiplied RGBA, and raster size, stride, input extent, output allocation size, work, and cancellation are checked before and during normalization.
 
+Premultiplied RGBA is scanned in a cancellable preflight before normalized output is allocated;
+each pixel is charged once for that validation and once for normalization. Straight and opaque
+inputs require only the normalization pass.
+
 The normalizer's raster-byte ceiling covers the checked sum of the borrowed input's minimum
 readable extent, `(height - 1) * row_stride + row_bytes`, and its requested owned normalized pixel
 storage, `width * height * size_of::<LinearPremultipliedRgba>()`. It includes padding between rows
@@ -42,9 +46,10 @@ not be subtracted from the budget passed to the normalizer.
 transfer decoding, then multiplies linear RGB by alpha. Premultiplied sRGB input is interpreted as
 associated in the encoded sRGB domain: for nonzero alpha, unassociate there, decode to linear, and
 premultiply in linear light. Premultiplied linear input is already associated in linear light.
-Alpha-zero pixels always normalize to transparent black without division, so invisible RGB cannot
-affect averages. Nonfinite, out-of-range, and invalid premultiplied samples are rejected rather
-than clipped.
+Alpha-zero pixels always normalize to transparent black without division, and their hidden channel
+bytes are ignored even for premultiplied input. For nonzero alpha, premultiplied channels above
+alpha are rejected; nonfinite, out-of-range, and other invalid samples are rejected rather than
+clipped.
 
 Ordinary opaque wallpaper must be composited over its chosen opaque `LinearRgb` background in
 linear light before matching. `NormalizedRaster::composited_over` provides those colors without an
