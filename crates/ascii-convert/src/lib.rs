@@ -1,4 +1,4 @@
-//! Bounded font rasterization and immutable glyph-table primitives.
+//! Bounded font rasterization and immutable glyph-table primitives, with typed color normalization and alpha compositing.
 
 mod color;
 mod font;
