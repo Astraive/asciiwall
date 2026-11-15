@@ -28,19 +28,31 @@ pub struct DecodedFrame {
     // Declared after pixels so the allocation is freed before its charge is released.
     _memory_permit: MemoryPermit,
 }
+pub(crate) struct DecodedFrameData {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) row_stride: usize,
+    pub(crate) channels: PixelChannels,
+    pub(crate) alpha: AlphaMode,
+    pub(crate) pixels: Vec<u8>,
+    pub(crate) memory_permit: MemoryPermit,
+}
 
 impl DecodedFrame {
     pub(crate) fn new(
-        width: u32,
-        height: u32,
-        row_stride: usize,
-        channels: PixelChannels,
-        alpha: AlphaMode,
-        pixels: Vec<u8>,
-        memory_permit: MemoryPermit,
+        data: DecodedFrameData,
         budget: &Budget,
         cancel: &CancellationToken,
     ) -> Result<Self, Error> {
+        let DecodedFrameData {
+            width,
+            height,
+            row_stride,
+            channels,
+            alpha,
+            pixels,
+            memory_permit,
+        } = data;
         let capacity = u64::try_from(pixels.capacity()).map_err(|_| Error::SizeOverflow)?;
         if memory_permit.bytes() != capacity {
             return Err(Error::Malformed(
@@ -131,13 +143,15 @@ mod tests {
         let capacity = u64::try_from(pixels.capacity()).unwrap();
         let permit = resources.try_reserve_memory(capacity).unwrap();
         let frame = DecodedFrame::new(
-            2,
-            2,
-            8,
-            PixelChannels::Rgb,
-            AlphaMode::Opaque,
-            pixels,
-            permit,
+            DecodedFrameData {
+                width: 2,
+                height: 2,
+                row_stride: 8,
+                channels: PixelChannels::Rgb,
+                alpha: AlphaMode::Opaque,
+                pixels,
+                memory_permit: permit,
+            },
             &Budget::new(64, 64, 64),
             &CancellationToken::new(),
         )

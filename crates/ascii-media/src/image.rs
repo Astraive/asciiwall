@@ -10,8 +10,9 @@ use image::metadata::Orientation;
 use zune_core::{colorspace::ColorSpace, options::DecoderOptions};
 use zune_jpeg::{JpegDecoder, errors::DecodeErrors};
 
-use crate::resources::DecodeResources;
-use crate::{DecodedFrame, resources::MemoryPermit};
+use crate::DecodedFrame;
+use crate::decoded_frame::DecodedFrameData;
+use crate::resources::{DecodeResources, MemoryPermit};
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const INPUT_PREFIX_BYTES: usize = 12;
@@ -95,10 +96,7 @@ pub fn decode_image(
         return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
     }
 
-    let _decode_permit = limits
-        .resources
-        .try_acquire_decode()
-        .map_err(|error| error)?;
+    let _decode_permit = limits.resources.try_acquire_decode()?;
     let (start, encoded_len) = inspect_extent(input, limits.max_encoded_bytes, cancel)?;
     if encoded_len == 0 {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
@@ -123,10 +121,7 @@ pub fn decode_image(
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
     }
 
-    let snapshot_permit = limits
-        .resources
-        .try_reserve_memory(encoded_len)
-        .map_err(|error| error)?;
+    let snapshot_permit = limits.resources.try_reserve_memory(encoded_len)?;
     let snapshot_len = usize::try_from(encoded_len).map_err(|_| Error::SizeOverflow)?;
     let mut snapshot = zeroed_bytes(snapshot_len)?;
     snapshot[..prefix_len].copy_from_slice(&prefix[..prefix_len]);
@@ -305,24 +300,17 @@ fn reserve_plan(
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
     }
 
-    let scratch_permit = limits
-        .resources
-        .try_reserve_memory(scratch_bytes)
-        .map_err(|error| error)?;
+    let scratch_permit = limits.resources.try_reserve_memory(scratch_bytes)?;
     let source_permit = if plan.temporary_source_bytes == 0 {
         None
     } else {
         Some(
             limits
                 .resources
-                .try_reserve_memory(plan.temporary_source_bytes)
-                .map_err(|error| error)?,
+                .try_reserve_memory(plan.temporary_source_bytes)?,
         )
     };
-    let output_permit = limits
-        .resources
-        .try_reserve_memory(plan.output_bytes)
-        .map_err(|error| error)?;
+    let output_permit = limits.resources.try_reserve_memory(plan.output_bytes)?;
     Ok((scratch_permit, source_permit, output_permit))
 }
 
@@ -415,13 +403,15 @@ fn decode_png(
         (PixelChannels::Rgb, AlphaMode::Opaque)
     };
     DecodedFrame::new(
-        plan.output_width,
-        plan.output_height,
-        plan.row_stride,
-        channels,
-        alpha,
-        output,
-        output_permit,
+        DecodedFrameData {
+            width: plan.output_width,
+            height: plan.output_height,
+            row_stride: plan.row_stride,
+            channels,
+            alpha,
+            pixels: output,
+            memory_permit: output_permit,
+        },
         &limits.budget,
         cancel,
     )
@@ -617,7 +607,11 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
                     );
                 }
                 if values.iter().any(|value| *value > 100_000)
-                    || values.chunks_exact(2).any(|xy| xy[0] + xy[1] > 100_000)
+                    || values
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .any(|xy| xy[0] + xy[1] > 100_000)
                 {
                     return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
                 }
@@ -678,15 +672,14 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
     if !seen_ihdr || !seen_idat || !seen_iend || offset != encoded.len() {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
-    if header.color_type == 3 {
-        if !seen_plte
+    if header.color_type == 3
+        && (!seen_plte
             || header.palette_entries > (1_usize << header.bit_depth)
             || header
                 .transparency_len
-                .is_some_and(|length| length > header.palette_entries)
-        {
-            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
-        }
+                .is_some_and(|length| length > header.palette_entries))
+    {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
     if let Some(length) = header.transparency_len {
         let valid = match header.color_type {
@@ -704,16 +697,15 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
             .unsupported
             .get_or_insert(UnsupportedReason::ColorDescription);
     }
-    if header.has_srgb {
-        if header.gamma.is_some_and(|gamma| gamma != PNG_SRGB_GAMMA)
+    if header.has_srgb
+        && (header.gamma.is_some_and(|gamma| gamma != PNG_SRGB_GAMMA)
             || header
                 .chromaticities
-                .is_some_and(|values| values != PNG_SRGB_CHROMATICITIES)
-        {
-            header
-                .unsupported
-                .get_or_insert(UnsupportedReason::ColorDescription);
-        }
+                .is_some_and(|values| values != PNG_SRGB_CHROMATICITIES))
+    {
+        header
+            .unsupported
+            .get_or_insert(UnsupportedReason::ColorDescription);
     }
     Ok(header)
 }
@@ -957,13 +949,15 @@ fn decode_jpeg(
         return Err(Error::Cancelled);
     }
     DecodedFrame::new(
-        plan.output_width,
-        plan.output_height,
-        plan.row_stride,
-        PixelChannels::Rgb,
-        AlphaMode::Opaque,
-        output,
-        output_permit,
+        DecodedFrameData {
+            width: plan.output_width,
+            height: plan.output_height,
+            row_stride: plan.row_stride,
+            channels: PixelChannels::Rgb,
+            alpha: AlphaMode::Opaque,
+            pixels: output,
+            memory_permit: output_permit,
+        },
         &limits.budget,
         cancel,
     )
@@ -1050,12 +1044,6 @@ fn inspect_jpeg(encoded: &[u8], cancel: &CancellationToken) -> Result<JpegHeader
                     if let Some(orientation) = parse_tiff_orientation(tiff) {
                         header.orientation = orientation;
                     }
-                } else if payload.starts_with(b"http://ns.adobe.com/xap/1.0\0")
-                    || payload.starts_with(b"http://ns.adobe.com/xmp/extension/\0")
-                {
-                    header
-                        .unsupported
-                        .get_or_insert(UnsupportedReason::UnsupportedFormat);
                 } else {
                     header
                         .unsupported
@@ -1110,7 +1098,7 @@ fn inspect_jpeg(encoded: &[u8], cancel: &CancellationToken) -> Result<JpegHeader
             }
             0xc4 | 0xdb | 0xdd | 0xfe | 0xe0 | 0xee => {}
             _ if is_jpeg_sof(marker) => {}
-            _ if marker >= 0xe0 && marker <= 0xef => {
+            _ if (0xe0..=0xef).contains(&marker) => {
                 header
                     .unsupported
                     .get_or_insert(UnsupportedReason::UnsupportedFormat);
@@ -1223,7 +1211,9 @@ fn parse_jpeg_sos(payload: &[u8], header: &JpegHeader) -> Result<usize, Error> {
             return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
         }
         if payload[1..1 + index * 2]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .any(|previous| previous[0] == id)
         {
             return Err(Error::Malformed(MalformedReason::InvalidEncodedData));

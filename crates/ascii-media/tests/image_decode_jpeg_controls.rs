@@ -10,12 +10,12 @@
 //!   optimize=false; only progressive=false/true differs.
 //! - 64x64 cancellation fixture uses Python random.Random(0xA51C).randrange(256)
 //!   row-major grayscale samples, quality=90, subsampling=0, optimize=false.
-//! SHA-256 of complete encoded bytes:
+//!   SHA-256 of complete encoded bytes:
 //!   baseline 4x3:     90f84b4bf806830d877894c41bc6ab5b0688565237094060abeca4b2fdee4982
 //!   progressive 4x3:  ee333a42b8603c25f03293d526ca17352b32b6ad7eaf48e04f77f019f7678581
 //!   cancel 64x64:     12870a1e5c0dcfa734a7f00bebb45146696482e158c459afc146d4b0d526166c
-//! The orientation cases prepend a single APP1 segment containing Exif\0\0 and a
-//! little-endian TIFF IFD0 Orientation (0x0112, SHORT, count 1); complete variant hashes:
+//!   The orientation cases prepend a single APP1 segment containing Exif\0\0 and a
+//!   little-endian TIFF IFD0 Orientation (0x0112, SHORT, count 1); complete variant hashes:
 //!   1 ea6cc82b7cf4b418300eeb827e9ca22157cdd1134bdb2a2a73ee6d842d3eefec
 //!   2 c776304658b573bfcb2b906be15b02731a0649efb56bdd81274ff62fed42b7b7
 //!   3 a06d5ab8f0c27594a1e7fca500ecb19412256ff19d6d770afcad4de320623258
@@ -197,7 +197,9 @@ fn limits() -> DecodeLimits {
 fn fixture_bytes(hex: &str) -> Vec<u8> {
     assert_eq!(hex.len() % 2, 0);
     hex.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]))
         .collect()
 }
@@ -238,7 +240,9 @@ fn assert_gray_grid(frame: &DecodedFrame, dimensions: (u32, u32), expected: &[u8
 
     for (index, (pixel, expected)) in frame
         .pixels()
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .zip(expected.iter().copied())
         .enumerate()
     {
