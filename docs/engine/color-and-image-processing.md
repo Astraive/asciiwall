@@ -22,7 +22,7 @@ wide-gamut conversion, clipping, or complete ICC-profile claim.
 
 Decode within limits and apply display orientation once in the decoder; then interpret source color metadata, decide alpha compositing background, select crop/contain/cover, resample, and apply artistic adjustments such as exposure, contrast, gamma, saturation, and edge emphasis. Distinguish physical color conversion from user-selected artistic distortion.
 
-The `ascii-media` decoder applies display orientation exactly once and returns top-down pixels. The `ascii-convert` color normalizer requires top-down raster input and never transforms orientation. Interpret supported source color metadata after decoding and before fit, crop, or resampling. A normalized raster is owned linear-premultiplied RGBA, and raster size, stride, input extent, output allocation size, work, and cancellation are checked before and during normalization.
+An `ascii-media` decoder is planned to apply display orientation exactly once and return top-down pixels; that decoder is not implemented in this PR. The existing `ascii-convert` normalizer accepts top-down raster inputs and never transforms orientation. The planned pipeline should interpret supported source color metadata after decoding and before fit, crop, or resampling. A normalized raster is owned linear-premultiplied RGBA, and raster size, stride, input extent, output allocation size, work, and cancellation are checked before and during normalization.
 
 Premultiplied RGBA is scanned in a cancellable preflight before normalized output is allocated;
 each pixel is charged once for that validation and once for normalization. Straight and opaque
