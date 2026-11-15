@@ -440,14 +440,7 @@ pub fn convert_density_detailed(
     let foreground = output_color(settings.foreground);
     let background = output_color(settings.background);
 
-    if settings.cancellation.is_cancelled() {
-        return Err(Error::Cancelled.into());
-    }
-
-    let mut cells = Vec::new();
-    cells
-        .try_reserve_exact(grid_budget.cell_count_usize())
-        .map_err(|_| Error::AllocationFailed)?;
+    let mut cells = reserve_output_cells(grid_budget.cell_count_usize(), settings.cancellation)?;
 
     for row in 0..size.rows() {
         for column in 0..size.columns() {
@@ -513,6 +506,21 @@ pub fn convert_density_detailed(
     })
 }
 
+fn reserve_output_cells(
+    cell_count: usize,
+    cancellation: &CancellationToken,
+) -> Result<Vec<AsciiCell>, Error> {
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+
+    let mut cells = Vec::new();
+    cells
+        .try_reserve_exact(cell_count)
+        .map_err(|_| Error::AllocationFailed)?;
+    Ok(cells)
+}
+
 fn output_color(color: LinearRgb) -> [u8; 4] {
     let channels = encode_output(color, OutputEncoding::Srgb8).channels();
     [channels[0], channels[1], channels[2], u8::MAX]
@@ -557,7 +565,7 @@ fn best_glyph<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{CANCELLATION_GLYPH_INTERVAL, best_glyph};
+    use super::{CANCELLATION_GLYPH_INTERVAL, best_glyph, reserve_output_cells};
     use crate::font::{GlyphConfig, GlyphRepertoire, build_glyph_table};
     use ascii_core::{Budget, CancellationToken, Error};
 
@@ -594,5 +602,16 @@ mod tests {
 
         assert_eq!(result, Err(Error::Cancelled));
         assert_eq!(cancellation_checks, 2);
+    }
+
+    #[test]
+    fn output_cell_reservation_checks_cancellation_before_impossible_reserve() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        assert_eq!(
+            reserve_output_cells(usize::MAX, &cancellation).err(),
+            Some(Error::Cancelled)
+        );
     }
 }
