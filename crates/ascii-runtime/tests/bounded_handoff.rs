@@ -1,8 +1,8 @@
 use std::{
     mem::size_of,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -235,10 +235,7 @@ fn concurrent_revocations_do_not_starve_a_pending_stop() {
     sender.join().unwrap();
 
     assert_eq!(first, Some(ControlEvent::Stop));
-    assert_eq!(
-        controls.try_recv(),
-        Some(ControlEvent::RevokePermissions)
-    );
+    assert_eq!(controls.try_recv(), Some(ControlEvent::RevokePermissions));
     assert!(controls.is_empty());
 }
 
