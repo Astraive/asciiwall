@@ -48,7 +48,7 @@ pub enum RuntimeError {
     InvalidCapacity,
     /// A checked mapping or memory-size calculation overflowed.
     SizeOverflow,
-    /// An allocation failed while constructing fixed-capacity storage.
+    /// A required allocation failed.
     AllocationFailed,
     /// The buffer pool has no reusable slot.
     NoFreeSlots,

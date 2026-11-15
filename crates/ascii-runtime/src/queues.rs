@@ -184,7 +184,16 @@ impl ControlQueue {
         if let Some(event) = self.take_urgent() {
             return Some(event);
         }
-        lock_unpoisoned(&self.ordinary).items.pop_front()
+        self.try_recv_after_urgent_check()
+    }
+
+    fn try_recv_after_urgent_check(&self) -> Option<ControlEvent> {
+        let mut ordinary = lock_unpoisoned(&self.ordinary);
+        // Urgent producers bypass this mutex, so recheck after waiting for it.
+        if let Some(event) = self.take_urgent() {
+            return Some(event);
+        }
+        ordinary.items.pop_front()
     }
 
     fn take_urgent(&self) -> Option<ControlEvent> {
@@ -423,7 +432,7 @@ fn is_retryable_receive_error(error: RuntimeError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::BoundedHandoff;
+    use super::{BoundedHandoff, ControlEvent, ControlQueue};
     use crate::{
         PermitKind, RasterDescriptorMetadata, ResourceBudget, ResourceLimits, RuntimeError,
         SlotState,
@@ -516,6 +525,20 @@ mod tests {
         lease.completion_token().unwrap().acknowledge();
         lease.release().unwrap();
     }
+    #[test]
+    fn urgent_control_recheck_wins_before_fifo_pop() {
+        let resource_budget = resource_budget();
+        let controls = ControlQueue::new(&resource_budget, 1).unwrap();
+        controls.try_send(ControlEvent::Refresh).unwrap();
+        controls.try_send(ControlEvent::Stop).unwrap();
+
+        assert_eq!(
+            controls.try_recv_after_urgent_check(),
+            Some(ControlEvent::Stop)
+        );
+        assert_eq!(controls.try_recv(), Some(ControlEvent::Refresh));
+    }
+
     #[test]
     fn cpu_submission_permit_is_shared_and_nonblocking() {
         let resource_budget = ResourceBudget::new(ResourceLimits::new(1, 1, 1, u64::MAX, u64::MAX));
