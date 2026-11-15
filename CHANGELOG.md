@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Dependency-free `crates/ascii-core` COR-001 contracts for bounded ASCII frames, allocator-safe grid preflight, reusable owned cell storage, cancellation, typed displayable errors, and zero-copy validated raster views, with behavior-focused integration tests; updated the [data model contract](docs/architecture/data-model-and-contracts.md) and [E01 implementation plan](docs/plans/engine-implementation-plan.md).
 - Bounded `ascii-convert` glyph tables with measured cell-clipped masks, descriptors, deterministic fingerprints, and typed font-validation failures ([FNT-001](docs/engine/glyph-matching-and-fonts.md)).
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
+- Added named strict-cell presets for printable ASCII/space, Unicode blocks, Braille, and their union, plus deterministic scalar-specific validation and fixed-cell metric classification ([font contract](docs/engine/glyph-matching-and-fonts.md)).
+- Added matcher-identical single-glyph previews with available, unavailable, invisible, and multi-cell states; source-generated font fixtures cover the complete supported repertoire and every Braille dot pattern at two raster sizes. Editor, clip-reader, and text-export integrations remain absent and are explicitly not claimed.
 
 ### Changed
 
