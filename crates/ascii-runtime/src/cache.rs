@@ -387,16 +387,22 @@ pub enum StoreOutcome {
     AlreadyPresent,
 }
 
+/// Current cache accounting reconciled against all generated files beneath the shared root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheSnapshot {
+    /// Byte limit configured on this cache instance.
     pub budget_bytes: u64,
+    /// Bytes occupied by all managed generated files, including files unknown to this instance.
     pub used_bytes: u64,
+    /// Semantic identities registered in this instance; unknown files are counted as used bytes.
     pub entries: usize,
+    /// Active leases known to this instance.
     pub active_leases: u64,
 }
 
 #[derive(Debug)]
 struct CacheEntry {
+    file_id: u64,
     path: PathBuf,
     bytes: u64,
     last_used: u64,
@@ -408,6 +414,7 @@ struct CacheEntry {
 /// evictable, but cannot be leased as a semantic cache entry.
 #[derive(Debug)]
 struct OrphanedFile {
+    file_id: u64,
     path: PathBuf,
     bytes: u64,
     last_used: u64,
@@ -420,6 +427,7 @@ struct CacheState {
     next_file_id: u64,
     lru_clock: u64,
     entries: HashMap<CacheIdentity, CacheEntry>,
+    entries_by_file_id: HashMap<u64, CacheIdentity>,
     orphaned_files: Vec<OrphanedFile>,
     active_lease_files: HashMap<CacheIdentity, Vec<File>>,
 }
@@ -431,11 +439,14 @@ struct CacheInner {
     state: Mutex<CacheState>,
 }
 
-/// Thread-safe byte-bounded LRU containing generated files in marked, cache-owned subdirectories
-/// beneath its canonical private root. Active leases hold portable OS shared file locks; deletion
-/// obtains an exclusive file lock and fails closed while any instance holds a lease. The caller
-/// must keep the root private and stable; portable path APIs cannot defend against a hostile
-/// concurrent root-directory replacement.
+/// Thread-safe byte-bounded cache of generated files beneath a private root. Each instance keeps
+/// LRU identity state for entries it knows; files known only through root reconciliation remain
+/// accounted and are selected as orphaned eviction candidates by generated file ID. Operations
+/// that account for root-wide byte usage reconcile under an OS lock; instances sharing a root must
+/// use the same budget.
+/// Active leases hold portable OS shared file locks; deletion obtains an exclusive file lock and
+/// fails closed while any instance holds a lease. The caller must keep the root private and stable;
+/// portable path APIs cannot defend against a hostile concurrent root-directory replacement.
 #[derive(Clone, Debug)]
 pub struct DerivedCache {
     inner: Arc<CacheInner>,
@@ -443,8 +454,8 @@ pub struct DerivedCache {
 
 impl DerivedCache {
     /// Creates the private cache root if needed, canonicalizes it once, and creates or reuses a
-    /// marked cache-owned subdirectory while accounting for generated files left by earlier
-    /// instances. An unmarked reserved-name collision is rejected without modifying its contents.
+    /// marked cache-owned subdirectory. Existing generated files are reconciled before use.
+    /// Instances sharing a root must use the same byte budget.
     pub fn open(root: impl AsRef<Path>, budget_bytes: u64) -> Result<Self, CacheError> {
         fs::create_dir_all(root.as_ref())?;
         let root = fs::canonicalize(root.as_ref())?;
@@ -463,6 +474,7 @@ impl DerivedCache {
             next_file_id,
             lru_clock,
             entries: HashMap::new(),
+            entries_by_file_id: HashMap::new(),
             orphaned_files,
             active_lease_files: HashMap::new(),
         };
@@ -508,7 +520,8 @@ impl DerivedCache {
     ) -> Result<StoreOutcome, CacheError> {
         let entry_bytes = u64::try_from(bytes.len()).map_err(|_| CacheError::ArithmeticOverflow)?;
         let mut state = lock_unpoisoned(&self.inner.state);
-        let operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
+        let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
+        reconcile_cache_state(&self.inner.root, &mut state)?;
         if let Some((path, active_leases)) = state
             .entries
             .get(&identity)
@@ -531,6 +544,7 @@ impl DerivedCache {
                         .entries
                         .remove(&identity)
                         .ok_or(CacheError::NotFound)?;
+                    state.entries_by_file_id.remove(&removed.file_id);
                     state.used_bytes = state
                         .used_bytes
                         .checked_sub(removed.bytes)
@@ -554,18 +568,19 @@ impl DerivedCache {
             .checked_add(entry_bytes)
             .ok_or(CacheError::ArithmeticOverflow)?;
         let tick = next_tick(&mut state)?;
-        let (path, mut file) =
+        let (file_id, path, mut file) =
             create_derived_file(&self.inner.root, &self.inner.managed_dir, &mut state)?;
-        drop(operations_lock);
         if let Err(error) = file.write_all(bytes).and_then(|()| file.flush()) {
             drop(file);
             delete_managed_file(&self.inner.root, &path)?;
             return Err(CacheError::Io(error));
         }
         state.used_bytes = new_used_bytes;
+        state.entries_by_file_id.insert(file_id, identity.clone());
         state.entries.insert(
             identity,
             CacheEntry {
+                file_id,
                 path,
                 bytes: entry_bytes,
                 last_used: tick,
@@ -622,6 +637,7 @@ impl DerivedCache {
             Ok(_) => return Err(CacheError::UnsafeDerivedPath(path)),
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 let removed = state.entries.remove(identity).ok_or(CacheError::NotFound)?;
+                state.entries_by_file_id.remove(&removed.file_id);
                 state.used_bytes = state
                     .used_bytes
                     .checked_sub(removed.bytes)
@@ -660,6 +676,7 @@ impl DerivedCache {
     pub fn set_budget_bytes(&self, budget_bytes: u64) -> Result<(), CacheError> {
         let mut state = lock_unpoisoned(&self.inner.state);
         let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
+        reconcile_cache_state(&self.inner.root, &mut state)?;
         state.budget_bytes = budget_bytes;
         trim_to_budget(&self.inner.root, &mut state)
     }
@@ -668,11 +685,14 @@ impl DerivedCache {
     pub fn trim_to_budget(&self) -> Result<(), CacheError> {
         let mut state = lock_unpoisoned(&self.inner.state);
         let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
+        reconcile_cache_state(&self.inner.root, &mut state)?;
         trim_to_budget(&self.inner.root, &mut state)
     }
 
     pub fn snapshot(&self) -> Result<CacheSnapshot, CacheError> {
-        let state = lock_unpoisoned(&self.inner.state);
+        let mut state = lock_unpoisoned(&self.inner.state);
+        let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
+        reconcile_cache_state(&self.inner.root, &mut state)?;
         let active_leases = state.entries.values().try_fold(0u64, |sum, entry| {
             sum.checked_add(entry.active_leases)
                 .ok_or(CacheError::ArithmeticOverflow)
@@ -741,6 +761,36 @@ fn next_tick(state: &mut CacheState) -> Result<u64, CacheError> {
         .checked_add(1)
         .ok_or(CacheError::ArithmeticOverflow)?;
     Ok(state.lru_clock)
+}
+fn reconcile_cache_state(root: &Path, state: &mut CacheState) -> Result<(), CacheError> {
+    let (mut discovered, used_bytes, next_file_id, lru_clock) = scan_orphaned_files(root)?;
+    if state.entries.values().any(|entry| {
+        entry.active_leases > 0
+            && discovered
+                .binary_search_by_key(&entry.file_id, |file| file.file_id)
+                .is_err()
+    }) {
+        return Err(CacheError::InvalidLease);
+    }
+
+    state.entries.retain(|_, entry| {
+        if let Ok(index) = discovered.binary_search_by_key(&entry.file_id, |file| file.file_id) {
+            entry.bytes = discovered[index].bytes;
+            true
+        } else {
+            false
+        }
+    });
+    let entries = &state.entries;
+    state
+        .entries_by_file_id
+        .retain(|_, identity| entries.contains_key(identity));
+    discovered.retain(|file| !state.entries_by_file_id.contains_key(&file.file_id));
+    state.orphaned_files = discovered;
+    state.used_bytes = used_bytes;
+    state.next_file_id = state.next_file_id.max(next_file_id);
+    state.lru_clock = state.lru_clock.max(lru_clock);
+    Ok(())
 }
 
 fn evict_for(root: &Path, state: &mut CacheState, requested_bytes: u64) -> Result<(), CacheError> {
@@ -848,6 +898,7 @@ fn remove_entry(
         return Ok(false);
     }
     let removed = state.entries.remove(identity).ok_or(CacheError::NotFound)?;
+    state.entries_by_file_id.remove(&removed.file_id);
     state.used_bytes = state
         .used_bytes
         .checked_sub(removed.bytes)
@@ -960,7 +1011,7 @@ fn create_derived_file(
     root: &Path,
     managed_dir: &Path,
     state: &mut CacheState,
-) -> Result<(PathBuf, File), CacheError> {
+) -> Result<(u64, PathBuf, File), CacheError> {
     verify_owned_cache_dir(root, managed_dir)?;
     loop {
         let id = state.next_file_id;
@@ -972,7 +1023,7 @@ fn create_derived_file(
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => {
                 file.try_lock().map_err(io::Error::from)?;
-                return Ok((path, file));
+                return Ok((id, path, file));
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(CacheError::Io(error)),
@@ -1050,7 +1101,7 @@ fn scan_orphaned_files(root: &Path) -> Result<(Vec<OrphanedFile>, u64, u64, u64)
     let mut used_bytes = 0u64;
     let mut lru_clock = 0u64;
     let mut orphaned_files = Vec::with_capacity(discovered.len());
-    for (_, path, bytes) in discovered {
+    for (file_id, path, bytes) in discovered {
         used_bytes = used_bytes
             .checked_add(bytes)
             .ok_or(CacheError::ArithmeticOverflow)?;
@@ -1058,6 +1109,7 @@ fn scan_orphaned_files(root: &Path) -> Result<(Vec<OrphanedFile>, u64, u64, u64)
             .checked_add(1)
             .ok_or(CacheError::ArithmeticOverflow)?;
         orphaned_files.push(OrphanedFile {
+            file_id,
             path,
             bytes,
             last_used: lru_clock,

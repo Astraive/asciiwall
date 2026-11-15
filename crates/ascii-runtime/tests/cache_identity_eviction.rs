@@ -67,6 +67,27 @@ fn derived_file_count(cache_root: &Path) -> usize {
     count
 }
 
+fn derived_file_bytes(cache_root: &Path) -> u64 {
+    let mut bytes = 0u64;
+    for directory in fs::read_dir(cache_root).unwrap().filter_map(Result::ok) {
+        if !directory
+            .file_type()
+            .is_ok_and(|file_type| file_type.is_dir())
+        {
+            continue;
+        }
+        for entry in fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+        {
+            if entry.file_name().to_string_lossy().starts_with("derived-") {
+                bytes += entry.metadata().unwrap().len();
+            }
+        }
+    }
+    bytes
+}
+
 fn digest(byte: u8) -> ContentDigest {
     ContentDigest([byte; 32])
 }
@@ -516,6 +537,131 @@ fn store_reconciles_an_entry_evicted_by_another_cache_instance() {
     );
     let lease = first_cache.lease(&key).unwrap();
     assert_eq!(fs::read(lease.path()).unwrap(), b"replacement");
+}
+
+#[test]
+fn independently_opened_caches_enforce_one_shared_root_budget() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    let second_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    let first_key = identity(44);
+
+    first_cache.store(first_key.clone(), b"first").unwrap();
+    second_cache.store(identity(45), b"other").unwrap();
+
+    assert!(derived_file_bytes(&cache_root) <= 5);
+    assert_eq!(derived_file_count(&cache_root), 1);
+    assert_eq!(derived_file_bytes(&cache_root), 5);
+    assert_eq!(first_cache.snapshot().unwrap().used_bytes, 5);
+    assert!(matches!(
+        first_cache.lease(&first_key),
+        Err(CacheError::NotFound)
+    ));
+}
+
+#[test]
+fn shared_root_budget_respects_a_lease_from_another_instance() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    let second_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    assert_eq!(
+        first_cache.store(identity(46), b"first").unwrap(),
+        StoreOutcome::Inserted
+    );
+
+    let leased_key = identity(46);
+    let lease = first_cache.lease(&leased_key).unwrap();
+    assert!(matches!(
+        second_cache.store(identity(47), b"other"),
+        Err(CacheError::BudgetPinned {
+            used_bytes: 5,
+            budget_bytes: 5,
+            requested_bytes: 5,
+        })
+    ));
+    assert_eq!(derived_file_bytes(&cache_root), 5);
+
+    lease.acknowledge().unwrap();
+    assert_eq!(
+        second_cache.store(identity(47), b"other").unwrap(),
+        StoreOutcome::Inserted
+    );
+    assert_eq!(derived_file_bytes(&cache_root), 5);
+}
+
+#[test]
+fn concurrent_cache_instances_serialize_shared_root_budget() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    let second_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    let first_worker_cache = first_cache.clone();
+    let second_worker_cache = second_cache.clone();
+
+    let first_worker = std::thread::spawn(move || {
+        for value in 0..32u8 {
+            first_worker_cache
+                .store(identity(value), &[value; 5])
+                .unwrap();
+            assert!(first_worker_cache.snapshot().unwrap().used_bytes <= 5);
+        }
+    });
+    let second_worker = std::thread::spawn(move || {
+        for value in 128..160u8 {
+            second_worker_cache
+                .store(identity(value), &[value; 5])
+                .unwrap();
+            assert!(second_worker_cache.snapshot().unwrap().used_bytes <= 5);
+        }
+    });
+
+    first_worker.join().unwrap();
+    second_worker.join().unwrap();
+
+    assert_eq!(derived_file_count(&cache_root), 1);
+    assert_eq!(derived_file_bytes(&cache_root), 5);
+    assert_eq!(first_cache.snapshot().unwrap().used_bytes, 5);
+    assert_eq!(second_cache.snapshot().unwrap().used_bytes, 5);
+}
+
+#[test]
+fn repeated_cross_instance_lease_failures_recover_after_acknowledgement() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    let second_cache = DerivedCache::open(&cache_root, 5).unwrap();
+
+    for round in 0..32u8 {
+        let first_key = identity(round.wrapping_add(64));
+        let second_key = identity(round.wrapping_add(128));
+        first_cache.store(first_key.clone(), b"first").unwrap();
+        let lease = first_cache.lease(&first_key).unwrap();
+
+        assert!(matches!(
+            second_cache.store(second_key.clone(), b"other"),
+            Err(CacheError::BudgetPinned {
+                used_bytes: 5,
+                budget_bytes: 5,
+                requested_bytes: 5,
+            })
+        ));
+        assert_eq!(derived_file_bytes(&cache_root), 5);
+
+        lease.acknowledge().unwrap();
+        assert_eq!(
+            second_cache.store(second_key, b"other").unwrap(),
+            StoreOutcome::Inserted
+        );
+        assert_eq!(derived_file_count(&cache_root), 1);
+        assert_eq!(derived_file_bytes(&cache_root), 5);
+        assert!(matches!(
+            first_cache.lease(&first_key),
+            Err(CacheError::NotFound)
+        ));
+        assert_eq!(first_cache.snapshot().unwrap().used_bytes, 5);
+    }
 }
 
 #[test]
