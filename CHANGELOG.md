@@ -24,7 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Hardened portable handoff ownership: pending completion tokens pin their backing pool and dropped leases reclaim only after acknowledgement; one-slot freshness replacement validates before eviction; Stop now takes priority over repeated revocation; existing transition charges transfer without double counting. CPU handoff, slot writes, raster validation, and pixel callbacks now hold shared work permits, while active output leases retain output permits until completion. Native OS/GPU transport remains unimplemented and is not claimed.
+- Hardened portable handoff ownership: pending completion tokens pin their backing pool and dropped leases reclaim only after acknowledgement; one-slot freshness replacement validates before eviction; Stop now takes priority over repeated revocation; existing transition charges transfer without double counting. CPU handoff, slot writes, raster validation, and pixel callbacks now hold shared work permits, while active output leases retain output permits until completion. Focused regressions also race concurrent lease drop with completion acknowledgement and sustain concurrent revocation traffic while Stop is pending. Native OS/GPU transport remains unimplemented and is not claimed.
 
 - Recorded the COR-005 integration blocker: this workspace has no application, decoder, scene-transition manager, or transport-owner interface to wire decode/transition permits or validate native lifecycle behavior; production consumers and native transport/device evidence remain prerequisites, so issue `#73` stays open.
 
