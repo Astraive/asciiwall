@@ -37,6 +37,6 @@ jobs:
         run: pip-audit
       - name: Report actual workflow Python dependency licenses
         run: pip-licenses --format=markdown --with-urls
-      # Rust dependency and license auditing is pending: there is no Cargo.toml or Cargo.lock and
-      # no reviewed crate/license policy. Add a pinned cargo-audit/cargo-deny gate only after
-      # those prerequisites are established under SEC-EPIC, REL-002, and REL-009.
+      # The workspace currently contains only dependency-free ascii-core; a reviewed Rust crate/license
+      # audit policy is still pending. Add pinned Rust audit gates after those policy prerequisites land
+      # under SEC-EPIC, REL-002, and REL-009.
