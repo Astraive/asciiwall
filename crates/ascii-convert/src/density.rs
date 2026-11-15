@@ -553,8 +553,12 @@ mod tests {
     use ascii_core::{Budget, CancellationToken, Error};
 
     #[allow(dead_code)]
-    #[path = "../../../tests/support/synthetic_font.rs"]
-    mod synthetic_font;
+    mod synthetic_font {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/synthetic_font.rs"
+        ));
+    }
 
     #[test]
     fn cancellation_interrupts_a_large_glyph_scan() {
