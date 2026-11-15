@@ -39,6 +39,15 @@ impl GlyphBounds {
     }
 }
 
+/// Classification of a font advance against the configured fixed cell width.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlyphCellClassification {
+    /// The measured advance fits within one fixed-width cell.
+    SingleCell,
+    /// The measured advance exceeds one fixed-width cell.
+    MultiCell,
+}
+
 /// Font metrics expressed in raster pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlyphMetrics {
@@ -71,6 +80,15 @@ impl GlyphMetrics {
     #[must_use]
     pub const fn baseline(self) -> u32 {
         self.baseline
+    }
+    /// Classifies the measured advance against a configured fixed-width cell.
+    #[must_use]
+    pub fn cell_classification(self, cell_width: u32) -> GlyphCellClassification {
+        if self.advance <= cell_width as f32 {
+            GlyphCellClassification::SingleCell
+        } else {
+            GlyphCellClassification::MultiCell
+        }
     }
 }
 

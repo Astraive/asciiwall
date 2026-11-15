@@ -8,12 +8,14 @@ use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
 use ascii_core::{
-    Budget, BudgetKind, CancellationToken, Error, MalformedReason, UnsupportedReason,
+    Budget, BudgetKind, CancellationToken, Error, GlyphFailureReason, MalformedReason,
 };
 use fontdue::{Font, FontSettings};
 use sha2::{Digest, Sha256};
 
-use crate::glyphs::{Centroid, EdgeOrientation, GlyphBounds, GlyphMetrics, describe};
+use crate::glyphs::{
+    Centroid, EdgeOrientation, GlyphBounds, GlyphCellClassification, GlyphMetrics, describe,
+};
 
 const MAX_FONT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GLYPHS: usize = 4096;
@@ -22,6 +24,19 @@ const MAX_GLYPH_RASTER_DIMENSION: usize = 16 * 1024;
 const MAX_CHARSET_BYTES: usize = MAX_GLYPHS * 4;
 const DESCRIPTOR_VERSION: u32 = 1;
 const RENDERING_MODE: &[u8] = b"fontdue-0.9.3-gray8-no-gsub-v1";
+
+/// Named, curated presets for the supported single-cell repertoire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlyphRepertoirePreset {
+    /// Printable ASCII, including space.
+    PrintableAscii,
+    /// Unicode block elements U+2580 through U+259F.
+    BlockElements,
+    /// Braille patterns U+2800 through U+28FF.
+    BraillePatterns,
+    /// The union of printable ASCII, Unicode block elements, and Braille patterns.
+    AllSupported,
+}
 
 /// A nonempty, unique repertoire restricted to scalars supported in one terminal cell.
 ///
@@ -33,6 +48,9 @@ pub struct GlyphRepertoire {
 
 impl GlyphRepertoire {
     /// Validates and canonically sorts printable ASCII, block-element, and Braille scalars.
+    ///
+    /// Invalid and duplicate entries are reported with the offending Unicode scalar. Validation
+    /// order is canonical, so permuting the input does not change which invalid entry is reported.
     pub fn new(input: &str) -> Result<Self, Error> {
         if input.len() > MAX_CHARSET_BYTES {
             return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
@@ -44,12 +62,6 @@ impl GlyphRepertoire {
         if glyph_count > MAX_GLYPHS {
             return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
         }
-        if input
-            .chars()
-            .any(|character| !is_supported_single_cell_scalar(character))
-        {
-            return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
-        }
 
         let mut characters = Vec::new();
         characters
@@ -57,8 +69,54 @@ impl GlyphRepertoire {
             .map_err(|_| Error::AllocationFailed)?;
         characters.extend(input.chars());
         characters.sort_unstable();
-        if characters.windows(2).any(|pair| pair[0] == pair[1]) {
+        if let Some(&character) = characters
+            .iter()
+            .find(|&&character| !is_supported_single_cell_scalar(character))
+        {
+            return Err(Error::Glyph {
+                character,
+                reason: GlyphFailureReason::UnsupportedScalar,
+            });
+        }
+        if let Some(pair) = characters.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(Error::Glyph {
+                character: pair[0],
+                reason: GlyphFailureReason::DuplicateScalar,
+            });
+        }
+        Ok(Self { characters })
+    }
+
+    /// Creates one of the named, curated strict-cell repertoires.
+    pub fn from_preset(preset: GlyphRepertoirePreset) -> Result<Self, Error> {
+        let ranges: &[(u32, u32)] = match preset {
+            GlyphRepertoirePreset::PrintableAscii => &[(0x20, 0x7e)],
+            GlyphRepertoirePreset::BlockElements => &[(0x2580, 0x259f)],
+            GlyphRepertoirePreset::BraillePatterns => &[(0x2800, 0x28ff)],
+            GlyphRepertoirePreset::AllSupported => {
+                &[(0x20, 0x7e), (0x2580, 0x259f), (0x2800, 0x28ff)]
+            }
+        };
+        let glyph_count = ranges.iter().try_fold(0usize, |count, (start, end)| {
+            let range_count = usize::try_from(end - start + 1).ok()?;
+            count.checked_add(range_count)
+        });
+        let glyph_count = glyph_count.ok_or(Error::SizeOverflow)?;
+        if glyph_count == 0 {
             return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+        }
+        if glyph_count > MAX_GLYPHS {
+            return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
+        }
+
+        let mut characters = Vec::new();
+        characters
+            .try_reserve_exact(glyph_count)
+            .map_err(|_| Error::AllocationFailed)?;
+        for &(start, end) in ranges {
+            for scalar in start..=end {
+                characters.push(char::from_u32(scalar).ok_or(Error::SizeOverflow)?);
+            }
         }
         Ok(Self { characters })
     }
@@ -225,6 +283,73 @@ impl GlyphTable {
     }
 }
 
+/// Explicit state reported by a single-glyph raster preview.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlyphPreviewStatus {
+    /// The font contains a glyph with a visible mask, or this is the preserved blank space.
+    Available,
+    /// The selected font has no glyph for this repertoire scalar.
+    Unavailable,
+    /// The glyph exists but rasterizes to an all-zero mask at the requested size.
+    Invisible,
+    /// The glyph's measured advance exceeds the configured single-cell width.
+    MultiCell,
+}
+
+/// A single-cell preview built by the same rasterizer and mask path as glyph matching.
+///
+/// Missing and multi-cell glyphs carry no mask; no fallback or tofu mask is synthesized. Space
+/// remains `Available` with its measured, blank mask.
+#[derive(Debug, PartialEq)]
+pub struct GlyphPreview {
+    character: char,
+    status: GlyphPreviewStatus,
+    cell_width: u32,
+    cell_height: u32,
+    metrics: Option<GlyphMetrics>,
+    mean_coverage: Option<f32>,
+    mask: Option<Vec<u8>>,
+}
+
+impl GlyphPreview {
+    #[must_use]
+    pub const fn character(&self) -> char {
+        self.character
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> GlyphPreviewStatus {
+        self.status
+    }
+
+    #[must_use]
+    pub const fn cell_width(&self) -> u32 {
+        self.cell_width
+    }
+
+    #[must_use]
+    pub const fn cell_height(&self) -> u32 {
+        self.cell_height
+    }
+
+    #[must_use]
+    pub const fn metrics(&self) -> Option<GlyphMetrics> {
+        self.metrics
+    }
+
+    #[must_use]
+    pub const fn mean_coverage(&self) -> Option<f32> {
+        self.mean_coverage
+    }
+
+    /// Row-major 8-bit coverage identical to the matcher mask; absent for unavailable/multi-cell
+    /// glyphs.
+    #[must_use]
+    pub fn mask(&self) -> Option<&[u8]> {
+        self.mask.as_deref()
+    }
+}
+
 /// Builds a fully measured, cell-clipped table from a validated repertoire. No table is
 /// published unless every glyph succeeds.
 pub fn build_glyph_table(
@@ -351,10 +476,21 @@ pub fn build_glyph_table(
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let glyph_index = lookup_glyph_index(&font, character)
-            .ok_or(Error::Unsupported(UnsupportedReason::GlyphUnavailable))?;
+        let glyph_index = lookup_glyph_index(&font, character).ok_or(Error::Glyph {
+            character,
+            reason: GlyphFailureReason::GlyphUnavailable,
+        })?;
         let metrics = font.metrics_indexed(glyph_index, config.raster_size());
         validate_metrics(metrics.advance_width, line_height)?;
+        if GlyphMetrics::new(metrics.advance_width, line_height, config.baseline())
+            .cell_classification(config.cell_width())
+            == GlyphCellClassification::MultiCell
+        {
+            return Err(Error::Glyph {
+                character,
+                reason: GlyphFailureReason::MultiCellMetrics,
+            });
+        }
         if metrics.width > MAX_GLYPH_RASTER_DIMENSION || metrics.height > MAX_GLYPH_RASTER_DIMENSION
         {
             return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
@@ -558,6 +694,68 @@ pub fn build_glyph_table(
         cell_width: config.cell_width(),
         cell_height: config.cell_height(),
         glyphs,
+    })
+}
+
+/// Builds the editor-facing state for one accepted scalar using the matcher rasterizer and mask.
+///
+/// Missing font glyphs and glyphs wider than the configured cell are successful preview states,
+/// not tofu substitutions. Cancellation, malformed font data, and resource-limit failures remain
+/// errors and publish no partial preview.
+pub fn build_glyph_preview(
+    font_bytes: &[u8],
+    character: char,
+    config: &GlyphConfig,
+    budget: &Budget,
+    cancellation: &CancellationToken,
+) -> Result<GlyphPreview, Error> {
+    if !is_supported_single_cell_scalar(character) {
+        return Err(Error::Glyph {
+            character,
+            reason: GlyphFailureReason::UnsupportedScalar,
+        });
+    }
+    let mut encoded = [0; 4];
+    let repertoire = GlyphRepertoire::new(character.encode_utf8(&mut encoded))?;
+    let unavailable = |status| GlyphPreview {
+        character,
+        status,
+        cell_width: config.cell_width(),
+        cell_height: config.cell_height(),
+        metrics: None,
+        mean_coverage: None,
+        mask: None,
+    };
+
+    let mut table = match build_glyph_table(font_bytes, &repertoire, config, budget, cancellation) {
+        Ok(table) => table,
+        Err(Error::Glyph {
+            character: failed,
+            reason: GlyphFailureReason::GlyphUnavailable,
+        }) if failed == character => return Ok(unavailable(GlyphPreviewStatus::Unavailable)),
+        Err(Error::Glyph {
+            character: failed,
+            reason: GlyphFailureReason::MultiCellMetrics,
+        }) if failed == character => return Ok(unavailable(GlyphPreviewStatus::MultiCell)),
+        Err(error) => return Err(error),
+    };
+    let record = table
+        .glyphs
+        .pop()
+        .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
+    let status = if character != ' ' && record.mean_coverage == 0.0 {
+        GlyphPreviewStatus::Invisible
+    } else {
+        GlyphPreviewStatus::Available
+    };
+    Ok(GlyphPreview {
+        character,
+        status,
+        cell_width: table.cell_width,
+        cell_height: table.cell_height,
+        metrics: Some(record.metrics),
+        mean_coverage: Some(record.mean_coverage),
+        mask: Some(record.mask),
     })
 }
 
