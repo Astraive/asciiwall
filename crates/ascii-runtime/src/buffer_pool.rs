@@ -2,10 +2,10 @@
 //!
 //! Each slot follows `Free -> Filling -> Published -> Consumed -> Released -> Free`. A fill lease
 //! dropped before publication returns its slot to `Free`. Dropping a consumer lease without an
-//! acknowledgement leaves it `Consumed`; its completion token pins the pool until acknowledged,
-//! and acknowledgement after lease drop reclaims the slot. A lost unacknowledged token keeps the
-//! slot quarantined until an owner first invalidates the mapped transport region and then changes
-//! generation; invalidation is not inferred from observing a process exit.
+//! acknowledgement leaves it `Consumed`. The caller MUST retain the completion token until
+//! external work completes: a live token owns a strong pool handle, but the slot does not pin the
+//! pool after token drop. While any pool or lease handle remains, an unacknowledged slot stays
+//! quarantined until invalidation; dropping the final handle releases the region and its permits.
 //!
 //! Pool access is serialized by one short-lived mutex. The only API that runs caller code while
 //! holding it is [`FrameLease::with_pixels`]; that callback MUST be short CPU-only work and MUST NOT
@@ -98,7 +98,6 @@ struct Slot {
     completion_token_issued: bool,
     completion_acknowledged: bool,
     lease_attached: bool,
-    completion_pin: Option<Arc<Mutex<PoolInner>>>,
     output_permit: Option<ConcurrencyPermit>,
 }
 
@@ -113,7 +112,6 @@ impl core::fmt::Debug for Slot {
             .field("completion_token_issued", &self.completion_token_issued)
             .field("completion_acknowledged", &self.completion_acknowledged)
             .field("lease_attached", &self.lease_attached)
-            .field("completion_pin", &self.completion_pin.is_some())
             .field("output_permit", &self.output_permit.is_some())
             .finish()
     }
@@ -190,7 +188,6 @@ impl BufferPool {
             completion_token_issued: false,
             completion_acknowledged: false,
             lease_attached: false,
-            completion_pin: None,
             output_permit: None,
         });
 
@@ -423,7 +420,6 @@ impl BufferPool {
             // This invalidation boundary is authorized to discard the old consumer lease. Release
             // its concurrency permit while the pool owner is locked; budget code never locks pools.
             drop(slot.output_permit.take());
-            slot.completion_pin = None;
             slot.state = SlotState::Free;
             slot.generation = new_generation;
             slot.written_len = 0;
@@ -595,9 +591,11 @@ impl Drop for FillLease {
 /// Caller-owned, explicit attestation that external work using a [`FrameLease`] has completed.
 ///
 /// The runtime permits exactly one token per consumer lease. The caller MUST keep this token alive
-/// until its CPU/native/GPU work is actually complete, then acknowledge it. The token pins the
-/// process-local pool until acknowledgement. Dropping an unacknowledged token quarantines its slot
-/// and storage until generation invalidation; it never implies completion.
+/// until its CPU/native/GPU work is actually complete, then acknowledge it. The token's strong
+/// pool handle lasts only while the token is alive; the slot does not pin its pool after token drop.
+/// Dropping an unacknowledged token does not acknowledge completion: any remaining pool or lease
+/// handle keeps its slot quarantined until invalidation, and dropping the final handle releases the
+/// region and permits.
 #[must_use = "keep this token until external work completes, then acknowledge it"]
 pub struct CompletionToken {
     inner: Arc<Mutex<PoolInner>>,
@@ -616,10 +614,10 @@ impl core::fmt::Debug for CompletionToken {
 impl CompletionToken {
     /// Explicitly acknowledges completion and reclaims a lease already dropped by its consumer.
     pub fn acknowledge(self) {
-        let (completion_pin, output_permit) = {
+        let output_permit = {
             let mut inner = lock_unpoisoned(&self.inner);
             if inner.generation != self.descriptor.generation {
-                (None, None)
+                None
             } else {
                 let index = self.descriptor.slot_id as usize;
                 match inner.slots.get_mut(index) {
@@ -632,7 +630,6 @@ impl CompletionToken {
                             }) =>
                     {
                         slot.completion_acknowledged = true;
-                        let completion_pin = slot.completion_pin.take();
                         let output_permit = slot.output_permit.take();
                         if !slot.lease_attached {
                             slot.state = SlotState::Free;
@@ -640,13 +637,12 @@ impl CompletionToken {
                             slot.descriptor = None;
                             slot.completion_token_issued = false;
                         }
-                        (completion_pin, output_permit)
+                        output_permit
                     }
-                    Some(_) | None => (None, None),
+                    Some(_) | None => None,
                 }
             }
         };
-        drop(completion_pin);
         drop(output_permit);
     }
 }
@@ -681,8 +677,9 @@ impl FrameLease {
 
     /// Creates the one explicit completion token for the caller's external work.
     ///
-    /// A duplicate request returns `InvalidState`. Dropping an unacknowledged token leaves the
-    /// consumed slot and its backing storage quarantined until generation invalidation.
+    /// A duplicate request returns `InvalidState`. The caller MUST retain this token until external
+    /// work completes; dropping an unacknowledged token does not acknowledge its slot, and the slot
+    /// does not keep the pool alive after token drop.
     pub fn completion_token(&mut self) -> Result<CompletionToken, RuntimeError> {
         if self.released || self.completion_token_issued {
             return Err(RuntimeError::InvalidState);
@@ -709,7 +706,6 @@ impl FrameLease {
             }
             slot.completion_token_issued = true;
             slot.completion_acknowledged = false;
-            slot.completion_pin = Some(Arc::clone(&pool));
         }
         self.completion_token_issued = true;
         Ok(CompletionToken {
@@ -760,11 +756,11 @@ impl FrameLease {
             self.released = true;
             return Ok(());
         };
-        let (result, completion_pin) = {
+        let result = {
             let mut inner = lock_unpoisoned(&pool);
             if inner.generation != self.descriptor.generation {
                 // Generation invalidation already severed this lease from the active mapping.
-                (Ok(()), None)
+                Ok(())
             } else {
                 let index = self.descriptor.slot_id as usize;
                 match inner.slots.get_mut(index) {
@@ -776,18 +772,17 @@ impl FrameLease {
                             }) =>
                     {
                         if !slot.completion_acknowledged {
-                            (Err(RuntimeError::CompletionPending), None)
+                            Err(RuntimeError::CompletionPending)
                         } else {
                             slot.state = SlotState::Released;
                             slot.lease_attached = false;
-                            (Ok(()), slot.completion_pin.take())
+                            Ok(())
                         }
                     }
-                    Some(_) | None => (Err(RuntimeError::StaleLease), None),
+                    Some(_) | None => Err(RuntimeError::StaleLease),
                 }
             }
         };
-        drop(completion_pin);
         if result.is_ok() {
             self.released = true;
         } else {
@@ -802,10 +797,10 @@ impl Drop for FrameLease {
         let Some(pool) = self.inner.take() else {
             return;
         };
-        let (completion_pin, output_permit) = {
+        let output_permit = {
             let mut inner = lock_unpoisoned(&pool);
             if inner.generation != self.descriptor.generation {
-                (None, None)
+                None
             } else {
                 let index = self.descriptor.slot_id as usize;
                 match inner.slots.get_mut(index) {
@@ -822,16 +817,15 @@ impl Drop for FrameLease {
                             slot.written_len = 0;
                             slot.descriptor = None;
                             slot.completion_token_issued = false;
-                            (slot.completion_pin.take(), slot.output_permit.take())
+                            slot.output_permit.take()
                         } else {
-                            (None, None)
+                            None
                         }
                     }
-                    Some(_) | None => (None, None),
+                    Some(_) | None => None,
                 }
             }
         };
-        drop(completion_pin);
         drop(output_permit);
     }
 }
