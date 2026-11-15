@@ -47,3 +47,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Preserve orientation error precedence for unsupported-depth density inputs while rejecting validly oriented unsupported sample depths before stride calculations ([CNV-001]).
 - Preflight unsupported alpha layouts and HDR/wide-gamut metadata before density sampling geometry, work, and stride checks ([CNV-001]).
 - Explain unsupported raster color profiles in the core error display so the convenience density API directs callers to supply SDR sRGB instead of reporting only generic unsupported input ([CNV-001]).
+- Keep valid extreme-crop box footprints representable by normalizing separable overlap weights instead of underflowing their area products; add exact-boundary sampling geometry, cache-identity, padded-stride, crop-mapping, and patch-budget regressions ([CNV-003]).
