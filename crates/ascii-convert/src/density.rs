@@ -187,8 +187,8 @@ pub struct ConversionSettings<'a> {
 }
 
 impl<'a> ConversionSettings<'a> {
-    /// Creates settings after validating nonempty sizing and distinct foreground/background
-    /// luminance. Colors are linear-light RGB; output cells store their sRGB8 encoding.
+    /// Creates settings after validating nonempty sizing and foreground/background colors that
+    /// remain distinguishable after sRGB8 encoding.
     pub fn new(
         sizing: GridSizing,
         metadata: FrameMetadata,
@@ -196,7 +196,11 @@ impl<'a> ConversionSettings<'a> {
         foreground: LinearRgb,
         background: LinearRgb,
     ) -> Result<Self, Error> {
-        if !sizing.is_nonempty() || foreground.luminance().value() == background.luminance().value()
+        let foreground_srgb8 = encode_output(foreground, OutputEncoding::Srgb8).channels();
+        let background_srgb8 = encode_output(background, OutputEncoding::Srgb8).channels();
+        if !sizing.is_nonempty()
+            || foreground.luminance().value() == background.luminance().value()
+            || foreground_srgb8 == background_srgb8
         {
             return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
         }
@@ -415,8 +419,7 @@ pub fn convert_density_detailed(
         .checked_mul(glyph_count_u64)
         .ok_or(Error::SizeOverflow)?;
     let sampling = prepare_sampling(
-        input.width(),
-        input.height(),
+        &input,
         size,
         glyphs.cell_width(),
         glyphs.cell_height(),
