@@ -1,6 +1,8 @@
 mod support;
 
-use ascii_convert::{GlyphConfig, build_glyph_table};
+use ascii_convert::{
+    GlyphConfig, GlyphRepertoire, build_glyph_table, is_supported_single_cell_scalar,
+};
 use ascii_core::{
     Budget, BudgetKind, CancellationToken, Error, MalformedReason, UnsupportedReason,
 };
@@ -16,13 +18,17 @@ fn budget(max_raster_bytes: u64, max_work_units: u64) -> Budget {
     Budget::new(1024, max_raster_bytes, max_work_units)
 }
 
+fn repertoire(input: &str) -> GlyphRepertoire {
+    GlyphRepertoire::new(input).expect("fixture repertoire is supported")
+}
+
 #[test]
 fn measured_masks_retain_space_and_order_equal_coverage_by_font_index() {
     let font = synthetic_font(false);
     let token = CancellationToken::new();
     let table = build_glyph_table(
         &font,
-        "BA ",
+        &repertoire("BA "),
         &config(),
         &budget(1_000_000, 1_000_000),
         &token,
@@ -30,7 +36,7 @@ fn measured_masks_retain_space_and_order_equal_coverage_by_font_index() {
     .expect("valid fixture font builds a complete table");
     let reversed = build_glyph_table(
         &font,
-        " AB",
+        &repertoire(" AB"),
         &config(),
         &budget(1_000_000, 1_000_000),
         &token,
@@ -85,30 +91,53 @@ fn fingerprint_covers_font_raster_geometry_and_normalized_repertoire() {
     let other_font = synthetic_font(true);
     let token = CancellationToken::new();
     let generous = budget(1_000_000, 1_000_000);
-    let original =
-        build_glyph_table(&font, "AB", &config(), &generous, &token).expect("fixture builds");
-    let different_font = build_glyph_table(&other_font, "AB", &config(), &generous, &token)
-        .expect("second fixture builds");
+    let original = build_glyph_table(&font, &repertoire("AB"), &config(), &generous, &token)
+        .expect("fixture builds");
+    let different_font =
+        build_glyph_table(&other_font, &repertoire("AB"), &config(), &generous, &token)
+            .expect("second fixture builds");
     let different_config = GlyphConfig::new(9.0, 8, 12, 9).expect("valid alternate raster size");
-    let different_raster = build_glyph_table(&font, "AB", &different_config, &generous, &token)
-        .expect("alternate raster size builds");
+    let different_raster = build_glyph_table(
+        &font,
+        &repertoire("AB"),
+        &different_config,
+        &generous,
+        &token,
+    )
+    .expect("alternate raster size builds");
     let different_width_config =
         GlyphConfig::new(8.0, 9, 12, 9).expect("valid alternate cell width");
-    let different_width =
-        build_glyph_table(&font, "AB", &different_width_config, &generous, &token)
-            .expect("alternate cell width builds");
+    let different_width = build_glyph_table(
+        &font,
+        &repertoire("AB"),
+        &different_width_config,
+        &generous,
+        &token,
+    )
+    .expect("alternate cell width builds");
     let different_height_config =
         GlyphConfig::new(8.0, 8, 13, 9).expect("valid alternate cell height");
-    let different_height =
-        build_glyph_table(&font, "AB", &different_height_config, &generous, &token)
-            .expect("alternate cell height builds");
+    let different_height = build_glyph_table(
+        &font,
+        &repertoire("AB"),
+        &different_height_config,
+        &generous,
+        &token,
+    )
+    .expect("alternate cell height builds");
     let different_baseline_config =
         GlyphConfig::new(8.0, 8, 12, 8).expect("valid alternate baseline");
-    let different_baseline =
-        build_glyph_table(&font, "AB", &different_baseline_config, &generous, &token)
-            .expect("alternate baseline builds");
+    let different_baseline = build_glyph_table(
+        &font,
+        &repertoire("AB"),
+        &different_baseline_config,
+        &generous,
+        &token,
+    )
+    .expect("alternate baseline builds");
     let different_repertoire =
-        build_glyph_table(&font, "A", &config(), &generous, &token).expect("repertoire builds");
+        build_glyph_table(&font, &repertoire("A"), &config(), &generous, &token)
+            .expect("repertoire builds");
 
     assert_ne!(original.fingerprint(), different_font.fingerprint());
     assert_ne!(original.fingerprint(), different_raster.fingerprint());
@@ -124,24 +153,29 @@ fn invalid_and_missing_repertoires_return_typed_errors() {
     let token = CancellationToken::new();
     let generous = budget(1_000_000, 1_000_000);
 
+    for invalid in [
+        "", "A\n", "AA", "\u{202e}", "\u{0301}", "\u{fe0f}", "界", "😀",
+    ] {
+        assert_eq!(
+            GlyphRepertoire::new(invalid),
+            Err(Error::Malformed(MalformedReason::InvalidConfiguration))
+        );
+    }
+    for accepted in [' ', 'A', '\u{2580}', '\u{259f}', '\u{2800}', '\u{28ff}'] {
+        assert!(is_supported_single_cell_scalar(accepted));
+        assert_eq!(
+            GlyphRepertoire::new(&accepted.to_string())
+                .expect("supported scalar makes a repertoire")
+                .characters(),
+            &[accepted]
+        );
+    }
     assert_eq!(
-        build_glyph_table(&font, "", &config(), &generous, &token),
-        Err(Error::Malformed(MalformedReason::InvalidConfiguration))
-    );
-    assert_eq!(
-        build_glyph_table(&font, "A\n", &config(), &generous, &token),
-        Err(Error::Malformed(MalformedReason::InvalidConfiguration))
-    );
-    assert_eq!(
-        build_glyph_table(&font, "AA", &config(), &generous, &token),
-        Err(Error::Malformed(MalformedReason::InvalidConfiguration))
-    );
-    assert_eq!(
-        build_glyph_table(&font, "C", &config(), &generous, &token),
+        build_glyph_table(&font, &repertoire("C"), &config(), &generous, &token),
         Err(Error::Unsupported(UnsupportedReason::GlyphUnavailable))
     );
     assert_eq!(
-        build_glyph_table(&[0, 1, 2], "A", &config(), &generous, &token),
+        build_glyph_table(&[0, 1, 2], &repertoire("A"), &config(), &generous, &token),
         Err(Error::Malformed(MalformedReason::InvalidEncodedData))
     );
     assert_eq!(
@@ -154,7 +188,7 @@ fn invalid_and_missing_repertoires_return_typed_errors() {
     );
     let oversized_charset = "A".repeat(4097);
     assert_eq!(
-        build_glyph_table(&font, &oversized_charset, &config(), &generous, &token),
+        GlyphRepertoire::new(&oversized_charset),
         Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
     );
 }
@@ -167,7 +201,7 @@ fn resource_limits_and_cancellation_fail_before_publishing_a_table() {
     assert_eq!(
         build_glyph_table(
             &oversized_font,
-            "A",
+            &repertoire("A"),
             &config(),
             &budget(1_000_000, 1_000_000),
             &token
@@ -179,7 +213,7 @@ fn resource_limits_and_cancellation_fail_before_publishing_a_table() {
     assert_eq!(
         build_glyph_table(
             &font,
-            "A",
+            &repertoire("A"),
             &large_cell,
             &budget(1_000_000, 1_000_000),
             &token
@@ -206,7 +240,7 @@ fn resource_limits_and_cancellation_fail_before_publishing_a_table() {
     assert_eq!(
         build_glyph_table(
             &font,
-            "A",
+            &repertoire("A"),
             &config(),
             &budget(parser_limited_bytes, 1_000_000),
             &token
@@ -214,19 +248,31 @@ fn resource_limits_and_cancellation_fail_before_publishing_a_table() {
         Err(Error::BudgetExceeded(BudgetKind::RasterBytes))
     );
     assert_eq!(
-        build_glyph_table(&font, "A", &config(), &budget(1_000_000, 1), &token),
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &config(),
+            &budget(1_000_000, 1),
+            &token
+        ),
         Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
     );
 
     token.cancel();
     assert_eq!(
-        build_glyph_table(&font, "A", &config(), &budget(1_000_000, 1_000_000), &token),
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &config(),
+            &budget(1_000_000, 1_000_000),
+            &token
+        ),
         Err(Error::Cancelled)
     );
 
     let recovered = build_glyph_table(
         &font,
-        "A",
+        &repertoire("A"),
         &config(),
         &budget(1_000_000, 1_000_000),
         &CancellationToken::new(),
@@ -272,19 +318,37 @@ fn outline_raster_work_is_bounded_at_the_requested_size() {
         (composite_font(), 55_000),
     ];
     for (font, limit) in fixtures {
-        build_glyph_table(&font, "A", &small, &budget(raster_bytes, limit), &token)
-            .expect("the same outline fits when rasterized small");
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &small,
+            &budget(raster_bytes, limit),
+            &token,
+        )
+        .expect("the same outline fits when rasterized small");
         assert_eq!(
-            build_glyph_table(&font, "A", &large, &budget(raster_bytes, limit), &token),
+            build_glyph_table(
+                &font,
+                &repertoire("A"),
+                &large,
+                &budget(raster_bytes, limit),
+                &token
+            ),
             Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
         );
-        build_glyph_table(&font, "A", &large, &budget(raster_bytes, 1_000_000), &token)
-            .expect("the outline is valid with sufficient raster work");
+        build_glyph_table(
+            &font,
+            &repertoire("A"),
+            &large,
+            &budget(raster_bytes, 1_000_000),
+            &token,
+        )
+        .expect("the outline is valid with sufficient raster work");
     }
 
     build_glyph_table(
         &synthetic_font(false),
-        "A",
+        &repertoire("A"),
         &large,
         &budget(raster_bytes, 40_000),
         &token,
@@ -299,13 +363,20 @@ fn aliases_are_charged_for_each_rasterization() {
     let token = CancellationToken::new();
     let limit = budget(2_000_000, 150_000);
 
-    build_glyph_table(&font, "A", &config, &limit, &token).expect("one copy of the outline fits");
+    build_glyph_table(&font, &repertoire("A"), &config, &limit, &token)
+        .expect("one copy of the outline fits");
     assert_eq!(
-        build_glyph_table(&font, "AB", &config, &limit, &token),
+        build_glyph_table(&font, &repertoire("AB"), &config, &limit, &token),
         Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
     );
-    let table = build_glyph_table(&font, "AB", &config, &budget(2_000_000, 1_000_000), &token)
-        .expect("both aliases work with sufficient budget");
+    let table = build_glyph_table(
+        &font,
+        &repertoire("AB"),
+        &config,
+        &budget(2_000_000, 1_000_000),
+        &token,
+    )
+    .expect("both aliases work with sufficient budget");
     assert_eq!(
         table.glyphs()[0].glyph_index(),
         table.glyphs()[1].glyph_index()
@@ -349,7 +420,7 @@ fn malformed_format_twelve_scalar_ranges_are_rejected_before_fontdue() {
         assert_eq!(
             build_glyph_table(
                 &font,
-                "A",
+                &repertoire("A"),
                 &config(),
                 &budget(1_000_000, 1_000_000),
                 &CancellationToken::new(),
@@ -366,7 +437,7 @@ fn large_valid_format_twelve_range_fails_work_budget_before_fontdue() {
     assert_eq!(
         build_glyph_table(
             &font,
-            "A",
+            &repertoire("A"),
             &config(),
             &budget(1_000_000, 1_000_000),
             &CancellationToken::new(),
@@ -383,7 +454,7 @@ fn horizontal_kern_format_three_is_rejected_before_fontdue() {
     assert_eq!(
         build_glyph_table(
             &font,
-            "A",
+            &repertoire("A"),
             &config(),
             &budget(1_000_000, 1_000_000),
             &CancellationToken::new(),
@@ -397,13 +468,13 @@ fn legacy_format_two_coexists_with_unicode_cmap_and_malformed_tables_fail() {
     let token = CancellationToken::new();
     let generous = budget(1_000_000, 1_000_000);
     let legacy = legacy_format2_font(false);
-    let table =
-        build_glyph_table(&legacy, "A", &config(), &generous, &token).expect("valid cmaps build");
+    let table = build_glyph_table(&legacy, &repertoire("A"), &config(), &generous, &token)
+        .expect("valid cmaps build");
     assert_eq!(table.glyphs()[0].glyph_index(), 2);
 
     let malformed = legacy_format2_font(true);
     assert_eq!(
-        build_glyph_table(&malformed, "A", &config(), &generous, &token),
+        build_glyph_table(&malformed, &repertoire("A"), &config(), &generous, &token),
         Err(Error::Malformed(MalformedReason::InvalidEncodedData))
     );
 }
@@ -413,8 +484,14 @@ fn one_pixel_cells_have_nonzero_normalized_edge_descriptors() {
     let font = synthetic_font(false);
     let config = GlyphConfig::new(8.0, 1, 1, 1).expect("valid one-pixel cell");
     let token = CancellationToken::new();
-    let table = build_glyph_table(&font, "A", &config, &budget(1_000_000, 1_000_000), &token)
-        .expect("one-pixel table builds");
+    let table = build_glyph_table(
+        &font,
+        &repertoire("A"),
+        &config,
+        &budget(1_000_000, 1_000_000),
+        &token,
+    )
+    .expect("one-pixel table builds");
     let glyph = &table.glyphs()[0];
 
     assert_eq!(glyph.mask().len(), 1);
