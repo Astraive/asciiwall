@@ -418,6 +418,7 @@ pub fn convert_density_detailed(
         .cell_count()
         .checked_mul(glyph_count_u64)
         .ok_or(Error::SizeOverflow)?;
+    let frame_validation_work = grid_budget.work_units();
     let sampling = prepare_sampling(
         &input,
         size,
@@ -425,6 +426,7 @@ pub fn convert_density_detailed(
         glyphs.cell_height(),
         settings.sampling,
         matching_work,
+        frame_validation_work,
         budget,
     )?;
 
@@ -437,6 +439,10 @@ pub fn convert_density_detailed(
     let luminance_span = foreground_luminance - background_luminance;
     let foreground = output_color(settings.foreground);
     let background = output_color(settings.background);
+
+    if settings.cancellation.is_cancelled() {
+        return Err(Error::Cancelled.into());
+    }
 
     let mut cells = Vec::new();
     cells

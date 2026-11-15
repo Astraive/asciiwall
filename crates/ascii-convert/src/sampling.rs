@@ -823,8 +823,19 @@ pub(crate) fn prepare_sampling(
     cell_height: u32,
     options: SamplingOptions,
     matching_work: u64,
+    frame_validation_work: u64,
     budget: &Budget,
 ) -> Result<SamplingPlan, Error> {
+    let bytes_per_pixel = match source.format().channels() {
+        ascii_core::PixelChannels::Gray => 1usize,
+        ascii_core::PixelChannels::Rgb => 3,
+        ascii_core::PixelChannels::Rgba => 4,
+        ascii_core::PixelChannels::Other(_) => {
+            return Err(Error::Unsupported(
+                ascii_core::UnsupportedReason::PixelFormat,
+            ));
+        }
+    };
     let source_width = source.width();
     let source_height = source.height();
     let display_width = u64::from(grid.columns())
@@ -903,6 +914,7 @@ pub(crate) fn prepare_sampling(
         .and_then(|work| work.checked_add(sample_work))
         .and_then(|work| work.checked_add(descriptor_work))
         .and_then(|work| work.checked_add(initialization_work))
+        .and_then(|work| work.checked_add(frame_validation_work))
         .ok_or(Error::SizeOverflow)?;
     if total_work > budget.max_work_units() {
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
@@ -931,12 +943,6 @@ pub(crate) fn prepare_sampling(
             .ok_or(Error::SizeOverflow)?
     } else {
         0
-    };
-    let bytes_per_pixel = match source.format().channels() {
-        ascii_core::PixelChannels::Gray => 1usize,
-        ascii_core::PixelChannels::Rgb => 3,
-        ascii_core::PixelChannels::Rgba => 4,
-        ascii_core::PixelChannels::Other(_) => return Err(Error::SizeOverflow),
     };
     let row_bytes = usize::try_from(source.width())
         .map_err(|_| Error::SizeOverflow)?
