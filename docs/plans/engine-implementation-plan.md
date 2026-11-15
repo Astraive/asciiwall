@@ -86,7 +86,7 @@ Raster validation supports top-down 8-bit Gray/RGB/RGBA with sRGB primaries and 
 
 **Consumes and owns:** E01; defines GlyphConfig and immutable GlyphTable with fingerprint.
 
-**Produces:** `build_glyph_table(font_bytes: &[u8], charset: &str, config: &GlyphConfig, budget: &Budget) -> Result<GlyphTable, Error>`
+**Produces:** `GlyphRepertoire::new(&str) -> Result<GlyphRepertoire, Error>` for printable ASCII, block elements, and Braille; `build_glyph_table(font_bytes: &[u8], repertoire: &GlyphRepertoire, config: &GlyphConfig, budget: &Budget, cancellation: &CancellationToken) -> Result<GlyphTable, Error>`
 
 **Dependencies:** E01.
 
