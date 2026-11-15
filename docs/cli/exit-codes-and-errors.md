@@ -20,6 +20,8 @@
 | 14 | network | Explicit optional download failed |
 | 15 | internal | Unexpected invariant failure; safe diagnostic ID supplied |
 
+The current `convert` surface emits usage `2`, validation `3`, capability `4`, permission `5`, and I/O `8` errors. A request without a selected font returns capability `4`; when the conversion backend is absent, no request reports success or creates an output. Other table entries, including media and cancellation `10`, are not yet reachable through the CLI. Existing-output conflicts take precedence over format/charset checks and engine-capability errors, and remain usage `2`. The publication helper has cancellation-aware staging, but there is no end-to-end conversion cancellation flow yet.
+
 No success exit for a partially written archive. For batch operations, return a nonzero aggregate code if any item failed and include each result in JSON. Define deterministic error precedence: integrity/security before general validation, then resource, permission, capability, media, graphics, I/O, controller/network, internal. Cancellation before any commit returns 10; completed outputs remain listed explicitly.
 
 ## Structured result example
@@ -43,7 +45,7 @@ Error strings are human-readable and may evolve/localize. Scripts depend on `cod
 
 ## Error location and redaction
 
-Prefer manifest field paths and package-relative asset names over full local paths. Sanitize control characters and cap embedded text. Never echo arbitrary metadata as terminal escape sequences or rich HTML. Include native error codes only in optional redacted diagnostics, without process memory or source pixels.
+Prefer manifest field paths and package-relative asset names over full local paths. Sanitize control characters and cap embedded text. CLI parser failures use a generic message rather than echoing supplied option values or local paths. Never echo arbitrary metadata as terminal escape sequences or rich HTML. Include native error codes only in optional redacted diagnostics, without process memory or source pixels.
 
 ## Recovery examples
 

@@ -2,9 +2,9 @@
 
 ## Status and conventions
 
-These commands are the proposed stable CLI contract, not commands available from an already implemented executable. All work is local unless a command explicitly downloads catalog/package data and network consent is enabled. Headless conversion/export does not require a wallpaper host.
+The current `asciiwall` binary parses and validates headless conversion requests, but does **not** produce conversions: image decoding, text/ANSI export, and PNG export are not integrated. Valid requests fail with a capability error without decoding the input, consuming a selected font, or producing an output. The command does not start a controller or wallpaper host.
 
-Global flags: `--json`, `--quiet`, `--verbose`, `--config <path>`, `--no-color`, `--offline`, and `--help`. Paths are arguments, never interpolated into shell command strings. `--offline` overrides any saved online preference for that invocation.
+The binary accepts global `--json`, `--quiet`, `--verbose`, `--config <path>`, `--no-color`, `--offline`, and `--help` before or after `convert`. Diagnostics are uncolored and go to stderr unless `--json` requests a structured result on stdout; help remains plain text. `--quiet` never suppresses errors. Paths are separate arguments, never shell strings. This build makes no network requests; the shared settings registry is not available, so explicitly supplying `--config` reports a capability error. Once settings are integrated, `--offline` must override any saved online preference for that invocation.
 
 ## Conversion and rendering
 
@@ -17,11 +17,19 @@ Global flags: `--json`, `--quiet`, `--verbose`, `--config <path>`, `--no-color`,
 
 File extension can suggest a format but explicit conflicting flags are rejected. `bake --format video` requires an encoder actually included in the build; print supported encoders rather than inventing availability. Audio is absent/muted unless a future explicit supported option is selected.
 
+The current request parser defaults to 240 columns, `--matcher density`, monochrome (`--color mono`), and the literal printable ASCII repertoire ` .:-=+*#%@`. `--charset <glyphs>` supplies a literal repertoire; until the shared strict-cell repertoire is available it accepts distinct printable ASCII only and rejects controls, duplicates, and non-ASCII text. `--matcher structural` and `--color source` are recognized but report unavailable capabilities, not fallback output. There is no production built-in font: omitting `--font <path>` returns a capability error rather than silently selecting a font. Supplying a path does not yet load or consume it in `convert`; shared font geometry plus the media/export integrations are still required.
+
+The reusable `font::load_glyph_table` helper reads an explicitly supplied local font under a 16 MiB and caller-budget bound, then delegates glyph-table construction to `ascii-convert`. It follows symlinks to regular files and rejects special-file handles before reading. Unix opens with `O_NONBLOCK` and validates the opened handle so a direct or swapped FIFO cannot block; Windows checks the native handle type and rejects pipe/device handles before synchronous reads. Cancellation is checked around file operations and between reads, but cannot interrupt an OS call already in progress. The caller must provide a validated `GlyphConfig`; the current CLI does not provide those metrics or call this helper during conversion.
+
+For a destination other than `-`, the parser infers `.txt`, `.ans`/`.ansi`, or `.png` case-insensitively. An explicit format conflicting with a recognized extension is a usage error; an unknown extension requires `--format`. For `--output -`, omitted format means plain text. `--json --output -` is a usage error. Existing destination entries (including dangling symlinks) require `--overwrite`; that conflict takes precedence over format and charset validation. The check is advisory; publication must also enforce no-clobber at commit time.
+
 ```bash
-asciiwall convert mountain.png --columns 180 --matcher structural --format txt --output mountain.txt
-asciiwall convert mountain.png --color source --format png --output mountain-ascii.png
-asciiwall bake waves.mp4 --format ascii-clip --fps 30 --duration 12s --output waves.ascii-clip
-asciiwall bake scene.json --format video --fps 30 --duration 10s --seed 42 --output rain.webm
+# This request shape is accepted, but export is not integrated and creates no artifact.
+asciiwall convert "mountain image.png" --font "font with spaces.ttf" --columns 180 --format txt --output "mountain output.txt"
+
+# Plain-text output may use stdout; JSON status and artwork cannot share stdout.
+asciiwall convert mountain.png --font font.ttf --format txt --output -
+asciiwall --json convert mountain.png --font font.ttf --format txt --output mountain.txt
 ```
 
 ## Desktop control
@@ -64,4 +72,6 @@ asciiwall bake scene.json --format video --fps 30 --duration 10s --seed 42 --out
 
 ## Output safety
 
-Plain text may go to stdout with `--output -`; binary output and JSON status cannot share stdout. Reject `--json --output -` when the output is artwork bytes. Progress and diagnostics go to stderr. No ANSI escape output when redirected unless `--format ansi` was explicitly chosen. Exported plain text strips terminal control sequences from metadata/custom glyph input.
+Text output may use `--output -`; artwork and JSON status are never combined on stdout. Progress and human diagnostics go to stderr. CLI errors use fixed messages and never interpolate input, output, font, config paths, host names, or option values; terminal controls are stripped. Redirected plain-text exports must contain no ANSI escapes, but text export is not integrated in this build.
+
+The current CLI rejects the stdout/JSON conflict and strips terminal control sequences from diagnostics; parser failures are generic and identify the parsed command from Clap's usage context without echoing supplied values. It produces no artwork and does not read the input or selected font. Its standalone publication helper stages output in the destination directory, checks cancellation before commit, and uses a no-clobber operation unless overwrite was explicitly requested; it is not connected to an export. On filesystems without an atomic no-replace rename, the no-clobber fallback may leave an additional temporary link. Integration with the shared export transaction remains necessary.
