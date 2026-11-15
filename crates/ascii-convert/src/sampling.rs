@@ -568,17 +568,9 @@ impl QualityPatches {
         descriptors
             .try_reserve_exact(cell_count)
             .map_err(|_| Error::AllocationFailed)?;
-        for index in 0..patch_value_count {
-            if index.is_multiple_of(PATCH_INITIALIZATION_CANCEL_INTERVAL)
-                && cancellation.is_cancelled()
-            {
-                return Err(Error::Cancelled);
-            }
-            luminance.push(0.0);
-        }
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
+        zero_fill_patch_values(&mut luminance, patch_value_count, || {
+            cancellation.is_cancelled()
+        })?;
         Ok(Self {
             dimensions,
             luminance,
@@ -604,6 +596,23 @@ impl QualityPatches {
     pub(crate) fn push_descriptor(&mut self, descriptor: PatchDescriptors) {
         self.descriptors.push(descriptor);
     }
+}
+
+fn zero_fill_patch_values(
+    luminance: &mut Vec<f32>,
+    patch_value_count: usize,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<(), Error> {
+    for index in 0..patch_value_count {
+        if index.is_multiple_of(PATCH_INITIALIZATION_CANCEL_INTERVAL) && is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        luminance.push(0.0);
+    }
+    if is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    Ok(())
 }
 
 /// Internal, fully preflighted geometry and sampling identity for one conversion.
@@ -1306,7 +1315,9 @@ fn patch_descriptors(
 
 #[cfg(test)]
 mod tests {
-    use super::{CropRect, FitMode, FitTransform, PatchDimensions, QualityPatches};
+    use super::{
+        CropRect, FitMode, FitTransform, PatchDimensions, QualityPatches, zero_fill_patch_values,
+    };
     use ascii_core::{CancellationToken, Error, MalformedReason};
 
     #[test]
@@ -1323,6 +1334,22 @@ mod tests {
             .err(),
             Some(Error::Cancelled)
         );
+    }
+
+    #[test]
+    fn patch_zero_fill_polls_cancellation_every_256_values() {
+        let mut luminance = Vec::with_capacity(1024);
+        let mut polls = 0;
+
+        assert_eq!(
+            zero_fill_patch_values(&mut luminance, 1024, || {
+                polls += 1;
+                polls == 3
+            }),
+            Err(Error::Cancelled)
+        );
+        assert_eq!(polls, 3);
+        assert_eq!(luminance.len(), 512);
     }
 
     #[test]
