@@ -86,7 +86,7 @@ Raster validation supports top-down 8-bit Gray/RGB/RGBA with sRGB primaries and 
 
 **Consumes and owns:** E01; defines GlyphConfig and immutable GlyphTable with fingerprint.
 
-**Produces:** `GlyphRepertoire::new(&str) -> Result<GlyphRepertoire, Error>` for printable ASCII, block elements, and Braille; `build_glyph_table(font_bytes: &[u8], repertoire: &GlyphRepertoire, config: &GlyphConfig, budget: &Budget, cancellation: &CancellationToken) -> Result<GlyphTable, Error>`
+**Produces:** `GlyphRepertoire::from_preset(GlyphRepertoirePreset)` for printable ASCII, Unicode blocks, Braille, and their union; `GlyphRepertoire::new(&str) -> Result<GlyphRepertoire, Error>` for validated subsets; `build_glyph_table(font_bytes: &[u8], repertoire: &GlyphRepertoire, config: &GlyphConfig, budget: &Budget, cancellation: &CancellationToken) -> Result<GlyphTable, Error>`; and matcher-identical `build_glyph_preview` states/masks. Clip-reader, editor, and text-export consumers remain separate work because those executable paths are absent.
 
 **Dependencies:** E01.
 
