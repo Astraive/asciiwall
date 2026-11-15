@@ -23,7 +23,7 @@ the exact profile-specific normalization failure.
 
 ## Image preprocessing order
 
-Decode within limits and apply display orientation once in the decoder; then interpret source color metadata, decide alpha compositing background, select crop/contain/cover, resample, and apply artistic adjustments such as exposure, contrast, gamma, saturation, and edge emphasis. Distinguish physical color conversion from user-selected artistic distortion.
+Decode within limits and apply display orientation once in the decoder; then interpret source color metadata and alpha, normalize transfer/range, select and publish one contain/cover/custom-crop transform, and resample. Apply artistic adjustments such as exposure, contrast, gamma, saturation, and edge emphasis only after fitting/resampling. The published source/display mapping is shared by sampling and any preview or pointer consumer, with letterbox and crop rejection derived from its exact rectangles rather than a second crop approximation. Distinguish physical color conversion from user-selected artistic distortion.
 
 The IMG-001 `ascii-media` decoder applies display orientation once and returns top-down pixels, as described below. `ascii-convert` accepts these top-down raster inputs and never transforms orientation. The decoder rejects unsupported color metadata rather than converting profiles; `ascii-convert` then performs the linear-light normalization described above. A normalized raster is owned linear-premultiplied RGBA, and raster size, stride, input extent, output allocation size, work, and cancellation are checked before and during normalization.
 
@@ -34,6 +34,8 @@ normalization (including the sRGB assumption for unknown profile fields) alongsi
 frame; callers must surface that warning rather than discard it. Optional retained quality patches
 are bounded by the shared raster/work budgets before allocation, and their zero-initialization is
 charged to work and checked for cancellation at bounded intervals.
+
+Patch dimensions are validated at 1–64 samples per axis and at most 4096 values per output cell. The operation preflights aggregate readable-input, normalized-raster, retained-patch and descriptor bytes together with sampling, zero-initialization, descriptor, and final-frame work before allocating patch/output vectors; cancellation is checked through initialization and sampling. A failed or cancelled call publishes no partial result.
 
 Premultiplied RGBA is scanned in a cancellable preflight before normalized output is allocated;
 each pixel is charged once for that validation and once for normalization. Straight and opaque
@@ -80,7 +82,7 @@ Background/foreground separation can be a single fixed background for speed or a
 
 ## Filtering and edges
 
-Area/box sampling is a practical baseline for shrink-heavy conversion. Compare alternatives with thin lines, checkerboards, text, and photographs. Edge enhancement should be bounded and operate before quantization; strong enhancement can introduce halos. Dithering is optional and can increase flicker in video unless its pattern is temporally stable.
+Area/box sampling is the explainable baseline for shrink-heavy conversion. CNV-003 proposes no alternate filter. Any future alternate must be compared using deterministic rights-cleared synthetic thin-line, checkerboard, text, and photo fixtures with grid, font, and crop fixed; publish fixture/configuration hashes and retain the box outputs as the reference. Edge enhancement should be bounded and operate before quantization; strong enhancement can introduce halos. Dithering is optional and can increase flicker in video unless its pattern is temporally stable.
 
 ## Input coverage
 
