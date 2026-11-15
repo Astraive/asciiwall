@@ -548,6 +548,9 @@ impl QualityPatches {
         luminance
             .try_reserve_exact(patch_value_count)
             .map_err(|_| Error::AllocationFailed)?;
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         let mut descriptors = Vec::new();
         descriptors
             .try_reserve_exact(cell_count)
