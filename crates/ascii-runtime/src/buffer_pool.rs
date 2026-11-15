@@ -408,18 +408,29 @@ impl BufferPool {
     /// some external mapping. A strictly greater generation prevents stale descriptors and leases
     /// from aliasing newly published slots.
     pub fn invalidate_generation(&self, new_generation: u64) -> Result<usize, RuntimeError> {
+        let mut output_permits = Vec::new();
         let mut inner = lock_unpoisoned(&self.inner);
         if new_generation <= inner.generation {
             return Err(RuntimeError::StaleGeneration);
+        }
+        if inner.slots.iter().any(|slot| slot.output_permit.is_some()) {
+            let slot_count = inner.slots.len();
+            drop(inner);
+            // The fixed slot count bounds the permits, so reserve before reacquiring the pool lock.
+            output_permits.reserve(slot_count);
+            inner = lock_unpoisoned(&self.inner);
+            if new_generation <= inner.generation {
+                return Err(RuntimeError::StaleGeneration);
+            }
         }
         let mut invalidated = 0;
         for slot in &mut inner.slots {
             if slot.state != SlotState::Free {
                 invalidated += 1;
             }
-            // This invalidation boundary is authorized to discard the old consumer lease. Release
-            // its concurrency permit while the pool owner is locked; budget code never locks pools.
-            drop(slot.output_permit.take());
+            if let Some(output_permit) = slot.output_permit.take() {
+                output_permits.push(output_permit);
+            }
             slot.state = SlotState::Free;
             slot.generation = new_generation;
             slot.written_len = 0;
@@ -429,6 +440,8 @@ impl BufferPool {
             slot.lease_attached = false;
         }
         inner.generation = new_generation;
+        drop(inner);
+        drop(output_permits);
         Ok(invalidated)
     }
 }
