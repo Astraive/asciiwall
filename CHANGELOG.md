@@ -41,3 +41,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Preserve ISO-looking JSON text and exact protected ledger timestamp strings through repeated reads and atomic writes; the real filesystem regression now exercises lossless reloads.
 - Hardened FNT-001 cancellation through parser preflight, glyph description, rasterization, and final sorting; prevented implicit deep clones of budgeted tables, validated legacy cmap format 2 beside Unicode maps, fixed one-pixel edge descriptors, expanded fingerprint invalidation coverage, and documented the checked parser-allocation envelope.
 - Collect COR-005 generation-invalidation output permits under the buffer-pool lock and release them only after unlocking; document the non-nested pool/budget lock order.
+- Dropping a staged COR-005 transition now releases only its candidate charge while preserving the active old-scene memory permit.
