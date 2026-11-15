@@ -47,3 +47,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Preflight premultiplied raster channels before allocating normalized output, charge the cancellable validation pass to work budgets, and test cancellation within that pass ([CNV-002]).
 - Made `NormalizedRaster` intentionally non-`Clone` to prevent unbudgeted pixel-buffer copies, and clarified that `ascii-media` decoding is outside this PR's scope ([CNV-002]).
 - Collect COR-005 generation-invalidation output permits under the buffer-pool lock and release them only after unlocking; document the non-nested pool/budget lock order.
+- Dropping a staged COR-005 transition now releases only its candidate charge while preserving the active old-scene memory permit.
