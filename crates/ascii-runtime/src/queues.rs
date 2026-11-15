@@ -212,8 +212,9 @@ impl ControlQueue {
 ///
 /// The coordinator publishes a valid replacement before discarding older queued frames whenever
 /// a free slot exists. If all slots are occupied by queued frames, it validates the replacement
-/// before reclaiming the oldest queued frame to make room; consumed slots remain pinned until
-/// completion acknowledgement or generation invalidation.
+/// before reclaiming the oldest queued frame to make room; consumed slots retain output permits
+/// until acknowledgement, generation invalidation, or pool destruction, without the slot pinning
+/// the pool.
 #[derive(Debug)]
 pub struct BoundedHandoff {
     operation: Mutex<()>,

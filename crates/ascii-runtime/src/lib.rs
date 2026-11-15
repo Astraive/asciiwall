@@ -6,10 +6,10 @@
 //! disconnect, or device-completion behavior is implemented here.
 //!
 //! Submission, producer writes, raster consumption, and pixel callbacks acquire shared CPU-work
-//! permits. Consumed slots retain a shared output permit until their external completion token is
-//! acknowledged. A decoder outside this crate MUST hold `ResourceBudget::try_acquire_decode` for
-//! its active decode job; this crate supplies no decoder operation to which such a permit could be
-//! applied internally.
+//! permits. A consumed slot retains its shared output permit until completion acknowledgement,
+//! generation invalidation, or final pool-owner drop. A decoder outside this crate MUST hold
+//! `ResourceBudget::try_acquire_decode` for its active decode job; this crate supplies no decoder
+//! operation to which such a permit could be applied internally.
 //!
 //! # Locking and callbacks
 //!
@@ -25,7 +25,10 @@
 //! must arrange their own thread affinity and completion callbacks outside this crate.
 //!
 //! A [`CompletionToken`] is an explicit caller attestation that external use (including native or
-//! GPU work) has completed. Reference counts and dropping a lease do not acknowledge completion.
+//! GPU work) has completed. Callers MUST retain it until external work completes. A live token owns
+//! a strong pool handle, but the slot does not pin its pool after token drop; if no other pool or
+//! lease handle remains, dropping it releases storage and permits. Dropping a token or lease does
+//! not acknowledge completion.
 
 mod buffer_pool;
 mod queues;
