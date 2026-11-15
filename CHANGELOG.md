@@ -39,7 +39,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Project-field schema preflight preserves singleton GraphQL argument collections instead of mistaking a valid input object for multiple arguments.
 - Preserve ISO-looking JSON text and exact protected ledger timestamp strings through repeated reads and atomic writes; the real filesystem regression now exercises lossless reloads.
 - [COR-008] Serialize atomic writes, importer journal transitions, and diagnostic-log rotation by
-  storage directory; clean reserved interrupted-write temporaries, sync newly created directory
-  entries, recover from oversized current configs without replacing last-good data, and redact
-  clipped diagnostics plus portable file URIs and network endpoints.
-- [COR-008] Strip app/application-rule fields from portable exports; they remain available only in explicitly labeled nonportable local backups.
+  storage directory; clean owned interrupted-write temporaries, sync newly created directory
+  entries where supported, preserve only schema-valid last-good configs, and redact clipped
+  diagnostics plus portable file URIs and network endpoints.
+- [COR-008] Inject failures at every config/registry atomic-write hook boundary and verify recovery
+  yields only complete valid state, cleans owned temporaries, and permits subsequent writes; race
+  retained concurrent log records through rotation without loss or corruption.
+- [COR-008] Bound diagnostic logs to 16 files of at most 16 MiB each and 64 KiB per record; bound
+  portable-export traversal and serialized output, reject over-budget exports without partial data,
+  and redact single-label host-and-port endpoints such as `buildhost:9000`.
+- [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
+  explicitly labeled nonportable local backups.
