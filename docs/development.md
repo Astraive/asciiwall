@@ -1,6 +1,6 @@
 # Development workflow and local tooling
 
-> **Current repository state:** The Rust workspace contains portable `ascii-core` and `ascii-runtime` contracts alongside project governance, documentation, and Python/PowerShell tooling. There is no application binary or buildable installer yet; future `asciiwall` CLI examples are not currently runnable.
+> **Current repository state:** The Rust workspace contains the portable `ascii-core` frame contract, the `ascii-convert` glyph-table implementation, and bounded `ascii-runtime` contracts alongside project governance, documentation, and Python/PowerShell tooling. There is no application binary or buildable installer yet; future `asciiwall` CLI examples are not currently runnable.
 
 ## Current repository tooling and prerequisites
 
