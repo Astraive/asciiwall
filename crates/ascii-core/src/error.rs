@@ -17,6 +17,8 @@ pub enum MalformedReason {
     RasterBackingTooShort,
     /// Caller-supplied input configuration violates its own bounds.
     InvalidConfiguration,
+    /// Encoded input data is empty, unreadable, or structurally invalid.
+    InvalidEncodedData,
 }
 
 /// A supported-core capability that the supplied input requires but this API does not support.
@@ -32,8 +34,20 @@ pub enum UnsupportedReason {
     ColorDescription,
     /// The alpha mode does not match the raster's channel layout.
     AlphaMode,
-    /// The requested glyph is not present in the selected font.
+    /// The font uses a character-map or kerning format this preflight does not support.
+    UnsupportedFormat,
+}
+/// A glyph-specific single-cell validation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlyphFailureReason {
+    /// The scalar is outside the strict supported repertoire.
+    UnsupportedScalar,
+    /// The repertoire contains the same scalar more than once.
+    DuplicateScalar,
+    /// The selected font has no glyph for the requested scalar.
     GlyphUnavailable,
+    /// The glyph's measured advance exceeds one configured cell.
+    MultiCellMetrics,
 }
 
 /// The bounded resource that was exhausted.
@@ -41,6 +55,8 @@ pub enum UnsupportedReason {
 pub enum BudgetKind {
     /// Owned ASCII cell-vector capacity, measured in bytes.
     FrameBytes,
+    /// The size of an encoded input asset, measured in bytes.
+    EncodedBytes,
     /// The minimum readable raster extent, excluding trailing bytes and final-row padding.
     RasterBytes,
     /// The bounded per-cell or per-pixel validation work estimate.
@@ -72,6 +88,13 @@ pub enum Error {
     MissingAsset,
     /// A required device or service is temporarily unavailable.
     TemporarilyUnavailable,
+    /// A repertoire or font glyph failure, including the offending Unicode scalar.
+    Glyph {
+        /// The scalar rejected by the single-cell contract.
+        character: char,
+        /// Why the scalar or its selected-font metrics failed validation.
+        reason: GlyphFailureReason,
+    },
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -79,6 +102,17 @@ impl core::fmt::Display for Error {
             Self::Malformed(_) => formatter.write_str("malformed input"),
             Self::Unsupported(_) => formatter.write_str("unsupported input"),
             Self::BudgetExceeded(_) => formatter.write_str("resource budget exceeded"),
+            Self::Glyph { character, reason } => {
+                let reason = match reason {
+                    GlyphFailureReason::UnsupportedScalar => "is outside the supported repertoire",
+                    GlyphFailureReason::DuplicateScalar => {
+                        "appears more than once in the repertoire"
+                    }
+                    GlyphFailureReason::GlyphUnavailable => "is missing from the selected font",
+                    GlyphFailureReason::MultiCellMetrics => "has an advance wider than one cell",
+                };
+                write!(formatter, "glyph U+{:04X} {reason}", *character as u32)
+            }
             Self::AllocationFailed => formatter.write_str("allocation failed"),
             Self::SizeOverflow => formatter.write_str("size overflow"),
             Self::Cancelled => formatter.write_str("operation cancelled"),

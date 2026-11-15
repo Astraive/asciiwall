@@ -1,10 +1,11 @@
+#[allow(dead_code)]
 mod support;
 
 use ascii_convert::{
-    ColorNormalizationError, ColorNormalizationWarning, ConversionSettings, DensityConversionError,
-    FitMode, GlyphConfig, GlyphTable, GridSizing, LinearRgb, PatchDimensions, SamplingFilter,
-    SamplingOptions, UnsupportedColorReason, build_glyph_table, convert_density,
-    convert_density_detailed,
+    ColorNormalizationError, ColorNormalizationWarning, ConversionSettings, CropRect,
+    DensityConversionError, FitMode, GlyphConfig, GlyphRepertoire, GlyphTable, GridSizing,
+    LinearRgb, PatchDimensions, SamplingFilter, SamplingOptions, UnsupportedColorReason,
+    build_glyph_table, convert_density, convert_density_detailed,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, Error, FrameMetadata,
@@ -19,7 +20,7 @@ const CELL_HEIGHT: u32 = 12;
 fn build_table() -> GlyphTable {
     build_glyph_table(
         &synthetic_font(false),
-        "BA ",
+        &GlyphRepertoire::new("BA ").expect("fixture repertoire is supported"),
         &GlyphConfig::new(8.0, CELL_WIDTH, CELL_HEIGHT, 9)
             .expect("fixture glyph geometry is valid"),
         &Budget::new(1_000_000, 2_000_000, 2_000_000),
@@ -32,12 +33,7 @@ fn budget() -> Budget {
     Budget::new(8_000_000, 64_000_000, 16_000_000)
 }
 
-fn raster(
-    pixels: &[u8],
-    width: u32,
-    height: u32,
-    row_stride: usize,
-) -> RasterFrameView<'_> {
+fn raster(pixels: &[u8], width: u32, height: u32, row_stride: usize) -> RasterFrameView<'_> {
     RasterFrameView::new(
         width,
         height,
@@ -119,7 +115,7 @@ fn column_geometry_rounds_half_rows_and_accounts_for_glyph_aspect() {
         .expect("one-cell geometry is valid");
     assert_eq!(one_cell, GridSize::new(1, 1));
     assert_eq!(
-        GridSizing::columns(1).resolve(1, 1, 8, 12),
+        GridSizing::columns(1).resolve(1, 1, 8, 24),
         Err(Error::Malformed(MalformedReason::EmptyDimensions))
     );
 }
@@ -131,8 +127,54 @@ fn fixed_surface_floors_grid_and_reports_right_bottom_leftovers() {
         sizing.resolve(1920, 1080, CELL_WIDTH, CELL_HEIGHT),
         Ok(GridSize::new(2, 2))
     );
-    assert_eq!(sizing.fixed_surface_leftovers(CELL_WIDTH, CELL_HEIGHT), Some((3, 5)));
+    assert_eq!(
+        sizing.fixed_surface_leftovers(CELL_WIDTH, CELL_HEIGHT),
+        Some((3, 5))
+    );
     assert_eq!(GridSizing::columns(10).fixed_surface_leftovers(8, 12), None);
+}
+
+#[test]
+fn custom_crop_column_sizing_uses_selected_source_geometry() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let source = vec![128; 32 * 12];
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::columns(4),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::CustomCrop(CropRect::new(0.25, 0.0, 0.5, 1.0).expect("crop is valid")),
+        SamplingFilter::Box,
+        None,
+    ));
+    let raster = RasterFrameView::new(
+        32,
+        12,
+        32,
+        PixelFormat::gray8(),
+        ColorDescription::new(
+            ascii_core::ColorPrimaries::Other(7),
+            TransferFunction::Other(9),
+            AlphaMode::Opaque,
+        ),
+        RasterOrientation::TopDown,
+        &source,
+    );
+    let converted = convert_density_detailed(raster, &table, &conversion_settings, &budget())
+        .expect("custom-crop conversion succeeds with an explicit profile warning");
+
+    assert_eq!(converted.frame().size(), GridSize::new(4, 4));
+    assert_eq!(converted.transform().source_rect().width(), 8.0);
+    assert_eq!(converted.transform().source_rect().height(), 12.0);
+    assert_eq!(converted.transform().display_dimensions(), (32, 48));
+    assert_eq!(
+        converted.normalization_warning(),
+        Some(ColorNormalizationWarning::AssumedSrgbForUnknownProfile)
+    );
 }
 
 #[test]
@@ -141,59 +183,76 @@ fn endpoints_and_both_luminance_polarities_match_space_and_ink() {
     let black = [0_u8; 6];
     let white = [u8::MAX; 6];
     let normal = CancellationToken::new();
-    let dark_space = convert_density_detailed(raster(&black, 2, 3, 2),
-    &table,
-    &settings(
+    let dark_space = convert_density_detailed(
+        raster(&black, 2, 3, 2),
         &table,
-        &normal,
-        GridSizing::fixed_pixel_surface(8, 12),
-        LinearRgb::WHITE,
-        LinearRgb::BLACK,
-    ),
-    &budget(),)
+        &settings(
+            &table,
+            &normal,
+            GridSizing::fixed_pixel_surface(8, 12),
+            LinearRgb::WHITE,
+            LinearRgb::BLACK,
+        ),
+        &budget(),
+    )
     .expect("black sample converts");
-    let light_ink = convert_density_detailed(raster(&white, 2, 3, 2),
-    &table,
-    &settings(
+    let light_ink = convert_density_detailed(
+        raster(&white, 2, 3, 2),
         &table,
-        &normal,
-        GridSizing::fixed_pixel_surface(8, 12),
-        LinearRgb::WHITE,
-        LinearRgb::BLACK,
-    ),
-    &budget(),)
+        &settings(
+            &table,
+            &normal,
+            GridSizing::fixed_pixel_surface(8, 12),
+            LinearRgb::WHITE,
+            LinearRgb::BLACK,
+        ),
+        &budget(),
+    )
     .expect("white sample converts");
     assert_eq!(dark_space.frame().cells()[0].glyph(), slot(&table, ' '));
     assert_eq!(light_ink.frame().cells()[0].glyph(), slot(&table, 'A'));
-    assert_eq!(dark_space.frame().cells()[0].fg_srgba8(), [255, 255, 255, 255]);
+    assert_eq!(
+        dark_space.frame().cells()[0].fg_srgba8(),
+        [255, 255, 255, 255]
+    );
     assert_eq!(dark_space.frame().cells()[0].bg_srgba8(), [0, 0, 0, 255]);
 
-    let reversed_black = convert_density_detailed(raster(&black, 2, 3, 2),
-    &table,
-    &settings(
+    let reversed_black = convert_density_detailed(
+        raster(&black, 2, 3, 2),
         &table,
-        &normal,
-        GridSizing::fixed_pixel_surface(8, 12),
-        LinearRgb::BLACK,
-        LinearRgb::WHITE,
-    ),
-    &budget(),)
+        &settings(
+            &table,
+            &normal,
+            GridSizing::fixed_pixel_surface(8, 12),
+            LinearRgb::BLACK,
+            LinearRgb::WHITE,
+        ),
+        &budget(),
+    )
     .expect("dark-on-light sample converts");
-    let reversed_white = convert_density_detailed(raster(&white, 2, 3, 2),
-    &table,
-    &settings(
+    let reversed_white = convert_density_detailed(
+        raster(&white, 2, 3, 2),
         &table,
-        &normal,
-        GridSizing::fixed_pixel_surface(8, 12),
-        LinearRgb::BLACK,
-        LinearRgb::WHITE,
-    ),
-    &budget(),)
+        &settings(
+            &table,
+            &normal,
+            GridSizing::fixed_pixel_surface(8, 12),
+            LinearRgb::BLACK,
+            LinearRgb::WHITE,
+        ),
+        &budget(),
+    )
     .expect("light background sample converts");
     assert_eq!(reversed_black.frame().cells()[0].glyph(), slot(&table, 'A'));
     assert_eq!(reversed_white.frame().cells()[0].glyph(), slot(&table, ' '));
-    assert_eq!(reversed_black.frame().cells()[0].fg_srgba8(), [0, 0, 0, 255]);
-    assert_eq!(reversed_black.frame().cells()[0].bg_srgba8(), [255, 255, 255, 255]);
+    assert_eq!(
+        reversed_black.frame().cells()[0].fg_srgba8(),
+        [0, 0, 0, 255]
+    );
+    assert_eq!(
+        reversed_black.frame().cells()[0].bg_srgba8(),
+        [255, 255, 255, 255]
+    );
 }
 
 #[test]
@@ -214,8 +273,10 @@ fn equal_coverage_ties_use_font_index_and_repeat_deterministically() {
     let second = convert_density_detailed(raster(&source, 1, 1, 1), &table, &settings, &budget())
         .expect("repeat conversion succeeds");
 
-    assert_eq!(table.glyphs()[slot(&table, 'A') as usize].mean_coverage(),
-        table.glyphs()[slot(&table, 'B') as usize].mean_coverage());
+    assert_eq!(
+        table.glyphs()[slot(&table, 'A') as usize].mean_coverage(),
+        table.glyphs()[slot(&table, 'B') as usize].mean_coverage()
+    );
     assert_eq!(first.frame().cells()[0].glyph(), slot(&table, 'A'));
     assert_eq!(first.frame().cells(), second.frame().cells());
 }
@@ -239,10 +300,12 @@ fn box_sampling_integrates_cell_footprint_and_never_reads_stride_padding() {
         Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
     ));
     let mixed = [0, 255, 0, 255, 0, 255];
-    let mixed_result = convert_density_detailed(linear_gray_raster(&mixed, 2, 3, 2),
-    &table,
-    &area_settings,
-    &budget(),)
+    let mixed_result = convert_density_detailed(
+        linear_gray_raster(&mixed, 2, 3, 2),
+        &table,
+        &area_settings,
+        &budget(),
+    )
     .expect("fractional-area conversion succeeds");
     let patch = mixed_result
         .patches()
@@ -253,15 +316,19 @@ fn box_sampling_integrates_cell_footprint_and_never_reads_stride_padding() {
 
     let padded_rows = [255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0];
     let tightly_packed = [255, 255, 255, 255, 255, 255];
-    let padded_result = convert_density_detailed(raster(&padded_rows, 2, 3, 4),
-    &table,
-    &conversion_settings,
-    &budget(),)
+    let padded_result = convert_density_detailed(
+        raster(&padded_rows, 2, 3, 4),
+        &table,
+        &conversion_settings,
+        &budget(),
+    )
     .expect("padded rows normalize successfully");
-    let packed_result = convert_density_detailed(raster(&tightly_packed, 2, 3, 2),
-    &table,
-    &conversion_settings,
-    &budget(),)
+    let packed_result = convert_density_detailed(
+        raster(&tightly_packed, 2, 3, 2),
+        &table,
+        &conversion_settings,
+        &budget(),
+    )
     .expect("packed rows normalize successfully");
     assert_eq!(padded_result.frame().cells(), packed_result.frame().cells());
     assert_eq!(padded_result.frame().cells()[0].glyph(), slot(&table, 'A'));
@@ -273,16 +340,18 @@ fn source_metadata_is_propagated_exactly_and_mismatched_identity_is_rejected() {
     let cancellation = CancellationToken::new();
     let source = [128];
     let expected_metadata = metadata(&table);
-    let frame = convert_density(raster(&source, 1, 1, 1),
-    &table,
-    &settings(
+    let frame = convert_density(
+        raster(&source, 1, 1, 1),
         &table,
-        &cancellation,
-        GridSizing::fixed_pixel_surface(8, 12),
-        LinearRgb::WHITE,
-        LinearRgb::BLACK,
-    ),
-    &budget(),)
+        &settings(
+            &table,
+            &cancellation,
+            GridSizing::fixed_pixel_surface(8, 12),
+            LinearRgb::WHITE,
+            LinearRgb::BLACK,
+        ),
+        &budget(),
+    )
     .expect("matching glyph identity converts");
     assert_eq!(frame.metadata(), expected_metadata);
     assert_eq!(frame.generation(), expected_metadata.generation());
@@ -308,22 +377,40 @@ fn source_metadata_is_propagated_exactly_and_mismatched_identity_is_rejected() {
 }
 
 #[test]
-fn cancellation_and_output_budgets_fail_before_publishing_a_frame() {
+fn pre_cancelled_no_patch_conversion_precedes_frame_budget() {
     let table = build_table();
     let source = [255];
-    let cancelled = CancellationToken::new();
-    let cancelled_settings = settings(
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
         &table,
-        &cancelled,
+        &cancellation,
         GridSizing::fixed_pixel_surface(8, 12),
         LinearRgb::WHITE,
         LinearRgb::BLACK,
-    );
-    cancelled.cancel();
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::Contain,
+        SamplingFilter::Box,
+        None,
+    ));
+    cancellation.cancel();
+    let insufficient_frame_budget = Budget::new(0, 64_000_000, 16_000_000);
+
     assert_eq!(
-        convert_density_detailed(raster(&source, 1, 1, 1), &table, &cancelled_settings, &budget()),
+        convert_density_detailed(
+            raster(&source, 1, 1, 1),
+            &table,
+            &conversion_settings,
+            &insufficient_frame_budget,
+        ),
         Err(DensityConversionError::Core(Error::Cancelled))
     );
+}
+
+#[test]
+fn output_budgets_fail_before_publishing_a_frame() {
+    let table = build_table();
+    let source = [255];
 
     let cancellation = CancellationToken::new();
     let conversion_settings = settings(
@@ -344,7 +431,12 @@ fn cancellation_and_output_budgets_fail_before_publishing_a_frame() {
     );
     let no_frame_budget = Budget::new(0, 64_000_000, 16_000_000);
     assert_eq!(
-        convert_density_detailed(unsupported_format, &table, &conversion_settings, &no_frame_budget),
+        convert_density_detailed(
+            unsupported_format,
+            &table,
+            &conversion_settings,
+            &no_frame_budget
+        ),
         Err(DensityConversionError::Core(Error::BudgetExceeded(
             BudgetKind::FrameBytes
         )))
@@ -360,6 +452,153 @@ fn cancellation_and_output_budgets_fail_before_publishing_a_frame() {
         ),
         Err(DensityConversionError::Core(Error::BudgetExceeded(
             BudgetKind::WorkUnits
+        )))
+    );
+}
+
+#[test]
+fn patch_zero_initialization_is_charged_to_the_work_budget() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::Contain,
+        SamplingFilter::Nearest,
+        Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
+    ));
+    let budget_excluding_initialization = Budget::new(8_000_000, 64_000_000, 8);
+
+    assert_eq!(
+        convert_density_detailed(
+            raster(&[128], 1, 1, 1),
+            &table,
+            &conversion_settings,
+            &budget_excluding_initialization,
+        ),
+        Err(DensityConversionError::Core(Error::BudgetExceeded(
+            BudgetKind::WorkUnits
+        )))
+    );
+}
+
+#[test]
+fn premultiplied_validation_pass_is_charged_to_the_work_budget() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::Contain,
+        SamplingFilter::Nearest,
+        None,
+    ));
+    let premultiplied = RasterFrameView::new(
+        1,
+        1,
+        4,
+        PixelFormat::rgba8(),
+        ColorDescription::srgb(AlphaMode::Premultiplied),
+        RasterOrientation::TopDown,
+        &[128, 128, 128, 255],
+    );
+    let opaque = raster(&[128], 1, 1, 1);
+    let below_exact_work = Budget::new(8_000_000, 64_000_000, 5);
+    let exact_work = Budget::new(8_000_000, 64_000_000, 6);
+
+    assert_eq!(
+        convert_density_detailed(opaque, &table, &conversion_settings, &below_exact_work),
+        Err(DensityConversionError::Core(Error::BudgetExceeded(
+            BudgetKind::WorkUnits
+        )))
+    );
+    assert_eq!(
+        convert_density_detailed(premultiplied, &table, &conversion_settings, &exact_work),
+        Err(DensityConversionError::Core(Error::BudgetExceeded(
+            BudgetKind::WorkUnits
+        )))
+    );
+    assert!(convert_density_detailed(opaque, &table, &conversion_settings, &exact_work).is_ok());
+}
+
+#[test]
+fn patch_memory_budget_includes_readable_input_extent_but_not_trailing_padding() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::Contain,
+        SamplingFilter::Nearest,
+        Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
+    ));
+    // Two readable rows: 64 bytes per row including inter-row padding, plus 32 trailing bytes.
+    let mut pixels = vec![128; 160];
+    pixels[64] = 129;
+    let padded = raster(&pixels, 1, 2, 64);
+    let normalized_and_patch_only = Budget::new(8_000_000, 136, 16_000_000);
+
+    assert_eq!(
+        convert_density_detailed(
+            padded,
+            &table,
+            &conversion_settings,
+            &normalized_and_patch_only
+        ),
+        Err(DensityConversionError::Core(Error::BudgetExceeded(
+            BudgetKind::RasterBytes
+        )))
+    );
+    let exact_extent = Budget::new(8_000_000, 201, 16_000_000);
+    assert!(convert_density_detailed(padded, &table, &conversion_settings, &exact_extent).is_ok());
+}
+
+#[test]
+fn unsupported_pixel_channels_precede_size_overflow() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    );
+    let unsupported_format = RasterFrameView::new(
+        u32::MAX,
+        1,
+        0,
+        PixelFormat::new(PixelChannels::Other(5), 8),
+        ColorDescription::srgb(AlphaMode::Opaque),
+        RasterOrientation::TopDown,
+        &[],
+    );
+    let sufficient_budget = Budget::new(u64::MAX, u64::MAX, u64::MAX);
+
+    assert_eq!(
+        convert_density_detailed(
+            unsupported_format,
+            &table,
+            &conversion_settings,
+            &sufficient_budget,
+        ),
+        Err(DensityConversionError::Core(Error::Unsupported(
+            ascii_core::UnsupportedReason::PixelFormat
         )))
     );
 }
@@ -476,5 +715,29 @@ fn settings_reject_empty_geometry_and_indistinguishable_luminance() {
         )
         .err(),
         Some(Error::Malformed(MalformedReason::InvalidConfiguration))
+    );
+    let near_equal = LinearRgb::new(0.5001, 0.5001, 0.5001).expect("normalized linear gray");
+    let mid_gray = LinearRgb::new(0.5, 0.5, 0.5).expect("normalized linear gray");
+    assert_eq!(
+        ConversionSettings::new(
+            GridSizing::fixed_pixel_surface(8, 12),
+            metadata(&table),
+            &cancellation,
+            mid_gray,
+            near_equal,
+        )
+        .err(),
+        Some(Error::Malformed(MalformedReason::InvalidConfiguration))
+    );
+    let distinguishable = LinearRgb::new(0.51, 0.51, 0.51).expect("normalized linear gray");
+    assert!(
+        ConversionSettings::new(
+            GridSizing::fixed_pixel_surface(8, 12),
+            metadata(&table),
+            &cancellation,
+            mid_gray,
+            distinguishable,
+        )
+        .is_ok()
     );
 }

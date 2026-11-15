@@ -24,20 +24,50 @@ Decode within limits and apply display orientation once in the decoder; then int
 
 The `ascii-media` decoder applies display orientation exactly once and returns top-down pixels. The `ascii-convert` color normalizer requires top-down raster input and never transforms orientation. Interpret supported source color metadata after decoding and before fit, crop, or resampling. A normalized raster is owned linear-premultiplied RGBA, and raster size, stride, input extent, output allocation size, work, and cancellation are checked before and during normalization.
 
+`ascii-convert` sizes column grids from the selected source geometry: custom-crop mode uses the
+crop's aspect rather than the full raster, while fixed-pixel surfaces retain floor division and
+right/bottom leftovers. The detailed density-conversion result carries any material warning from
+normalization (including the sRGB assumption for unknown profile fields) alongside the generated
+frame; callers must surface that warning rather than discard it. Optional retained quality patches
+are bounded by the shared raster/work budgets before allocation, and their zero-initialization is
+charged to work and checked for cancellation at bounded intervals.
+
+Premultiplied RGBA is scanned in a cancellable preflight before normalized output is allocated;
+each pixel is charged once for that validation and once for normalization. Straight and opaque
+inputs require only the normalization pass.
+
+The normalizer's raster-byte ceiling covers the checked sum of the borrowed input's minimum
+readable extent, `(height - 1) * row_stride + row_bytes`, and its requested owned normalized pixel
+storage, `width * height * size_of::<LinearPremultipliedRgba>()`. It includes padding between rows
+but excludes trailing bytes after the last pixel. The borrowed input extent is counted once beside
+the distinct output, although the normalizer does not allocate that input buffer. This is an
+operation-local ceiling check: `Budget` stores numeric ceilings only, not a shared reservation or
+process-wide usage. The returned normalized raster remains caller-owned and live after this check;
+any limit across it and other concurrently retained storage belongs to a higher-level owner.
+Unused input backing capacity and allocator overhead or over-allocation are outside this
+extent/request check. The input extent is already included in this operation's calculation and must
+not be subtracted from the budget passed to the normalizer.
+
 ## Alpha
 
 `Alpha` is an independent linear value. Straight RGBA input keeps color unassociated until after
 transfer decoding, then multiplies linear RGB by alpha. Premultiplied sRGB input is interpreted as
 associated in the encoded sRGB domain: for nonzero alpha, unassociate there, decode to linear, and
 premultiply in linear light. Premultiplied linear input is already associated in linear light.
-Alpha-zero pixels always normalize to transparent black without division, so invisible RGB cannot
-affect averages. Nonfinite, out-of-range, and invalid premultiplied samples are rejected rather
-than clipped.
+Alpha-zero pixels always normalize to transparent black without division, and their hidden channel
+bytes are ignored even for premultiplied input. For nonzero alpha, premultiplied channels above
+alpha are rejected; nonfinite, out-of-range, and other invalid samples are rejected rather than
+clipped.
 
 Ordinary opaque wallpaper must be composited over its chosen opaque `LinearRgb` background in
 linear light before matching. `NormalizedRaster::composited_over` provides those colors without an
-intermediate allocation. Transparent layered paths retain linear-premultiplied channels and alpha
-until their layers are composited.
+intermediate allocation. Transparent layers instead use
+`LinearPremultipliedRgba::composite_over_layer`, which applies source-over directly to premultiplied
+linear RGB and returns the resulting alpha:
+`out_rgb = src_rgb + dst_rgb * (1 - src_alpha)` and
+`out_alpha = src_alpha + dst_alpha * (1 - src_alpha)`. The result can be composited over another
+transparent layer without flattening or re-decoding sRGB; zero-alpha output is canonical transparent
+black. Ordinary opaque wallpaper continues to use its existing opaque-background path.
 
 ## Palettes
 

@@ -2,26 +2,34 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-use ascii_core::{BudgetKind, Error, MalformedReason, UnsupportedReason};
+use ascii_core::{BudgetKind, CancellationToken, Error, MalformedReason, UnsupportedReason};
 use ttf_parser::{Face, GlyphId, OutlineBuilder, RawFace, Tag};
 
 const MAX_CMAP_RECORDS: usize = 64;
 const MAX_CMAP_WORK: u64 = 1_000_000;
 const MAX_FONT_PARSER_WORK: u64 = 16_000_000;
 const MAX_FONT_PARSER_BYTES: u64 = 256 * 1024 * 1024;
+// fontdue 0.9.3 stores a 72-byte Glyph on 64-bit targets; 128 covers that
+// record and conservative per-glyph alignment.
 const ESTIMATED_GLYPH_BYTES: u64 = 128;
+// Covers hash buckets, control bytes, and capacity slack for fontdue's hashbrown maps.
 const ESTIMATED_HASH_ENTRY_BYTES: u64 = 32;
+// fontdue 0.9.3 stores each raster Line in 64 bytes; this allows up to 2x Vec capacity.
 const ESTIMATED_OUTLINE_LINE_BYTES: u64 = 128;
+// One UTF-16 name can expand to 1.5x source bytes in UTF-8 and up to 2x String capacity.
+const ESTIMATED_NAME_CAPACITY_PER_FONT_BYTE: u64 = 3;
 // The 64-segment curve stacks and estimator locals stay below this fixed allowance.
 const CURVE_STACK_BYTES: u64 = 4096;
+const CANCELLATION_POLL_INTERVAL: usize = 256;
+const FORMAT_TWO_MAX_CODEPOINTS: u64 = 1 << 16;
 const GLYPH_SET_BITS: usize = u64::BITS as usize;
 const UNICODE_SCALAR_LIMIT: u32 = 0x11_0000;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub(crate) struct FontPreflight {
     pub(crate) parser_bytes: u64,
     pub(crate) work_units: u64,
+    pub(crate) raster_edge_work: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -36,16 +44,20 @@ struct KernStats {
     pairs: u64,
 }
 
-/// Validates parser iteration inputs and estimates fontdue's retained parser allocations.
+/// Validates parser iteration inputs and checks a conservative parser-allocation upper envelope.
 pub(crate) fn preflight_font(
     bytes: &[u8],
     collection_index: u32,
     scale: f32,
+    raster_size: f32,
     max_raster_bytes: u64,
     max_work_units: u64,
+    cancellation: &CancellationToken,
 ) -> Result<FontPreflight, Error> {
+    check_cancelled(cancellation)?;
     let raw_face = RawFace::parse(bytes, collection_index)
         .map_err(|_| Error::Malformed(MalformedReason::InvalidEncodedData))?;
+    check_cancelled(cancellation)?;
     let maxp = raw_face
         .table(Tag::from_bytes(b"maxp"))
         .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
@@ -56,10 +68,17 @@ pub(crate) fn preflight_font(
     if glyph_count == 0 {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
+    let glyph_count_u64 = u64::try_from(glyph_count).map_err(|_| Error::SizeOverflow)?;
 
     let cmap_stats = raw_face
         .table(Tag::from_bytes(b"cmap"))
-        .map(|cmap| inspect_cmap(cmap, max_work_units.min(MAX_FONT_PARSER_WORK / 2)))
+        .map(|cmap| {
+            inspect_cmap(
+                cmap,
+                max_work_units.min(MAX_FONT_PARSER_WORK / 2),
+                cancellation,
+            )
+        })
         .transpose()?
         .unwrap_or_default();
     let kern_work_limit = max_work_units
@@ -68,7 +87,7 @@ pub(crate) fn preflight_font(
         .ok_or(Error::BudgetExceeded(BudgetKind::WorkUnits))?;
     let kern_stats = raw_face
         .table(Tag::from_bytes(b"kern"))
-        .map(|kern| inspect_kern(kern, kern_work_limit))
+        .map(|kern| inspect_kern(kern, kern_work_limit, cancellation))
         .transpose()?
         .unwrap_or_default();
     let pass_work = cmap_stats
@@ -76,14 +95,24 @@ pub(crate) fn preflight_font(
         .checked_add(kern_stats.work_units)
         .ok_or(Error::SizeOverflow)?;
     let double_pass_work = pass_work.checked_mul(2).ok_or(Error::SizeOverflow)?;
-    if double_pass_work > max_work_units || double_pass_work > MAX_FONT_PARSER_WORK {
+    let fixed_work = double_pass_work
+        .checked_add(glyph_count_u64)
+        .ok_or(Error::SizeOverflow)?;
+    if fixed_work > max_work_units || fixed_work > MAX_FONT_PARSER_WORK {
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
     }
 
+    check_cancelled(cancellation)?;
     let face = Face::parse(bytes, collection_index)
         .map_err(|_| Error::Malformed(MalformedReason::InvalidEncodedData))?;
+    check_cancelled(cancellation)?;
     let units_per_em = face.units_per_em();
-    if !(16..=16_384).contains(&units_per_em) || !scale.is_finite() || scale <= 0.0 {
+    if !(16..=16_384).contains(&units_per_em)
+        || !scale.is_finite()
+        || scale <= 0.0
+        || !raster_size.is_finite()
+        || raster_size <= 0.0
+    {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
     let max_area = 6.0 * (f32::from(units_per_em) / scale);
@@ -99,23 +128,46 @@ pub(crate) fn preflight_font(
         .map_err(|_| Error::SizeOverflow)?
         .checked_mul(u64::try_from(core::mem::size_of::<u64>()).map_err(|_| Error::SizeOverflow)?)
         .ok_or(Error::SizeOverflow)?;
+    let raster_edge_bytes = glyph_count_u64
+        .checked_mul(u64::try_from(core::mem::size_of::<u64>()).map_err(|_| Error::SizeOverflow)?)
+        .ok_or(Error::SizeOverflow)?;
     let fixed_scratch_bytes = glyph_set_bytes
         .checked_add(CURVE_STACK_BYTES)
+        .and_then(|value| value.checked_add(raster_edge_bytes))
         .ok_or(Error::SizeOverflow)?;
     if fixed_scratch_bytes > max_raster_bytes || fixed_scratch_bytes > MAX_FONT_PARSER_BYTES {
         return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
     }
+    check_cancelled(cancellation)?;
     let mut glyph_set = Vec::new();
     glyph_set
         .try_reserve_exact(glyph_set_len)
         .map_err(|_| Error::AllocationFailed)?;
     glyph_set.resize(glyph_set_len, 0u64);
+    let mut raster_edge_work = Vec::new();
+    raster_edge_work
+        .try_reserve_exact(glyph_count)
+        .map_err(|_| Error::AllocationFailed)?;
+    raster_edge_work.resize(glyph_count, 0u64);
     glyph_set[0] = 1;
     let mut mapped_codepoints = 0u64;
     let mut invalid_mapping = false;
     if let Some(cmap) = face.tables().cmap {
         for subtable in cmap.subtables {
+            check_cancelled(cancellation)?;
+            let mut codepoints_seen = 0usize;
+            let mut cancelled = false;
             subtable.codepoints(|codepoint| {
+                if cancelled {
+                    return;
+                }
+                if codepoints_seen.is_multiple_of(CANCELLATION_POLL_INTERVAL)
+                    && cancellation.is_cancelled()
+                {
+                    cancelled = true;
+                    return;
+                }
+                codepoints_seen = codepoints_seen.saturating_add(1);
                 if char::from_u32(codepoint).is_none() {
                     invalid_mapping = true;
                     return;
@@ -131,6 +183,9 @@ pub(crate) fn preflight_font(
                     glyph_set[index / GLYPH_SET_BITS] |= 1u64 << (index % GLYPH_SET_BITS);
                 }
             });
+            if cancelled || cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
         }
     }
     if invalid_mapping || mapped_codepoints > MAX_CMAP_WORK {
@@ -138,36 +193,52 @@ pub(crate) fn preflight_font(
     }
 
     let remaining_work = max_work_units
-        .checked_sub(double_pass_work)
+        .checked_sub(fixed_work)
         .ok_or(Error::BudgetExceeded(BudgetKind::WorkUnits))?
-        .min(MAX_FONT_PARSER_WORK.saturating_sub(double_pass_work));
+        .min(MAX_FONT_PARSER_WORK.saturating_sub(fixed_work));
     let outline_work_limit = remaining_work / 2;
-    let mut outlines = OutlineEstimate::new(max_area, outline_work_limit);
+    let mut outlines = OutlineEstimate::new(
+        max_area,
+        outline_work_limit,
+        raster_size / f32::from(units_per_em),
+        cancellation,
+    );
     for index in 0..glyph_count {
+        if index % CANCELLATION_POLL_INTERVAL == 0 {
+            check_cancelled(cancellation)?;
+        }
         if glyph_set[index / GLYPH_SET_BITS] & (1u64 << (index % GLYPH_SET_BITS)) == 0 {
             continue;
         }
+        outlines.raster_edge_work = 0;
         face.outline_glyph(
             GlyphId(u16::try_from(index).map_err(|_| Error::SizeOverflow)?),
             &mut outlines,
         );
+        if outlines.cancelled || cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         if outlines.exceeded {
             return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
         }
+        if outlines.invalid {
+            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+        }
+        raster_edge_work[index] = outlines.raster_edge_work;
     }
-    let glyph_count_u64 = u64::try_from(glyph_count).map_err(|_| Error::SizeOverflow)?;
+    check_cancelled(cancellation)?;
     let font_len = u64::try_from(bytes.len()).map_err(|_| Error::SizeOverflow)?;
+    let name_capacity = font_len
+        .checked_mul(ESTIMATED_NAME_CAPACITY_PER_FONT_BYTE)
+        .ok_or(Error::SizeOverflow)?;
     let hash_entries = glyph_count_u64
         .max(mapped_codepoints)
         .checked_add(glyph_count_u64)
         .and_then(|value| value.checked_add(kern_stats.pairs))
         .ok_or(Error::SizeOverflow)?;
-    let parser_bytes = font_len
-        .checked_add(
-            glyph_count_u64
-                .checked_mul(ESTIMATED_GLYPH_BYTES)
-                .ok_or(Error::SizeOverflow)?,
-        )
+    let parser_bytes = glyph_count_u64
+        .checked_mul(ESTIMATED_GLYPH_BYTES)
+        .and_then(|glyphs| name_capacity.checked_add(glyphs))
         .and_then(|value| {
             hash_entries
                 .checked_mul(ESTIMATED_HASH_ENTRY_BYTES)
@@ -189,20 +260,26 @@ pub(crate) fn preflight_font(
         .work_units
         .checked_mul(2)
         .ok_or(Error::SizeOverflow)?;
-    let work_units = double_pass_work
+    let work_units = fixed_work
         .checked_add(outline_double_pass)
         .ok_or(Error::SizeOverflow)?;
     if work_units > max_work_units || work_units > MAX_FONT_PARSER_WORK {
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
     }
 
+    check_cancelled(cancellation)?;
     Ok(FontPreflight {
         parser_bytes,
         work_units,
+        raster_edge_work,
     })
 }
 
-fn inspect_cmap(cmap: &[u8], max_work_units: u64) -> Result<CmapStats, Error> {
+fn inspect_cmap(
+    cmap: &[u8],
+    max_work_units: u64,
+    cancellation: &CancellationToken,
+) -> Result<CmapStats, Error> {
     if read_u16(cmap, 0)? != 0 {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
@@ -225,17 +302,21 @@ fn inspect_cmap(cmap: &[u8], max_work_units: u64) -> Result<CmapStats, Error> {
         work_limit,
     )?;
     for index in 0..record_count {
+        poll_cancelled(cancellation, index)?;
         let record = 4 + index * 8;
         let offset =
             usize::try_from(read_u32(cmap, record + 4)?).map_err(|_| Error::SizeOverflow)?;
+        if offset < records_end {
+            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+        }
         let format = read_u16(cmap, offset)?;
         let (subtable_len, work, mapped) = match format {
             0 => inspect_format_zero(cmap, offset)?,
-            2 => return Err(Error::Unsupported(UnsupportedReason::UnsupportedFormat)),
-            4 => inspect_format_four(cmap, offset)?,
+            2 => inspect_format_two(cmap, offset, cancellation)?,
+            4 => inspect_format_four(cmap, offset, cancellation)?,
             6 => inspect_format_six(cmap, offset)?,
             10 => inspect_format_ten(cmap, offset)?,
-            12 | 13 => inspect_format_twelve_or_thirteen(cmap, offset)?,
+            12 | 13 => inspect_format_twelve_or_thirteen(cmap, offset, cancellation)?,
             8 | 14 => (read_format_length(cmap, offset, format)?, 0, 0),
             _ => (2, 0, 0),
         };
@@ -251,6 +332,7 @@ fn inspect_cmap(cmap: &[u8], max_work_units: u64) -> Result<CmapStats, Error> {
             .checked_add(mapped)
             .ok_or(Error::SizeOverflow)?;
     }
+    check_cancelled(cancellation)?;
     Ok(stats)
 }
 
@@ -270,7 +352,77 @@ fn inspect_format_zero(cmap: &[u8], offset: usize) -> Result<(usize, u64, u64), 
     ))
 }
 
-fn inspect_format_four(cmap: &[u8], offset: usize) -> Result<(usize, u64, u64), Error> {
+fn inspect_format_two(
+    cmap: &[u8],
+    offset: usize,
+    cancellation: &CancellationToken,
+) -> Result<(usize, u64, u64), Error> {
+    let len = read_format_length(cmap, offset, 2)?;
+    if len < 6 + 256 * 2 + 8 || offset.checked_add(len).ok_or(Error::SizeOverflow)? > cmap.len() {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+    }
+
+    let keys_offset = offset + 6;
+    let mut max_subheader = 0usize;
+    for index in 0..256 {
+        poll_cancelled(cancellation, index)?;
+        let key = usize::from(read_u16(cmap, keys_offset + index * 2)?);
+        if key % 8 != 0 {
+            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+        }
+        max_subheader = max_subheader.max(key / 8);
+    }
+
+    let subheaders_offset = keys_offset + 256 * 2;
+    let subheader_count = max_subheader.checked_add(1).ok_or(Error::SizeOverflow)?;
+    let subheaders_bytes = subheader_count.checked_mul(8).ok_or(Error::SizeOverflow)?;
+    let glyph_array_offset = subheaders_offset
+        .checked_add(subheaders_bytes)
+        .ok_or(Error::SizeOverflow)?;
+    if glyph_array_offset > offset.checked_add(len).ok_or(Error::SizeOverflow)? {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+    }
+
+    for index in 0..subheader_count {
+        poll_cancelled(cancellation, index)?;
+        let subheader = subheaders_offset + index * 8;
+        let first_code = usize::from(read_u16(cmap, subheader)?);
+        let entry_count = usize::from(read_u16(cmap, subheader + 2)?);
+        let range_end = first_code
+            .checked_add(entry_count)
+            .ok_or(Error::SizeOverflow)?;
+        if range_end > 256 {
+            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+        }
+        if entry_count == 0 {
+            continue;
+        }
+
+        let id_range_offset = usize::from(read_u16(cmap, subheader + 6)?);
+        let range_start = subheader
+            .checked_add(6)
+            .and_then(|value| value.checked_add(id_range_offset))
+            .ok_or(Error::SizeOverflow)?;
+        let range_bytes = entry_count.checked_mul(2).ok_or(Error::SizeOverflow)?;
+        let range_end = range_start
+            .checked_add(range_bytes)
+            .ok_or(Error::SizeOverflow)?;
+        if range_start < glyph_array_offset
+            || range_end > offset.checked_add(len).ok_or(Error::SizeOverflow)?
+        {
+            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+        }
+    }
+
+    // ttf-parser and fontdue enumerate at most the complete 16-bit codepoint plane.
+    Ok((len, FORMAT_TWO_MAX_CODEPOINTS, FORMAT_TWO_MAX_CODEPOINTS))
+}
+
+fn inspect_format_four(
+    cmap: &[u8],
+    offset: usize,
+    cancellation: &CancellationToken,
+) -> Result<(usize, u64, u64), Error> {
     let len = read_format_length(cmap, offset, 4)?;
     if len < 16 || offset.checked_add(len).ok_or(Error::SizeOverflow)? > cmap.len() {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
@@ -290,6 +442,7 @@ fn inspect_format_four(cmap: &[u8], offset: usize) -> Result<(usize, u64, u64), 
     let starts = offset + 16 + segment_count * 2;
     let mut work = 0u64;
     for segment in 0..segment_count {
+        poll_cancelled(cancellation, segment)?;
         let start = u32::from(read_u16(cmap, starts + segment * 2)?);
         let end = u32::from(read_u16(cmap, ends + segment * 2)?);
         if start > end {
@@ -361,6 +514,7 @@ fn inspect_format_ten(cmap: &[u8], offset: usize) -> Result<(usize, u64, u64), E
 fn inspect_format_twelve_or_thirteen(
     cmap: &[u8],
     offset: usize,
+    cancellation: &CancellationToken,
 ) -> Result<(usize, u64, u64), Error> {
     let format = read_u16(cmap, offset)?;
     let len = read_format_length(cmap, offset, format)?;
@@ -377,6 +531,7 @@ fn inspect_format_twelve_or_thirteen(
     }
     let mut work = u64::try_from(group_count).map_err(|_| Error::SizeOverflow)?;
     for group in 0..group_count {
+        poll_cancelled(cancellation, group)?;
         let start = read_u32(cmap, offset + 16 + group * 12)?;
         let end = read_u32(cmap, offset + 20 + group * 12)?;
         validate_scalar_range(start, end)?;
@@ -387,7 +542,11 @@ fn inspect_format_twelve_or_thirteen(
     Ok((len, work, work))
 }
 
-fn inspect_kern(kern: &[u8], max_work_units: u64) -> Result<KernStats, Error> {
+fn inspect_kern(
+    kern: &[u8],
+    max_work_units: u64,
+    cancellation: &CancellationToken,
+) -> Result<KernStats, Error> {
     let version = read_u16(kern, 0)?;
     let (mut offset, subtable_count) = match version {
         0 => (4usize, u32::from(read_u16(kern, 2)?)),
@@ -398,7 +557,11 @@ fn inspect_kern(kern: &[u8], max_work_units: u64) -> Result<KernStats, Error> {
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
     }
     let mut stats = KernStats::default();
-    for _ in 0..subtable_count {
+    for index in 0..subtable_count {
+        poll_cancelled(
+            cancellation,
+            usize::try_from(index).map_err(|_| Error::SizeOverflow)?,
+        )?;
         let (subtable_len, format, horizontal, header_len) = if version == 0 {
             let len = usize::from(read_u16(kern, offset + 2)?);
             let format = *kern
@@ -451,6 +614,7 @@ fn inspect_kern(kern: &[u8], max_work_units: u64) -> Result<KernStats, Error> {
         }
         offset = end;
     }
+    check_cancelled(cancellation)?;
     Ok(stats)
 }
 
@@ -492,6 +656,20 @@ fn charge(total: &mut u64, amount: u64, limit: u64) -> Result<(), Error> {
     }
     Ok(())
 }
+fn check_cancelled(cancellation: &CancellationToken) -> Result<(), Error> {
+    if cancellation.is_cancelled() {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn poll_cancelled(cancellation: &CancellationToken, index: usize) -> Result<(), Error> {
+    if index.is_multiple_of(CANCELLATION_POLL_INTERVAL) {
+        check_cancelled(cancellation)?;
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Point {
@@ -514,31 +692,57 @@ struct Segment {
 }
 
 #[derive(Debug)]
-struct OutlineEstimate {
+struct OutlineEstimate<'a> {
+    cancellation: &'a CancellationToken,
+    cancelled: bool,
     previous: Point,
     start: Point,
     max_area: f32,
     work_limit: u64,
     work_units: u64,
     line_count: u64,
+    raster_scale: f64,
+    raster_edge_work: u64,
+    invalid: bool,
     exceeded: bool,
 }
 
-impl OutlineEstimate {
-    fn new(max_area: f32, work_limit: u64) -> Self {
+impl<'a> OutlineEstimate<'a> {
+    fn new(
+        max_area: f32,
+        work_limit: u64,
+        raster_scale: f32,
+        cancellation: &'a CancellationToken,
+    ) -> Self {
         Self {
+            cancellation,
+            cancelled: false,
             previous: Point::default(),
             start: Point::default(),
             max_area,
             work_limit,
             work_units: 0,
             line_count: 0,
+            raster_scale: f64::from(raster_scale),
+            raster_edge_work: 0,
+            invalid: false,
             exceeded: false,
         }
     }
 
+    fn poll_cancellation(&mut self) {
+        if self
+            .work_units
+            .is_multiple_of(CANCELLATION_POLL_INTERVAL as u64)
+            && self.cancellation.is_cancelled()
+        {
+            self.cancelled = true;
+        }
+    }
+
     fn charge(&mut self, amount: u64) {
-        if self.exceeded {
+        self.poll_cancellation();
+        if self.exceeded || self.cancelled {
             return;
         }
         match self.work_units.checked_add(amount) {
@@ -546,17 +750,60 @@ impl OutlineEstimate {
             _ => self.exceeded = true,
         }
     }
+}
 
+impl<'a> OutlineEstimate<'a> {
     fn push_line(&mut self, start: Point, end: Point) {
+        self.poll_cancellation();
+        if self.exceeded || self.cancelled || self.invalid {
+            return;
+        }
+        if !start.x.is_finite() || !start.y.is_finite() || !end.x.is_finite() || !end.y.is_finite()
+        {
+            self.invalid = true;
+            return;
+        }
         if start.y.to_bits() != end.y.to_bits() {
             match self.line_count.checked_add(1) {
                 Some(count) => self.line_count = count,
                 None => self.exceeded = true,
             }
+
+            // fontdue's v_line walks Y, and m_line walks X plus Y, then each
+            // performs a final add. With the caller's 16,384-pixel dimension
+            // limit, repositioning, f32 scaling/offset and one-ULP nudging
+            // introduce less than one pixel of error per axis. Four extra
+            // steps per axis also cover truncation to pixel coordinates.
+            let y = self.scaled_span(start.y, end.y);
+            let edge_work = if start.x.to_bits() == end.x.to_bits() {
+                y.and_then(|value| value.checked_add(5))
+            } else {
+                self.scaled_span(start.x, end.x)
+                    .and_then(|x| y.and_then(|y| x.checked_add(y)))
+                    .and_then(|value| value.checked_add(9))
+            };
+            // An unrequested glyph may overflow this estimate. Preserve that
+            // fact per glyph; the caller returns SizeOverflow if it is used.
+            self.raster_edge_work = edge_work
+                .and_then(|value| self.raster_edge_work.checked_add(value))
+                .unwrap_or(u64::MAX);
+        }
+    }
+
+    fn scaled_span(&self, start: f32, end: f32) -> Option<u64> {
+        let span = ((f64::from(start) - f64::from(end)).abs() * self.raster_scale).ceil();
+        if !span.is_finite() || span >= u64::MAX as f64 {
+            None
+        } else {
+            Some(span as u64)
         }
     }
 
     fn tessellate_quadratic(&mut self, control: Point, end: Point) {
+        self.poll_cancellation();
+        if self.cancelled || self.exceeded {
+            return;
+        }
         let origin = self.previous;
         let mut stack = [Segment::default(); 64];
         let mut stack_len = 1usize;
@@ -566,11 +813,11 @@ impl OutlineEstimate {
             t_start: 0.0,
             t_end: 1.0,
         };
-        while stack_len != 0 && !self.exceeded {
+        while stack_len != 0 && !self.exceeded && !self.cancelled {
             stack_len -= 1;
             let segment = stack[stack_len];
             self.charge(1);
-            if self.exceeded {
+            if self.exceeded || self.cancelled {
                 break;
             }
             let middle_t = (segment.t_start + segment.t_end) * 0.5;
@@ -607,6 +854,10 @@ impl OutlineEstimate {
     }
 
     fn tessellate_cubic(&mut self, first: Point, second: Point, end: Point) {
+        self.poll_cancellation();
+        if self.cancelled || self.exceeded {
+            return;
+        }
         let origin = self.previous;
         let mut stack = [Segment::default(); 64];
         let mut stack_len = 1usize;
@@ -616,11 +867,11 @@ impl OutlineEstimate {
             t_start: 0.0,
             t_end: 1.0,
         };
-        while stack_len != 0 && !self.exceeded {
+        while stack_len != 0 && !self.exceeded && !self.cancelled {
             stack_len -= 1;
             let segment = stack[stack_len];
             self.charge(1);
-            if self.exceeded {
+            if self.exceeded || self.cancelled {
                 break;
             }
             let middle_t = (segment.t_start + segment.t_end) * 0.5;
@@ -657,7 +908,7 @@ impl OutlineEstimate {
     }
 }
 
-impl OutlineBuilder for OutlineEstimate {
+impl OutlineBuilder for OutlineEstimate<'_> {
     fn move_to(&mut self, x: f32, y: f32) {
         self.charge(1);
         self.previous = Point::new(x, y);
@@ -709,4 +960,61 @@ fn cubic_point(origin: Point, first: Point, second: Point, end: Point, t: f32) -
         a * origin.x + b * first.x + c * second.x + d * end.x,
         a * origin.y + b * first.y + c * second.y + d * end.y,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OutlineBuilder, OutlineEstimate, Point};
+    use ascii_core::CancellationToken;
+
+    #[test]
+    fn raster_edge_estimate_covers_both_line_kinds_and_closing_edges() {
+        let cancellation = CancellationToken::new();
+        let mut outline = OutlineEstimate::new(150.0, 100, 1.0, &cancellation);
+        outline.move_to(0.0, 0.0);
+        outline.line_to(8.0, 12.0);
+        outline.line_to(8.0, 20.0);
+        outline.line_to(2.0, 20.0); // horizontal edges are not retained
+        outline.close();
+
+        assert_eq!(outline.line_count, 3);
+        assert_eq!(outline.raster_edge_work, 29 + 13 + 31);
+    }
+
+    #[test]
+    fn cubic_segments_are_charged_at_the_requested_scale() {
+        let cancellation = CancellationToken::new();
+        let mut small = OutlineEstimate::new(150.0, 10_000, 0.008, &cancellation);
+        let mut large = OutlineEstimate::new(150.0, 10_000, 0.128, &cancellation);
+        for outline in [&mut small, &mut large] {
+            outline.move_to(0.0, 0.0);
+            outline.curve_to(0.0, 700.0, 500.0, 700.0, 500.0, 0.0);
+            outline.close();
+        }
+        assert!(small.line_count > 1);
+        assert_eq!(small.line_count, large.line_count);
+        assert!(large.raster_edge_work > small.raster_edge_work);
+        assert!(!small.exceeded && !large.exceeded);
+    }
+
+    #[test]
+    fn overflowing_edge_estimate_is_preserved_for_the_requested_glyph() {
+        let cancellation = CancellationToken::new();
+        let mut outline = OutlineEstimate::new(150.0, 10, 256.0, &cancellation);
+        outline.push_line(Point::new(0.0, 0.0), Point::new(f32::MAX, f32::MAX));
+        assert_eq!(outline.raster_edge_work, u64::MAX);
+    }
+
+    #[test]
+    fn outline_estimator_stops_at_a_cancellation_poll() {
+        let cancellation = CancellationToken::new();
+        let mut outline = OutlineEstimate::new(150.0, 10, 1.0, &cancellation);
+        outline.work_units = super::CANCELLATION_POLL_INTERVAL as u64;
+        cancellation.cancel();
+
+        outline.charge(1);
+
+        assert!(outline.cancelled);
+        assert_eq!(outline.work_units, super::CANCELLATION_POLL_INTERVAL as u64);
+    }
 }

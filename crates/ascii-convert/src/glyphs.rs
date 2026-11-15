@@ -1,5 +1,9 @@
 //! Immutable measurements derived from rasterized glyph coverage masks.
 
+use ascii_core::{CancellationToken, Error};
+
+const CANCELLATION_POLL_INTERVAL: usize = 256;
+
 /// Integer bounds of the nonzero coverage inside a cell.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GlyphBounds {
@@ -35,6 +39,15 @@ impl GlyphBounds {
     }
 }
 
+/// Classification of a font advance against the configured fixed cell width.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlyphCellClassification {
+    /// The measured advance fits within one fixed-width cell.
+    SingleCell,
+    /// The measured advance exceeds one fixed-width cell.
+    MultiCell,
+}
+
 /// Font metrics expressed in raster pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlyphMetrics {
@@ -67,6 +80,15 @@ impl GlyphMetrics {
     #[must_use]
     pub const fn baseline(self) -> u32 {
         self.baseline
+    }
+    /// Classifies the measured advance against a configured fixed-width cell.
+    #[must_use]
+    pub fn cell_classification(self, cell_width: u32) -> GlyphCellClassification {
+        if self.advance <= cell_width as f32 {
+            GlyphCellClassification::SingleCell
+        } else {
+            GlyphCellClassification::MultiCell
+        }
     }
 }
 
@@ -132,12 +154,17 @@ impl EdgeOrientation {
 
 /// Computes coverage bounds, centroid, mean coverage, and gradient-orientation bins.
 ///
-/// The caller guarantees `mask.len() == width * height`; no allocation occurs here.
+/// The caller guarantees `mask.len() == width * height` and nonzero dimensions. The descriptor
+/// passes poll cancellation every 256 pixels and allocate no memory.
 pub(crate) fn describe(
     mask: &[u8],
     width: usize,
     height: usize,
-) -> (GlyphBounds, Option<Centroid>, f32, EdgeOrientation) {
+    cancellation: &CancellationToken,
+) -> Result<(GlyphBounds, Option<Centroid>, f32, EdgeOrientation), Error> {
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     let mut min_x = width;
     let mut min_y = height;
     let mut max_x = 0usize;
@@ -147,25 +174,29 @@ pub(crate) fn describe(
     let mut centroid_x_sum = 0.0f64;
     let mut centroid_y_sum = 0.0f64;
 
-    for y in 0..height {
-        let row = y * width;
-        for x in 0..width {
-            let coverage = mask[row + x];
-            if coverage == 0 {
-                continue;
-            }
-            found_ink = true;
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            max_x = max_x.max(x);
-            max_y = max_y.max(y);
-            let weight = f64::from(coverage);
-            coverage_sum += weight;
-            centroid_x_sum += (x as f64 + 0.5) * weight;
-            centroid_y_sum += (y as f64 + 0.5) * weight;
+    for (index, &coverage) in mask.iter().enumerate() {
+        if index % CANCELLATION_POLL_INTERVAL == 0 && cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
         }
+        let x = index % width;
+        let y = index / width;
+        if coverage == 0 {
+            continue;
+        }
+        found_ink = true;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+        let weight = f64::from(coverage);
+        coverage_sum += weight;
+        centroid_x_sum += (x as f64 + 0.5) * weight;
+        centroid_y_sum += (y as f64 + 0.5) * weight;
     }
 
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     let bounds = if found_ink {
         GlyphBounds {
             x: min_x as u32,
@@ -198,49 +229,66 @@ pub(crate) fn describe(
     let mut diagonal_positive = 0.0f64;
     let mut diagonal_negative = 0.0f64;
     let mut total_energy = 0.0f64;
-    for y in 0..height {
-        for x in 0..width {
-            let left = if x == 0 {
-                0.0
-            } else {
-                f64::from(mask[y * width + x - 1])
-            };
-            let right = if x + 1 == width {
-                0.0
-            } else {
-                f64::from(mask[y * width + x + 1])
-            };
-            let up = if y == 0 {
-                0.0
-            } else {
-                f64::from(mask[(y - 1) * width + x])
-            };
-            let down = if y + 1 == height {
-                0.0
-            } else {
-                f64::from(mask[(y + 1) * width + x])
-            };
-            let gx = right - left;
-            let gy = down - up;
-            let ax = gx.abs();
-            let ay = gy.abs();
-            let energy = ax + ay;
-            if energy == 0.0 {
-                continue;
-            }
-            total_energy += energy;
-            if ax > ay * 2.0 {
-                vertical += energy;
-            } else if ay > ax * 2.0 {
-                horizontal += energy;
-            } else if gx * gy < 0.0 {
-                diagonal_positive += energy;
-            } else {
-                diagonal_negative += energy;
-            }
+    for (index, &coverage) in mask.iter().enumerate() {
+        if index % CANCELLATION_POLL_INTERVAL == 0 && cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let x = index % width;
+        let y = index / width;
+        let left = if x == 0 {
+            0.0
+        } else {
+            f64::from(mask[index - 1])
+        };
+        let right = if x + 1 == width {
+            0.0
+        } else {
+            f64::from(mask[index + 1])
+        };
+        let up = if y == 0 {
+            0.0
+        } else {
+            f64::from(mask[index - width])
+        };
+        let down = if y + 1 == height {
+            0.0
+        } else {
+            f64::from(mask[index + width])
+        };
+        let gx = if width == 1 {
+            f64::from(coverage)
+        } else {
+            right - left
+        };
+        let gy = if height == 1 {
+            f64::from(coverage)
+        } else {
+            down - up
+        };
+        let ax = gx.abs();
+        let ay = gy.abs();
+        let energy = ax + ay;
+        if energy == 0.0 {
+            continue;
+        }
+        total_energy += energy;
+        if width == 1 && height == 1 {
+            horizontal += ax;
+            vertical += ay;
+        } else if ax > ay * 2.0 {
+            vertical += energy;
+        } else if ay > ax * 2.0 {
+            horizontal += energy;
+        } else if gx * gy < 0.0 {
+            diagonal_positive += energy;
+        } else {
+            diagonal_negative += energy;
         }
     }
 
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     let edges = if total_energy == 0.0 {
         EdgeOrientation::default()
     } else {
@@ -253,5 +301,46 @@ pub(crate) fn describe(
         }
     };
 
-    (bounds, centroid, mean_coverage, edges)
+    Ok((bounds, centroid, mean_coverage, edges))
+}
+
+#[cfg(test)]
+mod tests {
+    use ascii_core::CancellationToken;
+
+    use super::{EdgeOrientation, describe};
+
+    #[test]
+    fn one_by_one_ink_has_nonzero_edge_energy_and_blank_masks_stay_zero() {
+        let token = CancellationToken::new();
+        let (bounds, centroid, mean, edges) =
+            describe(&[255], 1, 1, &token).expect("one-pixel descriptor succeeds");
+        assert_eq!((bounds.width(), bounds.height()), (1, 1));
+        assert_eq!(
+            centroid.map(|point| (point.x(), point.y())),
+            Some((0.5, 0.5))
+        );
+        assert_eq!(mean, 1.0);
+        assert_eq!(edges.horizontal(), 0.5);
+        assert_eq!(edges.vertical(), 0.5);
+        assert_eq!(edges.diagonal_positive(), 0.0);
+        assert_eq!(edges.diagonal_negative(), 0.0);
+
+        let (bounds, centroid, mean, edges) =
+            describe(&[0], 1, 1, &token).expect("blank descriptor succeeds");
+        assert_eq!((bounds.width(), bounds.height()), (0, 0));
+        assert_eq!(centroid, None);
+        assert_eq!(mean, 0.0);
+        assert_eq!(edges, EdgeOrientation::default());
+    }
+
+    #[test]
+    fn descriptor_cancellation_returns_no_partial_summary() {
+        let token = CancellationToken::new();
+        token.cancel();
+        assert_eq!(
+            describe(&[255], 1, 1, &token),
+            Err(ascii_core::Error::Cancelled)
+        );
+    }
 }
