@@ -377,27 +377,39 @@ fn source_metadata_is_propagated_exactly_and_mismatched_identity_is_rejected() {
 }
 
 #[test]
-fn cancellation_and_output_budgets_fail_before_publishing_a_frame() {
+fn pre_cancelled_no_patch_conversion_returns_cancelled() {
     let table = build_table();
     let source = [255];
-    let cancelled = CancellationToken::new();
-    let cancelled_settings = settings(
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
         &table,
-        &cancelled,
+        &cancellation,
         GridSizing::fixed_pixel_surface(8, 12),
         LinearRgb::WHITE,
         LinearRgb::BLACK,
-    );
-    cancelled.cancel();
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::Contain,
+        SamplingFilter::Box,
+        None,
+    ));
+    cancellation.cancel();
+
     assert_eq!(
         convert_density_detailed(
             raster(&source, 1, 1, 1),
             &table,
-            &cancelled_settings,
-            &budget()
+            &conversion_settings,
+            &budget(),
         ),
         Err(DensityConversionError::Core(Error::Cancelled))
     );
+}
+
+#[test]
+fn output_budgets_fail_before_publishing_a_frame() {
+    let table = build_table();
+    let source = [255];
 
     let cancellation = CancellationToken::new();
     let conversion_settings = settings(
@@ -500,8 +512,15 @@ fn premultiplied_validation_pass_is_charged_to_the_work_budget() {
         &[128, 128, 128, 255],
     );
     let opaque = raster(&[128], 1, 1, 1);
-    let exact_work = Budget::new(8_000_000, 64_000_000, 5);
+    let below_exact_work = Budget::new(8_000_000, 64_000_000, 5);
+    let exact_work = Budget::new(8_000_000, 64_000_000, 6);
 
+    assert_eq!(
+        convert_density_detailed(opaque, &table, &conversion_settings, &below_exact_work),
+        Err(DensityConversionError::Core(Error::BudgetExceeded(
+            BudgetKind::WorkUnits
+        )))
+    );
     assert_eq!(
         convert_density_detailed(premultiplied, &table, &conversion_settings, &exact_work),
         Err(DensityConversionError::Core(Error::BudgetExceeded(
@@ -546,6 +565,41 @@ fn patch_memory_budget_includes_readable_input_extent_but_not_trailing_padding()
     );
     let exact_extent = Budget::new(8_000_000, 201, 16_000_000);
     assert!(convert_density_detailed(padded, &table, &conversion_settings, &exact_extent).is_ok());
+}
+
+#[test]
+fn unsupported_pixel_channels_precede_size_overflow() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    );
+    let unsupported_format = RasterFrameView::new(
+        u32::MAX,
+        1,
+        0,
+        PixelFormat::new(PixelChannels::Other(5), 8),
+        ColorDescription::srgb(AlphaMode::Opaque),
+        RasterOrientation::TopDown,
+        &[],
+    );
+    let sufficient_budget = Budget::new(u64::MAX, u64::MAX, u64::MAX);
+
+    assert_eq!(
+        convert_density_detailed(
+            unsupported_format,
+            &table,
+            &conversion_settings,
+            &sufficient_budget,
+        ),
+        Err(DensityConversionError::Core(Error::Unsupported(
+            ascii_core::UnsupportedReason::PixelFormat
+        )))
+    );
 }
 
 #[test]
