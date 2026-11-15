@@ -11,7 +11,7 @@ mod error;
 mod frame;
 
 pub use budget::{Budget, CancellationToken, GridBudget, validate_grid_budget};
-pub use error::{BudgetKind, Error, MalformedReason, UnsupportedReason};
+pub use error::{BudgetKind, Error, GlyphFailureReason, MalformedReason, UnsupportedReason};
 pub use frame::{
     AlphaMode, AsciiCell, AsciiFrame, ColorDescription, ColorPrimaries, FrameMetadata,
     GlyphTableId, PixelChannels, PixelFormat, RasterFrameView, RasterOrientation, TransferFunction,
