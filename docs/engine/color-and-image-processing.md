@@ -29,3 +29,35 @@ Area/box sampling is a practical baseline for shrink-heavy conversion. Compare a
 ## Input coverage
 
 Start with PNG/JPEG and add WebP, GIF, APNG, and other formats only when the actual codec feature set and animation semantics are tested. Extensions are not codec guarantees. Check dimensions and allocation limits before large buffers; the image crate's limits are one layer of defense, not a substitute for process budgets. [S27](../research/source-register.md#s27) [S28](../research/source-register.md#s28)
+
+### Image decoder implementation status (IMG-001)
+
+`ascii-media::decode_image` sniffs PNG/JPEG bytes from the caller's current stream position; it
+does not open paths or URLs. The stream is copied into a size-bounded, budgeted snapshot before
+codec parsing so all validation and decode passes observe identical bytes. PNG handling uses
+`png` 0.18.0 and validates every chunk CRC through an exact terminal IEND. JPEG handling uses
+the strict, safe-mode pure-Rust `zune-jpeg` 0.5.5 decoder; it does not cross a native decoder
+callback boundary. The `image` 0.25.10 dependency is used for orientation metadata and test
+helpers, not as the PNG/JPEG decode backend.
+
+Published rasters are top-down and tightly packed as 8-bit RGB or straight-alpha RGBA. Gray
+samples expand to RGB; indexed PNG transparency expands to RGBA; 16-bit PNG samples are rounded
+to 8 bits. PNG Adam7 and JPEG baseline/progressive inputs are supported. JPEG EXIF orientation
+is applied before enforcing output dimensions. Untagged content is assumed sRGB; embedded ICC
+profiles, APNG, unsupported JPEG color models/depths, and non-sRGB PNG `gAMA`/`cHRM` color
+descriptions are rejected as explicit capability errors rather than silently mislabeled.
+
+`DecodeLimits` carries the core per-operation `Budget`, decoder-local encoded/scratch limits,
+dimensions, and a shared `DecodeResources` ledger for concurrent decode slots and retained
+memory. The owned input snapshot, codec scratch and temporary rasters are preflighted and
+charged before output allocation. Progressive JPEG scan-block work is budgeted separately
+from pixel work. Retained output stays charged until its `DecodedFrame` is dropped; its
+`RasterFrameView` borrows from that owner. Cancellation, malformed input, and failed budget
+checks release reservations without publishing partial frames. Codec-provided allocation
+limits remain defense in depth; application accounting is not an allocator-enforced process
+memory limit.
+
+Rights-cleared generated fixtures exercise PNG color/depth/interlace variants, JPEG baseline
+and progressive scans, malformed/truncated inputs, metadata policy, and budget/cancellation
+paths. Their generated configuration and SHA-256 values are printed/asserted by the focused
+tests. These fixture checks do not imply native-codec, performance, or platform-support claims.
