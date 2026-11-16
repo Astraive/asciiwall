@@ -37,7 +37,7 @@ Raster fixture hashes use SHA-256 over the domain tag `QA-101 raster fixture v1\
 
 `ascii-core::Budget` is an immutable ceiling, not a reservation ledger. EC-001 therefore observes the zero-budget error-precedence sentinel together with scoped allocation-request counts; no separate reservation counter is claimed.
 
-### QA-101 execution record (2026-11-16)
+### Initial QA-101 execution record (2026-11-16)
 
 - QA worktree branch: `test/qa-101-input-scenarios`; the worktree was fast-forwarded from `2013e4781ee6023b0302c6f96dd3eb00582b981f` to exact CNV-001 source head `63e145e228b9ec335294e4ea7961ae04af9a0e57` (`origin/feat/cnv-001-density-matching`). Source tree SHA-1: `aae6fed9ac5d2e1b9c65209a9f2f60a3d7101c09`.
 - QA test source SHA-256: `1b40a0fa11c534a1bef48945c36305e4898044500b319adfef3ce2ea9348fbf5`; generated test executable SHA-256: `63816cac18eb072a06fa7fc7a4154deff8e1cf8da73c39f55baf9a375c07cd58`; synthetic-font generator source SHA-256: `8a0b3b4e8ee150d6d16b084e51200525112ed6424855afa652a55ed3274176c8`.
@@ -52,7 +52,7 @@ Raster fixture hashes use SHA-256 over the domain tag `QA-101 raster fixture v1\
 - During fixture development, the original 128×1 `Cover` candidate returned `Core(SizeOverflow)`; no converted output or pass is claimed for that geometry. The committed EC-003 fixture therefore uses 1×16 and 16×1 (16:1 source aspect ratios) and asserts actual `Contain`/`Cover` converted samples and glyphs for both.
 - EC-004 remains not run: the checked-out workspace has only `ascii-core` and `ascii-convert` members and no `ascii-media` decoder-to-converter callsite. No EXIF fixture or decoder result is copied or fabricated.
 
-### Post-sync validation (2026-11-16)
+### Historical post-sync validation (2026-11-16)
 
 The following checks ran after rebasing the QA branch onto CNV-001 head `3faa42f40d673bbc44b86f8a79e214252947f899`, at QA commit `02f3221aea53735f6e9df0c5adbbaa50c90002dd` (tested source tree SHA-1 `f83842a75c853ec453661fe9b6f802c27d84f0e2`). The QA scenario fixtures and test source remain those hashed above.
 
@@ -62,6 +62,21 @@ The following checks ran after rebasing the QA branch onto CNV-001 head `3faa42f
 - `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` — PASS.
 
 The initial targeted run with the default Cargo home stopped before test execution because Cargo could not create its registry-cache directory (Windows OS error 183); the isolated-cache run above passed. EC-004 remains not run because no decoder-to-converter callsite exists, QA-004 #35 remains a hard dependency, and no QA-101 acceptance or native result is claimed.
+
+### Replacement PR exact-head validation (2026-11-16)
+
+The replacement branch `test/qa-101-input-boundaries-linear-r2` was validated at commit `88ca0b1d492c186fff90d471ca784be9e4cbb838`, based on CNV-001 PR #314 head `8fffc12b174de4930dfeb00bffd47d5b865e5791`. Tested source tree SHA-1: `79969e2d1ae2abe77da73303d0dee15f24adf319`.
+
+- QA test source SHA-256: `1b40a0fa11c534a1bef48945c36305e4898044500b319adfef3ce2ea9348fbf5`; generated test executable SHA-256: `bdb8c249b749adefff97cea0ada7631367ea4aa943cb159ce4a7bd72dca822bb`.
+- Host: Microsoft Windows 11 Home Single Language, version `10.0.26300`, build `26300`, x64; Rust host `x86_64-pc-windows-msvc`, `rustc 1.100.0 (0ef1bc386 2026-11-09)`, LLVM `23.1.5`, `cargo 1.100.0 (3acc79c0c 2026-11-05)`. CPU-only tests; no GPU, media permission, or network access was required.
+- Cargo used isolated external home and target directories to prevent cross-worktree artifact collisions.
+- Exact-head commands and results:
+  - `cargo test -p ascii-convert --test qa_101_input_conversion -- --nocapture` — PASS, 4 passed, 0 failed.
+  - `cargo test --workspace` — PASS, 148 tests across 14 suites; 0 failed.
+  - `cargo fmt --all -- --check` — PASS.
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings` — PASS.
+- The focused run printed the same deterministic synthetic-font and EC-001–003/005 fixture SHA-256 values recorded in the initial execution record above.
+- EC-004 remains not run because no decoder-to-converter callsite exists. QA-004 #35 remains a hard dependency. Independent exact-head re-review and reviewer-linked scenario receipts are pending; no QA-101 acceptance or native result is claimed.
 
 ## Glyphs and rendering
 
