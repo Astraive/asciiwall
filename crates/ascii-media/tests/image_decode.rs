@@ -303,6 +303,63 @@ fn current_position_and_encoded_extent_are_bounded() {
 }
 
 #[test]
+fn png_large_ancillary_and_compressed_payloads_are_not_double_counted_as_scratch() {
+    let resources = DecodeResources::new(1, 4 << 20);
+    let limits_with_scratch_budget = |max_decoder_bytes| {
+        DecodeLimits::new(
+            Budget::new(4 << 20, 4 << 20, 16 << 20),
+            resources.clone(),
+            1024,
+            1024,
+            2 << 20,
+            max_decoder_bytes,
+        )
+    };
+    let ancillary_limits = limits_with_scratch_budget(768 << 10);
+    let compressed_limits = limits_with_scratch_budget(256 << 10);
+    let tiny = png(1, 1, image::ColorType::Rgb8, &[10, 20, 30]);
+    let mut text_payload = vec![b'x'; 512 << 10];
+    text_payload[..8].copy_from_slice(b"comment\0");
+    let with_large_ancillary = png_with_chunk_after_ihdr(&tiny, *b"tEXt", &text_payload);
+    assert!(with_large_ancillary.len() > 256 << 10);
+    assert!(with_large_ancillary.len() < 2 << 20);
+
+    let ancillary_frame = decode_image(
+        &mut Cursor::new(&with_large_ancillary),
+        &ancillary_limits,
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    assert_eq!(ancillary_frame.pixels(), &[10, 20, 30]);
+    drop(ancillary_frame);
+    assert_eq!(resources.cpu_bytes_in_use(), 0);
+
+    let mut state = 0x2c1b_3c6d_u32;
+    let mut samples = Vec::with_capacity(512 * 512 * 3);
+    for _ in 0..512 * 512 * 3 {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        samples.push(state.to_be_bytes()[0]);
+    }
+    let with_large_idat = png(512, 512, image::ColorType::Rgb8, &samples);
+    assert!(with_large_idat.len() > 256 << 10);
+    assert!(with_large_idat.len() < 2 << 20);
+
+    let idat_frame = decode_image(
+        &mut Cursor::new(&with_large_idat),
+        &compressed_limits,
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    assert_eq!(idat_frame.width(), 512);
+    assert_eq!(idat_frame.height(), 512);
+    drop(idat_frame);
+    assert_eq!(resources.cpu_bytes_in_use(), 0);
+    assert_eq!(resources.active_decodes(), 0);
+}
+
+#[test]
 fn malformed_unsupported_and_truncated_are_distinct() {
     assert!(matches!(
         decode(b"not an image"),
