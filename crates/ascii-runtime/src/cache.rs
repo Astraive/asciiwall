@@ -1170,6 +1170,9 @@ struct DiskBudgetState {
     available_bytes: u64,
     reserved_bytes: u64,
     consumed_bytes_since_refresh: u64,
+    total_output_bytes_written: u128,
+    next_probe_id: u64,
+    applied_probe_id: u64,
 }
 
 #[derive(Debug)]
@@ -1178,9 +1181,19 @@ struct DiskBudgetInner {
     state: Mutex<DiskBudgetState>,
 }
 
+
+/// Snapshot token captured before probing host disk space. Applying a token charges output bytes
+/// written since it was created and ignores readings from older or unrelated probes.
+#[derive(Clone, Debug)]
+pub struct DiskBudgetProbe {
+    inner: Arc<DiskBudgetInner>,
+    probe_id: u64,
+    total_output_bytes_written: u128,
+}
+
 /// Shared reservation ledger. The host supplies available bytes from its platform disk-space
-/// probe; every reservation holds back the configured safety reserve. Output bytes written since
-/// the last refresh are charged until a fresh host probe includes them.
+/// probe; every reservation holds back the configured safety reserve. Output bytes written after
+/// a probe token is captured remain charged against the reading applied with that token.
 #[derive(Clone, Debug)]
 pub struct DiskBudget {
     inner: Arc<DiskBudgetInner>,
@@ -1195,18 +1208,55 @@ impl DiskBudget {
                     available_bytes,
                     reserved_bytes: 0,
                     consumed_bytes_since_refresh: 0,
+                    total_output_bytes_written: 0,
+                    next_probe_id: 0,
+                    applied_probe_id: 0,
                 }),
             }),
         }
     }
 
-    /// Refreshes the host-probed free-space estimate before future reservations. The fresh
-    /// estimate supersedes output bytes recorded since the previous refresh; outstanding
-    /// reservations retain only their unwritten capacity and are never revoked.
-    pub fn refresh_available_bytes(&self, available_bytes: u64) {
+    /// Starts a host-space probe. Capture this token before invoking the host probe, then apply it
+    /// with `refresh_available_bytes`; writes after this point remain charged against that reading.
+    pub fn begin_available_bytes_probe(&self) -> Result<DiskBudgetProbe, DiskReservationError> {
         let mut state = lock_unpoisoned(&self.inner.state);
+        let probe_id = state
+            .next_probe_id
+            .checked_add(1)
+            .ok_or(DiskReservationError::ArithmeticOverflow)?;
+        state.next_probe_id = probe_id;
+        Ok(DiskBudgetProbe {
+            inner: Arc::clone(&self.inner),
+            probe_id,
+            total_output_bytes_written: state.total_output_bytes_written,
+        })
+    }
+
+    /// Applies a host-probed free-space estimate. Returns false for a stale token or a token from
+    /// another ledger. Writes recorded after the token was captured remain charged to the reading.
+    pub fn refresh_available_bytes(
+        &self,
+        probe: DiskBudgetProbe,
+        available_bytes: u64,
+    ) -> bool {
+        if !Arc::ptr_eq(&probe.inner, &self.inner) {
+            return false;
+        }
+        let mut state = lock_unpoisoned(&self.inner.state);
+        if probe.probe_id <= state.applied_probe_id {
+            return false;
+        }
+        let Some(bytes_written_after_probe) = state
+            .total_output_bytes_written
+            .checked_sub(probe.total_output_bytes_written)
+        else {
+            return false;
+        };
         state.available_bytes = available_bytes;
-        state.consumed_bytes_since_refresh = 0;
+        state.consumed_bytes_since_refresh =
+            u64::try_from(bytes_written_after_probe).unwrap_or(u64::MAX);
+        state.applied_probe_id = probe.probe_id;
+        true
     }
 
     pub fn reserve(
@@ -1296,8 +1346,13 @@ impl DiskReservation {
             .consumed_bytes_since_refresh
             .checked_add(written_bytes)
             .ok_or_else(|| io::Error::other("consumed output byte accounting overflowed"))?;
+        let next_total_output_bytes_written = state
+            .total_output_bytes_written
+            .checked_add(u128::from(written_bytes))
+            .ok_or_else(|| io::Error::other("total output byte accounting overflowed"))?;
         state.reserved_bytes = next_reserved;
         state.consumed_bytes_since_refresh = next_consumed;
+        state.total_output_bytes_written = next_total_output_bytes_written;
         *output_written_bytes = next_output_written;
         Ok(())
     }

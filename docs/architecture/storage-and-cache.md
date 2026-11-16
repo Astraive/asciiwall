@@ -78,7 +78,22 @@ A cache root uses a marked cache-owned subdirectory; a generated-looking filenam
 
 Active decoder/upload users pin entries through non-cloneable leases; dropping a lease does not signal completion, and the owner must explicitly acknowledge completion. A live lease holds a shared OS file lock, and eviction must obtain an exclusive lock before deleting a file, so another cache instance cannot remove an actively leased artifact. Keep the managed cache root private and stable: project directories, imported packages, and unmanaged files remain outside the deletion scope.
 
-Disk reservations account for expanded input, scratch, output capacity, and a safety reserve against a host-probed free-space estimate. Bytes written to output staging transfer from outstanding reservation to a consumed-since-refresh charge; dropping a reservation releases only unwritten capacity. A fresh host probe replaces that charge while preserving still-outstanding reservations. The estimate can be refreshed, but real writes may still fail. Output is staged beside its destination and becomes registered only after successful flush, sync, and commit. A callback cannot suppress an underlying write or flush error and publish truncated output. A failed write reports its temporary partial path when one exists, does not commit or register the failed result, and leaves the destination unchanged provided its parent is not concurrently modified by an untrusted actor. Replacing a registered destination invalidates any identity for the same canonical path or, where supported, the same filesystem file identity; this includes case-insensitive path aliases. Disk-full and quota failures are classified without claiming that a particular filesystem or quota limit was exercised.
+Disk reservations account for expanded input, scratch, output capacity, and a safety reserve against
+a host-probed free-space estimate. Capture a `DiskBudgetProbe` with
+`begin_available_bytes_probe` before probing the host, then apply that reading with
+`refresh_available_bytes`. The ledger charges every output byte written since the token was
+captured and ignores readings from older tokens, so a delayed probe cannot forget concurrent writes.
+Existing reservations are preserved; a later probe replaces prior consumed-byte charges with writes
+since that token was captured. Real writes may still fail.
+
+Output is staged beside its destination and becomes registered only after successful flush, sync,
+and commit. A callback cannot suppress an underlying write or flush error and publish truncated
+output. A failed write reports its temporary partial path when one exists, does not commit or
+register the failed result, and leaves the destination unchanged provided its parent is not
+concurrently modified by an untrusted actor. Replacing a registered destination invalidates any
+identity for the same canonical path or, where supported, the same filesystem file identity; this
+includes case-insensitive path aliases. Disk-full and quota failures are classified without
+claiming that a particular filesystem or quota limit was exercised.
 
 ## Privacy
 
