@@ -219,53 +219,152 @@ fn unavailable_matcher_color_and_configuration_are_explicit() {
 }
 
 #[test]
-fn missing_export_integration_is_not_reported_as_success() {
+fn shared_decoder_density_and_text_ansi_export_are_wired_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("rights-cleared source image.png");
+    let invalid_path = dir.path().join("malformed source image.png");
     let font_path = dir.path().join("rights-cleared font.ttf");
     fs::write(&source_path, RIGHTS_CLEARED_PNG).unwrap();
+    fs::write(&invalid_path, b"not a PNG or JPEG").unwrap();
     fs::write(&font_path, synthetic_font::synthetic_font(false)).unwrap();
 
-    for format in ["txt", "ansi", "png"] {
-        let output = run([
-            OsStr::new("--offline"),
-            OsStr::new("--no-color"),
-            OsStr::new("convert"),
-            source_path.as_os_str(),
-            OsStr::new("--font"),
-            font_path.as_os_str(),
-            OsStr::new("--charset"),
-            OsStr::new(" AB"),
-            OsStr::new("--format"),
-            OsStr::new(format),
-            OsStr::new("--output"),
-            OsStr::new("-"),
-        ]);
-        assert_eq!(status(&output), 4);
-        assert!(output.stdout.is_empty());
-        let message = String::from_utf8(output.stderr).unwrap();
-        if format == "png" {
-            assert!(message.contains("PNG still export"), "{message}");
-        } else {
-            assert!(
-                message.contains("image decoding and text/ANSI export"),
-                "{message}"
-            );
-        }
-        assert!(!message.contains(source_path.to_string_lossy().as_ref()));
-        assert!(!message.contains(font_path.to_string_lossy().as_ref()));
-        assert!(!message.contains('\x1b'));
+    let text_output = run([
+        OsStr::new("--verbose"),
+        OsStr::new("--no-color"),
+        OsStr::new("convert"),
+        source_path.as_os_str(),
+        OsStr::new("--font"),
+        font_path.as_os_str(),
+        OsStr::new("--columns"),
+        OsStr::new("12"),
+        OsStr::new("--charset"),
+        OsStr::new(" AB"),
+        OsStr::new("--format"),
+        OsStr::new("txt"),
+        OsStr::new("--output"),
+        OsStr::new("-"),
+    ]);
+    assert_eq!(status(&text_output), 0);
+    assert!(!text_output.stdout.is_empty());
+    let text = String::from_utf8(text_output.stdout.clone()).unwrap();
+    assert!(text.ends_with('\n'));
+    assert!(text.lines().all(|line| line.chars().count() == 12));
+    assert!(!text.contains('\x1b'));
+    assert!(
+        text.chars()
+            .all(|glyph| glyph == '\n' || " AB".contains(glyph))
+    );
+    let progress = String::from_utf8(text_output.stderr).unwrap();
+    assert!(progress.contains("decoding source image"));
+    assert!(!progress.contains(source_path.to_string_lossy().as_ref()));
+    assert!(!progress.contains('\x1b'));
 
-        let destination = dir
-            .path()
-            .join(format!("existing output with spaces.{format}"));
-        fs::write(&destination, b"previous output").unwrap();
-        let output = run([
+    let text_path = dir.path().join("converted output with spaces.txt");
+    fs::write(&text_path, b"previous text output").unwrap();
+    let text_file_output = run([
+        OsStr::new("convert"),
+        source_path.as_os_str(),
+        OsStr::new("--quiet"),
+        OsStr::new("--offline"),
+        OsStr::new("--font"),
+        font_path.as_os_str(),
+        OsStr::new("--columns"),
+        OsStr::new("12"),
+        OsStr::new("--charset"),
+        OsStr::new(" AB"),
+        OsStr::new("--format"),
+        OsStr::new("txt"),
+        OsStr::new("--output"),
+        text_path.as_os_str(),
+        OsStr::new("--overwrite"),
+    ]);
+    assert_eq!(status(&text_file_output), 0);
+    assert!(text_file_output.stdout.is_empty());
+    assert!(text_file_output.stderr.is_empty());
+    assert_eq!(fs::read(&text_path).unwrap(), text.as_bytes());
+
+    let ansi_output = run([
+        OsStr::new("--quiet"),
+        OsStr::new("--offline"),
+        OsStr::new("convert"),
+        source_path.as_os_str(),
+        OsStr::new("--font"),
+        font_path.as_os_str(),
+        OsStr::new("--columns"),
+        OsStr::new("12"),
+        OsStr::new("--charset"),
+        OsStr::new(" AB"),
+        OsStr::new("--format"),
+        OsStr::new("ansi"),
+        OsStr::new("--output"),
+        OsStr::new("-"),
+    ]);
+    assert_eq!(status(&ansi_output), 0);
+    let ansi = String::from_utf8(ansi_output.stdout.clone()).unwrap();
+    assert!(ansi.starts_with("\x1b[0m\x1b[38;2;255;255;255;48;2;0;0;0m"));
+    assert!(ansi.ends_with("\x1b[0m\n"));
+    assert!(!ansi.contains("\x1b]"));
+    assert!(!ansi.contains("\x1bP"));
+    assert!(ansi_output.stderr.is_empty());
+
+    let ansi_path = dir.path().join("converted output with spaces.ans");
+    let ansi_file_output = run([
+        OsStr::new("--quiet"),
+        OsStr::new("--offline"),
+        OsStr::new("convert"),
+        source_path.as_os_str(),
+        OsStr::new("--font"),
+        font_path.as_os_str(),
+        OsStr::new("--columns"),
+        OsStr::new("12"),
+        OsStr::new("--charset"),
+        OsStr::new(" AB"),
+        OsStr::new("--format"),
+        OsStr::new("ansi"),
+        OsStr::new("--output"),
+        ansi_path.as_os_str(),
+    ]);
+    assert_eq!(status(&ansi_file_output), 0);
+    assert!(ansi_file_output.stderr.is_empty());
+    assert_eq!(fs::read(&ansi_path).unwrap(), ansi_output.stdout);
+
+    let json_path = dir.path().join("machine-readable output.txt");
+    let json_output = run([
+        OsStr::new("--json"),
+        OsStr::new("convert"),
+        source_path.as_os_str(),
+        OsStr::new("--font"),
+        font_path.as_os_str(),
+        OsStr::new("--columns"),
+        OsStr::new("12"),
+        OsStr::new("--charset"),
+        OsStr::new(" AB"),
+        OsStr::new("--format"),
+        OsStr::new("txt"),
+        OsStr::new("--output"),
+        json_path.as_os_str(),
+    ]);
+    assert_eq!(status(&json_output), 0);
+    assert!(json_output.stderr.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["command"], "convert");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["format"], "txt");
+    assert_eq!(json["columns"], 12);
+    assert_eq!(fs::read(&json_path).unwrap(), text.as_bytes());
+
+    for (format, destination) in [("txt", &text_path), ("ansi", &ansi_path)] {
+        fs::write(destination, b"preserve this output").unwrap();
+        let failed = run([
+            OsStr::new("--quiet"),
             OsStr::new("--offline"),
             OsStr::new("convert"),
-            source_path.as_os_str(),
+            invalid_path.as_os_str(),
             OsStr::new("--font"),
             font_path.as_os_str(),
+            OsStr::new("--columns"),
+            OsStr::new("12"),
             OsStr::new("--charset"),
             OsStr::new(" AB"),
             OsStr::new("--format"),
@@ -274,10 +373,38 @@ fn missing_export_integration_is_not_reported_as_success() {
             destination.as_os_str(),
             OsStr::new("--overwrite"),
         ]);
-        assert_eq!(status(&output), 4);
-        assert!(output.stdout.is_empty());
-        assert_eq!(fs::read(&destination).unwrap(), b"previous output");
+        assert_eq!(status(&failed), 6);
+        assert!(failed.stdout.is_empty());
+        let message = String::from_utf8(failed.stderr).unwrap();
+        assert!(!message.contains(invalid_path.to_string_lossy().as_ref()));
+        assert!(!message.contains(font_path.to_string_lossy().as_ref()));
+        assert!(!message.contains('\x1b'));
+        assert_eq!(fs::read(destination).unwrap(), b"preserve this output");
     }
+
+    let png_path = dir.path().join("preserved output.png");
+    fs::write(&png_path, b"preserve this output").unwrap();
+    let png_output = run([
+        OsStr::new("--quiet"),
+        OsStr::new("--offline"),
+        OsStr::new("convert"),
+        source_path.as_os_str(),
+        OsStr::new("--font"),
+        font_path.as_os_str(),
+        OsStr::new("--format"),
+        OsStr::new("png"),
+        OsStr::new("--output"),
+        png_path.as_os_str(),
+        OsStr::new("--overwrite"),
+    ]);
+    assert_eq!(status(&png_output), 4);
+    assert!(png_output.stdout.is_empty());
+    assert!(
+        String::from_utf8(png_output.stderr)
+            .unwrap()
+            .contains("PNG still export")
+    );
+    assert_eq!(fs::read(&png_path).unwrap(), b"preserve this output");
 }
 
 #[test]

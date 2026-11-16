@@ -29,6 +29,17 @@ impl CliError {
     pub fn io(message: &'static str) -> Self {
         Self::new(8, "cli.io", "io", message)
     }
+    pub fn media(message: &'static str) -> Self {
+        Self::new(6, "cli.media", "media", message)
+    }
+
+    pub fn cancelled(message: &'static str) -> Self {
+        Self::new(10, "cli.cancelled", "cancelled", message)
+    }
+
+    pub fn resource(message: &'static str) -> Self {
+        Self::new(11, "cli.resource-limit", "resource-limit", message)
+    }
 
     fn new(exit: u8, code: &'static str, category: &'static str, message: &'static str) -> Self {
         Self {

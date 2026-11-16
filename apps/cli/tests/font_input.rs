@@ -9,7 +9,7 @@ use std::os::unix::fs::symlink;
 use std::process::Command;
 
 use ascii_convert::{GlyphConfig, GlyphRepertoire, build_glyph_table};
-use ascii_core::{Budget, CancellationToken, Error};
+use ascii_core::{Budget, CancellationToken, Error, GlyphFailureReason};
 use asciiwall_cli::font::{FontLoadError, load_glyph_table};
 
 #[test]
@@ -50,9 +50,10 @@ fn invalid_repertoire_is_rejected_before_font_io() {
     let geometry = GlyphConfig::new(8.0, 8, 12, 9).unwrap();
     assert!(matches!(
         load_glyph_table(&path, "\u{1b}", &geometry, &budget, &cancellation),
-        Err(FontLoadError::Engine(Error::Malformed(
-            ascii_core::MalformedReason::InvalidConfiguration
-        )))
+        Err(FontLoadError::Engine(Error::Glyph {
+            character: '\u{1b}',
+            reason: GlyphFailureReason::UnsupportedScalar,
+        }))
     ));
 }
 

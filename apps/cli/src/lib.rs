@@ -7,6 +7,7 @@ pub mod font;
 pub mod output;
 
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use clap::{Parser, error::ErrorKind};
@@ -14,11 +15,22 @@ use clap::{Parser, error::ErrorKind};
 use arguments::{Cli, Color, Command, Format, Matcher};
 use diagnostic::{CliError, print_error, print_help};
 
-use ascii_convert::GlyphConfig;
-use ascii_core::{Budget, CancellationToken};
-use font::{FontLoadError, load_glyph_table_with_repertoire};
+use ascii_convert::{ColorNormalizationError, DensityConversionError, GlyphConfig};
+use ascii_core::{Budget, CancellationToken, Error, GlyphFailureReason};
+use ascii_media::{DecodeLimits, DecodeResources, decode_image};
+use ascii_render::{AnsiColorMode, ExportError, ExportTarget, export};
+use font::{FontLoadError, load_glyph_table_with_repertoire, open_regular_input_file};
 /// Parses and handles one invocation without starting a controller or wallpaper host.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
+    let cancellation = CancellationToken::new();
+    run_with_cancellation(args, &cancellation)
+}
+
+/// Runs one invocation with the caller's signal-aware cancellation token.
+pub fn run_with_cancellation(
+    args: impl IntoIterator<Item = OsString>,
+    cancellation: &CancellationToken,
+) -> ExitCode {
     let args: Vec<OsString> = args.into_iter().collect();
     let json_requested = args
         .iter()
@@ -48,7 +60,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     };
 
     let json = cli.json;
-    match execute(cli) {
+    match execute(cli, cancellation) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => report_error(&error, json, "convert"),
     }
@@ -99,11 +111,19 @@ fn report_error(error: &CliError, json: bool, command: &'static str) -> ExitCode
     }
 }
 
-fn execute(cli: Cli) -> Result<(), CliError> {
-    let Command::Convert(request) = cli.command;
-    let (format, repertoire) = request.validate(cli.json)?;
+fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), CliError> {
+    let Cli {
+        json,
+        quiet,
+        verbose,
+        config,
+        command,
+        ..
+    } = cli;
+    let Command::Convert(request) = command;
+    let (format, repertoire) = request.validate(json)?;
 
-    if cli.config.is_some() {
+    if config.is_some() {
         return Err(CliError::capability(
             "configuration loading requires the shared settings registry",
         ));
@@ -118,57 +138,239 @@ fn execute(cli: Cli) -> Result<(), CliError> {
             "source-color density conversion is not available in this build",
         ));
     }
+    if format == Format::Png {
+        return Err(CliError::capability(
+            "PNG still export requires the shared renderer's PNG export provider",
+        ));
+    }
+    if cancellation.is_cancelled() {
+        return Err(CliError::cancelled("conversion was cancelled"));
+    }
 
     let font_path = request.font.as_deref().ok_or_else(|| {
         CliError::capability("no built-in font is available; select a local font with --font")
     })?;
     let budget = Budget::new(8_000_000, 64_000_000, 16_000_000);
-    let cancellation = CancellationToken::new();
     let geometry = GlyphConfig::new(8.0, 8, 12, 9)
         .map_err(|_| CliError::validation("configured font geometry is invalid"))?;
-    let _glyphs =
-        load_glyph_table_with_repertoire(font_path, &repertoire, &geometry, &budget, &cancellation)
+    let verbose = verbose && !quiet;
+    progress(verbose, "measuring selected font");
+    let glyphs =
+        load_glyph_table_with_repertoire(font_path, &repertoire, &geometry, &budget, cancellation)
             .map_err(font_error)?;
 
-    if format == Format::Png {
-        return Err(CliError::capability(
-            "PNG still export is not available in this build",
-        ));
+    progress(verbose, "decoding source image");
+    let (mut input, _) =
+        open_regular_input_file(&request.image, cancellation).map_err(image_open_error)?;
+    let decode_limits = DecodeLimits::new(
+        budget,
+        DecodeResources::new(1, budget.max_frame_bytes()),
+        16_384,
+        16_384,
+        budget.max_raster_bytes(),
+        budget.max_frame_bytes(),
+    );
+    let decoded = decode_image(&mut input, &decode_limits, cancellation).map_err(core_error)?;
+
+    progress(verbose, "matching image density");
+    let columns = std::num::NonZeroU32::new(request.columns)
+        .ok_or_else(|| CliError::validation("columns must be positive"))?;
+    let converted =
+        convert::monochrome_density(decoded.view(), &glyphs, columns, &budget, cancellation)
+            .map_err(density_error)?;
+
+    progress(verbose, "serializing terminal output");
+    let target = match format {
+        Format::Txt => ExportTarget::Text,
+        Format::Ansi => ExportTarget::Ansi(AnsiColorMode::TrueColor),
+        Format::Png => {
+            return Err(CliError::capability(
+                "PNG still export requires the shared renderer's PNG export provider",
+            ));
+        }
+    };
+    let exported =
+        export(converted.frame(), &glyphs, target, &budget, cancellation).map_err(export_error)?;
+    let bytes = exported.bytes();
+    if request.output.as_os_str() == OsStr::new("-") {
+        let mut stdout = io::stdout().lock();
+        stdout
+            .write_all(bytes)
+            .and_then(|()| stdout.flush())
+            .map_err(|_| CliError::io("cannot write conversion output"))?;
+    } else {
+        output::publish_file(&request.output, request.overwrite, cancellation, |file| {
+            file.write_all(bytes)
+        })
+        .map_err(publish_error)?;
     }
 
-    // The bounded media decoder interface is not present in this workspace, so no input bytes
-    // are interpreted as a raster and no output is published by this CLI invocation.
-    Err(CliError::capability(
-        "image decoding and text/ANSI export are not integrated in this build",
-    ))
+    report_success(
+        json,
+        quiet,
+        verbose,
+        format,
+        exported.size().columns(),
+        exported.size().rows(),
+        exported.loss_notice(),
+    );
+    Ok(())
+}
+
+fn progress(enabled: bool, message: &'static str) {
+    if enabled {
+        let _ = writeln!(io::stderr().lock(), "{message}");
+    }
+}
+
+fn report_success(
+    json: bool,
+    quiet: bool,
+    verbose: bool,
+    format: Format,
+    columns: u32,
+    rows: u32,
+    loss_notice: &str,
+) {
+    if json {
+        let status = serde_json::json!({
+            "schema_version": 1,
+            "command": "convert",
+            "status": "ok",
+            "format": format_name(format),
+            "columns": columns,
+            "rows": rows,
+        });
+        let mut stdout = io::stdout().lock();
+        let _ = serde_json::to_writer(&mut stdout, &status);
+        let _ = stdout.write_all(b"\n");
+    } else if !quiet {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "conversion complete ({columns} columns, {rows} rows)"
+        );
+    }
+    if verbose && !quiet {
+        let _ = writeln!(io::stderr().lock(), "{loss_notice}");
+    }
+}
+
+const fn format_name(format: Format) -> &'static str {
+    match format {
+        Format::Txt => "txt",
+        Format::Ansi => "ansi",
+        Format::Png => "png",
+    }
+}
+
+fn image_open_error(error: FontLoadError) -> CliError {
+    match error {
+        FontLoadError::Io(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            CliError::permission("cannot access image input")
+        }
+        FontLoadError::Io(_) => CliError::io("cannot read image input"),
+        FontLoadError::NotRegularFile => CliError::validation("image input must be a regular file"),
+        FontLoadError::TooLarge { .. } => {
+            CliError::resource("image input exceeds the configured resource limit")
+        }
+        FontLoadError::Engine(error) => core_error(error),
+    }
+}
+
+fn density_error(error: DensityConversionError) -> CliError {
+    match error {
+        DensityConversionError::Core(error)
+        | DensityConversionError::ColorNormalization(ColorNormalizationError::Raster(error)) => {
+            core_error(error)
+        }
+        DensityConversionError::ColorNormalization(ColorNormalizationError::UnsupportedColor(
+            _,
+        )) => CliError::media("image color metadata is unsupported"),
+        DensityConversionError::ColorNormalization(ColorNormalizationError::InvalidSample(_)) => {
+            CliError::media("image contains invalid color samples")
+        }
+    }
+}
+
+fn core_error(error: Error) -> CliError {
+    match error {
+        Error::PermissionDenied => CliError::permission("cannot access image input"),
+        Error::MissingAsset => CliError::io("cannot read image input"),
+        Error::TemporarilyUnavailable => {
+            CliError::capability("image processing is temporarily unavailable")
+        }
+        Error::Malformed(_) | Error::Unsupported(_) => {
+            CliError::media("image input is invalid or unsupported")
+        }
+        Error::Glyph { .. } => {
+            CliError::validation("glyph repertoire or font metrics are unsupported")
+        }
+        Error::BudgetExceeded(_) | Error::SizeOverflow | Error::AllocationFailed => {
+            CliError::resource("image conversion exceeds configured resource limits")
+        }
+        Error::Cancelled => CliError::cancelled("conversion was cancelled"),
+    }
+}
+
+fn export_error(error: ExportError) -> CliError {
+    match error {
+        ExportError::Core(error) => core_error(error),
+        ExportError::UnsupportedGlyph { .. } => {
+            CliError::validation("glyph table contains unsupported text")
+        }
+    }
+}
+
+fn publish_error(error: output::PublishError) -> CliError {
+    match error {
+        output::PublishError::Cancelled => {
+            CliError::cancelled("conversion was cancelled before output publication")
+        }
+        output::PublishError::Io(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            CliError::permission("cannot write conversion output")
+        }
+        output::PublishError::Io(_) => CliError::io("cannot write conversion output"),
+    }
 }
 
 fn font_error(error: FontLoadError) -> CliError {
     match error {
-        FontLoadError::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+        FontLoadError::Io(error) if error.kind() == io::ErrorKind::PermissionDenied => {
             CliError::permission("cannot access selected font input")
         }
         FontLoadError::Io(_) => CliError::io("cannot read selected font input"),
         FontLoadError::NotRegularFile => CliError::validation("font input must be a regular file"),
         FontLoadError::TooLarge { .. } => {
-            CliError::validation("font input exceeds the configured resource limit")
+            CliError::resource("font input exceeds the configured resource limit")
         }
-        FontLoadError::Engine(error) => match error {
-            ascii_core::Error::PermissionDenied => {
-                CliError::permission("cannot access selected font input")
+        FontLoadError::Engine(Error::PermissionDenied) => {
+            CliError::permission("cannot access selected font input")
+        }
+        FontLoadError::Engine(Error::MissingAsset) => {
+            CliError::io("cannot read selected font input")
+        }
+        FontLoadError::Engine(Error::TemporarilyUnavailable) => {
+            CliError::capability("font measurement is temporarily unavailable")
+        }
+        FontLoadError::Engine(Error::Malformed(_) | Error::Unsupported(_)) => {
+            CliError::validation("font is invalid or unsupported")
+        }
+        FontLoadError::Engine(
+            Error::BudgetExceeded(_) | Error::SizeOverflow | Error::AllocationFailed,
+        ) => CliError::resource("font exceeds configured resource limits"),
+        FontLoadError::Engine(Error::Glyph { reason, .. }) => match reason {
+            GlyphFailureReason::UnsupportedScalar | GlyphFailureReason::DuplicateScalar => {
+                CliError::validation("charset contains unsupported glyphs")
             }
-            ascii_core::Error::MissingAsset => CliError::io("cannot read selected font input"),
-            ascii_core::Error::TemporarilyUnavailable => {
-                CliError::capability("font measurement is temporarily unavailable")
+            GlyphFailureReason::GlyphUnavailable => {
+                CliError::validation("selected font lacks a requested glyph")
             }
-            ascii_core::Error::Malformed(_) | ascii_core::Error::Unsupported(_) => {
-                CliError::validation("font is invalid or unsupported")
+            GlyphFailureReason::MultiCellMetrics => {
+                CliError::validation("selected font has a glyph wider than one cell")
             }
-            ascii_core::Error::BudgetExceeded(_) | ascii_core::Error::SizeOverflow => {
-                CliError::validation("font exceeds resource limits")
-            }
-            ascii_core::Error::AllocationFailed => CliError::io("font could not be loaded"),
-            ascii_core::Error::Cancelled => CliError::validation("font loading was cancelled"),
         },
+        FontLoadError::Engine(Error::Cancelled) => {
+            CliError::cancelled("font loading was cancelled")
+        }
     }
 }

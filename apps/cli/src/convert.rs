@@ -1,4 +1,4 @@
-//! The available headless density stage. Decoding and export remain separate engine contracts.
+//! Shared headless density stage used by the CLI; decoding, font selection, terminal export, and publication stay at the caller boundary.
 
 use std::num::NonZeroU32;
 
