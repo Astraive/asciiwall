@@ -249,6 +249,30 @@ fn plan(input: PlanInput, limits: &wgpu::Limits, budget: &Budget) -> Result<Plan
         atlas_staging_bytes,
     })
 }
+fn ensure_frame_budget(
+    current_cpu_capacity: u64,
+    current_gpu_capacity: u64,
+    requested: u64,
+    budget: &Budget,
+) -> Result<(), Error> {
+    let retained_cpu = current_cpu_capacity.max(requested);
+    let retained_gpu = current_gpu_capacity.max(requested);
+    // The replacement GPU buffer and the upload staging bytes coexist with the old buffer.
+    let gpu_growth_overlap = if current_gpu_capacity < requested {
+        current_gpu_capacity
+    } else {
+        0
+    };
+    let frame_bytes = retained_cpu
+        .checked_add(retained_gpu)
+        .and_then(|bytes| bytes.checked_add(gpu_growth_overlap))
+        .and_then(|bytes| bytes.checked_add(requested))
+        .ok_or(ascii_core::Error::SizeOverflow)?;
+    if frame_bytes > budget.max_frame_bytes() {
+        return Err(ascii_core::Error::BudgetExceeded(BudgetKind::FrameBytes).into());
+    }
+    Ok(())
+}
 
 struct Atlas {
     texture: wgpu::Texture,
@@ -415,23 +439,19 @@ impl Renderer {
         }
 
         // Bounds include retained capacity when grids shrink. A submission's staging bytes may
-        // coexist with the retained CPU and GPU allocations, but never with another submission.
-        let retained_cpu = u64::try_from(self.packed.capacity())
-            .map_err(|_| ascii_core::Error::SizeOverflow)?
-            .max(plan.cell_bytes);
-        let retained_gpu = self
+        // coexist with retained allocations, but never with another submission.
+        let current_cpu_capacity =
+            u64::try_from(self.packed.capacity()).map_err(|_| ascii_core::Error::SizeOverflow)?;
+        let current_gpu_capacity = self
             .resources
             .as_ref()
-            .map_or(0, |r| r.capacity)
-            .max(plan.cell_bytes);
-        if retained_cpu
-            .checked_add(retained_gpu)
-            .and_then(|n| n.checked_add(plan.cell_bytes))
-            .ok_or(ascii_core::Error::SizeOverflow)?
-            > self.budget.max_frame_bytes()
-        {
-            return Err(ascii_core::Error::BudgetExceeded(BudgetKind::FrameBytes).into());
-        }
+            .map_or(0, |resources| resources.capacity);
+        ensure_frame_budget(
+            current_cpu_capacity,
+            current_gpu_capacity,
+            plan.cell_bytes,
+            &self.budget,
+        )?;
         if !same_cells {
             self.last = None;
             self.packed_valid = false;
@@ -948,6 +968,36 @@ mod tests {
         assert_eq!(
             plan(input, &limits, &small).unwrap_err(),
             Error::Core(ascii_core::Error::BudgetExceeded(BudgetKind::RasterBytes))
+        );
+    }
+
+    #[test]
+    fn cell_buffer_growth_overlap_is_charged_at_frame_budget_boundary() {
+        let old_capacity = 16;
+        let requested = 32;
+        let exact_budget = requested * 3 + old_capacity;
+        assert_eq!(exact_budget, 112);
+        let make_budget = |max_frame| Budget::new(max_frame, 10_000, 10_000);
+
+        assert_eq!(
+            ensure_frame_budget(
+                old_capacity,
+                old_capacity,
+                requested,
+                &make_budget(exact_budget - 1),
+            ),
+            Err(Error::Core(ascii_core::Error::BudgetExceeded(
+                BudgetKind::FrameBytes
+            )))
+        );
+        assert_eq!(
+            ensure_frame_budget(
+                old_capacity,
+                old_capacity,
+                requested,
+                &make_budget(exact_budget),
+            ),
+            Ok(())
         );
     }
 
