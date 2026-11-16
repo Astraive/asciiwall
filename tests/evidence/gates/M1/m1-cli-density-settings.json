@@ -1,0 +1,128 @@
+{
+  "schema": "asciiwall.m1-cli-density-smoke/v1",
+  "purpose": "Explicit settings and provenance manifest for a branch-scoped real CLI conversion; this JSON was not passed through --config because the CLI settings registry is unavailable.",
+  "source": {
+    "repository": "Astraive/asciiwall",
+    "branch": "feat/cli-001-headless-conversion",
+    "commit": "0bbbf8da69aae5758b20d3ee34d38216313309d6",
+    "tree": "04283b76a28afce8e6040bbf73490c8d1ea28870",
+    "cli_entrypoint": "apps/cli/src/main.rs",
+    "conversion_path": "apps/cli/src/lib.rs"
+  },
+  "binary": {
+    "package": "asciiwall-cli",
+    "target": "asciiwall",
+    "sha256": "ff42bad49708689cd53481d6fc1f10edb908467d7009e28a7e183a13fcfcf624",
+    "build_command": "cargo build --locked --package asciiwall-cli --bin asciiwall",
+    "build_target_directory": "D:/.worktrees/qa-m1-cli-golden-target",
+    "build_cargo_home": "D:/.worktrees/qa-m1-cli-golden-cargo-home"
+  },
+  "environment": {
+    "os": "Microsoft Windows 10.0.26300.9711",
+    "architecture": "x86_64",
+    "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+    "cargo": "cargo 1.100.0 (3acc79c0c 2026-11-05)",
+    "worktree_isolated": true,
+    "target_directory_isolated": true,
+    "session_type": null,
+    "compositor": null,
+    "gpu_and_driver": null,
+    "permission_state": "headless local file conversion; no native surface permission exercised"
+  },
+  "fixtures": {
+    "image": {
+      "path": "tests/evidence/gates/M1/m1-cli-density-fixture.png",
+      "format": "PNG RGBA8",
+      "dimensions": [8, 4],
+      "sha256": "097a523501401c5a778f963661902f31e85739ece9b699b96302c39ccfdd6050",
+      "rights": "Original synthetic numeric pixel data generated specifically for this evidence; no third-party or personal image asset.",
+      "generator_description": "Filter-0 scanlines, RGBA8, each listed grayscale sample replicated into R/G/B with alpha 255; PNG chunks encoded with zlib.",
+      "grayscale_rows": [
+        [0, 36, 72, 108, 144, 180, 216, 255],
+        [255, 216, 180, 144, 108, 72, 36, 0],
+        [0, 0, 64, 64, 192, 192, 255, 255],
+        [255, 255, 192, 192, 64, 64, 0, 0]
+      ]
+    },
+    "font": {
+      "path": "tests/evidence/gates/M1/m1-cli-synthetic-font.ttf",
+      "format": "synthetic TrueType SFNT",
+      "sha256": "50fea7e6d99d4f46d5e8bd800a3b6b4ec4c89d0617f0be102e421a74808e018b",
+      "generator_source": "crates/ascii-convert/tests/support/synthetic_font.rs at the recorded CLI source commit",
+      "generator_source_sha256": "ed96313cfbbc552a891745851922d28c576db4349ee060f5c44f473cf2950f93",
+      "generator_function_and_argument": "synthetic_font(true)",
+      "rights": "Repository source describes this as a tiny rights-cleared TrueType SFNT fixture built entirely from source constants; no third-party font file is used."
+    }
+  },
+  "settings": {
+    "offline": true,
+    "quiet": true,
+    "command": "convert",
+    "input_image": "tests/evidence/gates/M1/m1-cli-density-fixture.png",
+    "output_path": "tests/evidence/gates/M1/m1-cli-density-golden.txt",
+    "font_path": "tests/evidence/gates/M1/m1-cli-synthetic-font.ttf",
+    "columns": 16,
+    "matcher": "density",
+    "charset": " AB",
+    "color": "mono",
+    "format": "txt",
+    "overwrite": true,
+    "font_geometry_from_source": {
+      "cell_width_px": 8,
+      "cell_height_px": 12,
+      "glyph_size_px": 8.0,
+      "baseline_px": 9
+    },
+    "engine_budget_from_source": {
+      "max_frame_bytes": 8000000,
+      "max_raster_bytes": 64000000,
+      "max_work_units": 16000000
+    },
+    "argv": [
+      "D:/.worktrees/qa-m1-cli-golden-target/debug/asciiwall.exe",
+      "--offline",
+      "--quiet",
+      "convert",
+      "tests/evidence/gates/M1/m1-cli-density-fixture.png",
+      "--output",
+      "tests/evidence/gates/M1/m1-cli-density-golden.txt",
+      "--font",
+      "tests/evidence/gates/M1/m1-cli-synthetic-font.ttf",
+      "--columns",
+      "16",
+      "--matcher",
+      "density",
+      "--charset",
+      " AB",
+      "--color",
+      "mono",
+      "--format",
+      "txt",
+      "--overwrite"
+    ],
+    "argv_note": "The settings manifest records the command flags but was not loaded by the CLI. No --config option was used."
+  },
+  "actual_conversion": {
+    "status": "PASS",
+    "runs": 3,
+    "same_argv_for_all_runs": true,
+    "output_sha256_each_run": [
+      "cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623",
+      "cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623",
+      "cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623"
+    ],
+    "bytewise_equal": true,
+    "comparison_method": "cmp compared the retained output after runs 1, 2, and 3 byte-for-byte; all comparisons succeeded.",
+    "output_path": "tests/evidence/gates/M1/m1-cli-density-golden.txt",
+    "output_bytes": 85,
+    "output_rows": 5,
+    "output_columns": 16,
+    "output_glyph_cells": 80
+  },
+  "limits": [
+    "This is a successful monochrome density-to-TXT smoke on the CLI branch head only; it is not evidence for an integrated M1 candidate or issue acceptance.",
+    "The CLI source at this head explicitly reports structural matching, config registry loading, and PNG still export as unavailable; these capabilities were not invoked in this smoke.",
+    "No firewall-denied conversion, PNG output, cross-platform run, native surface, compositor/GPU/driver, permission, or manual observation was exercised.",
+    "A first cargo build using the pre-existing default Cargo home failed to create a registry cache directory with OS error 183. The successful build used the dedicated Cargo home and target directory recorded above."
+  ]
+}
