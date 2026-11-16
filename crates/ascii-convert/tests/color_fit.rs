@@ -3,19 +3,18 @@ mod support;
 
 use ascii_convert::{
     ColorFitError, ColorFitStrategy, ConversionSettings, EncodedSrgb, GlyphConfig, GlyphRepertoire,
-    GlyphTable, GradientStop, GridSizing, LinearRgb, OutputEncoding, Palette, PaletteDefinition,
-    PaletteDistanceSpace, PaletteError, PaletteKind, MAX_GRADIENT_STOPS, MAX_PALETTE_COLORS,
-    MAX_PALETTE_PAIR_RESOLUTION_WORK_UNITS, MAX_PALETTE_RESOLUTION_WORK_UNITS,
-    build_glyph_table, convert_density_detailed, decode_srgb, encode_output, encode_srgb,
-    estimate_color_fit_work, fit_color_patch,
+    GlyphTable, GradientStop, GridSizing, LinearRgb, MAX_GRADIENT_STOPS, MAX_PALETTE_COLORS,
+    MAX_PALETTE_PAIR_RESOLUTION_WORK_UNITS, MAX_PALETTE_RESOLUTION_WORK_UNITS, OutputEncoding,
+    Palette, PaletteDefinition, PaletteDistanceSpace, PaletteError, PaletteKind, build_glyph_table,
+    convert_density_detailed, decode_srgb, encode_output, encode_srgb, estimate_color_fit_work,
+    fit_color_patch,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, Error, FrameMetadata,
     GlyphTableId, GridSize, PixelFormat, RasterFrameView, RasterOrientation,
 };
-use support::synthetic_font::synthetic_font;
 use sha2::{Digest, Sha256};
-
+use support::synthetic_font::synthetic_font;
 
 const LARGE_BUDGET: u64 = 100_000_000;
 const SYNTHETIC_COLOR_FIT_CONFIGURATION: &str = concat!(
@@ -60,7 +59,10 @@ fn palette(definition: PaletteDefinition<'_>, space: PaletteDistanceSpace) -> Pa
 }
 
 fn close(actual: f64, expected: f64, tolerance: f64) {
-    assert!((actual - expected).abs() <= tolerance, "{actual} != {expected}");
+    assert!(
+        (actual - expected).abs() <= tolerance,
+        "{actual} != {expected}"
+    );
 }
 
 fn encoded_distance_squared(left: LinearRgb, right: LinearRgb) -> f64 {
@@ -73,10 +75,7 @@ fn encoded_distance_squared(left: LinearRgb, right: LinearRgb) -> f64 {
 
 #[test]
 fn original_and_monochrome_preserve_their_distinct_pair_semantics() {
-    let original = palette(
-        PaletteDefinition::Original,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let original = palette(PaletteDefinition::Original, PaletteDistanceSpace::LinearRgb);
     let mono_fg = color(1.0, 0.1, 0.0);
     let mono_bg = color(0.0, 0.1, 1.0);
     let source_fg = color(0.7, 0.2, 0.1);
@@ -144,10 +143,7 @@ fn fixed_palette_ties_are_stable_and_distance_space_is_part_of_identity() {
 #[test]
 fn ansi_palettes_resolve_explicit_xterm_colors_and_report_terminal_caveat() {
     let cancellation = CancellationToken::new();
-    let ansi16 = palette(
-        PaletteDefinition::Ansi16,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let ansi16 = palette(PaletteDefinition::Ansi16, PaletteDistanceSpace::LinearRgb);
     let black = ansi16
         .resolve(LinearRgb::BLACK, &budget(48), &cancellation)
         .expect("ANSI-16 lookup is bounded");
@@ -155,10 +151,7 @@ fn ansi_palettes_resolve_explicit_xterm_colors_and_report_terminal_caveat() {
     assert_eq!(black.color(), LinearRgb::BLACK);
     assert!(ansi16.terminal_appearance_notice().is_some());
 
-    let ansi256 = palette(
-        PaletteDefinition::Ansi256,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let ansi256 = palette(PaletteDefinition::Ansi256, PaletteDistanceSpace::LinearRgb);
     let cube_color = encoded_color(215, 135, 0);
     let resolved = ansi256
         .resolve(cube_color, &budget(768), &cancellation)
@@ -185,8 +178,11 @@ fn gradient_requires_ordered_distinct_positions_and_interpolates_linear_light_en
     close(middle.color().red(), 0.25, 1.0e-12);
     close(middle.color().green(), 0.25, 1.0e-12);
     close(middle.color().blue(), 0.25, 1.0e-12);
-    close(middle.gradient_position().expect("gradient position"), 0.25, 1.0e-12);
-
+    close(
+        middle.gradient_position().expect("gradient position"),
+        0.25,
+        1.0e-12,
+    );
 
     assert_eq!(
         GradientStop::new(f64::NAN, LinearRgb::BLACK),
@@ -275,13 +271,16 @@ fn encoded_gradient_search_finds_global_minimum_without_unimodality_assumptions(
     );
     let requested = color(0.000_244_244, 0.304_238_494, 0.024_489_139);
     let work = gradient.resolution_work_units();
-    assert_eq!(work, 513);
+    assert_eq!(work, 39_177);
     let cancellation = CancellationToken::new();
     let resolved = gradient
         .resolve(requested, &budget(work), &cancellation)
         .expect("bounded global search resolves this gradient");
     let position = resolved.gradient_position().expect("gradient position");
-    assert!(position > 0.95, "expected the global basin near the end, got {position}");
+    assert!(
+        position > 0.95,
+        "expected the global basin near the end, got {position}"
+    );
     let reference_parameter = 0.976;
     let reference = color(
         stops[0].color().red()
@@ -379,10 +378,7 @@ fn palette_resolution_work_covers_each_mode_and_cancellation() {
         GradientStop::new(0.0, LinearRgb::BLACK).expect("valid start"),
         GradientStop::new(1.0, LinearRgb::WHITE).expect("valid end"),
     ];
-    let original = palette(
-        PaletteDefinition::Original,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let original = palette(PaletteDefinition::Original, PaletteDistanceSpace::LinearRgb);
     let monochrome = palette(
         PaletteDefinition::Monochrome {
             foreground: LinearRgb::BLACK,
@@ -394,14 +390,8 @@ fn palette_resolution_work_covers_each_mode_and_cancellation() {
         PaletteDefinition::Fixed(&fixed_colors),
         PaletteDistanceSpace::LinearRgb,
     );
-    let ansi16 = palette(
-        PaletteDefinition::Ansi16,
-        PaletteDistanceSpace::LinearRgb,
-    );
-    let ansi256 = palette(
-        PaletteDefinition::Ansi256,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let ansi16 = palette(PaletteDefinition::Ansi16, PaletteDistanceSpace::LinearRgb);
+    let ansi256 = palette(PaletteDefinition::Ansi256, PaletteDistanceSpace::LinearRgb);
     let linear_gradient = palette(
         PaletteDefinition::Gradient(&linear_stops),
         PaletteDistanceSpace::LinearRgb,
@@ -417,7 +407,7 @@ fn palette_resolution_work_covers_each_mode_and_cancellation() {
         (&ansi16, 48),
         (&ansi256, 768),
         (&linear_gradient, 3),
-        (&encoded_gradient, 513),
+        (&encoded_gradient, 39_177),
     ];
     let cancellation = CancellationToken::new();
     for (palette, expected_work) in modes {
@@ -428,11 +418,7 @@ fn palette_resolution_work_covers_each_mode_and_cancellation() {
         if expected_work > 0 {
             assert_eq!(
                 palette
-                    .resolve(
-                        LinearRgb::BLACK,
-                        &budget(expected_work - 1),
-                        &cancellation,
-                    )
+                    .resolve(LinearRgb::BLACK, &budget(expected_work - 1), &cancellation,)
                     .expect_err("one unit below the declared maximum is rejected"),
                 PaletteError::Core(Error::BudgetExceeded(BudgetKind::WorkUnits))
             );
@@ -490,7 +476,6 @@ fn palette_resolution_work_covers_each_mode_and_cancellation() {
     );
 }
 
-
 #[test]
 fn palette_pair_budget_allows_two_individually_bounded_gradient_resolutions() {
     let stop_count = 65;
@@ -509,8 +494,8 @@ fn palette_pair_budget_allows_two_individually_bounded_gradient_resolutions() {
         PaletteDistanceSpace::EncodedSrgb,
     );
     let pair_work = gradient.resolution_work_units() * 2;
-    assert_eq!(gradient.resolution_work_units(), 32_832);
-    assert_eq!(pair_work, 65_664);
+    assert_eq!(gradient.resolution_work_units(), 65_088);
+    assert_eq!(pair_work, 130_176);
     assert!(pair_work > MAX_PALETTE_RESOLUTION_WORK_UNITS);
     assert!(pair_work <= MAX_PALETTE_PAIR_RESOLUTION_WORK_UNITS);
 
@@ -630,10 +615,7 @@ fn two_color_fit_reconstructs_both_polarities_with_candidate_specific_colors() {
             background.blue() + (foreground.blue() - background.blue()) * mask,
         )
     });
-    let original = palette(
-        PaletteDefinition::Original,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let original = palette(PaletteDefinition::Original, PaletteDistanceSpace::LinearRgb);
     let cancellation = CancellationToken::new();
     let fit = fit_color_patch(
         &target,
@@ -645,9 +627,17 @@ fn two_color_fit_reconstructs_both_polarities_with_candidate_specific_colors() {
     )
     .expect("full rank mask has a finite joint fit");
     close(fit.foreground().color().red(), foreground.red(), 1.0e-10);
-    close(fit.foreground().color().green(), foreground.green(), 1.0e-10);
+    close(
+        fit.foreground().color().green(),
+        foreground.green(),
+        1.0e-10,
+    );
     close(fit.background().color().red(), background.red(), 1.0e-10);
-    close(fit.background().color().green(), background.green(), 1.0e-10);
+    close(
+        fit.background().color().green(),
+        background.green(),
+        1.0e-10,
+    );
     assert!(fit.mean_squared_error() < 1.0e-20);
 
     let light_on_dark = [LinearRgb::BLACK, LinearRgb::WHITE];
@@ -684,10 +674,7 @@ fn fixed_background_fit_clamps_and_preserves_the_requested_background() {
     let background = color(0.2, 0.2, 0.2);
     let target = [color(0.0, 0.0, 0.0), color(0.9, 0.6, 0.3)];
     let coverage = [0, 255];
-    let original = palette(
-        PaletteDefinition::Original,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let original = palette(PaletteDefinition::Original, PaletteDistanceSpace::LinearRgb);
     let cancellation = CancellationToken::new();
     let fit = fit_color_patch(
         &target,
@@ -699,7 +686,9 @@ fn fixed_background_fit_clamps_and_preserves_the_requested_background() {
     )
     .expect("fixed-background fit is bounded");
     assert_eq!(fit.background().color(), background);
-    assert_eq!(fit.foreground().color(), color(0.9, 0.6, 0.3));
+    close(fit.foreground().color().red(), 0.9, 1.0e-12);
+    close(fit.foreground().color().green(), 0.6, 1.0e-12);
+    close(fit.foreground().color().blue(), 0.3, 1.0e-12);
     assert!(fit.mean_squared_error() >= 0.0);
     let barely_inked = fit_color_patch(
         &[LinearRgb::WHITE],
@@ -716,16 +705,12 @@ fn fixed_background_fit_clamps_and_preserves_the_requested_background() {
         (254.0_f64 / 255.0).powi(2),
         1.0e-12,
     );
-
 }
 
 #[test]
 fn zero_full_constant_and_near_degenerate_masks_are_finite_and_repeatable() {
     let target = [color(0.1, 0.4, 0.8), color(0.9, 0.6, 0.2)];
-    let original = palette(
-        PaletteDefinition::Original,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let original = palette(PaletteDefinition::Original, PaletteDistanceSpace::LinearRgb);
     let cancellation = CancellationToken::new();
 
     for mask in [[0, 0], [255, 255], [128, 128]] {
@@ -838,16 +823,9 @@ fn gradient_fit_returns_colors_on_the_gradient_and_budget_preflight_is_explicit(
     assert!(fit.background().gradient_position().is_some());
     assert!(fit.mean_squared_error().is_finite());
 
-    let ansi256 = palette(
-        PaletteDefinition::Ansi256,
-        PaletteDistanceSpace::LinearRgb,
-    );
-    let estimate = estimate_color_fit_work(
-        2,
-        &ansi256,
-        ColorFitStrategy::TwoColorLeastSquares,
-    )
-    .expect("checked work estimate");
+    let ansi256 = palette(PaletteDefinition::Ansi256, PaletteDistanceSpace::LinearRgb);
+    let estimate = estimate_color_fit_work(2, &ansi256, ColorFitStrategy::TwoColorLeastSquares)
+        .expect("checked work estimate");
     assert_eq!(estimate, 65_537 * 6);
     let error = fit_color_patch(
         &target,
@@ -866,10 +844,7 @@ fn gradient_fit_returns_colors_on_the_gradient_and_budget_preflight_is_explicit(
 
 #[test]
 fn invalid_color_fit_patch_is_rejected_before_work() {
-    let original = palette(
-        PaletteDefinition::Original,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let original = palette(PaletteDefinition::Original, PaletteDistanceSpace::LinearRgb);
     let cancellation = CancellationToken::new();
     assert_eq!(
         fit_color_patch(
@@ -958,7 +933,10 @@ fn assert_palette_member(
             let distance = (decoded.red() - resolved.color().red()).powi(2)
                 + (decoded.green() - resolved.color().green()).powi(2)
                 + (decoded.blue() - resolved.color().blue()).powi(2);
-            assert!(distance <= 0.0001, "frame color is off the gradient: {distance}");
+            assert!(
+                distance <= 0.0001,
+                "frame color is off the gradient: {distance}"
+            );
         }
         PaletteKind::Original | PaletteKind::Monochrome => {
             panic!("explicit mode does not use nearest-color validation")
@@ -970,26 +948,20 @@ fn assert_palette_member(
 fn reconstruction_candidate_scoring_uses_each_color_solution_in_conversion() {
     let table = conversion_table();
     let mut pixels = Vec::new();
-    let color_pattern = [
-        [8, 24, 48],
-        [220, 184, 88],
-        [36, 172, 204],
-        [180, 52, 128],
-    ];
+    let color_pattern = [[8, 24, 48], [220, 184, 88], [36, 172, 204], [180, 52, 128]];
     for y in 0..12 {
         for x in 0..8 {
             let channels = color_pattern[(x + 3 * y) % color_pattern.len()];
             pixels.extend_from_slice(&channels);
         }
     }
-    let target: Vec<_> = pixels
-        .chunks_exact(3)
+    let (rgb_samples, remainder) = pixels.as_chunks::<3>();
+    assert!(remainder.is_empty());
+    let target: Vec<_> = rgb_samples
+        .iter()
         .map(|sample| encoded_color(sample[0], sample[1], sample[2]))
         .collect();
-    let original = palette(
-        PaletteDefinition::Original,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let original = palette(PaletteDefinition::Original, PaletteDistanceSpace::LinearRgb);
     let cancellation = CancellationToken::new();
     let strategy = ColorFitStrategy::TwoColorLeastSquares;
     let conversion_budget = budget(LARGE_BUDGET);
@@ -1013,9 +985,7 @@ fn reconstruction_candidate_scoring_uses_each_color_solution_in_conversion() {
             &cancellation,
         )
         .expect("every candidate receives its own bounded fit");
-        if expected.is_none_or(|(_, best)| {
-            fit.mean_squared_error() < best.mean_squared_error()
-        }) {
+        if expected.is_none_or(|(_, best)| fit.mean_squared_error() < best.mean_squared_error()) {
             expected = Some((position, fit));
         }
     }
@@ -1041,10 +1011,7 @@ fn original_mode_preserves_distinct_colors_for_each_converted_cell() {
             pixels.extend_from_slice(if x < 8 { &left } else { &right });
         }
     }
-    let original = palette(
-        PaletteDefinition::Original,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let original = palette(PaletteDefinition::Original, PaletteDistanceSpace::LinearRgb);
     let cancellation = CancellationToken::new();
     let settings = conversion_settings(
         &table,
@@ -1070,8 +1037,14 @@ fn original_mode_preserves_distinct_colors_for_each_converted_cell() {
     );
     assert_eq!(converted.terminal_appearance_notice(), None);
     for (cell, expected) in converted.frame().cells().iter().zip([left, right]) {
-        assert_eq!(cell.fg_srgba8(), [expected[0], expected[1], expected[2], u8::MAX]);
-        assert_eq!(cell.bg_srgba8(), [expected[0], expected[1], expected[2], u8::MAX]);
+        assert_eq!(
+            cell.fg_srgba8(),
+            [expected[0], expected[1], expected[2], u8::MAX]
+        );
+        assert_eq!(
+            cell.bg_srgba8(),
+            [expected[0], expected[1], expected[2], u8::MAX]
+        );
     }
 }
 
@@ -1096,10 +1069,7 @@ fn palette_modes_convert_to_explicit_resolved_colors_and_notice_ansi() {
         GradientStop::new(0.5, color(0.2, 0.65, 0.8)).expect("valid middle stop"),
         GradientStop::new(1.0, LinearRgb::WHITE).expect("valid last endpoint"),
     ];
-    let original = palette(
-        PaletteDefinition::Original,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let original = palette(PaletteDefinition::Original, PaletteDistanceSpace::LinearRgb);
     let mono_foreground = color(0.9, 0.15, 0.1);
     let mono_background = color(0.1, 0.2, 0.9);
     let monochrome = palette(
@@ -1113,33 +1083,19 @@ fn palette_modes_convert_to_explicit_resolved_colors_and_notice_ansi() {
         PaletteDefinition::Fixed(&fixed_colors),
         PaletteDistanceSpace::LinearRgb,
     );
-    let ansi16 = palette(
-        PaletteDefinition::Ansi16,
-        PaletteDistanceSpace::LinearRgb,
-    );
-    let ansi256 = palette(
-        PaletteDefinition::Ansi256,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let ansi16 = palette(PaletteDefinition::Ansi16, PaletteDistanceSpace::LinearRgb);
+    let ansi256 = palette(PaletteDefinition::Ansi256, PaletteDistanceSpace::LinearRgb);
     let gradient = palette(
         PaletteDefinition::Gradient(&gradient_stops),
         PaletteDistanceSpace::LinearRgb,
     );
-    let modes = [
-        &original,
-        &monochrome,
-        &fixed,
-        &ansi16,
-        &ansi256,
-        &gradient,
-    ];
+    let modes = [&original, &monochrome, &fixed, &ansi16, &ansi256, &gradient];
     let cancellation = CancellationToken::new();
     let conversion_budget = budget(LARGE_BUDGET);
     let strategy = ColorFitStrategy::FixedBackground(LinearRgb::BLACK);
 
     for palette in modes {
-        let settings =
-            conversion_settings(&table, &cancellation, palette, strategy, 8, 12);
+        let settings = conversion_settings(&table, &cancellation, palette, strategy, 8, 12);
         let converted = convert_density_detailed(
             rgb_raster(&pixels, 8, 12),
             &table,
@@ -1167,13 +1123,21 @@ fn palette_modes_convert_to_explicit_resolved_colors_and_notice_ansi() {
             PaletteKind::Fixed | PaletteKind::Ansi16 | PaletteKind::Ansi256 => {
                 assert_palette_member(
                     palette,
-                    [cell.fg_srgba8()[0], cell.fg_srgba8()[1], cell.fg_srgba8()[2]],
+                    [
+                        cell.fg_srgba8()[0],
+                        cell.fg_srgba8()[1],
+                        cell.fg_srgba8()[2],
+                    ],
                     &conversion_budget,
                     &cancellation,
                 );
                 assert_palette_member(
                     palette,
-                    [cell.bg_srgba8()[0], cell.bg_srgba8()[1], cell.bg_srgba8()[2]],
+                    [
+                        cell.bg_srgba8()[0],
+                        cell.bg_srgba8()[1],
+                        cell.bg_srgba8()[2],
+                    ],
                     &conversion_budget,
                     &cancellation,
                 );
@@ -1181,13 +1145,21 @@ fn palette_modes_convert_to_explicit_resolved_colors_and_notice_ansi() {
             PaletteKind::Gradient => {
                 assert_palette_member(
                     palette,
-                    [cell.fg_srgba8()[0], cell.fg_srgba8()[1], cell.fg_srgba8()[2]],
+                    [
+                        cell.fg_srgba8()[0],
+                        cell.fg_srgba8()[1],
+                        cell.fg_srgba8()[2],
+                    ],
                     &conversion_budget,
                     &cancellation,
                 );
                 assert_palette_member(
                     palette,
-                    [cell.bg_srgba8()[0], cell.bg_srgba8()[1], cell.bg_srgba8()[2]],
+                    [
+                        cell.bg_srgba8()[0],
+                        cell.bg_srgba8()[1],
+                        cell.bg_srgba8()[2],
+                    ],
                     &conversion_budget,
                     &cancellation,
                 );
@@ -1206,10 +1178,7 @@ fn palette_modes_convert_to_explicit_resolved_colors_and_notice_ansi() {
 fn validation_preflights_candidate_work_and_cancellation_publishes_no_frame() {
     let table = conversion_table();
     let pixels = [96, 144, 220].repeat(8 * 12);
-    let ansi256 = palette(
-        PaletteDefinition::Ansi256,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let ansi256 = palette(PaletteDefinition::Ansi256, PaletteDistanceSpace::LinearRgb);
     let cancellation = CancellationToken::new();
     let expensive_settings = conversion_settings(
         &table,
@@ -1228,15 +1197,10 @@ fn validation_preflights_candidate_work_and_cancellation_publishes_no_frame() {
             &small_work_budget,
         )
         .expect_err("all candidate fit work is preflighted before publishing a frame"),
-        ascii_convert::DensityConversionError::Core(Error::BudgetExceeded(
-            BudgetKind::WorkUnits
-        ))
+        ascii_convert::DensityConversionError::Core(Error::BudgetExceeded(BudgetKind::WorkUnits))
     );
 
-    let original = palette(
-        PaletteDefinition::Original,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let original = palette(PaletteDefinition::Original, PaletteDistanceSpace::LinearRgb);
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     let cancelled_settings = conversion_settings(
@@ -1367,10 +1331,7 @@ fn gradient_pair_fit_matches_dense_objective_reference_for_synthetic_patches() {
             for background_step in 0..=64 {
                 let background = gradient_color_at(start, end, f64::from(background_step) / 64.0);
                 dense_reference = dense_reference.min(reference_mean_squared_error(
-                    &target,
-                    &coverage,
-                    foreground,
-                    background,
+                    &target, &coverage, foreground, background,
                 ));
             }
         }
@@ -1385,8 +1346,7 @@ fn gradient_pair_fit_matches_dense_objective_reference_for_synthetic_patches() {
 fn synthetic_color_fit_fixture_configuration_hash_is_stable() {
     let configuration_hash: [u8; 32] =
         Sha256::digest(SYNTHETIC_COLOR_FIT_CONFIGURATION.as_bytes()).into();
-    let fixture_hash: [u8; 32] =
-        Sha256::digest(include_bytes!("support/synthetic_font.rs")).into();
+    let fixture_hash: [u8; 32] = Sha256::digest(include_bytes!("support/synthetic_font.rs")).into();
     assert_eq!(
         configuration_hash,
         [
@@ -1415,10 +1375,7 @@ fn validation_cancellation_during_candidate_search_publishes_no_partial_frame() 
         &CancellationToken::new(),
     )
     .expect("larger synthetic glyph table builds");
-    let palette = palette(
-        PaletteDefinition::Ansi256,
-        PaletteDistanceSpace::LinearRgb,
-    );
+    let palette = palette(PaletteDefinition::Ansi256, PaletteDistanceSpace::LinearRgb);
     let cancellation = std::sync::Arc::new(CancellationToken::new());
     let settings = ConversionSettings::new(
         GridSizing::fixed_pixel_surface(16, 18),
@@ -1437,15 +1394,12 @@ fn validation_cancellation_during_candidate_search_publishes_no_partial_frame() 
         cancellation_signal.cancel();
     });
 
-    let result = convert_density_detailed(
-        rgb_raster(&pixels, 16, 18),
-        &table,
-        &settings,
-        &budget,
-    );
-    canceller.join().expect("cancellation request thread succeeds");
+    let result = convert_density_detailed(rgb_raster(&pixels, 16, 18), &table, &settings, &budget);
+    canceller
+        .join()
+        .expect("cancellation request thread succeeds");
     assert_eq!(
         result.expect_err("in-flight cancellation publishes no partial frame"),
-        ascii_convert::DensityConversionError::Core(Error::Cancelled)
+        ascii_convert::DensityConversionError::ColorFit(ColorFitError::Core(Error::Cancelled,))
     );
 }

@@ -21,18 +21,14 @@ pub const MAX_GRADIENT_STOPS: usize = 128;
 /// Hard ceiling on channel-distance work units in a single palette resolution.
 pub const MAX_PALETTE_RESOLUTION_WORK_UNITS: u64 = 65_536;
 /// Hard ceiling on channel-distance work units for resolving both colors in one pair.
-pub const MAX_PALETTE_PAIR_RESOLUTION_WORK_UNITS: u64 =
-    2 * MAX_PALETTE_RESOLUTION_WORK_UNITS;
+pub const MAX_PALETTE_PAIR_RESOLUTION_WORK_UNITS: u64 = 2 * MAX_PALETTE_RESOLUTION_WORK_UNITS;
 // Engineering margin to reduce lower-bound overestimation from floating-point rounding.
 const ENCODED_GRADIENT_BOUND_ROUNDING_GUARD: f64 = 1.0e-14;
 const ENCODED_GRADIENT_DISTANCE_TOLERANCE: f64 = 1.0e-6;
-const ENCODED_GRADIENT_SEARCH_TOLERANCE: f64 =
-    ENCODED_GRADIENT_DISTANCE_TOLERANCE * 0.5;
-const ENCODED_GRADIENT_SEGMENT_TIE_TOLERANCE: f64 =
-    ENCODED_GRADIENT_DISTANCE_TOLERANCE * 0.5;
-const ENCODED_GRADIENT_MAX_SUBDIVISIONS: usize = 56;
-const ENCODED_GRADIENT_MAX_COMPARISONS: u64 =
-    3 + 3 * ENCODED_GRADIENT_MAX_SUBDIVISIONS as u64;
+const ENCODED_GRADIENT_SEARCH_TOLERANCE: f64 = ENCODED_GRADIENT_DISTANCE_TOLERANCE * 0.5;
+const ENCODED_GRADIENT_SEGMENT_TIE_TOLERANCE: f64 = ENCODED_GRADIENT_DISTANCE_TOLERANCE * 0.5;
+const ENCODED_GRADIENT_MAX_SUBDIVISIONS: usize = 4_096;
+const ENCODED_GRADIENT_INITIAL_SAMPLES: u32 = 256;
 
 /// The metric used to compare a requested color with palette colors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -263,11 +259,7 @@ impl Palette {
                 if stops.len() < 2 || stops.len() > MAX_GRADIENT_STOPS {
                     return Err(PaletteError::InvalidDefinition);
                 }
-                validate_storage(
-                    stops.len(),
-                    core::mem::size_of::<GradientStop>(),
-                    budget,
-                )?;
+                validate_storage(stops.len(), core::mem::size_of::<GradientStop>(), budget)?;
                 if stops.first().map(|stop| stop.position) != Some(0.0)
                     || stops.last().map(|stop| stop.position) != Some(1.0)
                 {
@@ -433,11 +425,18 @@ impl Palette {
             PaletteStorage::Ansi16 => 16,
             PaletteStorage::Ansi256 => 256,
             PaletteStorage::Gradient(stops) => {
+                let segment_count = stops.len().saturating_sub(1);
                 let comparisons_per_segment = match self.distance_space {
                     PaletteDistanceSpace::LinearRgb => 1,
-                    PaletteDistanceSpace::EncodedSrgb => ENCODED_GRADIENT_MAX_COMPARISONS,
+                    PaletteDistanceSpace::EncodedSrgb => {
+                        let (initial_samples, subdivisions) =
+                            encoded_gradient_search_limits(segment_count);
+                        3 + 3
+                            * (u64::from(initial_samples)
+                                + u64::try_from(subdivisions).unwrap_or(u64::MAX))
+                    }
                 };
-                u64::try_from(stops.len().saturating_sub(1))
+                u64::try_from(segment_count)
                     .unwrap_or(u64::MAX)
                     .saturating_mul(comparisons_per_segment)
             }
@@ -484,8 +483,10 @@ impl Palette {
                 foreground,
                 background,
             } => {
-                let foreground_distance = color_distance(requested, *foreground, self.distance_space);
-                let background_distance = color_distance(requested, *background, self.distance_space);
+                let foreground_distance =
+                    color_distance(requested, *foreground, self.distance_space);
+                let background_distance =
+                    color_distance(requested, *background, self.distance_space);
                 if foreground_distance <= background_distance {
                     Ok(PaletteColor {
                         color: *foreground,
@@ -544,6 +545,12 @@ impl Palette {
             }
             PaletteStorage::Gradient(stops) => {
                 let mut best: Option<(usize, f64, f64, LinearRgb)> = None;
+                let (initial_samples, max_subdivisions) =
+                    if self.distance_space == PaletteDistanceSpace::EncodedSrgb {
+                        encoded_gradient_search_limits(stops.len() - 1)
+                    } else {
+                        (0, 0)
+                    };
                 for segment in 0..stops.len() - 1 {
                     if cancellation.is_cancelled() {
                         return Err(Error::Cancelled.into());
@@ -554,16 +561,16 @@ impl Palette {
                         stops[segment + 1],
                         self.distance_space,
                         cancellation,
+                        initial_samples,
+                        max_subdivisions,
                     )?;
-                    let replace = best.is_none_or(|(_, best_distance, _, _)| {
-                        match self.distance_space {
+                    let replace =
+                        best.is_none_or(|(_, best_distance, _, _)| match self.distance_space {
                             PaletteDistanceSpace::LinearRgb => distance < best_distance,
                             PaletteDistanceSpace::EncodedSrgb => {
-                                distance + ENCODED_GRADIENT_SEGMENT_TIE_TOLERANCE
-                                    < best_distance
+                                distance + ENCODED_GRADIENT_SEGMENT_TIE_TOLERANCE < best_distance
                             }
-                        }
-                    });
+                        });
                     if replace {
                         let position = stops[segment].position
                             + (stops[segment + 1].position - stops[segment].position) * parameter;
@@ -603,13 +610,6 @@ impl Palette {
         }
     }
 
-    pub(crate) fn gradient_stops(&self) -> Option<&[GradientStop]> {
-        match &self.storage {
-            PaletteStorage::Gradient(stops) => Some(stops),
-            _ => None,
-        }
-    }
-
     pub(crate) fn monochrome_pair(&self) -> Option<(LinearRgb, LinearRgb)> {
         match &self.storage {
             PaletteStorage::Monochrome {
@@ -622,10 +622,6 @@ impl Palette {
 
     pub(crate) fn is_original(&self) -> bool {
         matches!(&self.storage, PaletteStorage::Original)
-    }
-
-    pub(crate) fn distance(&self, left: LinearRgb, right: LinearRgb) -> f64 {
-        color_distance(left, right, self.distance_space)
     }
 }
 
@@ -684,7 +680,12 @@ fn check_work(
     budget: &Budget,
     cancellation: &CancellationToken,
 ) -> Result<(), PaletteError> {
-    check_work_limit(work, budget, cancellation, MAX_PALETTE_RESOLUTION_WORK_UNITS)
+    check_work_limit(
+        work,
+        budget,
+        cancellation,
+        MAX_PALETTE_RESOLUTION_WORK_UNITS,
+    )
 }
 
 fn check_pair_work(
@@ -718,9 +719,7 @@ fn check_work_limit(
 fn color_distance(left: LinearRgb, right: LinearRgb, space: PaletteDistanceSpace) -> f64 {
     let left = coordinates(left, space);
     let right = coordinates(right, space);
-    (left[0] - right[0]).powi(2)
-        + (left[1] - right[1]).powi(2)
-        + (left[2] - right[2]).powi(2)
+    (left[0] - right[0]).powi(2) + (left[1] - right[1]).powi(2) + (left[2] - right[2]).powi(2)
 }
 
 fn coordinates(color: LinearRgb, space: PaletteDistanceSpace) -> [f64; 3] {
@@ -733,20 +732,32 @@ fn coordinates(color: LinearRgb, space: PaletteDistanceSpace) -> [f64; 3] {
     }
 }
 
+fn encoded_gradient_search_limits(segment_count: usize) -> (u32, usize) {
+    let segment_count = u64::try_from(segment_count).unwrap_or(u64::MAX);
+    if segment_count == 0 {
+        return (0, 0);
+    }
+    let comparisons_per_segment = MAX_PALETTE_RESOLUTION_WORK_UNITS / segment_count / 3;
+    let available_subdivisions = comparisons_per_segment.saturating_sub(3) / 3;
+    let initial_samples = u32::try_from(available_subdivisions / 2)
+        .unwrap_or(u32::MAX)
+        .min(ENCODED_GRADIENT_INITIAL_SAMPLES);
+    let subdivisions = usize::try_from(available_subdivisions - u64::from(initial_samples))
+        .unwrap_or(usize::MAX)
+        .min(ENCODED_GRADIENT_MAX_SUBDIVISIONS);
+    (initial_samples, subdivisions)
+}
+
 #[derive(Clone, Copy)]
 struct EncodedGradientInterval {
     start: f64,
     end: f64,
-    start_color: LinearRgb,
-    end_color: LinearRgb,
     lower_bound: f64,
 }
 
 const EMPTY_ENCODED_GRADIENT_INTERVAL: EncodedGradientInterval = EncodedGradientInterval {
     start: 0.0,
     end: 0.0,
-    start_color: LinearRgb::BLACK,
-    end_color: LinearRgb::BLACK,
     lower_bound: 0.0,
 };
 
@@ -756,6 +767,8 @@ fn closest_gradient_segment(
     second: GradientStop,
     space: PaletteDistanceSpace,
     cancellation: &CancellationToken,
+    initial_samples: u32,
+    max_subdivisions: usize,
 ) -> Result<(f64, LinearRgb, f64), PaletteError> {
     if cancellation.is_cancelled() {
         return Err(Error::Cancelled.into());
@@ -780,11 +793,7 @@ fn closest_gradient_segment(
         }
         .clamp(0.0, 1.0);
         let (color, _) = gradient_color(first, second, parameter)?;
-        return Ok((
-            parameter,
-            color,
-            color_distance(requested, color, space),
-        ));
+        return Ok((parameter, color, color_distance(requested, color, space)));
     }
 
     if let Some((parameter, color)) = exact_gradient_match(requested, first, second)? {
@@ -798,15 +807,24 @@ fn closest_gradient_segment(
         best = (1.0, second.color, final_distance);
     }
 
+    for sample_index in 1..=initial_samples {
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled.into());
+        }
+        let parameter = f64::from(sample_index) / (f64::from(initial_samples) + 1.0);
+        let (color, _) = gradient_color(first, second, parameter)?;
+        let distance = encoded_distance(target, color);
+        if distance < best.2 || (distance == best.2 && parameter < best.0) {
+            best = (parameter, color, distance);
+        }
+    }
+
     let root = EncodedGradientInterval {
         start: 0.0,
         end: 1.0,
-        start_color: first.color,
-        end_color: second.color,
         lower_bound: encoded_interval_lower_bound(target, first.color, second.color),
     };
-    let mut intervals =
-        [EMPTY_ENCODED_GRADIENT_INTERVAL; ENCODED_GRADIENT_MAX_SUBDIVISIONS + 1];
+    let mut intervals = [EMPTY_ENCODED_GRADIENT_INTERVAL; ENCODED_GRADIENT_MAX_SUBDIVISIONS + 1];
     let mut interval_count = 0;
     if root.lower_bound < best.2 - ENCODED_GRADIENT_SEARCH_TOLERANCE {
         push_encoded_interval(&mut intervals, &mut interval_count, root)?;
@@ -820,10 +838,12 @@ fn closest_gradient_segment(
         if interval.lower_bound >= best.2 - ENCODED_GRADIENT_SEARCH_TOLERANCE {
             break;
         }
-        if subdivisions == ENCODED_GRADIENT_MAX_SUBDIVISIONS {
+        if subdivisions == max_subdivisions {
             return Err(Error::BudgetExceeded(BudgetKind::WorkUnits).into());
         }
 
+        let (start_color, _) = gradient_color(first, second, interval.start)?;
+        let (end_color, _) = gradient_color(first, second, interval.end)?;
         let midpoint = (interval.start + interval.end) * 0.5;
         let (color, _) = gradient_color(first, second, midpoint)?;
         let distance = encoded_distance(target, color);
@@ -834,16 +854,12 @@ fn closest_gradient_segment(
         let left = EncodedGradientInterval {
             start: interval.start,
             end: midpoint,
-            start_color: interval.start_color,
-            end_color: color,
-            lower_bound: encoded_interval_lower_bound(target, interval.start_color, color),
+            lower_bound: encoded_interval_lower_bound(target, start_color, color),
         };
         let right = EncodedGradientInterval {
             start: midpoint,
             end: interval.end,
-            start_color: color,
-            end_color: interval.end_color,
-            lower_bound: encoded_interval_lower_bound(target, color, interval.end_color),
+            lower_bound: encoded_interval_lower_bound(target, color, end_color),
         };
         for child in [left, right] {
             if child.lower_bound < best.2 - ENCODED_GRADIENT_SEARCH_TOLERANCE {
@@ -892,20 +908,17 @@ fn exact_gradient_match(
 }
 
 fn encoded_distance(target: [f64; 3], color: LinearRgb) -> f64 {
-    squared_distance(target, coordinates(color, PaletteDistanceSpace::EncodedSrgb))
+    squared_distance(
+        target,
+        coordinates(color, PaletteDistanceSpace::EncodedSrgb),
+    )
 }
 
 fn squared_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
-    (left[0] - right[0]).powi(2)
-        + (left[1] - right[1]).powi(2)
-        + (left[2] - right[2]).powi(2)
+    (left[0] - right[0]).powi(2) + (left[1] - right[1]).powi(2) + (left[2] - right[2]).powi(2)
 }
 
-fn encoded_interval_lower_bound(
-    target: [f64; 3],
-    first: LinearRgb,
-    second: LinearRgb,
-) -> f64 {
+fn encoded_interval_lower_bound(target: [f64; 3], first: LinearRgb, second: LinearRgb) -> f64 {
     let first = coordinates(first, PaletteDistanceSpace::EncodedSrgb);
     let second = coordinates(second, PaletteDistanceSpace::EncodedSrgb);
     let mut lower_bound = 0.0;

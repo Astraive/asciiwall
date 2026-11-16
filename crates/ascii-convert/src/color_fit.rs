@@ -10,8 +10,8 @@ use ascii_core::{Budget, BudgetKind, CancellationToken, Error};
 
 use crate::color::LinearRgb;
 use crate::palette::{
-    GradientStop, Palette, PaletteColor, PaletteError, PaletteStorage, gradient_color, rgb_channels,
-    rgb_from_channels,
+    GradientStop, Palette, PaletteColor, PaletteError, PaletteStorage, gradient_color,
+    rgb_channels, rgb_from_channels,
 };
 
 /// Version of glyph color reconstruction and candidate-pair semantics.
@@ -121,10 +121,7 @@ pub fn fit_color_patch(
     if cancellation.is_cancelled() {
         return Err(Error::Cancelled.into());
     }
-    if target.is_empty()
-        || target.len() != coverage.len()
-        || target.len() > MAX_COLOR_FIT_SAMPLES
-    {
+    if target.is_empty() || target.len() != coverage.len() || target.len() > MAX_COLOR_FIT_SAMPLES {
         return Err(ColorFitError::InvalidPatch);
     }
 
@@ -143,37 +140,61 @@ pub fn fit_color_patch(
 
     let (foreground, background, score) = match (strategy, palette.storage()) {
         (ColorFitStrategy::FixedBackground(requested_background), PaletteStorage::Original) => {
-            let foreground = fit_fixed_background(target, coverage, requested_background, cancellation)?;
-            let score = mean_squared_error(target, coverage, foreground, requested_background, cancellation)?;
-            (PaletteColor::from_fit(foreground, None, None), PaletteColor::from_fit(requested_background, None, None), score)
+            let foreground =
+                fit_fixed_background(target, coverage, requested_background, cancellation)?;
+            let score = mean_squared_error(
+                target,
+                coverage,
+                foreground,
+                requested_background,
+                cancellation,
+            )?;
+            (
+                PaletteColor::from_fit(foreground, None, None),
+                PaletteColor::from_fit(requested_background, None, None),
+                score,
+            )
         }
         (ColorFitStrategy::TwoColorLeastSquares, PaletteStorage::Original) => {
-            let (foreground, background) = fit_two_color_least_squares(target, coverage, cancellation)?;
+            let (foreground, background) =
+                fit_two_color_least_squares(target, coverage, cancellation)?;
             let score = mean_squared_error(target, coverage, foreground, background, cancellation)?;
-            (PaletteColor::from_fit(foreground, None, None), PaletteColor::from_fit(background, None, None), score)
+            (
+                PaletteColor::from_fit(foreground, None, None),
+                PaletteColor::from_fit(background, None, None),
+                score,
+            )
         }
-        (ColorFitStrategy::FixedBackground(requested_background), PaletteStorage::Fixed(_) | PaletteStorage::Ansi16 | PaletteStorage::Ansi256) => {
+        (
+            ColorFitStrategy::FixedBackground(requested_background),
+            PaletteStorage::Fixed(_) | PaletteStorage::Ansi16 | PaletteStorage::Ansi256,
+        ) => {
             let background = palette.resolve_unbudgeted(requested_background, cancellation)?;
             fit_fixed_palette_foreground(target, coverage, palette, background, cancellation)?
         }
-        (ColorFitStrategy::TwoColorLeastSquares, PaletteStorage::Fixed(_) | PaletteStorage::Ansi16 | PaletteStorage::Ansi256) => {
-            fit_discrete_palette_pair(target, coverage, palette, cancellation)?
-        }
-        (ColorFitStrategy::FixedBackground(requested_background), PaletteStorage::Gradient(stops)) => {
+        (
+            ColorFitStrategy::TwoColorLeastSquares,
+            PaletteStorage::Fixed(_) | PaletteStorage::Ansi16 | PaletteStorage::Ansi256,
+        ) => fit_discrete_palette_pair(target, coverage, palette, cancellation)?,
+        (
+            ColorFitStrategy::FixedBackground(requested_background),
+            PaletteStorage::Gradient(stops),
+        ) => {
             let background = palette.resolve_unbudgeted(requested_background, cancellation)?;
             fit_gradient_foreground(target, coverage, stops, background, cancellation)?
         }
         (ColorFitStrategy::TwoColorLeastSquares, PaletteStorage::Gradient(stops)) => {
             fit_gradient_pair(target, coverage, stops, cancellation)?
         }
-        (_, PaletteStorage::Monochrome { foreground, background }) => {
-            let score = mean_squared_error(
-                target,
-                coverage,
-                *foreground,
-                *background,
-                cancellation,
-            )?;
+        (
+            _,
+            PaletteStorage::Monochrome {
+                foreground,
+                background,
+            },
+        ) => {
+            let score =
+                mean_squared_error(target, coverage, *foreground, *background, cancellation)?;
             (
                 PaletteColor::from_fit(*foreground, None, None),
                 PaletteColor::from_fit(*background, None, None),
@@ -231,8 +252,8 @@ fn estimate_work(
         (ColorFitStrategy::TwoColorLeastSquares, PaletteStorage::Ansi16) => 257,
         (ColorFitStrategy::TwoColorLeastSquares, PaletteStorage::Ansi256) => 65_537,
         (ColorFitStrategy::FixedBackground(_), PaletteStorage::Gradient(stops)) => {
-            let segments = u64::try_from(stops.len().saturating_sub(1))
-                .map_err(|_| Error::SizeOverflow)?;
+            let segments =
+                u64::try_from(stops.len().saturating_sub(1)).map_err(|_| Error::SizeOverflow)?;
             segments
                 .checked_mul(2)
                 .ok_or(Error::SizeOverflow)?
@@ -240,8 +261,8 @@ fn estimate_work(
                 .ok_or(Error::SizeOverflow)?
         }
         (ColorFitStrategy::TwoColorLeastSquares, PaletteStorage::Gradient(stops)) => {
-            let segments = u64::try_from(stops.len().saturating_sub(1))
-                .map_err(|_| Error::SizeOverflow)?;
+            let segments =
+                u64::try_from(stops.len().saturating_sub(1)).map_err(|_| Error::SizeOverflow)?;
             segments
                 .checked_mul(segments)
                 .and_then(|pairs| pairs.checked_mul(2))
@@ -349,9 +370,7 @@ fn fit_two_color_least_squares(
         let mut best: Option<(f64, f64, f64)> = None;
         let unconstrained_bg = (rhs_bg * c_sum - rhs_fg * cross_sum) / determinant;
         let unconstrained_fg = (rhs_fg * a_sum - rhs_bg * cross_sum) / determinant;
-        if (0.0..=1.0).contains(&unconstrained_bg)
-            && (0.0..=1.0).contains(&unconstrained_fg)
-        {
+        if (0.0..=1.0).contains(&unconstrained_bg) && (0.0..=1.0).contains(&unconstrained_fg) {
             consider_channel_pair(
                 unconstrained_fg,
                 unconstrained_bg,
@@ -437,7 +456,9 @@ fn fit_fixed_palette_foreground(
     background: PaletteColor,
     cancellation: &CancellationToken,
 ) -> Result<(PaletteColor, PaletteColor, f64), ColorFitError> {
-    let candidate_count = palette.candidate_count().ok_or(ColorFitError::InvalidPatch)?;
+    let candidate_count = palette
+        .candidate_count()
+        .ok_or(ColorFitError::InvalidPatch)?;
     let mut best: Option<(PaletteColor, f64)> = None;
     for candidate_index in 0..candidate_count {
         if candidate_index % 32 == 0 && cancellation.is_cancelled() {
@@ -467,7 +488,9 @@ fn fit_discrete_palette_pair(
     palette: &Palette,
     cancellation: &CancellationToken,
 ) -> Result<(PaletteColor, PaletteColor, f64), ColorFitError> {
-    let candidate_count = palette.candidate_count().ok_or(ColorFitError::InvalidPatch)?;
+    let candidate_count = palette
+        .candidate_count()
+        .ok_or(ColorFitError::InvalidPatch)?;
     let mut best: Option<(PaletteColor, PaletteColor, f64)> = None;
     let mut candidates_seen = 0_usize;
     for foreground_index in 0..candidate_count {
@@ -475,7 +498,7 @@ fn fit_discrete_palette_pair(
             .indexed_color(foreground_index)
             .ok_or(ColorFitError::InvalidPatch)?;
         for background_index in 0..candidate_count {
-            if candidates_seen % 32 == 0 && cancellation.is_cancelled() {
+            if candidates_seen.is_multiple_of(32) && cancellation.is_cancelled() {
                 return Err(Error::Cancelled.into());
             }
             candidates_seen += 1;
@@ -557,12 +580,15 @@ fn fit_gradient_pair(
     stops: &[GradientStop],
     cancellation: &CancellationToken,
 ) -> Result<(PaletteColor, PaletteColor, f64), ColorFitError> {
-    let segment_count = stops.len().checked_sub(1).ok_or(ColorFitError::InvalidPatch)?;
+    let segment_count = stops
+        .len()
+        .checked_sub(1)
+        .ok_or(ColorFitError::InvalidPatch)?;
     let mut best: Option<(PaletteColor, PaletteColor, f64)> = None;
     let mut pairs_seen = 0_usize;
     for foreground_segment in 0..segment_count {
         for background_segment in 0..segment_count {
-            if pairs_seen % 8 == 0 && cancellation.is_cancelled() {
+            if pairs_seen.is_multiple_of(8) && cancellation.is_cancelled() {
                 return Err(Error::Cancelled.into());
             }
             pairs_seen += 1;
@@ -632,16 +658,10 @@ fn fit_gradient_segment_pair(
         rhs_b,
         residual_square,
     )?;
-    let (foreground, foreground_position) = gradient_color(
-        foreground_first,
-        foreground_last,
-        foreground_parameter,
-    )?;
-    let (background, background_position) = gradient_color(
-        background_first,
-        background_last,
-        background_parameter,
-    )?;
+    let (foreground, foreground_position) =
+        gradient_color(foreground_first, foreground_last, foreground_parameter)?;
+    let (background, background_position) =
+        gradient_color(background_first, background_last, background_parameter)?;
     let score = mean_squared_error(target, coverage, foreground, background, cancellation)?;
     Ok((
         PaletteColor::from_fit(foreground, None, Some(foreground_position)),
@@ -714,8 +734,7 @@ fn solve_bounded_pair(
             &mut best,
         );
     }
-    best
-        .map(|(foreground, background, _)| (foreground, background))
+    best.map(|(foreground, background, _)| (foreground, background))
         .ok_or(ColorFitError::InvalidPatch)
 }
 
@@ -756,8 +775,8 @@ fn mean_squared_error(
         let mask = f64::from(coverage[index]) / MASK_FULL_SCALE;
         let target = rgb_channels(target[index]);
         for channel in 0..3 {
-            let reconstructed = background[channel]
-                + (foreground[channel] - background[channel]) * mask;
+            let reconstructed =
+                background[channel] + (foreground[channel] - background[channel]) * mask;
             let difference = target[channel] - reconstructed;
             squared_error += difference * difference;
         }
@@ -777,7 +796,7 @@ fn check_cancel_periodically(
     sample_index: usize,
     cancellation: &CancellationToken,
 ) -> Result<(), ColorFitError> {
-    if sample_index % CANCELLATION_SAMPLE_INTERVAL == 0 && cancellation.is_cancelled() {
+    if sample_index.is_multiple_of(CANCELLATION_SAMPLE_INTERVAL) && cancellation.is_cancelled() {
         return Err(Error::Cancelled.into());
     }
     Ok(())

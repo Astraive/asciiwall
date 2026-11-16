@@ -668,14 +668,11 @@ impl SamplingPlan {
                     .checked_mul(u64::from(cell_width))
                     .and_then(|start| start.checked_add(u64::from(patch_x)))
                     .ok_or(Error::SizeOverflow)?;
-                if index.is_multiple_of(SAMPLER_CANCEL_INTERVAL)
-                    && cancellation.is_cancelled()
-                {
+                if index.is_multiple_of(SAMPLER_CANCEL_INTERVAL) && cancellation.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
                 let x0 = display_x + display_width * f64::from(patch_x) / f64::from(cell_width);
-                let x1 =
-                    display_x + display_width * f64::from(patch_x + 1) / f64::from(cell_width);
+                let x1 = display_x + display_width * f64::from(patch_x + 1) / f64::from(cell_width);
                 let y0 = display_y + display_height * f64::from(patch_y) / f64::from(cell_height);
                 let y1 =
                     display_y + display_height * f64::from(patch_y + 1) / f64::from(cell_height);
@@ -903,7 +900,7 @@ impl SamplingPlan {
                     }
                 }
                 let uncovered_area = (full_area - covered_area).max(0.0);
-                if let Some(output) = color_output.as_deref_mut() {
+                if let Some(output) = color_output {
                     let red = (weighted_red + background.red() * uncovered_area) / full_area;
                     let green = (weighted_green + background.green() * uncovered_area) / full_area;
                     let blue = (weighted_blue + background.blue() * uncovered_area) / full_area;
@@ -1093,12 +1090,8 @@ pub(crate) fn prepare_sampling(
         0
     } else {
         color_samples_per_cell
-            .checked_mul(
-                u64::try_from(size_of::<LinearRgb>()).map_err(|_| Error::SizeOverflow)?,
-            )
-            .and_then(|bytes| {
-                bytes.checked_add(u64::try_from(size_of::<Vec<LinearRgb>>()).ok()?)
-            })
+            .checked_mul(u64::try_from(size_of::<LinearRgb>()).map_err(|_| Error::SizeOverflow)?)
+            .and_then(|bytes| bytes.checked_add(u64::try_from(size_of::<Vec<LinearRgb>>()).ok()?))
             .ok_or(Error::SizeOverflow)?
     };
     let _color_buffer_layout =

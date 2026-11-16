@@ -95,9 +95,10 @@ between the best squared distance and the segment's global minimum. A later segm
 current one only when its candidate score is lower by more than `5e-7`; the returned color remains
 within `1e-6` of the global minimum, with exact ties retaining the earliest segment. Since `powf`
 has no portable error bound, the margin is an engineering guard, not a formal proof over exact real
-arithmetic. Each segment is limited to 56 subdivisions and 171 three-channel distance evaluations;
-failure to establish the tolerance returns a work-budget error. Fixed palette ties select the
-earliest palette entry.
+arithmetic. A one-segment search uses at most 256 deterministic interior samples and 4,096 branch
+subdivisions; allowances decrease with stop count to keep each palette resolution within 65,536
+channel-work units. Failure to establish the tolerance within that work limit returns a budget error.
+Fixed palette ties select the earliest palette entry.
 `Palette::cache_identity` covers the distance choice, definition contents, and palette algorithm
 version. Conversion/cache consumers also include `COLOR_FIT_ALGORITHM_VERSION` and the selected
 `ColorFitStrategy`, so a fitting-policy change cannot reuse colors from a different algorithm.
@@ -137,8 +138,10 @@ All output channels are finite and clamped to `[0,1]`. One fit accepts at most 6
 and 64,000,000 channel-work units; one palette resolution is capped at 65,536 channel-work units,
 and resolving a foreground/background pair is capped at 131,072. Resolution work charges three
 channel units per distance or interval-bound comparison: original uses 0, monochrome uses 6,
-fixed/ANSI modes use 3 per palette color, linear gradients use 3 per segment, and encoded gradients
-use at most 513 per segment (65,151 for the largest 128-stop gradient).
+fixed/ANSI modes use 3 per palette color, and linear gradients use 3 per segment. Encoded-sRGB
+gradients allocate at most 13,059 comparisons (39,177 channel units) for a single segment; the
+per-segment subdivision limit decreases with gradient size so a resolution stays under 65,536
+channel units (65,151 for 127 segments/128 stops).
 Use `estimate_color_fit_work` for every shortlisted glyph and checked-add estimates against the whole
 job budget before reranking multiple candidates.
 

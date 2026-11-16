@@ -658,7 +658,7 @@ pub fn convert_density_detailed(
                 let background_luminance = settings.background.luminance().value();
                 let target_coverage = ((target_luminance - background_luminance)
                     / (foreground_luminance - background_luminance))
-                .clamp(0.0, 1.0);
+                    .clamp(0.0, 1.0);
                 let glyph = best_glyph(glyph_records.iter(), target_coverage, || {
                     settings.cancellation.is_cancelled()
                 })?;
