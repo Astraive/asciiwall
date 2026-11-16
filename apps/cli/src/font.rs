@@ -125,6 +125,17 @@ pub fn load_glyph_table(
 ) -> Result<GlyphTable, FontLoadError> {
     check_cancelled(cancellation)?;
     let repertoire = GlyphRepertoire::new(charset).map_err(FontLoadError::Engine)?;
+    load_glyph_table_with_repertoire(path, &repertoire, config, budget, cancellation)
+}
+
+/// Loads a font using a repertoire that has already passed shared validation.
+pub fn load_glyph_table_with_repertoire(
+    path: &Path,
+    repertoire: &GlyphRepertoire,
+    config: &GlyphConfig,
+    budget: &Budget,
+    cancellation: &CancellationToken,
+) -> Result<GlyphTable, FontLoadError> {
     check_cancelled(cancellation)?;
     let path_metadata = fs::metadata(path).map_err(|error| io_or_cancel(error, cancellation))?;
     check_cancelled(cancellation)?;
@@ -190,7 +201,7 @@ pub fn load_glyph_table(
     if cancellation.is_cancelled() {
         return Err(FontLoadError::Engine(Error::Cancelled));
     }
-    build_glyph_table(&bytes, &repertoire, config, budget, cancellation)
+    build_glyph_table(&bytes, repertoire, config, budget, cancellation)
         .map_err(FontLoadError::Engine)
 }
 #[cfg(all(test, unix))]

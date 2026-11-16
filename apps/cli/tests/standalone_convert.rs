@@ -4,6 +4,19 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+#[allow(dead_code)]
+#[path = "../../../crates/ascii-convert/tests/support/synthetic_font.rs"]
+mod synthetic_font;
+
+// A generated 1×1 RGBA PNG fixture; no third-party image asset is used.
+const RIGHTS_CLEARED_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xff, 0xff, 0xff,
+    0x7f, 0x00, 0x09, 0xfb, 0x03, 0xfd, 0x2a, 0x86, 0xe3, 0x8a, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
 fn run<I, S>(args: I) -> Output
 where
     I: IntoIterator<Item = S>,
@@ -97,6 +110,24 @@ fn malformed_requests_return_usage_before_any_conversion() {
         }
     }
 }
+#[test]
+fn charset_validation_uses_the_shared_single_cell_repertoire() {
+    for charset in ["A", "░", "⣿"] {
+        let output = run([
+            "convert",
+            "input.png",
+            "--output",
+            "-",
+            "--charset",
+            charset,
+        ]);
+        assert_eq!(status(&output), 4, "charset: {charset}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("no built-in font"),
+            "charset: {charset}"
+        );
+    }
+}
 
 #[test]
 fn existing_spaced_paths_and_format_conflicts_never_modify_output() {
@@ -153,7 +184,7 @@ fn existing_spaced_paths_and_format_conflicts_never_modify_output() {
     assert_eq!(status(&output), 2);
     assert_eq!(fs::read(&destination).unwrap(), b"previous output");
 
-    // The missing backend is a capability failure, never a successful or partial overwrite.
+    // An explicit but missing font blocks conversion and cannot partially overwrite the target.
     let output = run([
         OsStr::new("convert"),
         input.as_os_str(),
@@ -163,7 +194,7 @@ fn existing_spaced_paths_and_format_conflicts_never_modify_output() {
         OsStr::new("font with spaces.ttf"),
         OsStr::new("--overwrite"),
     ]);
-    assert_eq!(status(&output), 4);
+    assert_eq!(status(&output), 8);
     assert_eq!(fs::read(&destination).unwrap(), b"previous output");
 }
 
@@ -189,23 +220,114 @@ fn unavailable_matcher_color_and_configuration_are_explicit() {
 
 #[test]
 fn missing_export_integration_is_not_reported_as_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("rights-cleared source image.png");
+    let font_path = dir.path().join("rights-cleared font.ttf");
+    fs::write(&source_path, RIGHTS_CLEARED_PNG).unwrap();
+    fs::write(&font_path, synthetic_font::synthetic_font(false)).unwrap();
+
     for format in ["txt", "ansi", "png"] {
         let output = run([
-            "--offline",
-            "--no-color",
-            "convert",
-            "source.png",
-            "--font",
-            "chosen.ttf",
-            "--format",
-            format,
-            "--output",
-            "-",
+            OsStr::new("--offline"),
+            OsStr::new("--no-color"),
+            OsStr::new("convert"),
+            source_path.as_os_str(),
+            OsStr::new("--font"),
+            font_path.as_os_str(),
+            OsStr::new("--charset"),
+            OsStr::new(" AB"),
+            OsStr::new("--format"),
+            OsStr::new(format),
+            OsStr::new("--output"),
+            OsStr::new("-"),
         ]);
         assert_eq!(status(&output), 4);
         assert!(output.stdout.is_empty());
-        assert!(!output.stderr.contains(&0x1b));
+        let message = String::from_utf8(output.stderr).unwrap();
+        if format == "png" {
+            assert!(message.contains("PNG still export"), "{message}");
+        } else {
+            assert!(
+                message.contains("image decoding and text/ANSI export"),
+                "{message}"
+            );
+        }
+        assert!(!message.contains(source_path.to_string_lossy().as_ref()));
+        assert!(!message.contains(font_path.to_string_lossy().as_ref()));
+        assert!(!message.contains('\x1b'));
+
+        let destination = dir
+            .path()
+            .join(format!("existing output with spaces.{format}"));
+        fs::write(&destination, b"previous output").unwrap();
+        let output = run([
+            OsStr::new("--offline"),
+            OsStr::new("convert"),
+            source_path.as_os_str(),
+            OsStr::new("--font"),
+            font_path.as_os_str(),
+            OsStr::new("--charset"),
+            OsStr::new(" AB"),
+            OsStr::new("--format"),
+            OsStr::new(format),
+            OsStr::new("--output"),
+            destination.as_os_str(),
+            OsStr::new("--overwrite"),
+        ]);
+        assert_eq!(status(&output), 4);
+        assert!(output.stdout.is_empty());
+        assert_eq!(fs::read(&destination).unwrap(), b"previous output");
     }
+}
+
+#[test]
+fn explicit_font_failures_block_conversion_without_disclosure_or_overwrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("private input.png");
+    let font_path = dir.path().join("private font.ttf");
+    let destination = dir.path().join("existing artwork.txt");
+    fs::write(&font_path, b"not a font").unwrap();
+    fs::write(&destination, b"previous output").unwrap();
+
+    let output = run([
+        OsStr::new("--json"),
+        OsStr::new("convert"),
+        input.as_os_str(),
+        OsStr::new("--font"),
+        font_path.as_os_str(),
+        OsStr::new("--output"),
+        destination.as_os_str(),
+        OsStr::new("--overwrite"),
+    ]);
+    assert_eq!(status(&output), 3);
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["command"], "convert");
+    assert_eq!(body["error"]["category"], "validation");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("font is invalid"));
+    assert!(!message.contains(input.to_string_lossy().as_ref()));
+    assert!(!message.contains(font_path.to_string_lossy().as_ref()));
+    assert_eq!(fs::read(&destination).unwrap(), b"previous output");
+
+    let missing_font = dir.path().join("missing private font.ttf");
+    let output = run([
+        OsStr::new("--json"),
+        OsStr::new("convert"),
+        input.as_os_str(),
+        OsStr::new("--font"),
+        missing_font.as_os_str(),
+        OsStr::new("--output"),
+        destination.as_os_str(),
+        OsStr::new("--overwrite"),
+    ]);
+    assert_eq!(status(&output), 8);
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["error"]["category"], "io");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("cannot read selected font input"));
+    assert!(!message.contains(input.to_string_lossy().as_ref()));
+    assert!(!message.contains(missing_font.to_string_lossy().as_ref()));
+    assert_eq!(fs::read(&destination).unwrap(), b"previous output");
 }
 
 #[test]
