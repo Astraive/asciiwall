@@ -74,6 +74,15 @@ The QA branch normally merged CNV-001 head `4ab4f7fd6aad5fbe0581347bf431be34bb60
 
 EC-004 remains not run because the checked-out code has no decoder-to-converter callsite; QA-004 #35 remains a hard dependency. These results do not claim QA-101 acceptance or native behavior.
 
+### Focused QA-101 binary evidence at current head (2026-11-16)
+
+- Exact tested commit: `dd378cc24e201dc7a91c7c9d9d109f950854908b`; source tree SHA-1: `2e4a846ba91b20d9418259c1a26e9f1cd7774e29`; QA test source SHA-256: `1b40a0fa11c534a1bef48945c36305e4898044500b319adfef3ce2ea9348fbf5`.
+- Generated `qa_101_input_conversion` test executable SHA-256: `6a41607adb68ff9f6206b32070630dc5c35918ea602998ff7d14a3de302ecc8e`.
+- Exact command: `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo test --locked -p ascii-convert --test qa_101_input_conversion -- --nocapture` — PASS, 4 passed, 0 failed.
+- Environment: Windows 11 Home Single Language, version `10.0.26300.9711`, build `26300`, x64; `x86_64-pc-windows-msvc`; `rustc 1.100.0 (0ef1bc386 2026-11-09)`, LLVM `23.1.5`; `cargo 1.100.0 (3acc79c0c 2026-11-05)`.
+
+This was one portable CPU-only test-binary run; no GPU, media permission, or native decoder behavior was exercised. EC-004 remains not run and QA-004 #35 remains a hard dependency; this evidence does not claim QA-101 acceptance.
+
 ## Glyphs and rendering
 
 | ID | Priority | Condition | Required outcome |
