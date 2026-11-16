@@ -94,12 +94,13 @@ impl SamplingRect {
     }
 
     fn edges_preserve_extent_within_f64_rounding(self) -> bool {
-        let width_error = ((self.right() - self.x) - self.width).abs();
-        let height_error = ((self.bottom() - self.y) - self.height).abs();
-        // Allow composed-operation noise, but reject cancellation that loses a meaningful extent.
-        let rounding_tolerance = 8.0 * f64::EPSILON;
-        width_error <= self.width * rounding_tolerance
-            && height_error <= self.height * rounding_tolerance
+        let right = self.right();
+        let bottom = self.bottom();
+        let width_error = ((right - self.x) - self.width).abs();
+        let height_error = ((bottom - self.y) - self.height).abs();
+        let width_tolerance = edge_rounding_tolerance(self.x, right, self.width);
+        let height_tolerance = edge_rounding_tolerance(self.y, bottom, self.height);
+        width_error <= width_tolerance && height_error <= height_tolerance
     }
 
     fn right(self) -> f64 {
@@ -109,6 +110,14 @@ impl SamplingRect {
     fn bottom(self) -> f64 {
         self.y + self.height
     }
+}
+
+// Account for precision at the coordinate origin, but cap tolerance at a safe fraction of extent.
+
+fn edge_rounding_tolerance(start: f64, end: f64, extent: f64) -> f64 {
+    const MAX_EXTENT_FRACTION: f64 = 0.125;
+    let local_precision = 8.0 * f64::EPSILON * start.abs().max(end.abs()).max(extent);
+    local_precision.min(extent * MAX_EXTENT_FRACTION)
 }
 
 /// A normalized source crop, expressed as left/top/right/bottom fractions in `[0, 1]`.
@@ -297,7 +306,8 @@ pub struct FitTransform {
 
 impl FitTransform {
     /// Builds the transform from source and destination pixel-edge extents.
-    /// Returns `SizeOverflow` when source or destination edge extents collapse beyond f64 rounding error.
+    /// Returns `SizeOverflow` when edge arithmetic loses an extent beyond
+    /// bounded local f64 rounding error.
     pub fn new(
         source_width: u32,
         source_height: u32,
