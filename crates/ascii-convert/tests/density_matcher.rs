@@ -408,6 +408,66 @@ fn pre_cancelled_no_patch_conversion_precedes_frame_budget() {
 }
 
 #[test]
+fn orientation_precedes_unsupported_sample_depth_through_both_apis() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    );
+    let channels = [PixelChannels::Gray, PixelChannels::Rgb, PixelChannels::Rgba];
+
+    for channels in channels {
+        let bottom_up = RasterFrameView::new(
+            1,
+            1,
+            0,
+            PixelFormat::new(channels, 16),
+            ColorDescription::srgb(AlphaMode::Opaque),
+            RasterOrientation::BottomUp,
+            &[],
+        );
+        assert_eq!(
+            convert_density_detailed(bottom_up, &table, &conversion_settings, &budget()),
+            Err(DensityConversionError::Core(Error::Unsupported(
+                ascii_core::UnsupportedReason::Orientation
+            )))
+        );
+        assert_eq!(
+            convert_density(bottom_up, &table, &conversion_settings, &budget()),
+            Err(Error::Unsupported(
+                ascii_core::UnsupportedReason::Orientation
+            ))
+        );
+
+        let top_down = RasterFrameView::new(
+            1,
+            1,
+            0,
+            PixelFormat::new(channels, 16),
+            ColorDescription::srgb(AlphaMode::Opaque),
+            RasterOrientation::TopDown,
+            &[],
+        );
+        assert_eq!(
+            convert_density_detailed(top_down, &table, &conversion_settings, &budget()),
+            Err(DensityConversionError::Core(Error::Unsupported(
+                ascii_core::UnsupportedReason::SampleDepth
+            )))
+        );
+        assert_eq!(
+            convert_density(top_down, &table, &conversion_settings, &budget()),
+            Err(Error::Unsupported(
+                ascii_core::UnsupportedReason::SampleDepth
+            ))
+        );
+    }
+}
+
+#[test]
 fn output_budgets_fail_before_publishing_a_frame() {
     let table = build_table();
     let source = [255];
