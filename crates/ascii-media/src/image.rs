@@ -16,7 +16,8 @@ use crate::resources::{DecodeResources, MemoryPermit};
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const INPUT_PREFIX_BYTES: usize = 12;
-const CODEC_READER_BUFFER_BYTES: usize = 8 * 1024;
+/// Maximum compressed bytes buffered between codec input cancellation checks.
+const CODEC_READER_BUFFER_BYTES: usize = 128;
 const PNG_FIXED_SCRATCH_BYTES: u64 = 128 * 1024;
 const JPEG_FIXED_SCRATCH_BYTES: u64 = 64 * 1024;
 const JPEG_EXIF_SCRATCH_BYTES: u64 = 64 * 1024;
@@ -73,9 +74,13 @@ impl DecodeLimits {
 /// Decodes an owned, size-bounded snapshot of a PNG or JPEG stream.
 ///
 /// PNG input is fully checked through its final IEND chunk and CRCs before publication. JPEG
-/// input is parsed through EOI, then decoded by the pure-Rust `zune-jpeg` backend with strict
-/// errors, bounded dimensions, a scan ceiling, and a cancellable buffered source. Both codecs
-/// receive preflighted scratch allowances; codec crate limits are additional defense in depth.
+/// input is parsed through EOI, then decoded by pure-Rust `zune-jpeg` with strict errors, bounded
+/// dimensions, and a scan ceiling.
+///
+/// During image-data decoding, cancellation is checked at compressed-input refills, with at most
+/// 128 compressed bytes buffered between checks. Work over already-buffered data is not
+/// preempted; cancellation is also checked after each codec call. Both codecs receive preflighted
+/// scratch allowances; codec crate limits are additional defense in depth.
 ///
 /// Output is top-down, tightly packed 8-bit RGB or straight-alpha RGBA. Untagged input is
 /// assumed sRGB. PNGs with `gAMA` or `cHRM` but no `sRGB` declaration, and embedded ICC profiles,
@@ -319,6 +324,20 @@ fn decode_png(
     limits: &DecodeLimits,
     cancel: &CancellationToken,
 ) -> Result<DecodedFrame, Error> {
+    decode_png_with_reader(
+        encoded,
+        limits,
+        cancel,
+        SnapshotReader::new(encoded, cancel),
+    )
+}
+
+fn decode_png_with_reader<R: Read + Seek>(
+    encoded: &[u8],
+    limits: &DecodeLimits,
+    cancel: &CancellationToken,
+    codec_source: R,
+) -> Result<DecodedFrame, Error> {
     let header = inspect_png(encoded, cancel)?;
     if let Some(reason) = header.unsupported {
         return Err(Error::Unsupported(reason));
@@ -340,8 +359,7 @@ fn decode_png(
         return Err(Error::Cancelled);
     }
 
-    let reader = SnapshotReader::new(encoded, cancel);
-    let buffered = BufReader::with_capacity(CODEC_READER_BUFFER_BYTES, reader);
+    let buffered = BufReader::with_capacity(CODEC_READER_BUFFER_BYTES, codec_source);
     let png_limits = png::Limits {
         bytes: usize::try_from(scratch_bytes).map_err(|_| Error::SizeOverflow)?,
     };
@@ -840,6 +858,20 @@ fn decode_jpeg(
     limits: &DecodeLimits,
     cancel: &CancellationToken,
 ) -> Result<DecodedFrame, Error> {
+    decode_jpeg_with_reader(
+        encoded,
+        limits,
+        cancel,
+        SnapshotReader::new(encoded, cancel),
+    )
+}
+
+fn decode_jpeg_with_reader<R: Read + Seek>(
+    encoded: &[u8],
+    limits: &DecodeLimits,
+    cancel: &CancellationToken,
+    codec_source: R,
+) -> Result<DecodedFrame, Error> {
     let header = inspect_jpeg(encoded, cancel)?;
     if let Some(reason) = header.unsupported {
         return Err(Error::Unsupported(reason));
@@ -887,8 +919,7 @@ fn decode_jpeg(
     if header.scan_count == 0 {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
-    let reader = SnapshotReader::new(encoded, cancel);
-    let buffered = BufReader::with_capacity(CODEC_READER_BUFFER_BYTES, reader);
+    let buffered = BufReader::with_capacity(CODEC_READER_BUFFER_BYTES, codec_source);
     let mut decoder = JpegDecoder::new_with_options(buffered, options);
     decoder
         .decode_headers()
@@ -1826,9 +1857,6 @@ fn check_cancel_periodically(cancel: &CancellationToken, offset: usize) -> Resul
 }
 
 fn map_png_error(error: png::DecodingError, cancel: &CancellationToken) -> Error {
-    if cancel.is_cancelled() {
-        return Error::Cancelled;
-    }
     match error {
         png::DecodingError::IoError(error) => map_io_error(error, cancel),
         png::DecodingError::LimitsExceeded => Error::BudgetExceeded(BudgetKind::RasterBytes),
@@ -1837,19 +1865,18 @@ fn map_png_error(error: png::DecodingError, cancel: &CancellationToken) -> Error
 }
 
 fn map_jpeg_error(error: DecodeErrors, cancel: &CancellationToken) -> Error {
-    if cancel.is_cancelled() {
-        return Error::Cancelled;
-    }
     match error {
         DecodeErrors::Unsupported(_) => Error::Unsupported(UnsupportedReason::UnsupportedFormat),
         DecodeErrors::LargeDimensions(_) => Error::BudgetExceeded(BudgetKind::WorkUnits),
-        DecodeErrors::IoErrors(_) => Error::Malformed(MalformedReason::InvalidEncodedData),
+        DecodeErrors::IoErrors(zune_core::bytestream::ZByteIoError::StdIoError(error)) => {
+            map_io_error(error, cancel)
+        }
         _ => Error::Malformed(MalformedReason::InvalidEncodedData),
     }
 }
 
 fn map_io_error(error: io::Error, cancel: &CancellationToken) -> Error {
-    if cancel.is_cancelled() {
+    if error.kind() == io::ErrorKind::Interrupted && cancel.is_cancelled() {
         return Error::Cancelled;
     }
     match error.kind() {
@@ -1869,6 +1896,314 @@ mod tests {
         assert_eq!(
             png_crc32(b"IHDR", &CancellationToken::new()).unwrap(),
             0xa8a1_ae0a
+        );
+    }
+}
+
+#[cfg(test)]
+mod codec_cancellation_tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    const WIDTH: u32 = 256;
+    const HEIGHT: u32 = 256;
+    const TEST_INPUT_CHUNK_BYTES: usize = CODEC_READER_BUFFER_BYTES;
+
+    // The same rights-cleared, 9x8 Adam7 fixture as the PNG integration matrix.
+    const ADAM7_RGBA_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x08, 0x08, 0x06, 0x00, 0x00, 0x01, 0x5c,
+        0xca, 0xe5, 0x23, 0x00, 0x00, 0x01, 0x2c, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x0d, 0xc7,
+        0x4b, 0x44, 0x84, 0x51, 0x18, 0x06, 0xe0, 0x97, 0x52, 0x52, 0xca, 0x3f, 0x44, 0x51, 0xe2,
+        0x54, 0xa4, 0x21, 0xa6, 0x3f, 0x52, 0x8b, 0x34, 0x1c, 0x4a, 0x74, 0x21, 0x5f, 0xad, 0x26,
+        0x51, 0x1d, 0x52, 0x44, 0x17, 0x87, 0x8a, 0x34, 0xc4, 0x24, 0x52, 0x44, 0x25, 0x26, 0xd1,
+        0x85, 0x8f, 0x49, 0x54, 0x9b, 0x2e, 0xa4, 0x21, 0xba, 0x90, 0x66, 0xd5, 0x50, 0x26, 0x91,
+        0x22, 0x26, 0x2d, 0x6a, 0x55, 0xbe, 0x7a, 0x76, 0x0f, 0xf0, 0xef, 0x2d, 0x2f, 0x04, 0x8c,
+        0x66, 0x69, 0xa0, 0x60, 0x52, 0x63, 0xe1, 0x3f, 0xa9, 0x4b, 0x37, 0x40, 0x6d, 0x9a, 0xe2,
+        0x5d, 0x8f, 0x61, 0x74, 0x04, 0x0d, 0x5f, 0xcd, 0x2b, 0x46, 0x76, 0x9d, 0x42, 0xa3, 0x06,
+        0x07, 0x9b, 0x0c, 0x4e, 0xda, 0x34, 0x7f, 0x77, 0x30, 0x50, 0x7e, 0x64, 0xd0, 0x7b, 0xa6,
+        0x39, 0x7c, 0xa1, 0x70, 0x7f, 0x03, 0xf6, 0xc4, 0x92, 0x40, 0x61, 0x8a, 0x43, 0x9d, 0x19,
+        0xae, 0x2c, 0xe6, 0x10, 0x5d, 0xe7, 0x5a, 0x81, 0xd7, 0xef, 0x52, 0x5f, 0x83, 0x23, 0xeb,
+        0xcd, 0x96, 0xe2, 0xed, 0x24, 0xa8, 0x99, 0x22, 0x1a, 0x99, 0xb1, 0x12, 0x99, 0x73, 0xe8,
+        0x75, 0xd1, 0x15, 0x34, 0x9c, 0x5a, 0x9a, 0x8e, 0x92, 0x1c, 0x5f, 0xba, 0xf4, 0x75, 0xeb,
+        0x08, 0xd2, 0x8b, 0x1c, 0x2e, 0x51, 0x10, 0x7f, 0xa9, 0x8b, 0xae, 0x32, 0x45, 0x13, 0x5e,
+        0xe2, 0x95, 0x0a, 0x2d, 0x87, 0x3e, 0x8b, 0x58, 0x95, 0xa1, 0x8f, 0xea, 0x55, 0x46, 0x6e,
+        0xc0, 0xe5, 0xca, 0x6e, 0x25, 0xad, 0x3d, 0x0e, 0x06, 0x0d, 0x68, 0xb6, 0xdf, 0xf2, 0xf6,
+        0xa0, 0x91, 0xe8, 0x10, 0xe1, 0x69, 0x58, 0xd3, 0xef, 0xd8, 0x31, 0xa3, 0x78, 0x8d, 0xb8,
+        0x3e, 0xac, 0x25, 0xb0, 0x61, 0x31, 0xbe, 0x69, 0x68, 0x79, 0xc7, 0xe1, 0x03, 0x86, 0xdc,
+        0x45, 0x5c, 0x24, 0xf7, 0x14, 0x65, 0xee, 0x3f, 0x32, 0x7c, 0x71, 0xcb, 0x2d, 0x0f, 0x46,
+        0x06, 0x12, 0x84, 0xd0, 0xb3, 0xa6, 0xad, 0x17, 0x97, 0xcf, 0xdf, 0x94, 0x24, 0xde, 0x1d,
+        0xfc, 0x24, 0x41, 0xf9, 0x9f, 0xc2, 0x7f, 0xec, 0x2e, 0x7c, 0xed, 0x4b, 0x2e, 0x5f, 0xcd,
+        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    struct CancelAfterCodecInput<'a> {
+        input: Cursor<&'a [u8]>,
+        cancellation: &'a CancellationToken,
+        cancel_at: u64,
+        furthest_read: u64,
+        interrupted_reads: usize,
+    }
+
+    impl<'a> CancelAfterCodecInput<'a> {
+        fn new(bytes: &'a [u8], cancellation: &'a CancellationToken, cancel_at: u64) -> Self {
+            Self {
+                input: Cursor::new(bytes),
+                cancellation,
+                cancel_at,
+                furthest_read: 0,
+                interrupted_reads: 0,
+            }
+        }
+
+        fn interrupted(&mut self) -> io::Error {
+            self.interrupted_reads += 1;
+            io::Error::new(io::ErrorKind::Interrupted, "test cancellation")
+        }
+    }
+
+    impl Read for CancelAfterCodecInput<'_> {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            if output.is_empty() {
+                return Ok(0);
+            }
+            if self.cancellation.is_cancelled() {
+                return Err(self.interrupted());
+            }
+            let position = self.input.position();
+            if position >= self.cancel_at {
+                self.cancellation.cancel();
+                return Err(self.interrupted());
+            }
+            let until_cancel = usize::try_from(self.cancel_at - position).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "test input offset overflow")
+            })?;
+            let read_limit = output.len().min(TEST_INPUT_CHUNK_BYTES).min(until_cancel);
+            let count = self.input.read(&mut output[..read_limit])?;
+            self.furthest_read = self.furthest_read.max(self.input.position());
+            if self.input.position() >= self.cancel_at {
+                self.cancellation.cancel();
+            }
+            Ok(count)
+        }
+    }
+
+    impl Seek for CancelAfterCodecInput<'_> {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            if self.cancellation.is_cancelled() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "test cancellation",
+                ));
+            }
+            self.input.seek(position)
+        }
+    }
+
+    fn limits() -> DecodeLimits {
+        DecodeLimits::new(
+            Budget::new(8 << 20, 8 << 20, 32 << 20),
+            DecodeResources::new(1, 32 << 20),
+            1024,
+            1024,
+            1 << 20,
+            8 << 20,
+        )
+    }
+
+    fn assert_cancelled_before_eof(
+        result: Result<super::DecodedFrame, Error>,
+        cancellation: &CancellationToken,
+        source: &CancelAfterCodecInput<'_>,
+        resources: &DecodeResources,
+        encoded_len: usize,
+    ) {
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert!(cancellation.is_cancelled());
+        assert!(source.furthest_read >= source.cancel_at);
+        assert!(source.furthest_read < u64::try_from(encoded_len).unwrap());
+        assert!(source.interrupted_reads > 0);
+        assert_eq!(resources.cpu_bytes_in_use(), 0);
+        assert_eq!(resources.active_decodes(), 0);
+    }
+
+    fn deterministic_bytes(len: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed;
+        let mut bytes = Vec::with_capacity(len);
+        for _ in 0..len {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            bytes.push(state.to_be_bytes()[0]);
+        }
+        bytes
+    }
+
+    fn random_rgb_png(width: u32, height: u32) -> Vec<u8> {
+        let sample_count = usize::try_from(width.checked_mul(height).unwrap()).unwrap() * 3;
+        let samples = deterministic_bytes(sample_count, 0x2c1b_3c6d);
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, width, height);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&samples)
+                .unwrap();
+        }
+        bytes
+    }
+
+    fn idat_payload_start(bytes: &[u8]) -> usize {
+        let mut offset = PNG_SIGNATURE.len();
+        while offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
+            let chunk_len = usize::try_from(u32::from_be_bytes(
+                bytes[offset..offset + 4].try_into().unwrap(),
+            ))
+            .unwrap();
+            if &bytes[offset + 4..offset + 8] == b"IDAT" {
+                return offset + 8;
+            }
+            offset = offset + 8 + chunk_len + 4;
+        }
+        panic!("PNG fixture has no IDAT chunk");
+    }
+
+    fn progressive_jpeg(width: u32, height: u32) -> Vec<u8> {
+        let sample_count = usize::try_from(width.checked_mul(height).unwrap()).unwrap();
+        let samples = deterministic_bytes(sample_count, 0x243f_6a88);
+        let mut encoder = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_GRAYSCALE);
+        encoder.set_size(
+            usize::try_from(width).unwrap(),
+            usize::try_from(height).unwrap(),
+        );
+        encoder.set_quality(95.0);
+        encoder.set_progressive_mode();
+        let mut started = encoder.start_compress(Vec::new()).unwrap();
+        started.write_scanlines(&samples).unwrap();
+        let bytes = started.finish().unwrap();
+        assert!(bytes.windows(2).any(|marker| marker == [0xff, 0xc2]));
+        bytes
+    }
+
+    fn jpeg_entropy_start(bytes: &[u8]) -> usize {
+        let marker = bytes
+            .windows(2)
+            .position(|pair| pair == b"\xff\xda")
+            .expect("JPEG has a Start of Scan marker");
+        let segment_length =
+            usize::from(u16::from_be_bytes([bytes[marker + 2], bytes[marker + 3]]));
+        marker + 2 + segment_length
+    }
+
+    #[test]
+    fn cancellation_during_png_inflate_stops_at_a_bounded_input_refill() {
+        let bytes = random_rgb_png(WIDTH, HEIGHT);
+        let cancel_at = idat_payload_start(&bytes).checked_add(1024).unwrap();
+        assert!(cancel_at < bytes.len());
+
+        let cancellation = CancellationToken::new();
+        let limits = limits();
+        let mut source =
+            CancelAfterCodecInput::new(&bytes, &cancellation, u64::try_from(cancel_at).unwrap());
+        let result = decode_png_with_reader(&bytes, &limits, &cancellation, &mut source);
+
+        assert_cancelled_before_eof(
+            result,
+            &cancellation,
+            &source,
+            &limits.resources,
+            bytes.len(),
+        );
+    }
+
+    #[test]
+    fn cancellation_during_adam7_png_inflate_stops_before_end_of_idat() {
+        assert_eq!(ADAM7_RGBA_PNG[28], 1, "fixture must use Adam7 interlace");
+        let data_start = idat_payload_start(ADAM7_RGBA_PNG);
+        let cancel_at = data_start.checked_add(TEST_INPUT_CHUNK_BYTES).unwrap();
+        assert!(cancel_at < ADAM7_RGBA_PNG.len());
+
+        let cancellation = CancellationToken::new();
+        let limits = limits();
+        let mut source = CancelAfterCodecInput::new(
+            ADAM7_RGBA_PNG,
+            &cancellation,
+            u64::try_from(cancel_at).unwrap(),
+        );
+        let result = decode_png_with_reader(ADAM7_RGBA_PNG, &limits, &cancellation, &mut source);
+
+        assert_cancelled_before_eof(
+            result,
+            &cancellation,
+            &source,
+            &limits.resources,
+            ADAM7_RGBA_PNG.len(),
+        );
+    }
+
+    #[test]
+    fn cancellation_during_progressive_jpeg_scan_stops_at_a_bounded_input_refill() {
+        let bytes = progressive_jpeg(WIDTH, HEIGHT);
+        let entropy_start = jpeg_entropy_start(&bytes);
+        let cancel_at = entropy_start.checked_add(1024).unwrap();
+        assert!(cancel_at < bytes.len());
+
+        let cancellation = CancellationToken::new();
+        let limits = limits();
+        let mut source =
+            CancelAfterCodecInput::new(&bytes, &cancellation, u64::try_from(cancel_at).unwrap());
+        let result = decode_jpeg_with_reader(&bytes, &limits, &cancellation, &mut source);
+
+        assert_cancelled_before_eof(
+            result,
+            &cancellation,
+            &source,
+            &limits.resources,
+            bytes.len(),
+        );
+    }
+
+    #[test]
+    fn codec_error_mapping_does_not_mask_errors_when_cancelled() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        assert!(matches!(
+            map_png_error(png::DecodingError::LimitsExceeded, &cancellation),
+            Error::BudgetExceeded(BudgetKind::RasterBytes)
+        ));
+        assert!(matches!(
+            map_jpeg_error(DecodeErrors::LargeDimensions(1), &cancellation),
+            Error::BudgetExceeded(BudgetKind::WorkUnits)
+        ));
+        assert_eq!(
+            map_jpeg_error(
+                DecodeErrors::IoErrors(zune_core::bytestream::ZByteIoError::StdIoError(
+                    io::Error::new(io::ErrorKind::PermissionDenied, "not cancellation"),
+                )),
+                &cancellation,
+            ),
+            Error::PermissionDenied
+        );
+        assert_eq!(
+            map_jpeg_error(
+                DecodeErrors::IoErrors(zune_core::bytestream::ZByteIoError::StdIoError(
+                    io::Error::new(io::ErrorKind::Interrupted, "not cancelled"),
+                )),
+                &CancellationToken::new(),
+            ),
+            Error::TemporarilyUnavailable
+        );
+        assert_eq!(
+            map_io_error(
+                io::Error::new(io::ErrorKind::PermissionDenied, "not cancellation"),
+                &cancellation,
+            ),
+            Error::PermissionDenied
         );
     }
 }
