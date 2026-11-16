@@ -32,7 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Encoded-sRGB gradient matching now uses bounded global interval search with exact-match and deterministic tie handling; palette work estimates charge monochrome, gradient, and pair resolution correctly, with numerical, budget, and cancellation regressions (`[CNV-005]`).
+- Encoded-gradient matching now compares quantized sRGB8 output bytes and uses bounded global interval search; color-fit candidate segment/pair enumeration is preflighted against charged work estimates, with output-boundary, budget, numerical, and cancellation regressions (`[CNV-005]`).
 
 - Durable publication-ledger replacement uses a same-directory overwrite rename instead of the Windows PowerShell `File.Replace` null-backup binding; a real filesystem regression runs locally and in CI.
 - Project-field schema preflight preserves singleton GraphQL argument collections instead of mistaking a valid input object for multiple arguments.

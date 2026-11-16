@@ -86,18 +86,21 @@ be finite and strictly increasing; out-of-order and duplicate-position stops are
 matching. Duplicate stop colors are allowed; equal linear-distance scores select the earliest
 segment, and encoded-distance scores within the documented tie tolerance retain the earliest.
 Colors interpolate linearly in linear-light RGB. Palette distance is independently configurable
-as squared Euclidean linear-RGB or encoded-sRGB distance; linear-RGB gradient matches project
-exactly onto each segment. Encoded-sRGB matching uses deterministic global branch-and-bound with
-encoded-RGB interval lower bounds, not an assumption of unimodality. A fixed `1e-14` score margin is
-subtracted from each bound to reduce floating-point overestimation. Exact requested-color matches
-on a segment are returned exactly. The search stops when guarded bounds leave at most `5e-7`
-between the best squared distance and the segment's global minimum. A later segment replaces the
-current one only when its candidate score is lower by more than `5e-7`; the returned color remains
-within `1e-6` of the global minimum, with exact ties retaining the earliest segment. Since `powf`
-has no portable error bound, the margin is an engineering guard, not a formal proof over exact real
-arithmetic. A one-segment search uses at most 256 deterministic interior samples and 4,096 branch
-subdivisions; allowances decrease with stop count to keep each palette resolution within 65,536
-channel-work units. Failure to establish the tolerance within that work limit returns a budget error.
+as squared Euclidean linear-RGB or sRGB8-output distance; encoded distance compares the actual
+output bytes, normalized to `[0, 1]`, after sRGB transfer encoding and byte quantization for both
+the request and each candidate. Linear-RGB gradient matches project exactly onto each segment.
+Encoded-sRGB matching uses deterministic global branch-and-bound with output-byte interval lower
+bounds, not an assumption of unimodality. A fixed `1e-14` score margin is subtracted from each
+bound to reduce floating-point overestimation. Exact output-byte matches score zero; exact
+linear-color matches retain their exact value. The search stops when guarded bounds leave at most
+`5e-7` between the best squared distance and the segment's global minimum. A later segment replaces
+the current one only when its candidate score is lower by more than `5e-7`; the returned color
+remains within `1e-6` of the global minimum, with exact ties retaining the earliest segment. Since
+`powf` has no portable error bound, the margin is an engineering guard, not a formal proof over exact
+real arithmetic. A one-segment search uses at most 256 deterministic interior samples and 4,096
+branch subdivisions; allowances decrease with stop count to keep each palette resolution within
+65,536 channel-work units. Failure to establish the tolerance within that work limit returns a
+budget error.
 Fixed palette ties select the earliest palette entry.
 `Palette::cache_identity` covers the distance choice, definition contents, and palette algorithm
 version. Conversion/cache consumers also include `COLOR_FIT_ALGORITHM_VERSION` and the selected
@@ -143,7 +146,9 @@ gradients allocate at most 13,059 comparisons (39,177 channel units) for a singl
 per-segment subdivision limit decreases with gradient size so a resolution stays under 65,536
 channel units (65,151 for 127 segments/128 stops).
 Use `estimate_color_fit_work` for every shortlisted glyph and checked-add estimates against the whole
-job budget before reranking multiple candidates.
+job budget before reranking multiple candidates. Estimates charge each candidate and every gradient
+segment/segment-pair pass; density conversion preflights the checked per-fit total across all glyphs
+and cells before normalization or sampling begins.
 
 Color fitting is integrated into the shared density consumer through
 `ConversionSettings::with_color_fit(&Palette, ColorFitStrategy)` and

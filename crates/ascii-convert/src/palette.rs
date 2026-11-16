@@ -1,8 +1,9 @@
 //! Explicit, bounded palette definitions and deterministic color resolution.
 //!
 //! Colors in this module are linear-light RGB. Palette distance is independently selectable as
-//! linear RGB Euclidean distance or encoded-sRGB Euclidean distance. ANSI modes use the canonical
-//! xterm color table as explicit sRGB values; their numeric labels do not promise terminal output.
+//! linear RGB Euclidean distance or sRGB8 output-byte Euclidean distance. ANSI modes use the
+//! canonical xterm color table as explicit sRGB values; their numeric labels do not promise
+//! terminal output.
 
 use core::fmt;
 use core::mem::size_of;
@@ -10,10 +11,10 @@ use core::mem::size_of;
 use ascii_core::{Budget, BudgetKind, CancellationToken, Error};
 use sha2::{Digest, Sha256};
 
-use crate::color::{EncodedSrgb, LinearRgb, decode_srgb, encode_srgb};
+use crate::color::{EncodedSrgb, LinearRgb, OutputEncoding, decode_srgb, encode_output};
 
 /// Version of palette matching and identity semantics.
-pub const PALETTE_ALGORITHM_VERSION: u32 = 2;
+pub const PALETTE_ALGORITHM_VERSION: u32 = 3;
 /// Maximum number of colors retained by a user-defined fixed palette.
 pub const MAX_PALETTE_COLORS: usize = 4096;
 /// Maximum number of ordered stops in a user gradient.
@@ -35,7 +36,7 @@ const ENCODED_GRADIENT_INITIAL_SAMPLES: u32 = 256;
 pub enum PaletteDistanceSpace {
     /// Squared Euclidean distance between linear-light R, G, and B channels.
     LinearRgb,
-    /// Squared Euclidean distance between transfer-encoded sRGB R, G, and B channels.
+    /// Squared Euclidean distance between normalized sRGB8 output channels after byte quantization.
     EncodedSrgb,
 }
 
@@ -338,11 +339,12 @@ impl Palette {
     /// Resolves a requested color to its nearest allowed color.
     ///
     /// Fixed palette ties select the earliest entry. Gradient interpolation is linear-light RGB;
-    /// linear-RGB distance projects exactly onto each segment. Encoded-sRGB distance uses bounded
-    /// global branch-and-bound search per segment, detects exact gradient matches, and returns a
-    /// result within `1e-6` of the global minimum. Encoded segment ties within the search tolerance
-    /// retain the earliest segment. If the tolerance cannot be established within bounded work,
-    /// resolution fails with a work-budget error.
+    /// linear-RGB distance projects exactly onto each segment. Encoded-sRGB distance compares
+    /// the normalized sRGB8 output bytes and uses bounded global branch-and-bound search per
+    /// segment. It detects exact output matches and returns a result within `1e-6` of the global
+    /// minimum. Encoded segment ties within the search tolerance retain the earliest segment. If
+    /// the tolerance cannot be established within bounded work, resolution fails with a
+    /// work-budget error.
     pub fn resolve(
         &self,
         requested: LinearRgb,
@@ -726,8 +728,8 @@ fn coordinates(color: LinearRgb, space: PaletteDistanceSpace) -> [f64; 3] {
     match space {
         PaletteDistanceSpace::LinearRgb => rgb_channels(color),
         PaletteDistanceSpace::EncodedSrgb => {
-            let encoded = encode_srgb(color);
-            [encoded.red(), encoded.green(), encoded.blue()]
+            let channels = encode_output(color, OutputEncoding::Srgb8).channels();
+            channels.map(|channel| f64::from(channel) / f64::from(u8::MAX))
         }
     }
 }

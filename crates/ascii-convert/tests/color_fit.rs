@@ -6,8 +6,7 @@ use ascii_convert::{
     GlyphTable, GradientStop, GridSizing, LinearRgb, MAX_GRADIENT_STOPS, MAX_PALETTE_COLORS,
     MAX_PALETTE_PAIR_RESOLUTION_WORK_UNITS, MAX_PALETTE_RESOLUTION_WORK_UNITS, OutputEncoding,
     Palette, PaletteDefinition, PaletteDistanceSpace, PaletteError, PaletteKind, build_glyph_table,
-    convert_density_detailed, decode_srgb, encode_output, encode_srgb, estimate_color_fit_work,
-    fit_color_patch,
+    convert_density_detailed, decode_srgb, encode_output, estimate_color_fit_work, fit_color_patch,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, Error, FrameMetadata,
@@ -66,11 +65,12 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 fn encoded_distance_squared(left: LinearRgb, right: LinearRgb) -> f64 {
-    let left = encode_srgb(left);
-    let right = encode_srgb(right);
-    (left.red() - right.red()).powi(2)
-        + (left.green() - right.green()).powi(2)
-        + (left.blue() - right.blue()).powi(2)
+    let left = encode_output(left, OutputEncoding::Srgb8).channels();
+    let right = encode_output(right, OutputEncoding::Srgb8).channels();
+    let red = f64::from(left[0]) - f64::from(right[0]);
+    let green = f64::from(left[1]) - f64::from(right[1]);
+    let blue = f64::from(left[2]) - f64::from(right[2]);
+    (red * red + green * green + blue * blue) / 65_025.0
 }
 
 #[test]
@@ -278,10 +278,14 @@ fn encoded_gradient_search_finds_global_minimum_without_unimodality_assumptions(
         .expect("bounded global search resolves this gradient");
     let position = resolved.gradient_position().expect("gradient position");
     assert!(
-        position > 0.95,
-        "expected the global basin near the end, got {position}"
+        (0.46..0.49).contains(&position),
+        "expected the global sRGB8-output basin near the middle, got {position}"
     );
-    let reference_parameter = 0.976;
+    assert_eq!(
+        encode_output(resolved.color(), OutputEncoding::Srgb8).channels(),
+        [118, 66, 188]
+    );
+    let reference_parameter = 0.471_721;
     let reference = color(
         stops[0].color().red()
             + (stops[1].color().red() - stops[0].color().red()) * reference_parameter,
@@ -843,6 +847,49 @@ fn gradient_fit_returns_colors_on_the_gradient_and_budget_preflight_is_explicit(
 }
 
 #[test]
+fn gradient_pair_candidate_search_is_charged_before_enumeration() {
+    let stops = [
+        GradientStop::new(0.0, LinearRgb::BLACK).expect("valid start"),
+        GradientStop::new(1.0 / 3.0, color(0.8, 0.1, 0.2)).expect("valid second stop"),
+        GradientStop::new(2.0 / 3.0, color(0.2, 0.9, 0.3)).expect("valid third stop"),
+        GradientStop::new(1.0, LinearRgb::WHITE).expect("valid end"),
+    ];
+    let gradient = palette(
+        PaletteDefinition::Gradient(&stops),
+        PaletteDistanceSpace::LinearRgb,
+    );
+    let target = [color(0.35, 0.55, 0.4)];
+    let coverage = [128];
+    let cancellation = CancellationToken::new();
+    let strategy = ColorFitStrategy::TwoColorLeastSquares;
+    let estimate = estimate_color_fit_work(target.len(), &gradient, strategy)
+        .expect("gradient candidate work estimate");
+    assert_eq!(estimate, 3 * (2 * 3 * 3 + 1));
+    assert_eq!(
+        fit_color_patch(
+            &target,
+            &coverage,
+            &gradient,
+            strategy,
+            &budget(estimate - 1),
+            &cancellation,
+        )
+        .expect_err("quadratic segment-pair search is rejected below its estimate"),
+        ColorFitError::Core(Error::BudgetExceeded(BudgetKind::WorkUnits))
+    );
+    let fit = fit_color_patch(
+        &target,
+        &coverage,
+        &gradient,
+        strategy,
+        &budget(estimate),
+        &cancellation,
+    )
+    .expect("the complete segment-pair search fits the declared work budget");
+    assert_eq!(fit.work_units(), estimate);
+}
+
+#[test]
 fn invalid_color_fit_patch_is_rejected_before_work() {
     let original = palette(PaletteDefinition::Original, PaletteDistanceSpace::LinearRgb);
     let cancellation = CancellationToken::new();
@@ -1172,6 +1219,69 @@ fn palette_modes_convert_to_explicit_resolved_colors_and_notice_ansi() {
             _ => assert_eq!(converted.terminal_appearance_notice(), None),
         }
     }
+}
+
+#[test]
+fn density_consumer_resolves_encoded_gradient_in_output_byte_space() {
+    let table = conversion_table();
+    let requested_background = color(
+        0.669_730_401_440_220_9,
+        0.308_136_457_589_144_2,
+        0.605_944_165_678_462_4,
+    );
+    assert_eq!(
+        encode_output(requested_background, OutputEncoding::Srgb8).channels(),
+        [214, 151, 204]
+    );
+    let stops = [
+        GradientStop::new(
+            0.0,
+            color(
+                0.956_034_271_889_249_4,
+                0.947_827_487_059_349_4,
+                0.056_551_367_726_808_69,
+            ),
+        )
+        .expect("valid first endpoint"),
+        GradientStop::new(
+            1.0,
+            color(
+                0.084_871_995_158_921_63,
+                0.835_498_878_129_449_6,
+                0.735_969_989_068_523_3,
+            ),
+        )
+        .expect("valid last endpoint"),
+    ];
+    let gradient = palette(
+        PaletteDefinition::Gradient(&stops),
+        PaletteDistanceSpace::EncodedSrgb,
+    );
+    let cancellation = CancellationToken::new();
+    let strategy = ColorFitStrategy::FixedBackground(requested_background);
+    let settings = ConversionSettings::new(
+        GridSizing::fixed_pixel_surface(8, 12),
+        conversion_metadata(&table),
+        &cancellation,
+        LinearRgb::WHITE,
+        requested_background,
+    )
+    .expect("conversion settings are valid")
+    .with_color_fit(&gradient, strategy);
+    let pixels = [96, 144, 220].repeat(8 * 12);
+    let converted = convert_density_detailed(
+        rgb_raster(&pixels, 8, 12),
+        &table,
+        &settings,
+        &budget(LARGE_BUDGET),
+    )
+    .expect("encoded-gradient conversion succeeds");
+
+    assert_eq!(
+        converted.frame().cells()[0].bg_srgba8(),
+        [180, 241, 179, u8::MAX]
+    );
+    assert_eq!(converted.color_fit_strategy(), Some(strategy));
 }
 
 #[test]
