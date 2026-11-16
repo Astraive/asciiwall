@@ -977,7 +977,7 @@ fn unsupported_alpha_and_profiles_precede_sampling_work_and_stride_through_both_
                 UnsupportedColorReason::HdrTransfer(TransferFunction::Pq),
             )),
             Error::Unsupported(ascii_core::UnsupportedReason::HdrTransfer(
-                TransferFunction::Pq
+                TransferFunction::Pq,
             )),
         ),
         (
@@ -986,7 +986,7 @@ fn unsupported_alpha_and_profiles_precede_sampling_work_and_stride_through_both_
                 UnsupportedColorReason::WideGamutPrimaries(ascii_core::ColorPrimaries::DisplayP3),
             )),
             Error::Unsupported(ascii_core::UnsupportedReason::WideGamutPrimaries(
-                ascii_core::ColorPrimaries::DisplayP3
+                ascii_core::ColorPrimaries::DisplayP3,
             )),
         ),
     ];

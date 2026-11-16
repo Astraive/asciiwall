@@ -4,8 +4,8 @@ mod support;
 use ascii_convert::{
     ColorNormalizationError, ConversionSettings, CropRect, DensityConversionError, FitMode,
     GlyphConfig, GlyphRepertoire, GlyphTable, GridSizing, LinearRgb, PatchDimensions,
-    SamplingFilter, SamplingOptions, UnsupportedColorReason, build_glyph_table,
-    convert_density, convert_density_detailed, normalize_raster,
+    SamplingFilter, SamplingOptions, UnsupportedColorReason, build_glyph_table, convert_density,
+    convert_density_detailed, normalize_raster,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, Error,
@@ -125,10 +125,7 @@ fn ec_006_unsupported_hdr_and_profile_return_typed_reasons() {
             }
         };
         assert_eq!(convenience_error, Error::Unsupported(convenience_reason));
-        assert_eq!(
-            convenience_error.to_string(),
-            expected_convenience_message
-        );
+        assert_eq!(convenience_error.to_string(), expected_convenience_message);
     }
 }
 
