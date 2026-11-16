@@ -775,15 +775,20 @@ fn unsupported_alpha_and_profiles_precede_sampling_work_and_stride_through_both_
             ),
             Err(detailed_error)
         );
-        assert_eq!(
-            convert_density(
-                source,
-                &table,
-                &conversion_settings,
-                &insufficient_sampling_budget,
-            ),
-            Err(core_error)
-        );
+        let error = convert_density(
+            source,
+            &table,
+            &conversion_settings,
+            &insufficient_sampling_budget,
+        )
+        .expect_err("unsupported profile must not produce a frame");
+        assert_eq!(error, core_error);
+        if core_error == Error::Unsupported(ascii_core::UnsupportedReason::ColorDescription) {
+            assert_eq!(
+                error.to_string(),
+                "unsupported color profile: provide SDR sRGB input; HDR tone mapping and wide-gamut conversion are not supported"
+            );
+        }
     }
 }
 

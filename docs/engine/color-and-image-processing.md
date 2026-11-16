@@ -16,7 +16,10 @@ Unknown source profile fields may use an sRGB assumption for SDR input, but norm
 a material `AssumedSrgbForUnknownProfile` warning. This is not HDR detection or full color
 management: explicit PQ/HLG input returns a typed unsupported-HDR failure, and explicit Display-P3
 or Rec. 2020 primaries return a typed unsupported-wide-gamut failure. There is no implicit tone map,
-wide-gamut conversion, clipping, or complete ICC-profile claim.
+wide-gamut conversion, clipping, or complete ICC-profile claim. The convenience
+`convert_density` API preserves its `Error::Unsupported(ColorDescription)` contract, but its
+display text directs callers to provide SDR sRGB input; `convert_density_detailed` retains
+the exact profile-specific normalization failure.
 
 ## Image preprocessing order
 
