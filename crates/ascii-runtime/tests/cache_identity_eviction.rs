@@ -675,7 +675,8 @@ fn disk_reservations_count_expanded_input_scratch_output_and_safety_reserve() {
         })
         .expect("exactly fits after safety reserve");
     assert_eq!(budget.snapshot().reserved_bytes, 90);
-    budget.refresh_available_bytes(80);
+    let probe = budget.begin_available_bytes_probe().unwrap();
+    assert!(budget.refresh_available_bytes(probe, 80));
     assert_eq!(budget.snapshot().available_bytes, 80);
     assert!(
         budget
@@ -696,6 +697,47 @@ fn disk_reservations_count_expanded_input_scratch_output_and_safety_reserve() {
         .total_bytes()
         .is_err()
     );
+}
+
+#[test]
+fn stale_disk_probe_keeps_writes_charged_until_a_fresh_probe() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(100, 0);
+    let probe_started_before_write = budget.begin_available_bytes_probe().unwrap();
+    let output_reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 40,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let destination = temp.path().join("probe-race.bin");
+    registry
+        .write_transactional(identity(47), &destination, &output_reservation, |output| {
+            output.write_all(&[b'x'; 40])
+        })
+        .unwrap();
+
+    assert!(budget.refresh_available_bytes(probe_started_before_write, 100));
+    assert_eq!(budget.snapshot().available_bytes, 100);
+    assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 40);
+    assert!(
+        budget
+            .reserve(DiskRequirements {
+                output_bytes: 61,
+                ..DiskRequirements::default()
+            })
+            .is_err(),
+        "the 40 post-probe output bytes leave only 60 bytes reservable"
+    );
+    let remaining = budget
+        .reserve(DiskRequirements {
+            output_bytes: 60,
+            ..DiskRequirements::default()
+        })
+        .expect("the exactly remaining capacity can be reserved");
+    assert_eq!(budget.snapshot().reserved_bytes, 60);
+    drop(remaining);
 }
 
 #[test]
@@ -750,7 +792,8 @@ fn completed_outputs_remain_charged_and_refresh_replaces_consumed_estimates() {
         .unwrap();
     assert_eq!(refreshed_budget.snapshot().reserved_bytes, 41);
     assert_eq!(refreshed_budget.snapshot().consumed_bytes_since_refresh, 19);
-    refreshed_budget.refresh_available_bytes(81);
+    let probe = refreshed_budget.begin_available_bytes_probe().unwrap();
+    assert!(refreshed_budget.refresh_available_bytes(probe, 81));
     assert_eq!(refreshed_budget.snapshot().reserved_bytes, 41);
     assert_eq!(refreshed_budget.snapshot().consumed_bytes_since_refresh, 0);
     let extra = refreshed_budget
