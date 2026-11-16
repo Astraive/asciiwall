@@ -2,8 +2,8 @@
 //!
 //! A source digest is the reusable identity. Paths and stat metadata are kept separately as
 //! revalidation hints and never participate in cache-key equality. `CacheLease::acknowledge` is an
-//! explicit owner boundary: dropping a lease does not imply decoder/GPU completion and therefore
-//! does not unpin its entry.
+//! explicit owner boundary: lock failures leave the lease available for retry, and dropping a
+//! lease does not imply decoder/GPU completion or release its entry pin.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -670,6 +670,7 @@ impl DerivedCache {
             inner: Arc::clone(&self.inner),
             identity: identity.clone(),
             path,
+            released: false,
         })
     }
 
@@ -710,13 +711,15 @@ impl DerivedCache {
 }
 
 /// A non-cloneable resource pin. Dropping it intentionally does not release the pin; call
-/// `acknowledge` only when every decoder/upload/user of this resource has completed.
+/// `acknowledge` only when every decoder/upload/user of this resource has completed. A lock failure
+/// before release leaves the lease available for retry.
 #[must_use = "explicitly acknowledge resource completion to unpin this cache entry"]
 #[derive(Debug)]
 pub struct CacheLease {
     inner: Arc<CacheInner>,
     identity: CacheIdentity,
     path: PathBuf,
+    released: bool,
 }
 
 impl CacheLease {
@@ -728,32 +731,53 @@ impl CacheLease {
         &self.identity
     }
 
-    pub fn acknowledge(self) -> Result<(), CacheError> {
+    /// Releases this lease's pin after obtaining the cache operations lock. Errors before release
+    /// preserve the lease for retry; errors during trimming leave the pin released and a retry only
+    /// retries trimming.
+    pub fn acknowledge(&mut self) -> Result<(), CacheError> {
         let mut state = lock_unpoisoned(&self.inner.state);
         let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
-        let active_leases = state
-            .entries
-            .get(&self.identity)
-            .ok_or(CacheError::InvalidLease)?
-            .active_leases
-            .checked_sub(1)
-            .ok_or(CacheError::InvalidLease)?;
-        let tick = next_tick(&mut state)?;
-        let entry = state
-            .entries
-            .get_mut(&self.identity)
-            .ok_or(CacheError::InvalidLease)?;
-        entry.active_leases = active_leases;
-        entry.last_used = tick;
-        let handles = state
-            .active_lease_files
-            .get_mut(&self.identity)
-            .ok_or(CacheError::InvalidLease)?;
-        let handle = handles.pop().ok_or(CacheError::InvalidLease)?;
-        if handles.is_empty() {
-            state.active_lease_files.remove(&self.identity);
+        if !self.released {
+            let active_leases = state
+                .entries
+                .get(&self.identity)
+                .ok_or(CacheError::InvalidLease)?
+                .active_leases
+                .checked_sub(1)
+                .ok_or(CacheError::InvalidLease)?;
+            if !state
+                .active_lease_files
+                .get(&self.identity)
+                .is_some_and(|handles| !handles.is_empty())
+            {
+                return Err(CacheError::InvalidLease);
+            }
+            let tick = state
+                .lru_clock
+                .checked_add(1)
+                .ok_or(CacheError::ArithmeticOverflow)?;
+            let handle = state
+                .active_lease_files
+                .get_mut(&self.identity)
+                .and_then(Vec::pop)
+                .expect("validated lease file handle remains present under the state lock");
+            if state
+                .active_lease_files
+                .get(&self.identity)
+                .is_some_and(|handles| handles.is_empty())
+            {
+                state.active_lease_files.remove(&self.identity);
+            }
+            state.lru_clock = tick;
+            let entry = state
+                .entries
+                .get_mut(&self.identity)
+                .expect("validated leased entry remains present under the state lock");
+            entry.active_leases = active_leases;
+            entry.last_used = tick;
+            drop(handle);
+            self.released = true;
         }
-        drop(handle);
         trim_to_budget(&self.inner.root, &mut state)
     }
 }
