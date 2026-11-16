@@ -97,7 +97,7 @@ fn skip_control_string(chars: &mut std::str::Chars<'_>, bell_terminates: bool) {
 }
 
 pub fn print_error(error: &CliError, json: bool, command: &'static str) -> io::Result<()> {
-    let mut message = strip_terminal_controls(&error.message);
+    let mut message = strip_terminal_controls(error.message);
     if let Some((index, _)) = message.char_indices().nth(4096) {
         message.truncate(index);
     }
