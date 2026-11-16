@@ -66,8 +66,8 @@ with each record capped at 64 KiB. Their input is bounded before redaction, clip
 redacted as a whole because a truncated prefix cannot prove whether a path or filename is private,
 and writers targeting the same directory are serialized. Home paths, media-bearing messages, and
 path-like values are redacted by default. Portable exports strip machine-specific paths, file URIs,
-network endpoints (including single-label host-and-port strings and IP addresses), monitor/display
-identifiers, permission grants, application rules, and user/home data; only an explicitly labeled
+bare host fields and network endpoints (including single-label host-and-port strings and IP addresses),
+monitor/display identifiers, permission grants, application rules, and user/home data; only an explicitly labeled
 nonportable local backup may retain those values. Export traversal is capped at 16,384 node/key
 visits and depth 64; keys are limited to 256 bytes, strings to 16 KiB, and encoded JSON to 1 MiB.
 An over-budget export fails with `DocumentTooLarge` instead of returning a partial export.

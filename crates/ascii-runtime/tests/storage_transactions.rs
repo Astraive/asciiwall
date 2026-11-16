@@ -1350,6 +1350,22 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
 }
 
 #[test]
+fn portable_export_filters_bare_host_field_but_preserves_local_backup() {
+    let source = json!({"host": "buildhost"});
+    let portable =
+        ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
+            .expect("bounded portable export");
+    assert_eq!(portable.content(), &json!({}));
+
+    let local_backup = ascii_runtime::storage::PortableExport::from_value(
+        &source,
+        ExportMode::NonportableLocalBackup,
+    )
+    .expect("bounded local backup");
+    assert_eq!(local_backup.content(), &source);
+}
+
+#[test]
 fn portable_export_rejects_over_budget_strings_depth_nodes_and_output() {
     use ascii_runtime::storage::PortableExport;
 
