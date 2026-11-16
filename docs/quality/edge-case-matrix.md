@@ -63,6 +63,17 @@ The following checks ran after rebasing the QA branch onto CNV-001 head `3faa42f
 
 The initial targeted run with the default Cargo home stopped before test execution because Cargo could not create its registry-cache directory (Windows OS error 183); the isolated-cache run above passed. EC-004 remains not run because no decoder-to-converter callsite exists, QA-004 #35 remains a hard dependency, and no QA-101 acceptance or native result is claimed.
 
+### Revalidation after CNV-001 merge (2026-11-16)
+
+The QA branch normally merged CNV-001 head `4ab4f7fd6aad5fbe0581347bf431be34bb60df17` into prior QA head `855024d78587cf4bb8345d60462241e378b5dedb`, producing integrated commit `e95f7239c5798b3e10babcb6449e9f8e3566389e` (tested source tree SHA-1 `b765a7c3744e7f27deaf218203eea905185803b0`). The QA scenario test source and fixtures were unchanged.
+
+- `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo test --locked -p ascii-convert --test qa_101_input_conversion` — PASS, 4 tests.
+- `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo test --locked --workspace` — PASS, 91 tests across 9 suites.
+- `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo fmt --all -- --check` — PASS.
+- `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` — PASS.
+
+EC-004 remains not run because the checked-out code has no decoder-to-converter callsite; QA-004 #35 remains a hard dependency. These results do not claim QA-101 acceptance or native behavior.
+
 ## Glyphs and rendering
 
 | ID | Priority | Condition | Required outcome |
