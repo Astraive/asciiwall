@@ -1013,14 +1013,11 @@ fn lock_cache_initialization(root: &Path) -> Result<File, CacheError> {
 fn create_cache_instance_staging_dir(root: &Path) -> Result<PathBuf, CacheError> {
     loop {
         let id = CACHE_INITIALIZATION_TEMP_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
             })
             .map_err(|_| CacheError::ArithmeticOverflow)?;
-        let name = format!(
-            "{CACHE_INSTANCE_DIR}.init-{}-{id:016x}",
-            std::process::id()
-        );
+        let name = format!("{CACHE_INSTANCE_DIR}.init-{}-{id:016x}", std::process::id());
         let path = root.join(name);
         match fs::create_dir(&path) {
             Ok(()) => return Ok(path),
@@ -1259,7 +1256,6 @@ struct DiskBudgetInner {
     state: Mutex<DiskBudgetState>,
 }
 
-
 /// Snapshot token captured before probing host disk space. Applying a token charges output bytes
 /// written since it was created and ignores readings from older or unrelated probes.
 #[derive(Clone, Debug)]
@@ -1312,11 +1308,7 @@ impl DiskBudget {
 
     /// Applies a host-probed free-space estimate. Returns false for a stale token or a token from
     /// another ledger. Writes recorded after the token was captured remain charged to the reading.
-    pub fn refresh_available_bytes(
-        &self,
-        probe: DiskBudgetProbe,
-        available_bytes: u64,
-    ) -> bool {
+    pub fn refresh_available_bytes(&self, probe: DiskBudgetProbe, available_bytes: u64) -> bool {
         if !Arc::ptr_eq(&probe.inner, &self.inner) {
             return false;
         }
@@ -1556,10 +1548,13 @@ impl OutputRegistry {
         F: FnOnce(&mut dyn Write) -> io::Result<()>,
     {
         let mut registry = lock_unpoisoned(&self.state);
-        let destination = canonical_output_destination(destination.as_ref()).map_err(|error| {
+        let destination = absolute_output_destination(destination.as_ref()).map_err(|error| {
             OutputWriteError::new(OutputFailureKind::TemporaryCreate, None, Some(error))
         })?;
-        let canonical_destination = destination.clone();
+        let canonical_destination =
+            canonical_output_destination(&destination).map_err(|error| {
+                OutputWriteError::new(OutputFailureKind::TemporaryCreate, None, Some(error))
+            })?;
         let (temp_path, mut file) = create_output_temp(&destination).map_err(|error| {
             let kind = if is_disk_full(&error) {
                 OutputFailureKind::DiskFull
@@ -1876,6 +1871,14 @@ fn canonical_output_destination(destination: &Path) -> io::Result<PathBuf> {
         return Ok(canonical_destination);
     }
     Ok(canonical_parent.join(file_name))
+}
+
+fn absolute_output_destination(destination: &Path) -> io::Result<PathBuf> {
+    if destination.is_absolute() {
+        Ok(destination.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(destination))
+    }
 }
 
 #[cfg(unix)]
