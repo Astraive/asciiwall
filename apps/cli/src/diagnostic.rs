@@ -31,7 +31,12 @@ impl CliError {
     }
 
     fn new(exit: u8, code: &'static str, category: &'static str, message: &'static str) -> Self {
-        Self { exit, code, category, message }
+        Self {
+            exit,
+            code,
+            category,
+            message,
+        }
     }
 }
 
@@ -58,11 +63,12 @@ pub fn strip_terminal_controls(text: &str) -> String {
             },
             '\u{9b}' => skip_csi(&mut chars),
             '\u{9d}' => skip_control_string(&mut chars, true),
-            '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
-                skip_control_string(&mut chars, false)
-            }
+            '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => skip_control_string(&mut chars, false),
             '\n' | '\t' => output.push(ch),
-            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}'
+            '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
             | '\u{2066}'..='\u{2069}' => {}
             _ if ch.is_control() => {}
             _ => output.push(ch),
@@ -82,7 +88,8 @@ fn skip_csi(chars: &mut std::str::Chars<'_>) {
 fn skip_control_string(chars: &mut std::str::Chars<'_>, bell_terminates: bool) {
     let mut previous_escape = false;
     for ch in chars.by_ref() {
-        if ch == '\u{9c}' || (bell_terminates && ch == '\u{07}') || (previous_escape && ch == '\\') {
+        if ch == '\u{9c}' || (bell_terminates && ch == '\u{07}') || (previous_escape && ch == '\\')
+        {
             break;
         }
         previous_escape = ch == '\u{1b}';
@@ -134,9 +141,15 @@ mod tests {
     #[test]
     fn strips_sgr_osc_clipboard_c1_and_bidi_controls() {
         let hostile = concat!(
-            "before", "\x1b]52;c;secret\x07", "after ",
-            "\x1b[31m", "red", "\x1b[0m",
-            "\u{9d}0;title\u{9c}", "\u{202e}", "!"
+            "before",
+            "\x1b]52;c;secret\x07",
+            "after ",
+            "\x1b[31m",
+            "red",
+            "\x1b[0m",
+            "\u{9d}0;title\u{9c}",
+            "\u{202e}",
+            "!"
         );
         assert_eq!(strip_terminal_controls(hostile), "beforeafter red!");
     }

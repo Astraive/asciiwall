@@ -3,11 +3,11 @@
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
-use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 
-use ascii_convert::{GlyphConfig, GlyphTable, build_glyph_table};
+use ascii_convert::{GlyphConfig, GlyphRepertoire, GlyphTable, build_glyph_table};
 use ascii_core::{Budget, CancellationToken, Error};
 
 /// Maximum encoded font bytes accepted by the CLI, independently of the caller's budget.
@@ -28,10 +28,12 @@ impl fmt::Display for FontLoadError {
         match self {
             Self::Io(error) => write!(f, "cannot read font: {error}"),
             Self::NotRegularFile => f.write_str("font input must be a regular file"),
-            Self::TooLarge { max_bytes } => write!(f, "font exceeds the {max_bytes}-byte input limit"),
+            Self::TooLarge { max_bytes } => {
+                write!(f, "font exceeds the {max_bytes}-byte input limit")
+            }
             Self::Engine(error) => write!(f, "cannot build glyph table: {error}"),
+        }
     }
-}
 }
 
 impl std::error::Error for FontLoadError {
@@ -40,8 +42,8 @@ impl std::error::Error for FontLoadError {
             Self::Io(error) => Some(error),
             Self::Engine(error) => Some(error),
             Self::NotRegularFile | Self::TooLarge { .. } => None,
+        }
     }
-}
 }
 
 fn check_cancelled(cancellation: &CancellationToken) -> Result<(), FontLoadError> {
@@ -122,6 +124,8 @@ pub fn load_glyph_table(
     cancellation: &CancellationToken,
 ) -> Result<GlyphTable, FontLoadError> {
     check_cancelled(cancellation)?;
+    let repertoire = GlyphRepertoire::new(charset).map_err(FontLoadError::Engine)?;
+    check_cancelled(cancellation)?;
     let path_metadata = fs::metadata(path).map_err(|error| io_or_cancel(error, cancellation))?;
     check_cancelled(cancellation)?;
     if !path_metadata.is_file() {
@@ -141,7 +145,8 @@ pub fn load_glyph_table(
         (initial_len as usize).saturating_add(1).min(limit)
     };
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(initial_capacity)
+    bytes
+        .try_reserve_exact(initial_capacity)
         .map_err(|_| FontLoadError::Engine(Error::AllocationFailed))?;
 
     loop {
@@ -161,16 +166,22 @@ pub fn load_glyph_table(
         }
         if bytes.capacity() == bytes.len() {
             let additional = READ_CHUNK.min(limit - bytes.len());
-            bytes.try_reserve_exact(additional)
+            bytes
+                .try_reserve_exact(additional)
                 .map_err(|_| FontLoadError::Engine(Error::AllocationFailed))?;
         }
         let start = bytes.len();
-        let count = (bytes.capacity() - start).min(READ_CHUNK).min(limit - start);
+        let count = (bytes.capacity() - start)
+            .min(READ_CHUNK)
+            .min(limit - start);
         bytes.resize(start + count, 0);
         let read = file.read(&mut bytes[start..]);
         check_cancelled(cancellation)?;
         match read {
-            Ok(0) => { bytes.truncate(start); break; }
+            Ok(0) => {
+                bytes.truncate(start);
+                break;
+            }
             Ok(read) => bytes.truncate(start + read),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => bytes.truncate(start),
             Err(error) => return Err(io_or_cancel(error, cancellation)),
@@ -179,7 +190,8 @@ pub fn load_glyph_table(
     if cancellation.is_cancelled() {
         return Err(FontLoadError::Engine(Error::Cancelled));
     }
-    build_glyph_table(&bytes, charset, config, budget, cancellation).map_err(FontLoadError::Engine)
+    build_glyph_table(&bytes, &repertoire, config, budget, cancellation)
+        .map_err(FontLoadError::Engine)
 }
 #[cfg(all(test, unix))]
 mod tests {

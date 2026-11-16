@@ -60,11 +60,14 @@ pub fn publish_file(
     if cancellation.is_cancelled() {
         return Err(PublishError::Cancelled);
     }
-    write_artifact(staging.as_file_mut())
+    write_artifact(staging.as_file_mut()).map_err(|error| io_or_cancel(error, cancellation))?;
+    staging
+        .as_file_mut()
+        .flush()
         .map_err(|error| io_or_cancel(error, cancellation))?;
-    staging.as_file_mut().flush()
-        .map_err(|error| io_or_cancel(error, cancellation))?;
-    staging.as_file().sync_all()
+    staging
+        .as_file()
+        .sync_all()
         .map_err(|error| io_or_cancel(error, cancellation))?;
     if cancellation.is_cancelled() {
         return Err(PublishError::Cancelled);
