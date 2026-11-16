@@ -1048,8 +1048,8 @@ mod tests {
         let builders: [fn() -> Vec<u8>; 5] = [
             || synthetic_font::synthetic_font(false),
             || synthetic_font::diagonal_font(false),
-            || synthetic_font::quadratic_font,
-            || synthetic_font::composite_font,
+            synthetic_font::quadratic_font,
+            synthetic_font::composite_font,
             || synthetic_font::legacy_format2_font(false),
         ];
         for build_font in builders {
