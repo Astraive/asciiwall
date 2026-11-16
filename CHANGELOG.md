@@ -64,3 +64,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Keep the active old-scene COR-005 memory permit borrowed while a transition is staged; abort releases only the candidate charge, while completion releases the old charge once and deactivates the original permit.
 - Recheck urgent Stop/revocation flags under the ordinary control-queue lock before popping a FIFO event.
 - Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
+- Reject a queued-frame replacement cancelled during its buffer copy before publication, with public `submit_frame` regression coverage (`[COR-005]`).
