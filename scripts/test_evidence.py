@@ -57,7 +57,7 @@ def prefixed_unicode_escaped_report(report):
     for marker in ("synthetic-control-report", "synthetic-control-only", "cpu-grid-diff"):
         escaped = f"\\u{ord(marker[0]):04x}" + marker[1:]
         text = text.replace(marker, escaped)
-    return b'prefix " orphan ' + text.encode("utf-8")
+    return b'note "' + text.encode("utf-8")
 
 
 def _supports_safe_directory_access():
