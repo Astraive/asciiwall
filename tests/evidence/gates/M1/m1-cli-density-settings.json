@@ -5,7 +5,7 @@
     "repository": "Astraive/asciiwall",
     "branch": "feat/cli-001-headless-conversion",
     "commit": "0bbbf8da69aae5758b20d3ee34d38216313309d6",
-    "tree": "04283b76a28afce8e6040bbf73490c8d1ea28870",
+    "source_tree_object_id": "04283b76a28afce8e6040bbf73490c8d1ea28870",
     "cli_entrypoint": "apps/cli/src/main.rs",
     "conversion_path": "apps/cli/src/lib.rs"
   },
@@ -13,6 +13,8 @@
     "package": "asciiwall-cli",
     "target": "asciiwall",
     "sha256": "ff42bad49708689cd53481d6fc1f10edb908467d7009e28a7e183a13fcfcf624",
+    "sha256_provenance": "Computed locally from the built CLI executable during the component smoke; the executable is not included in this PR, so reviewers cannot independently recompute this hash from the PR artifacts.",
+    "executable_included_in_pr_artifacts": false,
     "build_command": "cargo build --locked --package asciiwall-cli --bin asciiwall",
     "build_target_directory": "D:/.worktrees/qa-m1-cli-golden-target",
     "build_cargo_home": "D:/.worktrees/qa-m1-cli-golden-cargo-home"
@@ -112,8 +114,11 @@
       "cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623"
     ],
     "bytewise_equal": true,
-    "comparison_method": "cmp compared the retained output after runs 1, 2, and 3 byte-for-byte; all comparisons succeeded.",
+    "comparison_method": "cmp compared the per-run outputs byte-for-byte and all comparisons succeeded; per-run files and logs are not included in this PR.",
     "output_path": "tests/evidence/gates/M1/m1-cli-density-golden.txt",
+    "retained_golden_output_included": true,
+    "individual_run_output_files_included": false,
+    "run_logs_included": false,
     "output_bytes": 85,
     "output_rows": 5,
     "output_columns": 16,
@@ -123,6 +128,8 @@
     "This is a successful monochrome density-to-TXT smoke on the CLI branch head only; it is not evidence for an integrated M1 candidate or issue acceptance.",
     "The CLI source at this head explicitly reports structural matching, config registry loading, and PNG still export as unavailable; these capabilities were not invoked in this smoke.",
     "No firewall-denied conversion, PNG output, cross-platform run, native surface, compositor/GPU/driver, permission, or manual observation was exercised.",
-    "A first cargo build using the pre-existing default Cargo home failed to create a registry cache directory with OS error 183. The successful build used the dedicated Cargo home and target directory recorded above."
+    "A first cargo build using the pre-existing default Cargo home failed to create a registry cache directory with OS error 183. The successful build used the dedicated Cargo home and target directory recorded above.",
+    "The binary SHA-256 was recorded from the locally built executable, but the executable is not included in PR artifacts and reviewers cannot independently recompute its hash from this branch.",
+    "Only the final golden output is included. Separate per-run output files and execution logs were not retained in the PR; repeated output hashes and bytewise cmp result are recorded."
   ]
 }

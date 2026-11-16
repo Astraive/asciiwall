@@ -1,6 +1,6 @@
 {
   "schema": "asciiwall.m1-gate-receipt/v1",
-  "receipt_version": "draft-2",
+  "receipt_version": "draft-3",
   "recorded_on": "2026-11-16",
   "decision": "no-go",
   "record_status": "draft_pending_independent_signoff",
@@ -53,10 +53,10 @@
     "interpretation": "CNV-002 color normalization is now present on main, but density conversion and CLI remain on separate unmerged branches. No branch combination is treated as an integrated M1 release candidate."
   },
   "receipt_branch_provenance": {
-    "branch": "test/qa-m1-no-go-receipt",
-    "base_revision_at_branch_creation": "08381114be95f5270d45eb51daa0039eeb5fa1a5",
+    "branch": "test/qa-m1-no-go-receipt-linear",
+    "base_revision_at_branch_creation": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
     "current_main_revision_at_capture": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
-    "scope": "Receipt and branch-scoped evidence only; this branch does not integrate the candidate components."
+    "scope": "Receipt and branch-scoped evidence only; this branch preserves current main and does not integrate the candidate components."
   },
   "entry_criteria": [
     {
@@ -149,7 +149,7 @@
     {
       "scenario_ids": ["CLI-001/branch-monochrome-density-TXT"],
       "status": "PASS",
-      "scope": "Actual CLI binary built from branch head 0bbbf8da69aae5758b20d3ee34d38216313309d6 converted the synthetic 8x4 RGBA8 fixture to 16x5 monochrome TXT three times with the same argv; bytewise comparisons passed. Binary SHA-256 ff42bad49708689cd53481d6fc1f10edb908467d7009e28a7e183a13fcfcf624; image fixture SHA-256 097a523501401c5a778f963661902f31e85739ece9b699b96302c39ccfdd6050; settings manifest SHA-256 89770207b8bc84ef878fe58fdba660683ce91a2f253106df59daa98f097d68ec; output SHA-256 cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623.",
+      "scope": "Actual CLI binary built from branch head 0bbbf8da69aae5758b20d3ee34d38216313309d6 converted the synthetic 8x4 RGBA8 fixture to 16x5 monochrome TXT three times with the same argv; bytewise comparisons passed. Binary SHA-256 ff42bad49708689cd53481d6fc1f10edb908467d7009e28a7e183a13fcfcf624 was recorded locally, but the executable is not included and reviewers cannot recompute it from PR artifacts. The final golden is included; individual run outputs/logs are not. Image fixture SHA-256 097a523501401c5a778f963661902f31e85739ece9b699b96302c39ccfdd6050; settings manifest SHA-256 651bfcd61379215a7db7cd8b3064fea6c5b991b14eb77f075cc08ca74f1b6ecf; output SHA-256 cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623.",
       "m1_acceptance_status": "BLOCKED",
       "evidence_path": "tests/evidence/gates/M1/m1-cli-density-settings.json"
     },
@@ -251,7 +251,7 @@
       "pull_request": null,
       "branch": "feat/cli-001-headless-conversion",
       "head_sha": "0bbbf8da69aae5758b20d3ee34d38216313309d6",
-      "source_tree_sha256": "04283b76a28afce8e6040bbf73490c8d1ea28870",
+      "source_tree_object_id": "04283b76a28afce8e6040bbf73490c8d1ea28870",
       "github_pull_request_query": "No pull request found for this branch at observation time.",
       "component_outcome": "PASS: three actual monochrome density-to-TXT conversions with the same argv produced bytewise-identical output.",
       "limitations": "This branch is not on current main and has no PR. Source inspection confirms structural matching, config-registry loading, and PNG export are unavailable. Issue #129 acceptance and integrated M1 status remain incomplete."
@@ -473,13 +473,18 @@
       "pull_request": null,
       "branch": "feat/cli-001-headless-conversion",
       "source_head": "0bbbf8da69aae5758b20d3ee34d38216313309d6",
-      "source_tree_sha256": "04283b76a28afce8e6040bbf73490c8d1ea28870",
+      "source_tree_object_id": "04283b76a28afce8e6040bbf73490c8d1ea28870",
       "binary_sha256": "ff42bad49708689cd53481d6fc1f10edb908467d7009e28a7e183a13fcfcf624",
+      "binary_sha256_status": "OBSERVED_LOCALLY_NOT_INDEPENDENTLY_RECOMPUTABLE_FROM_PR_ARTIFACTS",
+      "binary_artifact_included": false,
       "image_fixture_sha256": "097a523501401c5a778f963661902f31e85739ece9b699b96302c39ccfdd6050",
       "font_fixture_sha256": "50fea7e6d99d4f46d5e8bd800a3b6b4ec4c89d0617f0be102e421a74808e018b",
       "font_generator_source_sha256": "ed96313cfbbc552a891745851922d28c576db4349ee060f5c44f473cf2950f93",
-      "settings_manifest_sha256": "89770207b8bc84ef878fe58fdba660683ce91a2f253106df59daa98f097d68ec",
+      "settings_manifest_sha256": "651bfcd61379215a7db7cd8b3064fea6c5b991b14eb77f075cc08ca74f1b6ecf",
       "output_sha256": "cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623",
+      "retained_golden_output_included": true,
+      "individual_run_output_files_included": false,
+      "run_logs_included": false,
       "runs": 3,
       "bytewise_equal": true,
       "scope": "Branch-scoped CLI component smoke only; none of these hashes is represented as the integrated M1 candidate bundle."
@@ -499,6 +504,8 @@
       "status": "PASS",
       "source_head": "0bbbf8da69aae5758b20d3ee34d38216313309d6",
       "binary_sha256": "ff42bad49708689cd53481d6fc1f10edb908467d7009e28a7e183a13fcfcf624",
+      "binary_artifact_included": false,
+      "binary_sha256_independently_recomputable_from_pr_artifacts": false,
       "os_and_build": "Microsoft Windows 10.0.26300.9711 x86_64",
       "rustc": "1.100.0 (0ef1bc386 2026-11-09)",
       "cargo": "1.100.0 (3acc79c0c 2026-11-05)",
@@ -513,6 +520,9 @@
         "cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623",
         "cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623"
       ],
+      "retained_golden_output_included": true,
+      "individual_run_output_files_included": false,
+      "run_logs_included": false,
       "bytewise_equal": true
     },
     "portable_ci_environment": {
