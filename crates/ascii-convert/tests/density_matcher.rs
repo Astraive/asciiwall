@@ -583,7 +583,7 @@ fn unsupported_pixel_channels_precede_size_overflow() {
         u32::MAX,
         1,
         0,
-        PixelFormat::new(PixelChannels::Other(5), 8),
+        PixelFormat::new(PixelChannels::Other(5), 16),
         ColorDescription::srgb(AlphaMode::Opaque),
         RasterOrientation::TopDown,
         &[],
@@ -601,6 +601,37 @@ fn unsupported_pixel_channels_precede_size_overflow() {
             ascii_core::UnsupportedReason::PixelFormat
         )))
     );
+}
+
+#[test]
+fn unsupported_sample_depth_precedes_short_stride() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    );
+
+    for channels in [PixelChannels::Gray, PixelChannels::Rgb, PixelChannels::Rgba] {
+        let unsupported_depth = RasterFrameView::new(
+            1,
+            1,
+            0,
+            PixelFormat::new(channels, 16),
+            ColorDescription::srgb(AlphaMode::Opaque),
+            RasterOrientation::TopDown,
+            &[],
+        );
+        assert_eq!(
+            convert_density_detailed(unsupported_depth, &table, &conversion_settings, &budget(),),
+            Err(DensityConversionError::Core(Error::Unsupported(
+                ascii_core::UnsupportedReason::SampleDepth
+            )))
+        );
+    }
 }
 
 #[test]
