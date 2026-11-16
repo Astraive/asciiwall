@@ -1,6 +1,6 @@
 {
   "schema": "asciiwall.m1-gate-receipt/v1",
-  "receipt_version": "draft-3",
+  "receipt_version": "draft-4",
   "recorded_on": "2026-11-16",
   "decision": "no-go",
   "record_status": "draft_pending_independent_signoff",
@@ -243,7 +243,14 @@
           "workflow": "Security analysis"
         }
       ],
-      "limitations": "The current open draft adds the fractional-block correction, but exact-head CI is not reported and independent review remains pending. Its recorded base is main at 08381114be95f5270d45eb51daa0039eeb5fa1a5, behind current main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; the PR remains dirty and issue #120 remains open."
+      "independent_exact_head_review": {
+        "reviewer": "Independent Luna xhigh review",
+        "head_sha": "3b587d8187847e2e6e42c72bb5feabe4fb4f9470",
+        "status": "PASS",
+        "findings": "no actionable P0-P3 findings",
+        "evidence": "https://github.com/Astraive/asciiwall/pull/306"
+      },
+      "limitations": "The current open draft adds the fractional-block correction, but exact-head CI is not reported. Independent Luna xhigh review of exact head 3b587d8187847e2e6e42c72bb5feabe4fb4f9470 found no actionable P0-P3 findings. Its recorded base is main at 08381114be95f5270d45eb51daa0039eeb5fa1a5, behind current main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; the PR remains dirty and issue #120 remains open."
     },
     {
       "work_item": "CLI-001",
@@ -282,30 +289,42 @@
     {
       "work_item": "CNV-001",
       "issue": 118,
-      "pull_request": 292,
+      "pull_request": 314,
       "state": "OPEN_DRAFT",
-      "head_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
-      "base_branch": "feat/cnv-002-color-normalization",
-      "base_sha": "52a7a471cf86851c47984a51486e1d8eb245bf64",
+      "head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
+      "base_branch": "main",
+      "base_sha": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
       "current_main_sha": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
+      "merge_state": "CLEAN",
+      "issue_state": "OPEN",
       "component_test_outcomes_reported": [
-        "PASS: cargo test --locked -p ascii-convert --test density_matcher (22 tests)",
-        "PASS: cargo test --locked --workspace (143 tests across 13 suites)"
+        "PASS: cargo test --locked --package ascii-convert --test density_matcher (23 tests)",
+        "PASS: cargo test --locked --workspace (144 tests across 13 suites, including compile-fail API doctests)",
+        "PASS: cargo fmt --all -- --check",
+        "PASS: cargo clippy --locked --workspace --all-targets -- -D warnings"
       ],
       "ci": [
         {
-          "run": "https://github.com/Astraive/asciiwall/actions/runs/43838977139",
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43858912787",
           "workflow": "Repository checks",
           "status": "PASS",
-          "checks": ["Repository quality", "Portable core (ubuntu-latest)", "Portable core (macos-latest)", "Portable core (windows-latest)"]
+          "checks": ["Repository quality", "Portable core (macos-latest)", "Portable core (ubuntu-latest)", "Portable core (windows-latest)"]
         },
         {
-          "run": "https://github.com/Astraive/asciiwall/actions/runs/43838561405",
-          "workflow": "Security analysis",
-          "status": "PASS"
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43857985238",
+          "workflow": "Python security analysis",
+          "status": "PASS",
+          "checks": ["Python security analysis"]
         }
       ],
-      "limitations": "Open draft still points to the closed #291 base branch rather than the merged #307 replacement. The current head has not been rebuilt/synchronized to main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; not an integrated M1 candidate."
+      "independent_exact_head_review": {
+        "reviewer": "Independent Luna xhigh review",
+        "head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
+        "status": "PASS",
+        "findings": "none",
+        "evidence": "https://github.com/Astraive/asciiwall/pull/314"
+      },
+      "limitations": "Replacement PR #314 is open/draft on current main; its exact-head CI and independent review are clean, but issue #118 remains open and ticket acceptance is incomplete. No integrated M1 candidate is claimed. Downstream PRs #302, #304, and #305 still target the old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and are stale/not synchronized to #314; their recorded tests and checks remain historical evidence for their own heads."
     },
     {
       "work_item": "CNV-003",
@@ -314,6 +333,8 @@
       "state": "OPEN_DRAFT",
       "head_sha": "5564df42a11664a9892a9bf64afb64a17f1cac50",
       "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "synchronization_status": "STALE_NOT_SYNCHRONIZED_TO_PR_314",
+      "current_cnv_001_replacement_head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
       "component_test_outcomes_reported": [
         "PASS: cargo test --locked -p ascii-convert --test sampling_geometry (9 tests)",
         "PASS: cargo test --locked -p ascii-convert --test density_matcher (22 tests)",
@@ -332,7 +353,7 @@
           "status": "PASS"
         }
       ],
-      "limitations": "Open draft, stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84; no exact integrated M1 candidate or native/UI evidence."
+      "limitations": "Open draft, still based on the old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and stale/not synchronized to replacement PR #314 at 8fffc12b174de4930dfeb00bffd47d5b865e5791. The recorded tests and checks are historical for this PR head; no exact integrated M1 candidate or native/UI evidence."
     },
     {
       "work_item": "QA-101",
@@ -342,6 +363,8 @@
       "head_sha": "9ad6656cb6e024f221977e025d1decd6afca88e7",
       "base_branch": "feat/cnv-001-density-matching",
       "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "synchronization_status": "STALE_NOT_SYNCHRONIZED_TO_PR_314",
+      "current_cnv_001_replacement_head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
       "component_test_outcomes_reported": [
         "PASS: cargo test --locked -p ascii-convert --test qa_101_input_conversion (4 tests)",
         "PASS: cargo test --locked --workspace (147 tests across 14 suites)"
@@ -359,7 +382,7 @@
           "status": "PASS"
         }
       ],
-      "limitations": "EC-004 EXIF orientation is NOT RUN; the PR is still stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84. QA-004 #35 and reviewer-linked scenario receipts remain outstanding."
+      "limitations": "EC-004 EXIF orientation is NOT RUN; the PR is still stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and is stale/not synchronized to replacement PR #314 at 8fffc12b174de4930dfeb00bffd47d5b865e5791. QA-004 #35 and reviewer-linked scenario receipts remain outstanding."
     },
     {
       "work_item": "QA-102",
@@ -369,6 +392,8 @@
       "head_sha": "fd7828e98db7e63057a4ba51d46739d6f201e4b7",
       "base_branch": "feat/cnv-001-density-matching",
       "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "synchronization_status": "STALE_NOT_SYNCHRONIZED_TO_PR_314",
+      "current_cnv_001_replacement_head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
       "component_test_outcomes_reported": [
         "PASS: cargo test --locked -p ascii-convert --test qa_102_input_conversion (5 tests)",
         "PASS: cargo test --locked -p ascii-convert --test density_matcher (22 tests)",
@@ -387,7 +412,17 @@
           "status": "PASS"
         }
       ],
-      "limitations": "EC-009 restricted-worker/UI error and EC-008 decoder-to-converter traversal are NOT RUN. The PR is still stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84. QA-004 #35 and reviewer-linked QA-102 scenario evidence remain outstanding."
+      "independent_pre_restack_review": {
+        "reviewer": "Independent Luna xhigh review",
+        "reviewed_head_sha": "fd7828e98db7e63057a4ba51d46739d6f201e4b7",
+        "status": "FINDINGS",
+        "scope": "Pre-restack review of the old QA-102 head; no resolution is claimed for this head.",
+        "findings": [
+          "P2: QA-102 source hashes in docs/quality/edge-case-matrix.md are stale (the source hash is the old fcd3684 value and the synthetic-font generator hash is also incorrect).",
+          "P2: PR #305 EC-010 text incorrectly says no decoder path exists, despite the compressed-raster budget regression in crates/ascii-media/tests/image_decode.rs:524."
+        ]
+      },
+      "limitations": "EC-009 restricted-worker/UI error and EC-008 decoder-to-converter traversal are NOT RUN. EC-010 QA-102 scenario acceptance remains outstanding; an existing compressed-raster budget regression at crates/ascii-media/tests/image_decode.rs:524 is not itself QA-102 acceptance evidence. This PR remains stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and is stale/not synchronized to replacement PR #314 at 8fffc12b174de4930dfeb00bffd47d5b865e5791. Its pre-restack independent review found two P2s, described above; no resolution is claimed. QA-004 #35 and reviewer-linked QA-102 scenario evidence remain outstanding; the tests and checks are historical for this PR head."
     },
     {
       "work_item": "RND-001",
@@ -420,6 +455,14 @@
       "state": "CLOSED",
       "superseded_by": 307,
       "note": "CNV-002 replacement PR #307 merged at 4f1ab1b227d4fa21bf28a2b7b0923727dd662ca0 into main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; do not list #291 as active."
+    },
+    {
+      "pull_request": 292,
+      "state": "CLOSED",
+      "superseded_by": 314,
+      "head_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "replacement_head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
+      "note": "CNV-001 PR #292 is closed as superseded by clean replacement PR #314, based on main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea. Replacement #314 remains open/draft; issue #118 remains open."
     },
     {
       "pull_request": 300,
