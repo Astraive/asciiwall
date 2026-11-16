@@ -231,6 +231,8 @@ pub struct BoundedHandoff {
     pool: BufferPool,
     frames: FrameQueue,
     controls: ControlQueue,
+    #[cfg(test)]
+    cancel_after_copy: Mutex<bool>,
 }
 
 impl BoundedHandoff {
@@ -249,6 +251,8 @@ impl BoundedHandoff {
             pool: BufferPool::new(resource_budget, generation, slot_count, bytes_per_slot)?,
             frames: FrameQueue::new(resource_budget, frame_queue_capacity)?,
             controls: ControlQueue::new(resource_budget, control_queue_capacity)?,
+            #[cfg(test)]
+            cancel_after_copy: Mutex::new(false),
         })
     }
 
@@ -274,6 +278,17 @@ impl BoundedHandoff {
     /// Returns one slot's state for bounded diagnostics/tests.
     pub fn slot_state(&self, slot_id: u32) -> Result<crate::SlotState, RuntimeError> {
         self.pool.slot_state(slot_id)
+    }
+    #[cfg(test)]
+    fn cancel_during_next_copy(&self) {
+        *lock_unpoisoned(&self.cancel_after_copy) = true;
+    }
+
+    #[cfg(test)]
+    fn apply_test_copy_cancellation(&self, cancellation: &CancellationToken) {
+        if std::mem::take(&mut *lock_unpoisoned(&self.cancel_after_copy)) {
+            cancellation.cancel();
+        }
     }
 
     /// Publishes the newest valid frame before releasing older queued frames.
@@ -312,6 +327,8 @@ impl BoundedHandoff {
         let fill = match self.pool.begin_fill() {
             Ok(mut fill) => {
                 fill.write_with_cpu_permit(pixels)?;
+                #[cfg(test)]
+                self.apply_test_copy_cancellation(cancellation);
                 before_publish();
                 if cancellation.is_cancelled() {
                     return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
@@ -333,6 +350,11 @@ impl BoundedHandoff {
                     match self.pool.begin_fill() {
                         Ok(mut fill) => {
                             fill.write_with_cpu_permit(pixels)?;
+                            #[cfg(test)]
+                            self.apply_test_copy_cancellation(cancellation);
+                            if cancellation.is_cancelled() {
+                                return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
+                            }
                             break fill;
                         }
                         Err(RuntimeError::NoFreeSlots) => {}
@@ -524,6 +546,32 @@ mod tests {
         assert_eq!(lease.descriptor().media_timestamp_ns, 1);
         lease.completion_token().unwrap().acknowledge();
         lease.release().unwrap();
+    }
+
+    #[test]
+    fn cancellation_during_one_slot_replacement_copy_is_not_published() {
+        let resource_budget = resource_budget();
+        let handoff = BoundedHandoff::new(&resource_budget, 1, 1, 3, 1, 1).unwrap();
+        let limits = budget();
+        handoff
+            .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        handoff.cancel_during_next_copy();
+
+        assert_eq!(
+            handoff.submit_frame(metadata(2), &[4, 5, 6], &limits, &cancellation),
+            Err(RuntimeError::CoreValidation(ascii_core::Error::Cancelled))
+        );
+        assert!(cancellation.is_cancelled());
+        assert_eq!(handoff.queued_frames(), 0);
+        assert_eq!(handoff.slot_state(0).unwrap(), SlotState::Free);
+        assert!(
+            handoff
+                .receive_frame(&limits, &CancellationToken::new())
+                .unwrap()
+                .is_none()
+        );
     }
     #[test]
     fn urgent_control_recheck_wins_before_fifo_pop() {
