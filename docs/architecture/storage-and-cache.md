@@ -56,7 +56,20 @@ recovery guarantees. Parent-directory sync is implemented on Unix and is a no-op
 
 ## Eviction
 
-A cache root uses a marked cache-owned subdirectory; a generated-looking filename at the root or in an unmarked directory is never sufficient ownership evidence. Operations that read or change root-wide byte accounting (open, store, budget changes, trimming, and snapshots) scan generated files beneath the root while holding its operations lock, so independently opened instances account for the same root-wide byte usage. Stores keep that lock through file creation, write, flush, and in-memory state publication; stale per-instance accounting cannot reserve bytes already stored by another instance. Instances sharing a root must use the same configured byte budget. Each instance retains semantic identity and LRU state only for its own known entries; files discovered from another instance or after reopen remain accounted as orphans and are eviction candidates ordered by generated file ID, not available for semantic lookup by identity.
+A cache root uses a marked cache-owned subdirectory; generated-looking filenames at the root or in
+an unmarked directory are never sufficient ownership evidence. Concurrent first opens serialize
+initialization through a root-level lock. A uniquely named sibling staging directory receives and
+syncs its owner marker before an atomic rename publishes it under the managed name, so another open
+never observes an unmarked final cache directory.
+
+Operations that read or change root-wide byte accounting (open, store, budget changes, trimming, and
+snapshots) scan generated files beneath the root while holding its operations lock, so independently
+opened instances account for the same root-wide byte usage. Stores keep that lock through file
+creation, write, flush, and in-memory state publication; stale per-instance accounting cannot reserve
+bytes already stored by another instance. Instances sharing a root must use the same configured
+byte budget. Each instance retains semantic identity and LRU state only for its own known entries;
+files discovered from another instance or after reopen remain accounted as orphans and are eviction
+candidates ordered by generated file ID, not available for semantic lookup by identity.
 
 Active decoder/upload users pin entries through non-cloneable leases; dropping a lease does not signal completion, and the owner must explicitly acknowledge completion. A live lease holds a shared OS file lock, and eviction must obtain an exclusive lock before deleting a file, so another cache instance cannot remove an actively leased artifact. Keep the managed cache root private and stable: project directories, imported packages, and unmanaged files remain outside the deletion scope.
 

@@ -17,6 +17,9 @@ const CACHE_INSTANCE_DIR: &str = ".asciiwall-cache-v1";
 const CACHE_OWNER_FILE: &str = ".asciiwall-owner";
 const CACHE_OWNER_MARKER: &[u8] = b"AsciiWall derived cache ownership v1\n";
 const CACHE_OPERATIONS_LOCK: &str = ".operations.lock";
+const CACHE_INITIALIZATION_LOCK: &str = ".asciiwall-cache-v1.init.lock";
+
+static CACHE_INITIALIZATION_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 /// A caller-computed cryptographic digest of content or shader bytes.
 ///
@@ -961,27 +964,78 @@ fn write_cache_owner_marker(directory: &Path) -> Result<(), CacheError> {
     Ok(())
 }
 
+fn lock_cache_initialization(root: &Path) -> Result<File, CacheError> {
+    let lock_path = root.join(CACHE_INITIALIZATION_LOCK);
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(&lock_path)?;
+            if !metadata.file_type().is_file() {
+                return Err(CacheError::UnsafeDerivedPath(lock_path));
+            }
+            OpenOptions::new().read(true).write(true).open(lock_path)?
+        }
+        Err(error) => return Err(CacheError::Io(error)),
+    };
+    file.lock()?;
+    Ok(file)
+}
+
+fn create_cache_instance_staging_dir(root: &Path) -> Result<PathBuf, CacheError> {
+    loop {
+        let id = CACHE_INITIALIZATION_TEMP_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| CacheError::ArithmeticOverflow)?;
+        let name = format!(
+            "{CACHE_INSTANCE_DIR}.init-{}-{id:016x}",
+            std::process::id()
+        );
+        let path = root.join(name);
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(CacheError::Io(error)),
+        }
+    }
+}
+
 fn create_cache_instance_dir(root: &Path) -> Result<PathBuf, CacheError> {
     verify_managed_root(root)?;
+    let _initialization_lock = lock_cache_initialization(root)?;
     let managed_dir = root.join(CACHE_INSTANCE_DIR);
-    match fs::create_dir(&managed_dir) {
-        Ok(()) => {
-            if let Err(error) = write_cache_owner_marker(&managed_dir) {
-                let _ = fs::remove_file(managed_dir.join(CACHE_OWNER_FILE));
-                let _ = fs::remove_dir(&managed_dir);
-                return Err(error);
-            }
-            Ok(managed_dir)
-        }
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            if cache_instance_is_owned(root, &managed_dir)? {
-                Ok(managed_dir)
-            } else {
-                Err(CacheError::UnsafeDerivedPath(managed_dir))
-            }
-        }
-        Err(error) => Err(CacheError::Io(error)),
+    match fs::symlink_metadata(&managed_dir) {
+        Ok(_) if cache_instance_is_owned(root, &managed_dir)? => return Ok(managed_dir),
+        Ok(_) => return Err(CacheError::UnsafeDerivedPath(managed_dir)),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(CacheError::Io(error)),
     }
+
+    let staging_dir = create_cache_instance_staging_dir(root)?;
+    if let Err(error) = write_cache_owner_marker(&staging_dir) {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&staging_dir, &managed_dir) {
+        let _ = fs::remove_dir_all(&staging_dir);
+        if cache_instance_is_owned(root, &managed_dir)? {
+            return Ok(managed_dir);
+        }
+        return match fs::symlink_metadata(&managed_dir) {
+            Ok(_) => Err(CacheError::UnsafeDerivedPath(managed_dir)),
+            Err(path_error) if path_error.kind() == ErrorKind::NotFound => {
+                Err(CacheError::Io(error))
+            }
+            Err(path_error) => Err(CacheError::Io(path_error)),
+        };
+    }
+    Ok(managed_dir)
 }
 
 fn lock_cache_directory(root: &Path, managed_dir: &Path) -> Result<File, CacheError> {
