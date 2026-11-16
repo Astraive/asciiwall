@@ -19,6 +19,23 @@ This matrix defines **120 proposed scenarios** and expected outcomes. It is not 
 | EC-009 | P0 | Malformed/truncated image | Worker failure with safe UI error |
 | EC-010 | P0 | Small compressed image with huge dimensions | Reject against pixel/byte budget before full allocation |
 
+### QA-102 portable regression coverage
+
+`crates/ascii-convert/tests/qa_102_input_conversion.rs` adds synthetic checks against the raster normalization and detailed density conversion APIs. These are executable regression specifications, not recorded test outcomes:
+
+| ID | Exercised real interface | Remaining boundary |
+|---|---|---|
+| EC-006 | Synthetic RGB raster bytes with PQ HDR-transfer and Rec.2020 wide-gamut metadata are passed through `convert_density_detailed`; the regression preserves the exact typed normalization cause and the actionable `Display` limitation (SDR or explicit tone mapping; tested color-managed conversion to sRGB). | This exercises the detailed portable conversion API, not decoder-extracted metadata or CLI/UI messaging. The convenience `convert_density` API intentionally maps unsupported color to a generic core error. |
+| EC-007 | All-black, all-white, and flat mid-gray Gray8 rasters are repeatedly converted with retained quality patches. Fixture-measured coverage asserts white selects ink glyph `A`, black selects blank space, descriptors/samples stay finite, gradients are zero, and endpoint luminance is exactly 0/1. | This covers the portable CPU conversion path only; it is not native preview/rendering evidence. |
+| EC-008 | A 3×2 Gray8 raster with odd five-byte stride and the minimum eight-byte backing extent is normalized and converted into a 3×2 grid. Two synthetic buffers differ only in poison padding; active normalized samples and converted glyphs must match, with black then white visible rows. | Decoder-to-converter coverage is not available in this branch: `ascii-media` is absent from the workspace and IMG-001 PR #301 is still draft on its separate branch. Device-specific stride is also untested. |
+| EC-009 | **Not run as EC-009.** A separately named raw-raster backing validation regression verifies the converter preserves `RasterBackingTooShort`; it does not use malformed encoded input, a restricted worker, or a UI. | The current workspace contains no SEC-005 restricted media worker or UIX-001 application UI/safe-error surface. The required malformed/truncated encoded-input → worker failure → safe UI error path is unavailable; no worker/UI pass is claimed. |
+| EC-010 | **Not run as EC-010.** A separately named raster-normalizer budget regression checks raster bytes/work preflight only; it is not a compressed-image or decoder test. | The QA-102 worktree has no `ascii-media` decoder. IMG-001 PR #301 is open/draft on `feat/img-001-image-decoding`, based on `main`; consuming it here would stack a separate unmerged decoder branch on the CNV-001/CNV-002 stack. The required local compressed huge-dimension fixture, decoder rejection, and pre-expanded-allocation reservation/counter evidence are not available, so this is not a decode-safety pass. |
+
+No tests or evidence runs are recorded here. Engine/binary and fixture hashes, host/GPU/permission state, observed outcomes, pass/fail, reviewer/date, and evidence links remain unrecorded until execution and an evidence receipt; these portable cases do not establish native or UI safety.
+
+QA-004 issue #35 remains open/draft and is a hard dependency. These regression runs are not a QA-004 evidence-recorder receipt, and no QA-102 acceptance completion is claimed.
+
+
 ## Glyphs and rendering
 
 | ID | Priority | Condition | Required outcome |
