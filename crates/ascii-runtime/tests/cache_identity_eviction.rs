@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Barrier, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 static CWD_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -501,6 +501,47 @@ fn eviction_only_deletes_generated_files_beneath_the_managed_cache_root() {
     assert_eq!(fs::read(&project_file).unwrap(), b"user data");
     assert_eq!(derived_file_count(cache.root()), 1);
     assert_eq!(cache.snapshot().unwrap().used_bytes, 3);
+}
+
+#[test]
+fn concurrent_first_cache_opens_publish_only_owned_managed_directories() {
+    const OPENERS: usize = 12;
+
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    fs::create_dir(&cache_root).unwrap();
+    let start = Arc::new(Barrier::new(OPENERS));
+    let mut workers = Vec::with_capacity(OPENERS);
+    for _ in 0..OPENERS {
+        let root = cache_root.clone();
+        let start = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            start.wait();
+            DerivedCache::open(root, 64)
+        }));
+    }
+
+    let caches = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap().expect("concurrent first open succeeds"))
+        .collect::<Vec<_>>();
+    let managed_dir = cache_root.join(".asciiwall-cache-v1");
+    assert_eq!(
+        fs::read(managed_dir.join(".asciiwall-owner")).unwrap(),
+        b"AsciiWall derived cache ownership v1\n"
+    );
+    let incomplete_staging_directories = fs::read_dir(&cache_root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".asciiwall-cache-v1.init-")
+        })
+        .count();
+    assert_eq!(incomplete_staging_directories, 0);
+    drop(caches);
 }
 
 #[test]
