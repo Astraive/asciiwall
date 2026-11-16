@@ -12,7 +12,7 @@ Font lookup is direct and substitution is disabled. A missing cmap entry returns
 
 `build_glyph_preview` rasterizes one supported scalar through the exact glyph-table mask path and returns row-major 8-bit coverage plus its mean coverage. Its status is `Available`, `Unavailable`, `Invisible`, or `MultiCell`; space remains `Available` with its actual blank mask, and missing/multi-cell glyphs have no mask. No tofu/fallback mask is synthesized.
 
-The current executable workspace contains only `crates/ascii-core/` and `crates/ascii-convert/`. There is no application/editor tree (`apps/`), `crates/ascii-clip/` reader/validator, or `crates/ascii-export/` text exporter; `docs/ui/` is design documentation, not an editor implementation. Consequently, the predicate and preview are library contracts only: clip/text-export reuse and editor integration remain unmet FNT-002 acceptance and this change must stay open/draft.
+The current executable workspace contains only `crates/ascii-core/`, `crates/ascii-convert/`, and `crates/ascii-media/`. There is no application/editor tree (`apps/`), `crates/ascii-clip/` reader/validator, or `crates/ascii-export/` text exporter; `docs/ui/` is design documentation, not an editor implementation. Consequently, the predicate and preview are library contracts only: clip/text-export reuse and editor integration remain unmet FNT-002 acceptance and this change must stay open/draft.
 
 Each glyph is rasterized with pinned `fontdue 0.9.3` (default features disabled; `hashbrown` enabled, SIMD disabled), centered by advance width and positioned at the configured baseline, then clipped to the cell. Space remains a real measured blank mask. Bounds, coverage-weighted centroid, normalized mean coverage, and four gradient-orientation energy bins come from the resulting mask. The immutable table sorts by measured coverage, then font glyph index, then Unicode scalar.
 
@@ -28,11 +28,11 @@ Version one enforces that repertoire at construction: C0/C1 controls, bidi forma
 
 ### FNT-002 verification evidence
 
-- Focused command: `cargo test --locked -p ascii-convert --test repertoire` — 8 tests passed, including all 256 Braille dot patterns at 8×12 and 10×15, complete preset font availability, block alignment/coverage, strict rejections, preview-mask identity, and missing/invisible states.
-- Locked workspace command: `cargo test --workspace --locked` — 48 tests passed across `ascii-core` and `ascii-convert`; doc tests passed with no tests defined.
+- Focused command: `cargo test -p ascii-convert --test repertoire` — 9 tests passed, including all 256 Braille dot patterns at 8×12 and 10×15, complete preset font availability, block alignment/coverage, strict rejections, preview-mask identity, and missing/invisible states.
+- Workspace command: `cargo test --workspace --all-targets` — 122 tests passed across 10 suites in `ascii-core`, `ascii-convert`, and `ascii-media`.
 - Quality commands: `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings` — passed.
 - Executable smoke: temporary offline path-dependent binary ran `cargo run --locked --offline` and asserted actual `A` preview-mask equality, blank space preservation, and `C` unavailable status. Output: `preview smoke passed: A=Available coverage=Some(0.21764706), space=Available, C=Unavailable`.
-- Fixture/config evidence (source-generated, rights-cleared, no downloaded assets): `crates/ascii-convert/tests/support/repertoire_font.rs` SHA-256 `61648ba1135fd0f351e44ea70120f30e735c292077e6f0093200317d2b341282`; `crates/ascii-convert/tests/repertoire.rs` (raster sizes, cells, baseline, budgets, assertions) SHA-256 `522d3f1aa38f741f2707b203e9f0fe213b06344e537377354612d2455a887c7c`.
+- Fixture/config evidence (source-generated, rights-cleared, no downloaded assets): `crates/ascii-convert/tests/support/repertoire_font.rs` SHA-256 `c48600adeffe69204ec1352a4bbaa2df7609d3b22530408722d9c44df922a764`; `crates/ascii-convert/tests/repertoire.rs` (raster sizes, cells, baseline, budgets, assertions) SHA-256 `3476a20ee52113fd1efb2852eaa0dbeca4db951d30a4286cfb9bce02dac16ab8`.
 - Environment: Windows 10 x64, `x86_64-pc-windows-msvc`, Cargo/rustc 1.100.0; `CARGO_HOME=D:/.worktrees/.cargo-cache`, `CARGO_TARGET_DIR=D:/.worktrees/.targets/fnt-002`.
 
 ## Density matching
