@@ -3,6 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use ascii_convert::GlyphRepertoire;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::diagnostic::CliError;
@@ -108,7 +109,7 @@ impl Format {
 
 impl ConvertArgs {
     /// Validates the request without opening or modifying the destination.
-    pub fn validate(&self, json: bool) -> Result<Format, CliError> {
+    pub fn validate(&self, json: bool) -> Result<(Format, GlyphRepertoire), CliError> {
         if self.image.as_os_str().is_empty()
             || self.output.as_os_str().is_empty()
             || self
@@ -175,27 +176,9 @@ impl ConvertArgs {
             }
         };
 
-        // Until the shared strict-cell repertoire is available, do not pass potentially unsafe
-        // Unicode, controls, or duplicate glyphs into a future terminal exporter.
-        let mut seen = [false; 95];
-        if self.charset.is_empty() || self.charset.len() > 4096 {
-            return Err(CliError::validation(
-                "charset must contain 1 to 4096 printable ASCII glyphs",
-            ));
-        }
-        for byte in self.charset.bytes() {
-            if !(b' '..=b'~').contains(&byte) {
-                return Err(CliError::validation(
-                    "only printable ASCII glyphs are available until strict-cell repertoire validation is implemented",
-                ));
-            }
-            let index = usize::from(byte - b' ');
-            if seen[index] {
-                return Err(CliError::validation("charset glyphs must not repeat"));
-            }
-            seen[index] = true;
-        }
-
-        Ok(format)
+        let repertoire = GlyphRepertoire::new(&self.charset).map_err(|_| {
+            CliError::validation("charset must contain unique supported single-cell glyphs")
+        })?;
+        Ok((format, repertoire))
     }
 }
