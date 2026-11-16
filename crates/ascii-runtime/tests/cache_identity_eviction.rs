@@ -9,8 +9,10 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Barrier, Mutex};
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static CWD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct TempDir(PathBuf);
 
@@ -37,6 +39,22 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct CurrentDirectoryGuard(PathBuf);
+
+impl CurrentDirectoryGuard {
+    fn change_to(path: &Path) -> io::Result<Self> {
+        let previous = std::env::current_dir()?;
+        std::env::set_current_dir(path)?;
+        Ok(Self(previous))
+    }
+}
+
+impl Drop for CurrentDirectoryGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
     }
 }
 
@@ -949,6 +967,46 @@ fn successful_output_creation_registers_only_after_commit() {
     assert_eq!(fs::read(&committed).unwrap(), b"created output");
     assert_eq!(registry.registered_path(&key), Some(committed));
     assert_eq!(partial_output_count(temp.path()), 0);
+}
+
+#[test]
+fn relative_output_destination_is_captured_before_callback_changes_working_directory() {
+    let _cwd_test_lock = CWD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = TempDir::new();
+    let initial_working_directory = temp.path().join("initial");
+    let changed_working_directory = temp.path().join("changed");
+    fs::create_dir(&initial_working_directory).unwrap();
+    fs::create_dir(&changed_working_directory).unwrap();
+    let _current_directory_guard =
+        CurrentDirectoryGuard::change_to(&initial_working_directory).unwrap();
+
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 64,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(48);
+    let relative_destination = PathBuf::from("relative-output.bin");
+    let committed = registry
+        .write_transactional(key.clone(), &relative_destination, &reservation, |output| {
+            output.write_all(b"captured at transaction start")?;
+            std::env::set_current_dir(&changed_working_directory)
+        })
+        .expect("the captured absolute destination remains stable after the callback changes cwd");
+
+    let expected_destination = initial_working_directory.join("relative-output.bin");
+    assert_eq!(committed, expected_destination);
+    assert_eq!(
+        registry.registered_path(&key),
+        Some(expected_destination.clone())
+    );
+    assert_eq!(fs::read(&expected_destination).unwrap(), b"captured at transaction start");
+    assert!(!changed_working_directory.join("relative-output.bin").exists());
 }
 
 #[cfg(any(unix, windows))]
