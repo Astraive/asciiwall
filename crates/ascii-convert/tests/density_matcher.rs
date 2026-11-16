@@ -222,9 +222,7 @@ fn custom_crop_preserves_narrow_extent_at_large_source_origin() {
         1,
         8,
         12,
-        FitMode::CustomCrop(
-            CropRect::new(0.5, 0.0, 0.5000001, 1.0).expect("crop is valid"),
-        ),
+        FitMode::CustomCrop(CropRect::new(0.5, 0.0, 0.5000001, 1.0).expect("crop is valid")),
     )
     .expect("representable crop edges tolerate rounding at their large origin");
 
@@ -335,6 +333,43 @@ fn equal_coverage_ties_use_font_index_and_repeat_deterministically() {
     );
     assert_eq!(first.frame().cells()[0].glyph(), slot(&table, 'A'));
     assert_eq!(first.frame().cells(), second.frame().cells());
+}
+
+#[test]
+fn box_sampling_converts_subnormal_crop_with_normalized_weights() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let pixel = [128_u8];
+    let crop_edge = f64::from_bits(1);
+    let crop = CropRect::new(0.0, 0.0, crop_edge, crop_edge).expect("subnormal crop is valid");
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::CustomCrop(crop),
+        SamplingFilter::Box,
+        Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
+    ));
+
+    let converted = convert_density_detailed(
+        linear_gray_raster(&pixel, 1, 1, 1),
+        &table,
+        &conversion_settings,
+        &budget(),
+    )
+    .expect("box sampling converts a valid subnormal crop");
+    let luminance = converted
+        .patches()
+        .expect("quality mode retains its sampled luminance")
+        .luminance_for_cell(0)
+        .expect("one-cell patch exists");
+
+    assert_eq!(converted.frame().size(), GridSize::new(1, 1));
+    assert!((f64::from(luminance[0]) - 128.0 / 255.0).abs() < 1.0e-7);
 }
 
 #[test]
