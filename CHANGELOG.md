@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace contains portable core and conversion crates, plus a headless CLI that validates requests and measures explicitly selected local fonts through `ascii-convert`; it still does not produce converted artifacts because image decoding and export are not integrated. **No published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace contains portable core/conversion contracts, bounded PNG/JPEG decoding, bounded text/ANSI export, and a headless CLI; the CLI pipeline is not yet connected. **No published release tag exists yet.**
 
 ### Added
 
@@ -21,10 +21,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Full `356`-issue planning publication across `Astraive/asciiwall` (`278`) and `Astraive/asciiwall-library` (`78`) (`39` protected foundation issues plus `317` newly verified `-CreateMissing` issues including `asciiwall/M1`), confirmed by an independent REST/GraphQL audit (`354` native parent edges, `576` native hard blockers including `38` cross-repo edges, `356` Project 4 issue items with zero drafts, and unchanged protected issue/project metadata) documented in [docs/setup-audit.md](docs/setup-audit.md).
 - Dependency-free `crates/ascii-core` COR-001 contracts for bounded ASCII frames, allocator-safe grid preflight, reusable owned cell storage, cancellation, typed displayable errors, and zero-copy validated raster views, with behavior-focused integration tests; updated the [data model contract](docs/architecture/data-model-and-contracts.md) and [E01 implementation plan](docs/plans/engine-implementation-plan.md).
 - Headless `asciiwall convert` argument, format-conflict, overwrite, and stdout/JSON validation; terminal-safe structured diagnostics; bounded explicit-font loading and shared glyph-table construction; a real shared density-engine stage; and a cancellation-aware, no-clobber file-publication helper. Missing decoding, export, structural matching, source-color conversion, PNG rendering, and production font/geometry selection return capability errors rather than fabricated output (`[CLI-001]`).
+- Added bounded, headless `.txt`/`.ans` serialization in `ascii-render`, with strict shared glyph checks, LF-terminated rows, ANSI16/256/true-color-only SGR, nearest-palette selection, all-or-error output, and target notices for color/alpha, source-font, motion, and viewer/terminal cell-aspect loss; CLI wiring is not present.
 - Bounded `ascii-convert` glyph tables with measured cell-clipped masks, descriptors, deterministic fingerprints, and typed font-validation failures ([FNT-001](docs/engine/glyph-matching-and-fonts.md)).
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
+- Added named strict-cell presets for printable ASCII/space, Unicode blocks, Braille, and their union, plus deterministic scalar-specific validation and fixed-cell metric classification ([font contract](docs/engine/glyph-matching-and-fonts.md)).
+- Added matcher-identical single-glyph previews with available, unavailable, invisible, and multi-cell states; source-generated font fixtures cover the complete supported repertoire and every Braille dot pattern at two raster sizes. Editor, clip-reader, and text-export integrations remain absent and are explicitly not claimed.
 
 ### Changed
 

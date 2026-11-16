@@ -98,6 +98,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascii-render"
+version = "0.1.0"
+dependencies = [
+ "ascii-convert",
+ "ascii-core",
+]
+
+[[package]]
 name = "asciiwall-cli"
 version = "0.1.0"
 dependencies = [
