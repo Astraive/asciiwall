@@ -769,43 +769,60 @@ impl SamplingPlan {
                 Ok(pixel_luminance(raster.pixels()[index], background))
             }
             SamplingFilter::Box => {
-                let (source_x0, source_y0) = self
-                    .transform
-                    .source_point_for_display(display_x0, display_y0);
-                let (source_x1, source_y1) = self
-                    .transform
-                    .source_point_for_display(display_x1, display_y1);
-                // Normalize each axis before multiplication to avoid requiring representable area.
-                let span_x = source_x1 - source_x0;
-                let span_y = source_y1 - source_y0;
-                if !span_x.is_finite() || span_x <= 0.0 || !span_y.is_finite() || span_y <= 0.0 {
+                let source_rect = self.transform.source_rect;
+                let display_rect = self.transform.display_rect;
+                // Keep mapped coordinates relative to the source crop's integer pixel origin.
+                // Adding a tiny, valid patch extent to a large absolute source origin can round
+                // both endpoints to the same f64 even when the crop itself remains representable.
+                let source_origin_x = source_rect.x.floor();
+                let source_origin_y = source_rect.y.floor();
+                let source_fraction_x = source_rect.x - source_origin_x;
+                let source_fraction_y = source_rect.y - source_origin_y;
+                let source_x0 = source_fraction_x
+                    + (display_x0 - display_rect.x) * source_rect.width / display_rect.width;
+                let source_y0 = source_fraction_y
+                    + (display_y0 - display_rect.y) * source_rect.height / display_rect.height;
+                // Compute spans directly instead of subtracting absolute source coordinates.
+                let span_x = (display_x1 - display_x0) * source_rect.width / display_rect.width;
+                let span_y = (display_y1 - display_y0) * source_rect.height / display_rect.height;
+                if !source_x0.is_finite()
+                    || !source_y0.is_finite()
+                    || !span_x.is_finite()
+                    || span_x <= 0.0
+                    || !span_y.is_finite()
+                    || span_y <= 0.0
+                {
                     return Err(Error::SizeOverflow);
                 }
-                let clipped_x0 = source_x0.max(self.transform.source_rect.x).max(0.0);
-                let clipped_y0 = source_y0.max(self.transform.source_rect.y).max(0.0);
+                let source_x1 = source_x0 + span_x;
+                let source_y1 = source_y0 + span_y;
+                let clipped_x0 = source_x0.max(source_fraction_x).max(-source_origin_x);
+                let clipped_y0 = source_y0.max(source_fraction_y).max(-source_origin_y);
                 let clipped_x1 = source_x1
-                    .min(self.transform.source_rect.right())
-                    .min(f64::from(raster.width()));
+                    .min(source_fraction_x + source_rect.width)
+                    .min(f64::from(raster.width()) - source_origin_x);
                 let clipped_y1 = source_y1
-                    .min(self.transform.source_rect.bottom())
-                    .min(f64::from(raster.height()));
+                    .min(source_fraction_y + source_rect.height)
+                    .min(f64::from(raster.height()) - source_origin_y);
                 let mut covered_weight = 0.0;
                 let mut weighted_luminance = 0.0;
                 if clipped_x1 > clipped_x0 && clipped_y1 > clipped_y0 {
-                    let first_x = clipped_x0.floor() as u32;
-                    let first_y = clipped_y0.floor() as u32;
-                    let end_x = clipped_x1.ceil().min(f64::from(raster.width())) as u32;
-                    let end_y = clipped_y1.ceil().min(f64::from(raster.height())) as u32;
+                    let first_x = (source_origin_x + clipped_x0.floor()) as u32;
+                    let first_y = (source_origin_y + clipped_y0.floor()) as u32;
+                    let end_x =
+                        (source_origin_x + clipped_x1.ceil()).min(f64::from(raster.width())) as u32;
+                    let end_y = (source_origin_y + clipped_y1.ceil())
+                        .min(f64::from(raster.height())) as u32;
                     for y in first_y..end_y {
-                        let overlap_y =
-                            clipped_y1.min(f64::from(y + 1)) - clipped_y0.max(f64::from(y));
+                        let pixel_y = f64::from(y) - source_origin_y;
+                        let overlap_y = clipped_y1.min(pixel_y + 1.0) - clipped_y0.max(pixel_y);
                         let weight_y = overlap_y / span_y;
                         if weight_y <= 0.0 {
                             continue;
                         }
                         for x in first_x..end_x {
-                            let overlap_x =
-                                clipped_x1.min(f64::from(x + 1)) - clipped_x0.max(f64::from(x));
+                            let pixel_x = f64::from(x) - source_origin_x;
+                            let overlap_x = clipped_x1.min(pixel_x + 1.0) - clipped_x0.max(pixel_x);
                             let weight = (overlap_x / span_x) * weight_y;
                             if weight <= 0.0 {
                                 continue;
