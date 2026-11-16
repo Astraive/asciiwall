@@ -598,6 +598,42 @@ impl QualityPatches {
     }
 }
 
+fn normalized_pixel_overlap(
+    sample_start: f64,
+    sample_end: f64,
+    source_origin: f64,
+    source_extent: f64,
+    pixel_start: f64,
+) -> f64 {
+    let source_end = source_origin + source_extent;
+    let pixel_start_fraction =
+        normalized_source_boundary_fraction(pixel_start, source_origin, source_end, source_extent);
+    let pixel_end_fraction = normalized_source_boundary_fraction(
+        pixel_start + 1.0,
+        source_origin,
+        source_end,
+        source_extent,
+    );
+    let overlap_start = sample_start.max(pixel_start_fraction).max(0.0);
+    let overlap_end = sample_end.min(pixel_end_fraction).min(1.0);
+    (overlap_end - overlap_start).max(0.0) / (sample_end - sample_start)
+}
+
+fn normalized_source_boundary_fraction(
+    boundary: f64,
+    source_origin: f64,
+    source_end: f64,
+    source_extent: f64,
+) -> f64 {
+    if boundary <= source_origin {
+        0.0
+    } else if boundary >= source_end {
+        1.0
+    } else {
+        (boundary - source_origin) / source_extent
+    }
+}
+
 fn zero_fill_patch_values(
     luminance: &mut Vec<f32>,
     patch_value_count: usize,
@@ -795,11 +831,27 @@ impl SamplingPlan {
                 if !source_offset_x0.is_finite()
                     || !source_offset_y0.is_finite()
                     || !span_x.is_finite()
-                    || span_x <= 0.0
+                    || span_x < 0.0
                     || !span_y.is_finite()
-                    || span_y <= 0.0
+                    || span_y < 0.0
                 {
                     return Err(Error::SizeOverflow);
+                }
+                if span_x == 0.0 || span_y == 0.0 {
+                    let display_sample = SamplingRect::new(
+                        display_x0,
+                        display_y0,
+                        display_x1 - display_x0,
+                        display_y1 - display_y0,
+                    )?;
+                    return sample_collapsed_box_footprint(
+                        raster,
+                        self.transform,
+                        display_sample,
+                        background,
+                        cancellation,
+                        work,
+                    );
                 }
                 let raster_x_extent = raster
                     .width()
@@ -877,6 +929,80 @@ impl SamplingPlan {
         }
     }
 }
+fn sample_collapsed_box_footprint(
+    raster: &NormalizedRaster,
+    transform: FitTransform,
+    display_sample: SamplingRect,
+    background: LinearRgb,
+    cancellation: &CancellationToken,
+    work: &mut u64,
+) -> Result<f64, Error> {
+    let source_rect = transform.source_rect;
+    let display_rect = transform.display_rect;
+    let sample_start_x = (display_sample.x - display_rect.x) / display_rect.width;
+    let sample_start_y = (display_sample.y - display_rect.y) / display_rect.height;
+    let sample_end_x = (display_sample.right() - display_rect.x) / display_rect.width;
+    let sample_end_y = (display_sample.bottom() - display_rect.y) / display_rect.height;
+    let footprint_width = sample_end_x - sample_start_x;
+    let footprint_height = sample_end_y - sample_start_y;
+    if !footprint_width.is_finite()
+        || !footprint_height.is_finite()
+        || footprint_width <= 0.0
+        || footprint_height <= 0.0
+    {
+        return Err(Error::SizeOverflow);
+    }
+    let covered_fraction_x =
+        ((sample_end_x.min(1.0) - sample_start_x.max(0.0)).max(0.0) / footprint_width)
+            .clamp(0.0, 1.0);
+    let covered_fraction_y =
+        ((sample_end_y.min(1.0) - sample_start_y.max(0.0)).max(0.0) / footprint_height)
+            .clamp(0.0, 1.0);
+    let mut weighted_luminance = 0.0;
+    if covered_fraction_x > 0.0 && covered_fraction_y > 0.0 {
+        let first_x = source_rect.x.floor().max(0.0) as u32;
+        let first_y = source_rect.y.floor().max(0.0) as u32;
+        let end_x = source_rect.right().ceil().min(f64::from(raster.width())) as u32;
+        let end_y = source_rect.bottom().ceil().min(f64::from(raster.height())) as u32;
+        for y in first_y..end_y {
+            let weight_y = normalized_pixel_overlap(
+                sample_start_y,
+                sample_end_y,
+                source_rect.y,
+                source_rect.height,
+                f64::from(y),
+            );
+            if weight_y <= 0.0 {
+                continue;
+            }
+            for x in first_x..end_x {
+                let weight_x = normalized_pixel_overlap(
+                    sample_start_x,
+                    sample_end_x,
+                    source_rect.x,
+                    source_rect.width,
+                    f64::from(x),
+                );
+                let area_weight = weight_x * weight_y;
+                if area_weight <= 0.0 {
+                    continue;
+                }
+                *work = work.checked_add(1).ok_or(Error::SizeOverflow)?;
+                if (*work).is_multiple_of(SAMPLER_CANCEL_INTERVAL)
+                    && cancellation.is_cancelled()
+                {
+                    return Err(Error::Cancelled);
+                }
+                let index = pixel_index(x, y, raster.width())?;
+                weighted_luminance +=
+                    pixel_luminance(raster.pixels()[index], background) * area_weight;
+            }
+        }
+    }
+    let uncovered_fraction = (1.0 - covered_fraction_x * covered_fraction_y).max(0.0);
+    Ok(weighted_luminance + background.luminance().value() * uncovered_fraction)
+}
+
 
 // Preserve the rounding residual when deciding which source pixel contains a fractional start.
 fn two_sum(left: f64, right: f64) -> (f64, f64) {
