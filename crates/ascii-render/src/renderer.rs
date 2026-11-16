@@ -262,6 +262,12 @@ fn ensure_frame_budget(
 ) -> Result<(), Error> {
     let retained_cpu = current_cpu_capacity.max(requested);
     let retained_gpu = current_gpu_capacity.max(requested);
+    // A growing Vec may briefly retain both the old packed storage and its replacement.
+    let cpu_growth_overlap = if current_cpu_capacity < requested {
+        current_cpu_capacity
+    } else {
+        0
+    };
     // The replacement GPU buffer and the upload staging bytes coexist with the old buffer.
     let gpu_growth_overlap = if current_gpu_capacity < requested {
         current_gpu_capacity
@@ -270,6 +276,7 @@ fn ensure_frame_budget(
     };
     let frame_bytes = retained_cpu
         .checked_add(retained_gpu)
+        .and_then(|bytes| bytes.checked_add(cpu_growth_overlap))
         .and_then(|bytes| bytes.checked_add(gpu_growth_overlap))
         .and_then(|bytes| bytes.checked_add(requested))
         .ok_or(ascii_core::Error::SizeOverflow)?;
@@ -977,11 +984,12 @@ mod tests {
     }
 
     #[test]
-    fn cell_buffer_growth_overlap_is_charged_at_frame_budget_boundary() {
+    fn cell_buffer_growth_and_cpu_reallocation_overlap_are_charged_at_frame_budget_boundary() {
         let old_capacity = 16;
         let requested = 32;
-        let exact_budget = requested * 3 + old_capacity;
-        assert_eq!(exact_budget, 112);
+        // Retained CPU/GPU buffers plus upload staging coexist with both old buffers during growth.
+        let exact_budget = requested * 3 + old_capacity * 2;
+        assert_eq!(exact_budget, 128);
         let make_budget = |max_frame| Budget::new(max_frame, 10_000, 10_000);
 
         assert_eq!(
