@@ -5,7 +5,7 @@ use ascii_convert::{
     ColorNormalizationError, ConversionSettings, CropRect, DensityConversionError, FitMode,
     GlyphConfig, GlyphRepertoire, GlyphTable, GridSizing, LinearRgb, PatchDimensions,
     SamplingFilter, SamplingOptions, UnsupportedColorReason, build_glyph_table,
-    convert_density_detailed, normalize_raster,
+    convert_density, convert_density_detailed, normalize_raster,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, Error,
@@ -79,6 +79,7 @@ fn ec_006_unsupported_hdr_and_profile_return_typed_reasons() {
             ),
             UnsupportedColorReason::HdrTransfer(TransferFunction::Pq),
             "density conversion color normalization failed: HDR transfer Pq is unsupported; provide SDR input or use an explicitly supported tone-mapping path",
+            "unsupported HDR transfer Pq: provide SDR input or use an explicitly supported tone-mapping path",
         ),
         (
             ColorDescription::new(
@@ -88,11 +89,12 @@ fn ec_006_unsupported_hdr_and_profile_return_typed_reasons() {
             ),
             UnsupportedColorReason::WideGamutPrimaries(ColorPrimaries::Rec2020),
             "density conversion color normalization failed: wide-gamut primaries Rec2020 are unsupported; convert to sRGB with tested color-managed tooling",
+            "unsupported wide-gamut primaries Rec2020: convert to sRGB with tested color-managed tooling",
         ),
     ];
     let source = [40, 96, 180];
 
-    for (color, expected_reason, expected_message) in scenarios {
+    for (color, expected_reason, expected_message, expected_convenience_message) in scenarios {
         let input = RasterFrameView::new(
             1,
             1,
@@ -112,6 +114,21 @@ fn ec_006_unsupported_hdr_and_profile_return_typed_reasons() {
             ))
         );
         assert_eq!(error.to_string(), expected_message);
+        let convenience_error = convert_density(input, &table, &settings, &conversion_budget())
+            .expect_err("convenience conversion must preserve the unsupported-color cause");
+        let convenience_reason = match expected_reason {
+            UnsupportedColorReason::HdrTransfer(transfer) => {
+                ascii_core::UnsupportedReason::HdrTransfer(transfer)
+            }
+            UnsupportedColorReason::WideGamutPrimaries(primaries) => {
+                ascii_core::UnsupportedReason::WideGamutPrimaries(primaries)
+            }
+        };
+        assert_eq!(convenience_error, Error::Unsupported(convenience_reason));
+        assert_eq!(
+            convenience_error.to_string(),
+            expected_convenience_message
+        );
     }
 }
 

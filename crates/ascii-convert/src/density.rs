@@ -13,8 +13,8 @@ use ascii_core::{
 };
 
 use crate::color::{
-    ColorNormalizationError, ColorNormalizationWarning, LinearRgb, OutputEncoding, encode_output,
-    normalize_raster,
+    ColorNormalizationError, ColorNormalizationWarning, LinearRgb, OutputEncoding,
+    UnsupportedColorReason, encode_output, normalize_raster,
 };
 use crate::font::GlyphTable;
 use crate::sampling::{
@@ -313,9 +313,12 @@ impl DensityConversionError {
         match self {
             Self::Core(error)
             | Self::ColorNormalization(ColorNormalizationError::Raster(error)) => error,
-            Self::ColorNormalization(ColorNormalizationError::UnsupportedColor(_)) => {
-                Error::Unsupported(UnsupportedReason::ColorDescription)
-            }
+            Self::ColorNormalization(ColorNormalizationError::UnsupportedColor(
+                UnsupportedColorReason::HdrTransfer(transfer),
+            )) => Error::Unsupported(UnsupportedReason::HdrTransfer(transfer)),
+            Self::ColorNormalization(ColorNormalizationError::UnsupportedColor(
+                UnsupportedColorReason::WideGamutPrimaries(primaries),
+            )) => Error::Unsupported(UnsupportedReason::WideGamutPrimaries(primaries)),
             Self::ColorNormalization(ColorNormalizationError::InvalidSample(_)) => {
                 Error::Malformed(MalformedReason::InvalidConfiguration)
             }
@@ -376,7 +379,7 @@ impl DensityConversion {
 /// Converts a raster into the caller-owned ASCII frame without desktop or GPU dependencies.
 ///
 /// Use [`convert_density_detailed`] when the caller also needs the exact sampling transform,
-/// retained quality patches, a normalization warning, or a more specific color-normalization failure.
+/// retained quality patches, a normalization warning, or the full typed color-normalization failure.
 pub fn convert_density(
     input: RasterFrameView<'_>,
     glyphs: &GlyphTable,

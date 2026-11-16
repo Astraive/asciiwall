@@ -1,5 +1,7 @@
 //! Typed failures shared by the portable core contracts.
 
+use crate::{ColorPrimaries, TransferFunction};
+
 /// The malformed-input condition reported by a validator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MalformedReason {
@@ -30,8 +32,12 @@ pub enum UnsupportedReason {
     SampleDepth,
     /// The raster orientation is not supported without transforming the pixels.
     Orientation,
-    /// The raster color primaries or transfer function are not supported.
+    /// The color description is unsupported and its specific cause is unavailable.
     ColorDescription,
+    /// The raster's HDR transfer function requires unsupported tone mapping.
+    HdrTransfer(TransferFunction),
+    /// The raster's wide-gamut primaries require unsupported color conversion.
+    WideGamutPrimaries(ColorPrimaries),
     /// The alpha mode does not match the raster's channel layout.
     AlphaMode,
     /// The input requires a format or feature this API does not support.
@@ -87,6 +93,14 @@ impl core::fmt::Display for Error {
             Self::Malformed(_) => formatter.write_str("malformed input"),
             Self::Unsupported(UnsupportedReason::ColorDescription) => formatter.write_str(
                 "unsupported color profile: provide SDR sRGB input; HDR tone mapping and wide-gamut conversion are not supported",
+            ),
+            Self::Unsupported(UnsupportedReason::HdrTransfer(transfer)) => core::write!(
+                formatter,
+                "unsupported HDR transfer {transfer:?}: provide SDR input or use an explicitly supported tone-mapping path"
+            ),
+            Self::Unsupported(UnsupportedReason::WideGamutPrimaries(primaries)) => core::write!(
+                formatter,
+                "unsupported wide-gamut primaries {primaries:?}: convert to sRGB with tested color-managed tooling"
             ),
             Self::Unsupported(_) => formatter.write_str("unsupported input"),
             Self::BudgetExceeded(_) => formatter.write_str("resource budget exceeded"),

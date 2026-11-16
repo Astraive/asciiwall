@@ -976,14 +976,18 @@ fn unsupported_alpha_and_profiles_precede_sampling_work_and_stride_through_both_
             DensityConversionError::ColorNormalization(ColorNormalizationError::UnsupportedColor(
                 UnsupportedColorReason::HdrTransfer(TransferFunction::Pq),
             )),
-            Error::Unsupported(ascii_core::UnsupportedReason::ColorDescription),
+            Error::Unsupported(ascii_core::UnsupportedReason::HdrTransfer(
+                TransferFunction::Pq
+            )),
         ),
         (
             wide_gamut,
             DensityConversionError::ColorNormalization(ColorNormalizationError::UnsupportedColor(
                 UnsupportedColorReason::WideGamutPrimaries(ascii_core::ColorPrimaries::DisplayP3),
             )),
-            Error::Unsupported(ascii_core::UnsupportedReason::ColorDescription),
+            Error::Unsupported(ascii_core::UnsupportedReason::WideGamutPrimaries(
+                ascii_core::ColorPrimaries::DisplayP3
+            )),
         ),
     ];
     let insufficient_sampling_budget = Budget::new(12, u64::MAX, 1);
@@ -1006,12 +1010,6 @@ fn unsupported_alpha_and_profiles_precede_sampling_work_and_stride_through_both_
         )
         .expect_err("unsupported profile must not produce a frame");
         assert_eq!(error, core_error);
-        if core_error == Error::Unsupported(ascii_core::UnsupportedReason::ColorDescription) {
-            assert_eq!(
-                error.to_string(),
-                "unsupported color profile: provide SDR sRGB input; HDR tone mapping and wide-gamut conversion are not supported"
-            );
-        }
     }
 }
 
@@ -1064,7 +1062,7 @@ fn shared_normalizer_failures_keep_their_typed_color_reason() {
     assert_eq!(
         convert_density(hdr_core, &table, &conversion_settings, &budget()),
         Err(Error::Unsupported(
-            ascii_core::UnsupportedReason::ColorDescription
+            ascii_core::UnsupportedReason::HdrTransfer(TransferFunction::Pq)
         ))
     );
 }
