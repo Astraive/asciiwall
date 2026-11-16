@@ -313,8 +313,8 @@ fn pinned_golden_and_static_invalidation() {
 }
 
 #[test]
-#[ignore = "requires a real wgpu adapter for complex-outline golden comparisons"]
-fn complex_outline_masks_render_without_crossing_glyph_table_identity() {
+#[ignore = "requires a real wgpu adapter for source-generated font golden comparisons"]
+fn source_font_masks_render_without_crossing_glyph_table_identity() {
     let (device, queue) = native_device();
     let (baseline_table, budget, token) = fixtures();
     let config = GlyphConfig::new(8.0, 8, 12, 9).unwrap();
@@ -331,10 +331,12 @@ fn complex_outline_masks_render_without_crossing_glyph_table_identity() {
         DeviceStatus::new(),
     );
     type FontFixture = (&'static str, fn() -> Vec<u8>);
-    let fonts: [FontFixture; 3] = [
+    let fonts: [FontFixture; 4] = [
         ("diagonal", || synthetic_font::diagonal_font(false)),
         ("quadratic", synthetic_font::quadratic_font),
         ("composite", synthetic_font::composite_font),
+        // Exercise the FNT legacy cmap input through the same presenter path.
+        ("legacy format-2", || synthetic_font::legacy_format2_font(false)),
     ];
     for (name, build_font) in fonts {
         let font = build_font();
