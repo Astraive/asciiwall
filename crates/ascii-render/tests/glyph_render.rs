@@ -336,7 +336,9 @@ fn source_font_masks_render_without_crossing_glyph_table_identity() {
         ("quadratic", synthetic_font::quadratic_font),
         ("composite", synthetic_font::composite_font),
         // Exercise the FNT legacy cmap input through the same presenter path.
-        ("legacy format-2", || synthetic_font::legacy_format2_font(false)),
+        ("legacy format-2", || {
+            synthetic_font::legacy_format2_font(false)
+        }),
     ];
     for (name, build_font) in fonts {
         let font = build_font();
