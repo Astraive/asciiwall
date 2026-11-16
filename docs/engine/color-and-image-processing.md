@@ -51,11 +51,15 @@ descriptions are rejected as explicit capability errors rather than silently mis
 dimensions, and a shared `DecodeResources` ledger for concurrent decode slots and retained
 memory. The owned input snapshot, codec scratch and temporary rasters are preflighted and
 charged before output allocation. Progressive JPEG scan-block work is budgeted separately
-from pixel work. Retained output stays charged until its `DecodedFrame` is dropped; its
-`RasterFrameView` borrows from that owner. Cancellation, malformed input, and failed budget
-checks release reservations without publishing partial frames. Codec-provided allocation
-limits remain defense in depth; application accounting is not an allocator-enforced process
-memory limit.
+from pixel work. Retained output remains charged until its `DecodedFrame` is dropped; its
+`RasterFrameView` borrows from that owner. Cancellation is checked whenever either codec
+requests compressed input through a 128-byte buffer; deterministic tests exercise regular and
+Adam7 PNG plus progressive JPEG interruption before the end of the compressed stream. This is
+bounded input cancellation, not CPU preemption: work on the current buffer continues until the
+codec requests more input.
+Malformed input, cancellation, and failed budget checks release reservations without publishing
+partial frames. Codec-provided allocation limits remain defense in depth; application
+accounting is not an allocator-enforced process memory limit.
 
 Rights-cleared generated fixtures exercise PNG color/depth/interlace variants, JPEG baseline
 and progressive scans, malformed/truncated inputs, metadata policy, and budget/cancellation
