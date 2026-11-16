@@ -588,6 +588,42 @@ impl QualityPatches {
     }
 }
 
+fn normalized_pixel_overlap(
+    sample_start: f64,
+    sample_end: f64,
+    source_origin: f64,
+    source_extent: f64,
+    pixel_start: f64,
+) -> f64 {
+    let source_end = source_origin + source_extent;
+    let pixel_start_fraction =
+        normalized_source_boundary_fraction(pixel_start, source_origin, source_end, source_extent);
+    let pixel_end_fraction = normalized_source_boundary_fraction(
+        pixel_start + 1.0,
+        source_origin,
+        source_end,
+        source_extent,
+    );
+    let overlap_start = sample_start.max(pixel_start_fraction).max(0.0);
+    let overlap_end = sample_end.min(pixel_end_fraction).min(1.0);
+    (overlap_end - overlap_start).max(0.0) / (sample_end - sample_start)
+}
+
+fn normalized_source_boundary_fraction(
+    boundary: f64,
+    source_origin: f64,
+    source_end: f64,
+    source_extent: f64,
+) -> f64 {
+    if boundary <= source_origin {
+        0.0
+    } else if boundary >= source_end {
+        1.0
+    } else {
+        (boundary - source_origin) / source_extent
+    }
+}
+
 fn zero_fill_patch_values(
     luminance: &mut Vec<f32>,
     patch_value_count: usize,
@@ -768,47 +804,75 @@ impl SamplingPlan {
                 Ok(pixel_luminance(raster.pixels()[index], background))
             }
             SamplingFilter::Box => {
+                let source_rect = self.transform.source_rect;
+                let display_rect = self.transform.display_rect;
+                let sample_start_x = (display_x0 - display_rect.x) / display_rect.width;
+                let sample_start_y = (display_y0 - display_rect.y) / display_rect.height;
+                let sample_end_x = (display_x1 - display_rect.x) / display_rect.width;
+                let sample_end_y = (display_y1 - display_rect.y) / display_rect.height;
+                let footprint_width = sample_end_x - sample_start_x;
+                let footprint_height = sample_end_y - sample_start_y;
                 let (source_x0, source_y0) = self
                     .transform
                     .source_point_for_display(display_x0, display_y0);
                 let (source_x1, source_y1) = self
                     .transform
                     .source_point_for_display(display_x1, display_y1);
-                let footprint_width = source_x1 - source_x0;
-                let footprint_height = source_y1 - source_y0;
-                if !footprint_width.is_finite()
+                if !source_x0.is_finite()
+                    || !source_y0.is_finite()
+                    || !source_x1.is_finite()
+                    || !source_y1.is_finite()
+                    || !footprint_width.is_finite()
                     || !footprint_height.is_finite()
                     || footprint_width <= 0.0
                     || footprint_height <= 0.0
                 {
                     return Err(Error::SizeOverflow);
                 }
-                let clipped_x0 = source_x0.max(self.transform.source_rect.x).max(0.0);
-                let clipped_y0 = source_y0.max(self.transform.source_rect.y).max(0.0);
-                let clipped_x1 = source_x1
-                    .min(self.transform.source_rect.right())
-                    .min(f64::from(raster.width()));
-                let clipped_y1 = source_y1
-                    .min(self.transform.source_rect.bottom())
-                    .min(f64::from(raster.height()));
-                let covered_width = (clipped_x1 - clipped_x0).max(0.0);
-                let covered_height = (clipped_y1 - clipped_y0).max(0.0);
-                let covered_fraction_x = (covered_width / footprint_width).clamp(0.0, 1.0);
-                let covered_fraction_y = (covered_height / footprint_height).clamp(0.0, 1.0);
+                let covered_fraction_x =
+                    ((sample_end_x.min(1.0) - sample_start_x.max(0.0)).max(0.0) / footprint_width)
+                        .clamp(0.0, 1.0);
+                let covered_fraction_y =
+                    ((sample_end_y.min(1.0) - sample_start_y.max(0.0)).max(0.0) / footprint_height)
+                        .clamp(0.0, 1.0);
                 let mut weighted_luminance = 0.0;
-                if covered_width > 0.0 && covered_height > 0.0 {
-                    let first_x = clipped_x0.floor() as u32;
-                    let first_y = clipped_y0.floor() as u32;
-                    let end_x = clipped_x1.ceil().min(f64::from(raster.width())) as u32;
-                    let end_y = clipped_y1.ceil().min(f64::from(raster.height())) as u32;
+                if covered_fraction_x > 0.0 && covered_fraction_y > 0.0 {
+                    let clipped_x0 = source_x0.min(source_x1).max(source_rect.x).max(0.0);
+                    let clipped_y0 = source_y0.min(source_y1).max(source_rect.y).max(0.0);
+                    let clipped_x1 = source_x0
+                        .max(source_x1)
+                        .min(source_rect.right())
+                        .min(f64::from(raster.width()));
+                    let clipped_y1 = source_y0
+                        .max(source_y1)
+                        .min(source_rect.bottom())
+                        .min(f64::from(raster.height()));
+                    // Include neighboring taps hidden by rounding collapsed inverse-mapped edges.
+                    let first_x = (clipped_x0.floor() as u32).saturating_sub(1);
+                    let first_y = (clipped_y0.floor() as u32).saturating_sub(1);
+                    let end_x = (clipped_x1.ceil() as u32)
+                        .saturating_add(1)
+                        .min(raster.width());
+                    let end_y = (clipped_y1.ceil() as u32)
+                        .saturating_add(1)
+                        .min(raster.height());
                     for y in first_y..end_y {
-                        let overlap_y =
-                            clipped_y1.min(f64::from(y + 1)) - clipped_y0.max(f64::from(y));
-                        let weight_y = overlap_y / footprint_height;
+                        let weight_y = normalized_pixel_overlap(
+                            sample_start_y,
+                            sample_end_y,
+                            source_rect.y,
+                            source_rect.height,
+                            f64::from(y),
+                        );
                         for x in first_x..end_x {
-                            let overlap_x =
-                                clipped_x1.min(f64::from(x + 1)) - clipped_x0.max(f64::from(x));
-                            let area_weight = (overlap_x / footprint_width) * weight_y;
+                            let weight_x = normalized_pixel_overlap(
+                                sample_start_x,
+                                sample_end_x,
+                                source_rect.x,
+                                source_rect.width,
+                                f64::from(x),
+                            );
+                            let area_weight = weight_x * weight_y;
                             if area_weight <= 0.0 {
                                 continue;
                             }
