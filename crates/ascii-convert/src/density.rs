@@ -139,10 +139,13 @@ impl GridSizing {
             * (crop.bottom() - crop.top())
             * f64::from(cell_width)
             / (f64::from(source_width) * (crop.right() - crop.left()) * f64::from(cell_height));
-        if !rows.is_finite() || rows > f64::from(u32::MAX) {
+        if !rows.is_finite() {
             return Err(Error::SizeOverflow);
         }
         let rounded_rows = (rows + 0.5).floor();
+        if rounded_rows > f64::from(u32::MAX) {
+            return Err(Error::SizeOverflow);
+        }
         let rows = u32::try_from(rounded_rows as u64).map_err(|_| Error::SizeOverflow)?;
         let size = GridSize::new(columns, rows);
         if size.is_empty() {

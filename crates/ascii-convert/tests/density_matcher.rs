@@ -178,6 +178,44 @@ fn custom_crop_column_sizing_uses_selected_source_geometry() {
 }
 
 #[test]
+fn custom_crop_row_limit_is_checked_after_half_up_rounding() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let pixels = [128_u8];
+    let convert_for_requested_rows = |requested_rows: f64| {
+        let crop_width = 2.0 / (3.0 * requested_rows);
+        let crop = CropRect::new(0.0, 0.0, crop_width, 1.0).expect("crop is valid");
+        let conversion_settings = settings(
+            &table,
+            &cancellation,
+            GridSizing::columns(1),
+            LinearRgb::WHITE,
+            LinearRgb::BLACK,
+        )
+        .with_sampling(SamplingOptions::new(
+            FitMode::CustomCrop(crop),
+            SamplingFilter::Box,
+            None,
+        ));
+        convert_density_detailed(
+            raster(&pixels, 1, 1, 1),
+            &table,
+            &conversion_settings,
+            &budget(),
+        )
+    };
+
+    assert!(matches!(
+        convert_for_requested_rows(f64::from(u32::MAX) + 0.25),
+        Err(DensityConversionError::Core(Error::BudgetExceeded(_)))
+    ));
+    assert_eq!(
+        convert_for_requested_rows(f64::from(u32::MAX) + 0.75),
+        Err(DensityConversionError::Core(Error::SizeOverflow))
+    );
+}
+
+#[test]
 fn endpoints_and_both_luminance_polarities_match_space_and_ink() {
     let table = build_table();
     let black = [0_u8; 6];
