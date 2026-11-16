@@ -20,9 +20,11 @@
 | 14 | network | Explicit optional download failed |
 | 15 | internal | Unexpected invariant failure; safe diagnostic ID supplied |
 
-The current `convert` surface emits usage `2`, validation `3`, capability `4`, permission `5`, and I/O `8` errors. A request without a selected font returns capability `4`; when the conversion backend is absent, no request reports success or creates an output. Other table entries, including media and cancellation `10`, are not yet reachable through the CLI. Existing-output conflicts take precedence over format/charset checks and engine-capability errors, and remain usage `2`. The publication helper has cancellation-aware staging, but there is no end-to-end conversion cancellation flow yet.
+The current `convert` command emits usage `2`, validation `3`, capability `4`, permission `5`, media `6`, I/O `8`, cancelled `10`, and resource-limit `11` results. Density-mode text and ANSI conversions can complete without a desktop host. Missing font, PNG export, structural matching, source-color conversion, and settings loading remain explicit capability errors. Existing-output conflicts take precedence over format/charset checks and engine-capability errors, and remain usage `2`.
 
-No success exit for a partially written archive. For batch operations, return a nonzero aggregate code if any item failed and include each result in JSON. Define deterministic error precedence: integrity/security before general validation, then resource, permission, capability, media, graphics, I/O, controller/network, internal. Cancellation before any commit returns 10; completed outputs remain listed explicitly.
+Cancellation before destination commit returns `10`; decode, conversion, export, or publication failures before commit leave an existing destination unchanged. The output helper stages in the destination directory, checks cancellation before commit, and publishes with a no-clobber operation unless overwrite was explicitly requested.
+
+Successful `--json` conversion writes one schema-versioned status object on stdout and keeps progress/target-loss diagnostics on stderr. The object reports only command, format, and grid dimensions, not local paths. Error JSON also uses `schema_version: 1`, with a stable category/code and a null result.
 
 ## Structured result example
 
