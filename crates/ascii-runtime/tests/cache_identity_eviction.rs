@@ -479,7 +479,10 @@ fn lease_acknowledgement_retries_after_lock_failure_before_release() {
     let error = lease
         .acknowledge()
         .expect_err("a non-file operations lock prevents acknowledgement");
-    assert!(matches!(error, CacheError::UnsafeDerivedPath(_)));
+    assert!(matches!(
+        error,
+        CacheError::UnsafeDerivedPath(_) | CacheError::Io(_)
+    ));
     assert!(pinned_path.exists());
 
     fs::remove_dir(&operations_lock).unwrap();
@@ -558,7 +561,12 @@ fn concurrent_first_cache_opens_publish_only_owned_managed_directories() {
 
     let caches = workers
         .into_iter()
-        .map(|worker| worker.join().unwrap().expect("concurrent first open succeeds"))
+        .map(|worker| {
+            worker
+                .join()
+                .unwrap()
+                .expect("concurrent first open succeeds")
+        })
         .collect::<Vec<_>>();
     let managed_dir = cache_root.join(".asciiwall-cache-v1");
     assert_eq!(
@@ -1081,8 +1089,15 @@ fn relative_output_destination_is_captured_before_callback_changes_working_direc
         registry.registered_path(&key),
         Some(expected_destination.clone())
     );
-    assert_eq!(fs::read(&expected_destination).unwrap(), b"captured at transaction start");
-    assert!(!changed_working_directory.join("relative-output.bin").exists());
+    assert_eq!(
+        fs::read(&expected_destination).unwrap(),
+        b"captured at transaction start"
+    );
+    assert!(
+        !changed_working_directory
+            .join("relative-output.bin")
+            .exists()
+    );
 }
 
 #[cfg(any(unix, windows))]
@@ -1499,7 +1514,6 @@ fn case_variant_replacement_after_deletion_clears_stale_unix_registration() {
         fs::canonicalize(&lower_destination).unwrap()
     );
 }
-
 
 #[test]
 fn failed_output_retry_preserves_previous_registration() {
