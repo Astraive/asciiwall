@@ -1353,6 +1353,7 @@ fn is_nonportable_key(key: &str) -> bool {
         || key.contains("user")
         || key.contains("home")
         || key.contains("address")
+        || key == "host"
         || key.contains("hostname")
         || key.contains("server")
         || key.contains("connection")
