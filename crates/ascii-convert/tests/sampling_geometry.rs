@@ -360,6 +360,101 @@ fn extreme_valid_crop_does_not_underflow_box_footprint_area() {
 }
 
 #[test]
+fn collapsed_inverse_mapped_boundaries_preserve_64_wide_box_patches() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let smallest_positive = f64::from_bits(1);
+    let wide_patch = PatchDimensions::new(64, 64).expect("maximum patch size is valid");
+    let tiny_crop = CropRect::new(0.0, 0.0, smallest_positive * 2.0, smallest_positive * 3.0)
+        .expect("positive subnormal crop is valid");
+    let tiny_settings = one_cell_settings(
+        &table,
+        &cancellation,
+        FitMode::CustomCrop(tiny_crop),
+        SamplingFilter::Box,
+        Some(wide_patch),
+    );
+    let tiny_conversion = convert_density_detailed(
+        linear_gray_raster(&[128], 1, 1, 1),
+        &table,
+        &tiny_settings,
+        &budget(),
+    )
+    .expect("subnormal crop converts across collapsed patch boundaries");
+    assert_eq!(tiny_conversion.frame().size(), GridSize::new(1, 1));
+    let tiny_patches = tiny_conversion
+        .patches()
+        .expect("subnormal crop retains its quality patch");
+    assert_eq!(tiny_patches.dimensions(), wide_patch);
+    assert_eq!(tiny_patches.cell_count(), 1);
+    let tiny_values = tiny_patches
+        .luminance_for_cell(0)
+        .expect("one-cell patch exists");
+    assert_eq!(tiny_values.len(), 64 * 64);
+    let tiny_expected = 128.0_f32 / 255.0;
+    assert!(tiny_values.iter().all(|value| {
+        value.is_finite() && (0.0..=1.0).contains(value) && (value - tiny_expected).abs() < 1.0e-6
+    }));
+    let tiny_descriptor = tiny_patches
+        .descriptor(0)
+        .expect("one-cell descriptor exists");
+    assert!(tiny_descriptor.mean_luminance().is_finite());
+    assert!((tiny_descriptor.mean_luminance() - tiny_expected).abs() < 1.0e-6);
+    assert_eq!(tiny_descriptor.mean_absolute_dx(), 0.0);
+    assert_eq!(tiny_descriptor.mean_absolute_dy(), 0.0);
+
+    let lower_crop_edge = f64::from_bits(0.5_f64.to_bits() - 1);
+    let upper_crop_edge = f64::from_bits(0.5_f64.to_bits() + 1);
+    let shifted_crop = CropRect::new(lower_crop_edge, 0.0, upper_crop_edge, 1.0)
+        .expect("adjacent normalized crop edges around a source boundary are valid");
+    let narrow_patch = PatchDimensions::new(64, 1).expect("wide one-row patch is valid");
+    let shifted_settings = one_cell_settings(
+        &table,
+        &cancellation,
+        FitMode::CustomCrop(shifted_crop),
+        SamplingFilter::Box,
+        Some(narrow_patch),
+    );
+    let shifted_conversion = convert_density_detailed(
+        linear_gray_raster(&[64, 192], 2, 1, 2),
+        &table,
+        &shifted_settings,
+        &budget(),
+    )
+    .expect("subpixel crop crossing a source boundary converts");
+    assert_eq!(shifted_conversion.frame().size(), GridSize::new(1, 1));
+    let source_rect = shifted_conversion.transform().source_rect();
+    assert!(source_rect.x() < 1.0);
+    assert!(source_rect.x() + source_rect.width() > 1.0);
+    let shifted_patches = shifted_conversion
+        .patches()
+        .expect("shifted crop retains its quality patch");
+    assert_eq!(shifted_patches.dimensions(), narrow_patch);
+    let shifted_values = shifted_patches
+        .luminance_for_cell(0)
+        .expect("one-cell patch exists");
+    let left_pixel = 64.0_f32 / 255.0;
+    let right_pixel = 192.0_f32 / 255.0;
+    assert!(
+        shifted_values
+            .iter()
+            .all(|value| { value.is_finite() && (0.0..=1.0).contains(value) })
+    );
+    assert!((shifted_values[0] - left_pixel).abs() < 1.0e-6);
+    assert!((shifted_values[63] - right_pixel).abs() < 1.0e-6);
+    let expected_mean = 448.0_f32 / 765.0;
+    let shifted_descriptor = shifted_patches
+        .descriptor(0)
+        .expect("one-cell descriptor exists");
+    assert!(shifted_descriptor.mean_luminance().is_finite());
+    assert!((shifted_descriptor.mean_luminance() - expected_mean).abs() < 1.0e-6);
+    assert!(shifted_descriptor.mean_absolute_dx().is_finite());
+    assert!(shifted_descriptor.mean_absolute_dx() > 0.0);
+    assert!(shifted_descriptor.mean_absolute_dx() <= 1.0);
+    assert_eq!(shifted_descriptor.mean_absolute_dy(), 0.0);
+}
+
+#[test]
 fn sampling_identity_changes_with_filter_patch_size_and_resolved_geometry() {
     let table = build_table();
     let cancellation = CancellationToken::new();
