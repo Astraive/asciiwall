@@ -1800,7 +1800,20 @@ fn canonical_output_destination(destination: &Path) -> io::Result<PathBuf> {
     Ok(canonical_parent.join(file_name))
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn same_output_destination(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    // Resolve existing spellings through the actual filesystem instead of assuming Unix paths
+    // are case-sensitive or folding their names unconditionally.
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn same_output_destination(left: &Path, right: &Path) -> bool {
     left == right
 }
