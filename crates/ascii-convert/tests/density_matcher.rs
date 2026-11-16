@@ -335,6 +335,138 @@ fn box_sampling_integrates_cell_footprint_and_never_reads_stride_padding() {
 }
 
 #[test]
+fn circle_density_tracks_cell_aspect_end_to_end() {
+    let table = build_table();
+    let circle = (0_i32..16)
+        .flat_map(|y| {
+            (0_i32..16).map(move |x| {
+                let dx = 2 * x + 1 - 16;
+                let dy = 2 * y + 1 - 16;
+                if dx * dx + dy * dy <= 14 * 14 {
+                    u8::MAX
+                } else {
+                    0
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::columns(2),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    );
+
+    let converted = convert_density_detailed(
+        linear_gray_raster(&circle, 16, 16, 16),
+        &table,
+        &conversion_settings,
+        &budget(),
+    )
+    .expect("circular raster converts using glyph-cell aspect");
+
+    assert_eq!(converted.frame().size(), GridSize::new(2, 1));
+    assert_eq!(
+        converted
+            .frame()
+            .cells()
+            .iter()
+            .map(|cell| cell.glyph())
+            .collect::<Vec<_>>(),
+        [slot(&table, 'A'), slot(&table, 'A')]
+    );
+}
+
+#[test]
+fn transparent_edge_pixel_composites_over_configured_nonblack_background() {
+    let table = build_table();
+    // A half-covered white edge pixel occupies the upper-left corner; transparent pixels expose
+    // the configured background rather than black.
+    let pixels = [
+        255, 255, 255, 128, 0, 0, 0, 0, // top row
+        0, 0, 0, 0, 0, 0, 0, 0, // middle row
+        0, 0, 0, 0, 0, 0, 0, 0, // bottom row
+    ];
+    let input = RasterFrameView::new(
+        2,
+        3,
+        8,
+        PixelFormat::rgba8(),
+        ColorDescription::srgb(AlphaMode::Straight),
+        RasterOrientation::TopDown,
+        &pixels,
+    );
+    let background = LinearRgb::new(0.2, 0.2, 0.2).expect("gray background is in range");
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        background,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::Contain,
+        SamplingFilter::Box,
+        Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
+    ));
+
+    let converted = convert_density_detailed(input, &table, &conversion_settings, &budget())
+        .expect("alpha edge converts over configured background");
+    let patch = converted
+        .patches()
+        .expect("quality mode retains its sampled luminance")
+        .luminance_for_cell(0)
+        .expect("one-cell patch exists");
+    let alpha = f64::from(128_u8) / f64::from(u8::MAX);
+    let expected = 0.2 + alpha * (1.0 - 0.2) / 6.0;
+
+    assert!((f64::from(patch[0]) - expected).abs() < 1.0e-7);
+    assert_eq!(
+        converted.frame().cells()[0].bg_srgba8(),
+        [124, 124, 124, 255]
+    );
+}
+
+#[test]
+fn nearest_sampling_returns_pixel_at_inverse_mapped_cell_center() {
+    let table = build_table();
+    let mut pixels = [0_u8; 16];
+    // Contain maps this cell center to source edge coordinate (2, 2); floor selects pixel (2, 2).
+    pixels[10] = u8::MAX;
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::Contain,
+        SamplingFilter::Nearest,
+        Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
+    ));
+
+    let converted = convert_density_detailed(
+        linear_gray_raster(&pixels, 4, 4, 4),
+        &table,
+        &conversion_settings,
+        &budget(),
+    )
+    .expect("nearest-sampled two-tone raster converts");
+    let patch = converted
+        .patches()
+        .expect("quality mode retains its sampled luminance")
+        .luminance_for_cell(0)
+        .expect("one-cell patch exists");
+
+    assert_eq!(patch, [1.0]);
+}
+
+#[test]
 fn source_metadata_is_propagated_exactly_and_mismatched_identity_is_rejected() {
     let table = build_table();
     let cancellation = CancellationToken::new();
