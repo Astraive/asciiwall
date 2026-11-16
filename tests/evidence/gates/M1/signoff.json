@@ -1,0 +1,445 @@
+{
+  "schema": "asciiwall.m1-gate-receipt/v1",
+  "receipt_version": "draft-1",
+  "recorded_on": "2026-11-16",
+  "decision": "no-go",
+  "record_status": "draft_pending_independent_signoff",
+  "immutability": {
+    "snapshot_identity": "The Git commit containing this file is the immutable identity of this receipt snapshot.",
+    "amendment_policy": "Future evidence or corrections must be recorded in a new committed receipt revision; this draft is not a signoff and must not be silently rewritten as one."
+  },
+  "gate": {
+    "issue": 211,
+    "url": "https://github.com/Astraive/asciiwall/issues/211",
+    "title": "[QA-M1] Sign off M1 ASCII Engine Prototype acceptance gate",
+    "state_observed": "OPEN",
+    "status_change": "none",
+    "completion_claim": false,
+    "supported_scope_claimed": []
+  },
+  "candidate": {
+    "repository": "Astraive/asciiwall",
+    "source_revision": {
+      "branch": "main",
+      "sha": "08381114be95f5270d45eb51daa0039eeb5fa1a5",
+      "meaning": "origin/main at receipt preparation; fetched and independently matched to the live origin/main ref"
+    },
+    "integrated_candidate_exists": false,
+    "binary_sha256": null,
+    "binary_sha256_status": "unavailable; no integrated M1 candidate binary was identified or built",
+    "fixture_bundle_sha256": null,
+    "fixture_bundle_sha256_status": "unavailable; no single M1 candidate fixture bundle is identified",
+    "settings_bundle_sha256": null,
+    "settings_bundle_sha256_status": "unavailable; no single M1 candidate settings bundle is identified",
+    "artifact_sha256": null,
+    "artifact_sha256_status": "unavailable; no M1 acceptance artifact bundle was produced",
+    "main_tree_observations": [
+      {
+        "path": "apps/cli",
+        "status": "absent",
+        "source_revision": "08381114be95f5270d45eb51daa0039eeb5fa1a5"
+      },
+      {
+        "path": "crates/ascii-convert/src/density.rs",
+        "status": "absent",
+        "source_revision": "08381114be95f5270d45eb51daa0039eeb5fa1a5"
+      }
+    ],
+    "interpretation": "The recorded component work is split across unmerged branches/PRs and is not one integrated source candidate. No branch combination is treated as a release candidate."
+  },
+  "entry_criteria": [
+    {
+      "criterion": "Bounded core frames exist",
+      "status": "PASS",
+      "scope": "Core frame implementation exists on the recorded main source; this alone does not establish the M1 gate."
+    },
+    {
+      "criterion": "Font descriptors exist",
+      "status": "PASS",
+      "scope": "Font descriptor and glyph sources are present on the recorded main source at crates/ascii-convert/src/font.rs and crates/ascii-convert/src/glyphs.rs. The separate FNT-002 repertoire/editor/clip/export acceptance remains incomplete in open draft PR #306 and issue #120."
+    },
+    {
+      "criterion": "Image conversion exists in the M1 candidate",
+      "status": "BLOCKED",
+      "scope": "The conversion implementation is in separate open draft PRs #291, #292, and #302; the conversion density source path is absent from the recorded main revision. These stacked branches do not establish one integrated candidate."
+    },
+    {
+      "criterion": "Standalone CLI build exists for the M1 candidate",
+      "status": "BLOCKED",
+      "scope": "The remote feat/cli-001-headless-conversion branch is at 0bbbf8da69aae5758b20d3ee34d38216313309d6, but GitHub reports no PR for that branch; apps/cli is absent from recorded main. Issue #129 remains open, and its latest published comment says the conversion/export pipeline is still unconnected and claims no end-to-end acceptance pass."
+    },
+    {
+      "criterion": "Rights-cleared small fixtures are pinned to one integrated source/settings/binary candidate",
+      "status": "BLOCKED",
+      "scope": "Some component PRs report hashes for synthetic fixtures/settings, but no M1-wide fixture/settings bundle is tied to an integrated source and binary."
+    }
+  ],
+  "exit_criteria": [
+    {
+      "criterion": "Deterministic CPU character-grid goldens on the exact M1 candidate",
+      "status": "BLOCKED",
+      "evidence": "No integrated candidate source/binary, M1 golden artifact, or candidate fixture/settings bundle is available. Component-level synthetic tests are not an M1 gate receipt."
+    },
+    {
+      "criterion": "Aspect, color, alpha, stride, overflow, and invalid-image checks pass on the exact M1 candidate",
+      "status": "BLOCKED",
+      "evidence": "Portable component tests reported in draft PRs include passing synthetic subcases, but they are split across unmerged heads and do not provide a complete reviewer-linked M1 scenario receipt."
+    },
+    {
+      "criterion": "Unsupported HDR behavior is explained",
+      "status": "PASS",
+      "scope": "QA-102 reports a passing synthetic conversion-boundary test for an actionable unsupported HDR/wide-gamut error on its own PR head. This is component evidence only; it does not establish M1 candidate acceptance."
+    },
+    {
+      "criterion": "Firewall-denied text and PNG conversion is recorded",
+      "status": "NOT RUN",
+      "evidence": "No firewall-denied end-to-end CLI conversion result or evidence artifact is available. The published CLI-001 issue comment states the conversion/export pipeline is unconnected."
+    },
+    {
+      "criterion": "Named native OS/session/compositor/GPU/driver/permission state and manual observations are recorded",
+      "status": "NOT RUN",
+      "evidence": "No native surface-owning host observation or M1 manual evidence was supplied. CI runner labels and a component-test OS report are not native acceptance evidence."
+    }
+  ],
+  "scenario_outcomes": [
+    {
+      "scenario_ids": ["QA-101/EC-001", "QA-101/EC-002", "QA-101/EC-003", "QA-101/EC-005"],
+      "status": "PASS",
+      "scope": "Portable consumer-boundary regressions only, reported as 4 passing tests on PR #304 head 9ad6656cb6e024f221977e025d1decd6afca88e7.",
+      "m1_acceptance_status": "BLOCKED",
+      "evidence_url": "https://github.com/Astraive/asciiwall/pull/304"
+    },
+    {
+      "scenario_ids": ["QA-101/EC-004"],
+      "status": "NOT RUN",
+      "scope": "The QA-101 PR states there is no decoder-to-converter callsite in that stack and no EXIF fixture or decoder result is claimed.",
+      "evidence_url": "https://github.com/Astraive/asciiwall/pull/304"
+    },
+    {
+      "scenario_ids": ["QA-102/EC-006", "QA-102/EC-007", "QA-102/EC-008"],
+      "status": "PASS",
+      "scope": "Synthetic direct-converter coverage only, reported in QA-102 PR #305. EC-008 decoder-to-converter traversal is separately NOT RUN.",
+      "m1_acceptance_status": "BLOCKED",
+      "evidence_url": "https://github.com/Astraive/asciiwall/pull/305"
+    },
+    {
+      "scenario_ids": ["QA-102/EC-009"],
+      "status": "NOT RUN",
+      "scope": "The QA-102 PR states that its stack has no restricted-worker/UI safe-error path; QA-004 #35 is a hard dependency and remains open.",
+      "evidence_url": "https://github.com/Astraive/asciiwall/pull/305"
+    },
+    {
+      "scenario_ids": ["QA-102/EC-010"],
+      "status": "PASS",
+      "scope": "The QA-102 PR identifies an existing decoder byte-budget regression for a small compressed image advertising 4096x4096 dimensions and reports a passing workspace run on its exact head. This is a decoder-level unit regression, not a reviewer-linked M1 scenario receipt.",
+      "m1_acceptance_status": "BLOCKED",
+      "evidence_url": "https://github.com/Astraive/asciiwall/pull/305"
+    },
+    {
+      "scenario_ids": ["QA-M1/CPU-golden", "QA-M1/aspect-color-alpha-stride-overflow-invalid-image"],
+      "status": "BLOCKED",
+      "scope": "No complete exact-candidate golden or integrated scenario run is available. Component outcomes above are retained as partial evidence and are not promoted to M1 PASS."
+    },
+    {
+      "scenario_ids": ["QA-M1/firewall-denied-text", "QA-M1/firewall-denied-png"],
+      "status": "NOT RUN",
+      "scope": "No end-to-end candidate CLI output exists for these scenarios."
+    },
+    {
+      "scenario_ids": ["QA-M1/native-surface-host", "QA-M1/manual-observations"],
+      "status": "NOT RUN",
+      "scope": "No native surface-owning host or manual observation evidence is available."
+    }
+  ],
+  "nonwaivable_p0_disposition": {
+    "status": "BLOCKED",
+    "decision": "no-go",
+    "waived": false,
+    "basis": "The P0 gate has no exact integrated source/binary candidate or complete acceptance receipt. QA-101 EC-001 and QA-102 EC-008 have only portable synthetic/consumer-boundary PASS evidence; QA-102 EC-009 remains NOT RUN, and no firewall-denied candidate CLI run or native/manual evidence exists.",
+    "p0_evidence": [
+      {
+        "item": "QA-101 EC-001 zero-dimension/overflow consumer-boundary regression",
+        "observed_component_result": "PASS",
+        "gate_disposition": "BLOCKED; not a candidate-wide reviewer-linked receipt"
+      },
+      {
+        "item": "QA-102 EC-008 odd stride/padded-data converter regression",
+        "observed_component_result": "PASS",
+        "gate_disposition": "BLOCKED; decoder-to-converter traversal and M1 scenario receipt are not run"
+      },
+      {
+        "item": "QA-102 EC-009 malformed/truncated image restricted-worker safe UI error",
+        "observed_component_result": "NOT RUN",
+        "gate_disposition": "BLOCKED; required worker/UI path is absent from the reported stack"
+      },
+      {
+        "item": "QA-M1 firewall-denied text/PNG conversion",
+        "observed_component_result": "NOT RUN",
+        "gate_disposition": "BLOCKED; no end-to-end CLI conversion evidence"
+      }
+    ]
+  },
+  "p1_limitations": {
+    "accepted_by_independent_reviewers": [],
+    "unaccepted_or_unassessed": [
+      "No integrated M1 support scope is accepted.",
+      "HDR/wide-gamut evidence is limited to synthetic conversion-boundary tests; no full candidate receipt exists.",
+      "FNT-002 preview/repertoire consumer integration remains incomplete in draft PR #306."
+    ]
+  },
+  "observed_component_heads": [
+    {
+      "work_item": "FNT-002",
+      "issue": 120,
+      "pull_request": 306,
+      "state": "OPEN_DRAFT",
+      "head_sha": "13fe7e23c75c00140c32f6d29dd47ce8896c2c27",
+      "base_sha": "08381114be95f5270d45eb51daa0039eeb5fa1a5",
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43845406845",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": ["Repository quality", "Portable core (ubuntu-latest)", "Portable core (macos-latest)", "Portable core (windows-latest)"]
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43845406837",
+          "workflow": "Security analysis",
+          "status": "PASS"
+        }
+      ],
+      "limitations": "No local tests were run on this replacement head per the PR body. The PR body says editor, ascii-clip, and ascii-export consumer acceptance is unmet; issue #120 remains open."
+    },
+    {
+      "work_item": "CLI-001",
+      "issue": 129,
+      "pull_request": null,
+      "branch": "feat/cli-001-headless-conversion",
+      "head_sha": "0bbbf8da69aae5758b20d3ee34d38216313309d6",
+      "github_pull_request_query": "No pull request found for this branch at observation time.",
+      "limitations": "Issue #129 remains open. Its latest published comment says the actual conversion/export pipeline is still unconnected and no end-to-end acceptance pass is claimed. The receipt records no positive M1 acceptance for PNG, structural matching, or config integration."
+    },
+    {
+      "work_item": "CNV-002",
+      "issue": 72,
+      "pull_request": 291,
+      "state": "OPEN_DRAFT",
+      "head_sha": "52a7a471cf86851c47984a51486e1d8eb245bf64",
+      "base_sha": "08381114be95f5270d45eb51daa0039eeb5fa1a5",
+      "component_test_outcomes_reported": [
+        "PASS: cargo test --locked -p ascii-convert --test color_normalization (19 tests)",
+        "PASS: cargo test --locked --workspace"
+      ],
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43832063499",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": ["Repository quality", "Portable core (ubuntu-latest)", "Portable core (macos-latest)", "Portable core (windows-latest)"]
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43831707323",
+          "workflow": "Security analysis",
+          "status": "PASS"
+        }
+      ],
+      "limitations": "Draft component branch; does not itself provide an integrated CLI/M1 candidate."
+    },
+    {
+      "work_item": "CNV-001",
+      "issue": 118,
+      "pull_request": 292,
+      "state": "OPEN_DRAFT",
+      "head_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "base_sha": "52a7a471cf86851c47984a51486e1d8eb245bf64",
+      "component_test_outcomes_reported": [
+        "PASS: cargo test --locked -p ascii-convert --test density_matcher (22 tests)",
+        "PASS: cargo test --locked --workspace (143 tests across 13 suites)"
+      ],
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43838977139",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": ["Repository quality", "Portable core (ubuntu-latest)", "Portable core (macos-latest)", "Portable core (windows-latest)"]
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43838561405",
+          "workflow": "Security analysis",
+          "status": "PASS"
+        }
+      ],
+      "limitations": "Open draft, stacked on CNV-002; not an integrated M1 candidate."
+    },
+    {
+      "work_item": "CNV-003",
+      "issue": 130,
+      "pull_request": 302,
+      "state": "OPEN_DRAFT",
+      "head_sha": "5564df42a11664a9892a9bf64afb64a17f1cac50",
+      "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "component_test_outcomes_reported": [
+        "PASS: cargo test --locked -p ascii-convert --test sampling_geometry (9 tests)",
+        "PASS: cargo test --locked -p ascii-convert --test density_matcher (22 tests)",
+        "PASS: cargo test --workspace --locked (153 tests)"
+      ],
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43842202805",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": ["Repository quality", "Portable core (ubuntu-latest)", "Portable core (macos-latest)", "Portable core (windows-latest)"]
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43841203670",
+          "workflow": "Security analysis",
+          "status": "PASS"
+        }
+      ],
+      "limitations": "Open draft, stacked on CNV-001; no exact integrated M1 candidate or native/UI evidence."
+    },
+    {
+      "work_item": "QA-101",
+      "issue": 77,
+      "pull_request": 304,
+      "state": "OPEN_DRAFT",
+      "head_sha": "9ad6656cb6e024f221977e025d1decd6afca88e7",
+      "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "component_test_outcomes_reported": [
+        "PASS: cargo test --locked -p ascii-convert --test qa_101_input_conversion (4 tests)",
+        "PASS: cargo test --locked --workspace (147 tests across 14 suites)"
+      ],
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43841877808",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": ["Repository quality", "Portable core (ubuntu-latest)", "Portable core (macos-latest)", "Portable core (windows-latest)"]
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43841157245",
+          "workflow": "Security analysis",
+          "status": "PASS"
+        }
+      ],
+      "limitations": "EC-004 EXIF orientation is NOT RUN; QA-004 #35 and reviewer-linked scenario receipts remain outstanding."
+    },
+    {
+      "work_item": "QA-102",
+      "issue": 78,
+      "pull_request": 305,
+      "state": "OPEN_DRAFT",
+      "head_sha": "fd7828e98db7e63057a4ba51d46739d6f201e4b7",
+      "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "component_test_outcomes_reported": [
+        "PASS: cargo test --locked -p ascii-convert --test qa_102_input_conversion (5 tests)",
+        "PASS: cargo test --locked -p ascii-convert --test density_matcher (22 tests)",
+        "PASS: cargo test --locked --workspace (148 tests across 14 suites)"
+      ],
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43841878874",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": ["Repository quality", "Portable core (ubuntu-latest)", "Portable core (macos-latest)", "Portable core (windows-latest)"]
+        }
+      ],
+      "limitations": "EC-009 restricted-worker/UI error and EC-008 decoder-to-converter traversal are NOT RUN. QA-004 #35 and reviewer-linked QA-102 scenario evidence remain outstanding."
+    }
+  ],
+  "superseded_records": [
+    {
+      "pull_request": 300,
+      "state": "CLOSED",
+      "superseded_by": 306,
+      "note": "Do not treat PR #300 as the current FNT-002 branch; PR #306 is the current open draft replacement."
+    }
+  ],
+  "fixture_and_settings_hashes": {
+    "m1_candidate_bundle": {
+      "fixture_sha256": null,
+      "settings_sha256": null,
+      "status": "UNAVAILABLE"
+    },
+    "partial_component_test_inputs": [
+      {
+        "source_pr": 291,
+        "source_head": "52a7a471cf86851c47984a51486e1d8eb245bf64",
+        "test_source_sha256": "54e70504d02256ee2cbd2949d3b4af426d5e22de150fd3b38f61f2f2326f319b",
+        "fixture_sha256": [
+          "08e5d6f7183a3407c481b795c637ddbc7a2a8049e976e053951903cc9fd89570",
+          "0315fa91e964fa07b4eb3a5a273c7a1dc1349b1d01a961a7a734f9145c6edb34",
+          "1269523da5404a82c95810df1fcd3ea8701ff959b3dcec3b9b573d01a7ad07f9"
+        ],
+        "settings_sha256": [
+          "a9ee7cf7a500baf3d4184e36da29f22d30a6a7baa96b402a5daadac30da2f59e",
+          "4814ab24ce1feb10d313cc0563711d38b30864196eae406116259fcdd16380b2"
+        ],
+        "scope": "CNV-002 synthetic test inputs only; not an M1 candidate fixture/settings bundle."
+      },
+      {
+        "source_pr": 302,
+        "source_head": "5564df42a11664a9892a9bf64afb64a17f1cac50",
+        "fixture_sha256": [
+          "26887198972e5be6930aa838b2a771ff6048b377a69d1ee92db10bdd5f3099ea",
+          "b4b5e352a9237df1fd5932b6748ea80c6d91e2c80ac294198313cad5f6db1070"
+        ],
+        "settings_sha256": ["5de059c1e35e4532e960c73112484cda200e56ee4717b31ead6e8d5a04e53317"],
+        "synthetic_font_generator_sha256": "8a0b3b4e8ee150d6d16b084e51200525112ed6424855afa652a55ed3274176c8",
+        "scope": "CNV-003 synthetic component fixtures/settings only; not an M1 candidate fixture/settings bundle."
+      }
+    ]
+  },
+  "environment_and_artifacts": {
+    "m1_candidate_environment": {
+      "status": "NOT RUN",
+      "os_and_build": null,
+      "session_type": null,
+      "compositor": null,
+      "gpu_and_driver": null,
+      "permission_state": null,
+      "manual_observation_evidence_path": null
+    },
+    "portable_ci_environment": {
+      "runner_labels_observed": ["ubuntu-latest", "macos-latest", "windows-latest"],
+      "limits": "These are PR-specific portable CI runners, not a named native surface-owning host. Exact OS build/session/compositor/GPU/driver/permission state and M1 manual observations are unavailable."
+    },
+    "reported_component_local_environment": {
+      "source_pr": 291,
+      "source_head": "52a7a471cf86851c47984a51486e1d8eb245bf64",
+      "os_and_build": "Windows 10 build 26300 x64",
+      "rust_version": "1.100.0",
+      "session_type": null,
+      "compositor": null,
+      "gpu_and_driver": null,
+      "permission_state": null,
+      "limits": "Local component-test environment as reported in PR #291; not an M1/native acceptance tuple."
+    },
+    "failures": [],
+    "failure_interpretation": "No failed M1-candidate run is claimed; the M1 candidate and required end-to-end procedures were not run."
+  },
+  "review_signoff": {
+    "status": "PENDING",
+    "required_reviewers": ["independent Engine maintainer", "independent CLI reviewer"],
+    "engine_maintainer": {
+      "identity": null,
+      "decision": null,
+      "signed_on": null,
+      "evidence_link": null
+    },
+    "cli_reviewer": {
+      "identity": null,
+      "decision": null,
+      "signed_on": null,
+      "evidence_link": null
+    },
+    "implementer_self_certification": "not claimed"
+  },
+  "final_disposition": {
+    "decision": "no-go",
+    "reason": "Entry criteria are not met on one integrated candidate, mandatory end-to-end and native evidence is missing, P0 scenario disposition is incomplete, and independent reviewer signoff is pending.",
+    "issue_211_remains_open": true,
+    "m1_completion_claimed": false,
+    "native_renderer_or_wallpaper_claimed": false
+  }
+}
