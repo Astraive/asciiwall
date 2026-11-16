@@ -8,15 +8,21 @@
 use core::fmt;
 
 use ascii_core::{
-    AsciiCell, AsciiFrame, Budget, CancellationToken, Error, FrameMetadata, GlyphTableId, GridSize,
-    MalformedReason, RasterFrameView, UnsupportedReason, validate_grid_budget,
+    AsciiCell, AsciiFrame, Budget, BudgetKind, CancellationToken, Error, FrameMetadata,
+    GlyphTableId, GridSize, MalformedReason, RasterFrameView, UnsupportedReason,
+    validate_grid_budget,
 };
 
 use crate::color::{
     ColorNormalizationError, ColorNormalizationWarning, LinearRgb, OutputEncoding, encode_output,
     normalize_raster,
 };
+use crate::color_fit::{
+    ColorFit, ColorFitError, ColorFitStrategy, MAX_COLOR_FIT_SAMPLES, estimate_color_fit_work,
+    fit_color_patch,
+};
 use crate::font::GlyphTable;
+use crate::palette::{Palette, PaletteError, PaletteKind};
 use crate::sampling::{
     FitMode, FitTransform, QualityPatches, SamplingIdentity, SamplingOptions, prepare_sampling,
 };
@@ -175,7 +181,7 @@ impl GridSizing {
     }
 }
 
-/// Validated identity, sizing, sampling, cancellation, and luminance-polarity settings.
+/// Validated identity, sizing, sampling, cancellation, and color-selection settings.
 #[derive(Clone, Copy, Debug)]
 pub struct ConversionSettings<'a> {
     sizing: GridSizing,
@@ -184,6 +190,7 @@ pub struct ConversionSettings<'a> {
     foreground: LinearRgb,
     background: LinearRgb,
     sampling: SamplingOptions,
+    color_fit: Option<(&'a Palette, ColorFitStrategy)>,
 }
 
 impl<'a> ConversionSettings<'a> {
@@ -212,7 +219,23 @@ impl<'a> ConversionSettings<'a> {
             foreground,
             background,
             sampling: SamplingOptions::default(),
+            color_fit: None,
         })
+    }
+
+    /// Selects candidate-specific color reconstruction for this conversion.
+    ///
+    /// Every glyph mask is fit against the same sampled RGB cell patch and scored with its own
+    /// resolved foreground/background pair. The selected pair is written explicitly into the
+    /// output frame; use the detailed result to read palette identity and terminal notices.
+    #[must_use]
+    pub const fn with_color_fit(
+        mut self,
+        palette: &'a Palette,
+        strategy: ColorFitStrategy,
+    ) -> Self {
+        self.color_fit = Some((palette, strategy));
+        self
     }
 
     /// Selects the shared fit, filter, and optional retained patch policy.
@@ -259,7 +282,7 @@ impl<'a> ConversionSettings<'a> {
     }
 }
 
-/// A density conversion failure, retaining the original core or color-normalization error.
+/// A density conversion failure, retaining core, normalization, and candidate color-fit errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DensityConversionError {
     /// Grid, budget, allocation, cancellation, identity, or frame validation failed.
@@ -267,6 +290,8 @@ pub enum DensityConversionError {
     /// Raster normalization failed; nested raster, HDR, and invalid-sample distinctions remain
     /// available in the original normalization error.
     ColorNormalization(ColorNormalizationError),
+    /// A candidate-specific color reconstruction failed.
+    ColorFit(ColorFitError),
 }
 
 impl fmt::Display for DensityConversionError {
@@ -279,7 +304,16 @@ impl fmt::Display for DensityConversionError {
                     "density conversion color normalization failed: {error}"
                 )
             }
+            Self::ColorFit(error) => {
+                write!(formatter, "density conversion color fit failed: {error}")
+            }
         }
+    }
+}
+
+impl From<ColorFitError> for DensityConversionError {
+    fn from(error: ColorFitError) -> Self {
+        Self::ColorFit(error)
     }
 }
 
@@ -300,11 +334,15 @@ impl DensityConversionError {
     fn into_core(self) -> Error {
         match self {
             Self::Core(error)
-            | Self::ColorNormalization(ColorNormalizationError::Raster(error)) => error,
+            | Self::ColorNormalization(ColorNormalizationError::Raster(error))
+            | Self::ColorFit(ColorFitError::Core(error))
+            | Self::ColorFit(ColorFitError::Palette(PaletteError::Core(error))) => error,
             Self::ColorNormalization(ColorNormalizationError::UnsupportedColor(_)) => {
                 Error::Unsupported(UnsupportedReason::ColorDescription)
             }
-            Self::ColorNormalization(ColorNormalizationError::InvalidSample(_)) => {
+            Self::ColorNormalization(ColorNormalizationError::InvalidSample(_))
+            | Self::ColorFit(ColorFitError::InvalidPatch)
+            | Self::ColorFit(ColorFitError::Palette(PaletteError::InvalidDefinition)) => {
                 Error::Malformed(MalformedReason::InvalidConfiguration)
             }
         }
@@ -321,6 +359,10 @@ pub struct DensityConversion {
     patches: Option<QualityPatches>,
     sampling_identity: SamplingIdentity,
     normalization_warning: Option<ColorNormalizationWarning>,
+    palette_kind: Option<PaletteKind>,
+    palette_cache_identity: Option<[u8; 32]>,
+    color_fit_strategy: Option<ColorFitStrategy>,
+    terminal_appearance_notice: Option<&'static str>,
 }
 
 impl DensityConversion {
@@ -353,6 +395,29 @@ impl DensityConversion {
     pub const fn normalization_warning(&self) -> Option<ColorNormalizationWarning> {
         self.normalization_warning
     }
+    /// Returns the palette mode used for this frame, if color fitting was enabled.
+    #[must_use]
+    pub const fn palette_kind(&self) -> Option<PaletteKind> {
+        self.palette_kind
+    }
+
+    /// Returns the stable identity of the palette definition and matching semantics.
+    #[must_use]
+    pub const fn palette_cache_identity(&self) -> Option<[u8; 32]> {
+        self.palette_cache_identity
+    }
+
+    /// Returns the candidate-specific fitting strategy, when color fitting was enabled.
+    #[must_use]
+    pub const fn color_fit_strategy(&self) -> Option<ColorFitStrategy> {
+        self.color_fit_strategy
+    }
+
+    /// Returns the export notice for ANSI palettes whose device appearance is user-configurable.
+    #[must_use]
+    pub const fn terminal_appearance_notice(&self) -> Option<&'static str> {
+        self.terminal_appearance_notice
+    }
 
     /// Consumes the result and returns its ASCII frame.
     #[must_use]
@@ -363,8 +428,9 @@ impl DensityConversion {
 
 /// Converts a raster into the caller-owned ASCII frame without desktop or GPU dependencies.
 ///
-/// Use [`convert_density_detailed`] when the caller also needs the exact sampling transform,
-/// retained quality patches, a normalization warning, or a more specific color-normalization failure.
+/// Use [`convert_density_detailed`] when the caller needs the exact sampling transform, retained
+/// quality patches, a normalization warning, palette identity, fit strategy, ANSI appearance
+/// notice, or a more specific color-normalization/color-fit failure.
 pub fn convert_density(
     input: RasterFrameView<'_>,
     glyphs: &GlyphTable,
@@ -376,12 +442,15 @@ pub fn convert_density(
         .map_err(DensityConversionError::into_core)
 }
 
-/// Converts a raster into a bounded frame plus the shared geometry and optional quality patches.
+/// Converts a raster into a bounded frame plus shared geometry and optional quality patches.
 ///
-/// Raster orientation, transfer decoding, and alpha normalization happen before fitting. Sampling
-/// then integrates each destination cell's actual pixel footprint in linear light, composites
-/// alpha over the configured background, and matches the result to measured glyph mean coverage.
-/// Exact coverage-distance ties use font glyph index, Unicode scalar, then table position.
+/// Raster orientation, transfer decoding, and alpha normalization happen before sampling.
+/// Sampling integrates each destination cell's actual footprint in linear light and composites
+/// alpha over the configured background. With color fitting enabled, each cell's bounded
+/// row-major linear-RGB patch is matched against every glyph mask using that candidate's own
+/// resolved foreground/background pair; the winning pair is encoded explicitly in the output
+/// frame. Otherwise, sampled luminance is matched to measured glyph mean coverage. The detailed
+/// result also retains palette/export metadata.
 ///
 /// Grid, work, normalized-raster, and optional whole-grid patch budgets are checked before their
 /// corresponding allocations. Fixed-surface pixels not covered by the floor-sized grid remain
@@ -414,10 +483,36 @@ pub fn convert_density_detailed(
     )?;
     let grid_budget = validate_grid_budget(size, budget, settings.cancellation)?;
     let glyph_count_u64 = u64::try_from(glyph_records.len()).map_err(|_| Error::SizeOverflow)?;
-    let matching_work = grid_budget
-        .cell_count()
-        .checked_mul(glyph_count_u64)
-        .ok_or(Error::SizeOverflow)?;
+    let (matching_work, color_samples_per_cell, palette_storage_bytes) =
+        if let Some((palette, strategy)) = settings.color_fit {
+            let sample_count = u64::from(glyphs.cell_width())
+                .checked_mul(u64::from(glyphs.cell_height()))
+                .ok_or(Error::SizeOverflow)?;
+            let sample_count_usize =
+                usize::try_from(sample_count).map_err(|_| Error::SizeOverflow)?;
+            if sample_count_usize > MAX_COLOR_FIT_SAMPLES {
+                return Err(ColorFitError::InvalidPatch.into());
+            }
+            let fit_work = estimate_color_fit_work(sample_count_usize, palette, strategy)?;
+            let total_fit_work = fit_work
+                .checked_mul(glyph_count_u64)
+                .and_then(|work| work.checked_mul(grid_budget.cell_count()))
+                .ok_or(Error::SizeOverflow)?;
+            (
+                total_fit_work,
+                sample_count,
+                palette.retained_storage_bytes()?,
+            )
+        } else {
+            (
+                grid_budget
+                    .cell_count()
+                    .checked_mul(glyph_count_u64)
+                    .ok_or(Error::SizeOverflow)?,
+                0,
+                0,
+            )
+        };
     let frame_validation_work = grid_budget.work_units();
     let sampling = prepare_sampling(
         &input,
@@ -427,6 +522,8 @@ pub fn convert_density_detailed(
         settings.sampling,
         matching_work,
         frame_validation_work,
+        color_samples_per_cell,
+        palette_storage_bytes,
         budget,
     )?;
 
@@ -434,11 +531,23 @@ pub fn convert_density_detailed(
     let normalization_warning = normalized.warning();
     let mut patches =
         sampling.allocate_patches(grid_budget.cell_count_usize(), settings.cancellation)?;
-    let foreground_luminance = settings.foreground.luminance().value();
-    let background_luminance = settings.background.luminance().value();
-    let luminance_span = foreground_luminance - background_luminance;
-    let foreground = output_color(settings.foreground);
-    let background = output_color(settings.background);
+    let mut color_samples = if let Some((_, _)) = settings.color_fit {
+        if settings.cancellation.is_cancelled() {
+            return Err(Error::Cancelled.into());
+        }
+        let sample_count =
+            usize::try_from(color_samples_per_cell).map_err(|_| Error::SizeOverflow)?;
+        let mut samples = Vec::new();
+        samples
+            .try_reserve_exact(sample_count)
+            .map_err(|_| Error::AllocationFailed)?;
+        if samples.capacity() != sample_count {
+            return Err(Error::BudgetExceeded(BudgetKind::RasterBytes).into());
+        }
+        Some(samples)
+    } else {
+        None
+    };
 
     if settings.cancellation.is_cancelled() {
         return Err(Error::Cancelled.into());
@@ -457,9 +566,11 @@ pub fn convert_density_detailed(
             {
                 return Err(Error::Cancelled.into());
             }
-            let (target_luminance, descriptors) = if let Some(patches) = patches.as_mut() {
-                let patch_output = patches.luminance_for_cell_mut(index)?;
-                sampling.sample_cell(
+            let cell = if let Some((palette, strategy)) = settings.color_fit {
+                let color_samples = color_samples
+                    .as_mut()
+                    .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+                sampling.sample_color_patch(
                     &normalized,
                     column,
                     row,
@@ -467,29 +578,97 @@ pub fn convert_density_detailed(
                     glyphs.cell_height(),
                     settings.background,
                     settings.cancellation,
-                    Some(patch_output),
-                )?
+                    color_samples,
+                )?;
+                if let Some(patches) = patches.as_mut() {
+                    let patch_output = patches.luminance_for_cell_mut(index)?;
+                    let (_, descriptors) = sampling.sample_cell(
+                        &normalized,
+                        column,
+                        row,
+                        glyphs.cell_width(),
+                        glyphs.cell_height(),
+                        settings.background,
+                        settings.cancellation,
+                        Some(patch_output),
+                    )?;
+                    if let Some(descriptor) = descriptors {
+                        patches.push_descriptor(descriptor);
+                    }
+                }
+
+                let mut best: Option<(usize, ColorFit)> = None;
+                for (table_position, glyph) in glyph_records.iter().enumerate() {
+                    if table_position.is_multiple_of(CANCELLATION_GLYPH_INTERVAL)
+                        && settings.cancellation.is_cancelled()
+                    {
+                        return Err(Error::Cancelled.into());
+                    }
+                    let fit = fit_color_patch(
+                        color_samples,
+                        glyph.mask(),
+                        palette,
+                        strategy,
+                        budget,
+                        settings.cancellation,
+                    )?;
+                    if best.is_none_or(|(_, best_fit)| {
+                        fit.mean_squared_error() < best_fit.mean_squared_error()
+                    }) {
+                        best = Some((table_position, fit));
+                    }
+                }
+                let (glyph_position, fit) =
+                    best.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+                let glyph = u32::try_from(glyph_position).map_err(|_| Error::SizeOverflow)?;
+                AsciiCell::new(
+                    glyph,
+                    output_color(fit.foreground().color()),
+                    output_color(fit.background().color()),
+                )
             } else {
-                sampling.sample_cell(
-                    &normalized,
-                    column,
-                    row,
-                    glyphs.cell_width(),
-                    glyphs.cell_height(),
-                    settings.background,
-                    settings.cancellation,
-                    None,
-                )?
+                let (target_luminance, descriptors) = if let Some(patches) = patches.as_mut() {
+                    let patch_output = patches.luminance_for_cell_mut(index)?;
+                    sampling.sample_cell(
+                        &normalized,
+                        column,
+                        row,
+                        glyphs.cell_width(),
+                        glyphs.cell_height(),
+                        settings.background,
+                        settings.cancellation,
+                        Some(patch_output),
+                    )?
+                } else {
+                    sampling.sample_cell(
+                        &normalized,
+                        column,
+                        row,
+                        glyphs.cell_width(),
+                        glyphs.cell_height(),
+                        settings.background,
+                        settings.cancellation,
+                        None,
+                    )?
+                };
+                if let (Some(patches), Some(descriptor)) = (patches.as_mut(), descriptors) {
+                    patches.push_descriptor(descriptor);
+                }
+                let foreground_luminance = settings.foreground.luminance().value();
+                let background_luminance = settings.background.luminance().value();
+                let target_coverage = ((target_luminance - background_luminance)
+                    / (foreground_luminance - background_luminance))
+                .clamp(0.0, 1.0);
+                let glyph = best_glyph(glyph_records.iter(), target_coverage, || {
+                    settings.cancellation.is_cancelled()
+                })?;
+                AsciiCell::new(
+                    glyph,
+                    output_color(settings.foreground),
+                    output_color(settings.background),
+                )
             };
-            if let (Some(patches), Some(descriptor)) = (patches.as_mut(), descriptors) {
-                patches.push_descriptor(descriptor);
-            }
-            let target_coverage =
-                ((target_luminance - background_luminance) / luminance_span).clamp(0.0, 1.0);
-            let glyph = best_glyph(glyph_records.iter(), target_coverage, || {
-                settings.cancellation.is_cancelled()
-            })?;
-            cells.push(AsciiCell::new(glyph, foreground, background));
+            cells.push(cell);
         }
     }
 
@@ -504,12 +683,27 @@ pub fn convert_density_detailed(
         budget,
         settings.cancellation,
     )?;
+    let (palette_kind, palette_cache_identity, color_fit_strategy, terminal_appearance_notice) =
+        if let Some((palette, strategy)) = settings.color_fit {
+            (
+                Some(palette.kind()),
+                Some(*palette.cache_identity()),
+                Some(strategy),
+                palette.terminal_appearance_notice(),
+            )
+        } else {
+            (None, None, None, None)
+        };
     Ok(DensityConversion {
         frame,
         transform: sampling.transform(),
         patches,
         sampling_identity: sampling.identity(),
         normalization_warning,
+        palette_kind,
+        palette_cache_identity,
+        color_fit_strategy,
+        terminal_appearance_notice,
     })
 }
 

@@ -71,9 +71,129 @@ black. Ordinary opaque wallpaper continues to use its existing opaque-background
 
 ## Palettes
 
-Support original per-cell color, monochrome foreground/background, fixed palettes, ANSI-16, ANSI-256, and user gradients. Palette matching space is a configurable algorithm choice; do not confuse a named terminal palette with the actual colors a user's terminal may display. PNG export uses explicit colors, while ANSI export is subject to terminal interpretation.
+Palette semantics are explicit and versioned in `ascii-convert`. `Original` preserves the supplied
+linear-light foreground/background colors without quantization; for ordinary source-color cells,
+pass the sampled cell color as foreground and the selected explicit background. `Monochrome` always
+returns its configured pair. A fixed palette preserves caller order, permits duplicate colors, and
+resolves equal nearest-color distances to the earliest entry. ANSI-16 and ANSI-256 resolve to the
+canonical xterm color table (ANSI-16's standard base/bright values, ANSI-256's 6×6×6 cube and
+24-step gray ramp). These are explicit sRGB colors for image output and palette labels for terminal
+output, not a guarantee that a terminal uses those RGB values; `Palette::terminal_appearance_notice`
+exposes that caveat.
 
-Background/foreground separation can be a single fixed background for speed or a two-color cell fit for quality. The latter must evaluate the character mask and color solution together; selecting a glyph only by average brightness then changing both colors can undermine its meaning.
+A user gradient contains 2–128 stops with exact endpoints at positions 0 and 1. Stop positions must
+be finite and strictly increasing; out-of-order and duplicate-position stops are rejected before
+matching. Duplicate stop colors are allowed; equal linear-distance scores select the earliest
+segment, and encoded-distance scores within the documented tie tolerance retain the earliest.
+Colors interpolate linearly in linear-light RGB. Palette distance is independently configurable
+as squared Euclidean linear-RGB or encoded-sRGB distance; linear-RGB gradient matches project
+exactly onto each segment. Encoded-sRGB matching uses deterministic global branch-and-bound with
+encoded-RGB interval lower bounds, not an assumption of unimodality. A fixed `1e-14` score margin is
+subtracted from each bound to reduce floating-point overestimation. Exact requested-color matches
+on a segment are returned exactly. The search stops when guarded bounds leave at most `5e-7`
+between the best squared distance and the segment's global minimum. A later segment replaces the
+current one only when its candidate score is lower by more than `5e-7`; the returned color remains
+within `1e-6` of the global minimum, with exact ties retaining the earliest segment. Since `powf`
+has no portable error bound, the margin is an engineering guard, not a formal proof over exact real
+arithmetic. Each segment is limited to 56 subdivisions and 171 three-channel distance evaluations;
+failure to establish the tolerance returns a work-budget error. Fixed palette ties select the
+earliest palette entry.
+`Palette::cache_identity` covers the distance choice, definition contents, and palette algorithm
+version. Conversion/cache consumers also include `COLOR_FIT_ALGORITHM_VERSION` and the selected
+`ColorFitStrategy`, so a fitting-policy change cannot reuse colors from a different algorithm.
+
+`Palette::new(definition, distance_space, budget, cancellation)` validates the definition before
+use. Fixed palettes retain at most 4096 colors and gradients at most 128 stops. User arrays are
+copied into immutable owned storage charged against the supplied raster-byte budget; definition
+validation, matching, and lookups have explicit work caps. No output color is silently substituted.
+`Palette::resolve_pair(requested_foreground, requested_background, budget, cancellation)` is the
+direct per-cell path: original preserves both requested colors, monochrome returns its configured
+pair, and other modes resolve each requested color to a palette color. Each color resolution is
+capped at 65,536 channel-work units and a pair at 131,072; the combined estimate must also fit the
+caller's work budget. `PaletteColor` carries explicit linear-light RGB and, for fixed/ANSI modes,
+the palette index. The shared conversion frame stores explicit sRGBA8 values; consumers should use
+those values for PNG rather than re-resolving the palette. This workspace has no PNG/ANSI exporter;
+the detailed conversion metadata below supplies the ANSI device-appearance notice.
+
+Color reconstruction uses `R(p) = B + (F - B)M(p)` with byte coverage interpreted as `M/255`.
+The Rust entry point is
+`fit_color_patch(target: &[LinearRgb], coverage: &[u8], palette: &Palette, strategy: ColorFitStrategy, budget: &Budget, cancellation: &CancellationToken) -> Result<ColorFit, ColorFitError>`.
+It receives row-major per-pixel linear-light RGB samples for one cell and the equally sized
+row-major glyph coverage mask. Target colors must be opaque linear-light RGB with alpha already
+composited under the established image-normalization contract. It returns the candidate-specific
+resolved foreground/background and mean squared error across linear-light RGB channels. Candidate
+comparison must fit and score every glyph with its own returned pair; `ColorFitStrategy::FixedBackground(background)` holds the background and solves/clamps the foreground.
+`ColorFitStrategy::TwoColorLeastSquares` solves each channel jointly with foreground/background constrained to
+`[0,1]`. Finite fixed/ANSI palettes search allowed colors; gradient fitting searches allowed
+interpolated segments, so the score uses exactly the colors returned. Original mode solves
+unrestricted colors; monochrome uses its explicit pair. Equal scores keep the first palette/segment
+pair for deterministic ties.
+
+The fit objective is linear-light RGB mean squared error, distinct from the configurable palette
+lookup distance. A zero, full, or numerically singular/near-degenerate coverage mask has no reliable
+two-color separation; per channel the stable fallback is equal foreground/background at the target
+channel mean. Otherwise the bounded least-squares solution checks interior and box-boundary minima.
+All output channels are finite and clamped to `[0,1]`. One fit accepts at most 65,536 patch samples
+and 64,000,000 channel-work units; one palette resolution is capped at 65,536 channel-work units,
+and resolving a foreground/background pair is capped at 131,072. Resolution work charges three
+channel units per distance or interval-bound comparison: original uses 0, monochrome uses 6,
+fixed/ANSI modes use 3 per palette color, linear gradients use 3 per segment, and encoded gradients
+use at most 513 per segment (65,151 for the largest 128-stop gradient).
+Use `estimate_color_fit_work` for every shortlisted glyph and checked-add estimates against the whole
+job budget before reranking multiple candidates.
+
+Color fitting is integrated into the shared density consumer through
+`ConversionSettings::with_color_fit(&Palette, ColorFitStrategy)` and
+`convert_density_detailed`. The consumer uses the established normalized raster and sampler to
+produce one bounded, reusable row-major linear-RGB patch for each cell, then fits and scores every
+glyph with that glyph's own coverage mask and corresponding foreground/background solution. It
+stores the selected explicit sRGBA8 pair in the resulting `AsciiCell`; it does not first choose a
+glyph by brightness and recolor it afterward. The temporary RGB patch is not retained. Optional
+`QualityPatches` continue to hold luminance and finite-difference descriptors, sampled independently
+when requested.
+
+`DensityConversion` exposes palette kind, cache identity, fit strategy, and the ANSI
+terminal-appearance notice alongside the actual `AsciiFrame`. Use the detailed result when an
+exporter needs to propagate that metadata; the convenience `convert_density` returns the frame
+only. ANSI palette colors are explicit engine sRGB values, not a promise of identical physical
+appearance across terminal devices.
+
+### CNV-005 regression evidence
+
+The synthetic conversion regression uses `tests/support/synthetic_font.rs` with
+`synthetic_font(false)`, repertoire `BA `, 8×12 glyph cells, baseline 9, RGB8 sRGB opaque
+top-down input, and explicit original/monochrome/fixed/ANSI-16/ANSI-256/gradient modes. The test
+asserts the source-font fixture SHA-256
+`8a0b3b4e8ee150d6d16b084e51200525112ed6424855afa652a55ed3274176c8` and configuration descriptor
+SHA-256 `c5784309d79a7a1116319a718da3465cf6ffa032de7ab22f4b51c40655e4ebed` in
+`tests/color_fit.rs`; changing either fixture or configuration requires updating the golden
+evidence.
+
+Focused executable evidence:
+
+```text
+cargo test -p ascii-convert --test color_fit reconstruction -- --nocapture
+cargo test -p ascii-convert --test color_fit palette_modes -- --nocapture
+cargo test -p ascii-convert --test color_fit validation -- --nocapture
+cargo test -p ascii-convert --test color_fit gradient_pair_fit -- --nocapture
+cargo test -p ascii-convert --test color_fit synthetic_color_fit_fixture_configuration_hash -- --nocapture
+```
+
+Workspace acceptance commands:
+
+```text
+cargo test -p ascii-convert --test color_fit
+cargo test --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The synthetic conversion tests exercise the real `convert_density_detailed` consumer: candidate
+glyph selection by paired reconstruction error, two independently colored cells, all six palette
+modes and ANSI notices, preflight rejection, in-flight cancellation without a published frame, and
+successful reuse after cancellation. No separate CLI or image-exporter crate exists in this
+workspace.
+
 
 ## Filtering and edges
 

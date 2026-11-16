@@ -1,10 +1,12 @@
-//! Bounded CPU density conversion, font masks, shared geometry, and color normalization.
+//! Bounded CPU density conversion, glyph-color fitting, explicit palettes, and color normalization.
 
+mod color_fit;
 mod color;
 mod density;
 mod font;
 mod font_preflight;
 mod glyphs;
+mod palette;
 
 mod sampling;
 pub use color::{
@@ -21,6 +23,17 @@ pub use density::{
 pub use font::{
     GlyphConfig, GlyphRecord, GlyphRepertoire, GlyphTable, build_glyph_table,
     is_supported_single_cell_scalar,
+};
+pub use color_fit::{
+    COLOR_FIT_ALGORITHM_VERSION, ColorFit, ColorFitError, ColorFitStrategy,
+    MAX_COLOR_FIT_SAMPLES, MAX_COLOR_FIT_WORK_UNITS, estimate_color_fit_work,
+    fit_color_patch,
+};
+pub use palette::{
+    MAX_GRADIENT_STOPS, MAX_PALETTE_COLORS, MAX_PALETTE_PAIR_RESOLUTION_WORK_UNITS,
+    MAX_PALETTE_RESOLUTION_WORK_UNITS, PALETTE_ALGORITHM_VERSION, GradientStop, Palette,
+    PaletteColor, PaletteColorPair, PaletteDefinition, PaletteDistanceSpace, PaletteError,
+    PaletteKind,
 };
 
 pub use glyphs::{Centroid, EdgeOrientation, GlyphBounds, GlyphMetrics};
