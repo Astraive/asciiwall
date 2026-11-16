@@ -8,7 +8,7 @@
 use core::fmt;
 
 use ascii_core::{
-    AsciiCell, AsciiFrame, Budget, CancellationToken, Error, FrameMetadata, GridSize, GlyphTableId,
+    AsciiCell, AsciiFrame, Budget, CancellationToken, Error, FrameMetadata, GlyphTableId, GridSize,
     MalformedReason, RasterFrameView, UnsupportedReason, validate_grid_budget,
 };
 
@@ -18,7 +18,7 @@ use crate::color::{
 };
 use crate::font::GlyphTable;
 use crate::sampling::{
-    FitTransform, QualityPatches, SamplingIdentity, SamplingOptions, prepare_sampling,
+    FitMode, FitTransform, QualityPatches, SamplingIdentity, SamplingOptions, prepare_sampling,
 };
 
 const CANCELLATION_CELL_INTERVAL: usize = 32;
@@ -115,6 +115,41 @@ impl GridSizing {
         }
         Ok(size)
     }
+    fn resolve_for_sampling(
+        self,
+        source_width: u32,
+        source_height: u32,
+        cell_width: u32,
+        cell_height: u32,
+        sampling: SamplingOptions,
+    ) -> Result<GridSize, Error> {
+        let (Self::Columns(columns), FitMode::CustomCrop(crop)) = (self, sampling.fit()) else {
+            return self.resolve(source_width, source_height, cell_width, cell_height);
+        };
+        if source_width == 0
+            || source_height == 0
+            || cell_width == 0
+            || cell_height == 0
+            || columns == 0
+        {
+            return Err(Error::Malformed(MalformedReason::EmptyDimensions));
+        }
+        let rows = f64::from(columns)
+            * f64::from(source_height)
+            * (crop.bottom() - crop.top())
+            * f64::from(cell_width)
+            / (f64::from(source_width) * (crop.right() - crop.left()) * f64::from(cell_height));
+        if !rows.is_finite() || rows > f64::from(u32::MAX) {
+            return Err(Error::SizeOverflow);
+        }
+        let rounded_rows = (rows + 0.5).floor();
+        let rows = u32::try_from(rounded_rows as u64).map_err(|_| Error::SizeOverflow)?;
+        let size = GridSize::new(columns, rows);
+        if size.is_empty() {
+            return Err(Error::Malformed(MalformedReason::EmptyDimensions));
+        }
+        Ok(size)
+    }
 
     /// Returns right and bottom leftover pixels for a fixed surface, if cell dimensions are valid.
     #[must_use]
@@ -125,9 +160,7 @@ impl GridSizing {
     ) -> Option<(u32, u32)> {
         match self {
             Self::Columns(_) => None,
-            Self::FixedPixelSurface { width, height }
-                if cell_width != 0 && cell_height != 0 =>
-            {
+            Self::FixedPixelSurface { width, height } if cell_width != 0 && cell_height != 0 => {
                 Some((width % cell_width, height % cell_height))
             }
             Self::FixedPixelSurface { .. } => None,
@@ -154,8 +187,8 @@ pub struct ConversionSettings<'a> {
 }
 
 impl<'a> ConversionSettings<'a> {
-    /// Creates settings after validating nonempty sizing and distinct foreground/background
-    /// luminance. Colors are linear-light RGB; output cells store their sRGB8 encoding.
+    /// Creates settings after validating nonempty sizing and foreground/background colors that
+    /// remain distinguishable after sRGB8 encoding.
     pub fn new(
         sizing: GridSizing,
         metadata: FrameMetadata,
@@ -163,8 +196,11 @@ impl<'a> ConversionSettings<'a> {
         foreground: LinearRgb,
         background: LinearRgb,
     ) -> Result<Self, Error> {
+        let foreground_srgb8 = encode_output(foreground, OutputEncoding::Srgb8).channels();
+        let background_srgb8 = encode_output(background, OutputEncoding::Srgb8).channels();
         if !sizing.is_nonempty()
             || foreground.luminance().value() == background.luminance().value()
+            || foreground_srgb8 == background_srgb8
         {
             return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
         }
@@ -178,6 +214,7 @@ impl<'a> ConversionSettings<'a> {
             sampling: SamplingOptions::default(),
         })
     }
+
     /// Selects the shared fit, filter, and optional retained patch policy.
     #[must_use]
     pub const fn with_sampling(mut self, sampling: SamplingOptions) -> Self {
@@ -237,7 +274,10 @@ impl fmt::Display for DensityConversionError {
         match self {
             Self::Core(error) => write!(formatter, "density conversion failed: {error}"),
             Self::ColorNormalization(error) => {
-                write!(formatter, "density conversion color normalization failed: {error}")
+                write!(
+                    formatter,
+                    "density conversion color normalization failed: {error}"
+                )
             }
         }
     }
@@ -252,7 +292,6 @@ impl From<Error> for DensityConversionError {
 }
 
 impl From<ColorNormalizationError> for DensityConversionError {
-
     fn from(error: ColorNormalizationError) -> Self {
         Self::ColorNormalization(error)
     }
@@ -260,9 +299,8 @@ impl From<ColorNormalizationError> for DensityConversionError {
 impl DensityConversionError {
     fn into_core(self) -> Error {
         match self {
-            Self::Core(error) | Self::ColorNormalization(ColorNormalizationError::Raster(error)) => {
-                error
-            }
+            Self::Core(error)
+            | Self::ColorNormalization(ColorNormalizationError::Raster(error)) => error,
             Self::ColorNormalization(ColorNormalizationError::UnsupportedColor(_)) => {
                 Error::Unsupported(UnsupportedReason::ColorDescription)
             }
@@ -323,7 +361,6 @@ impl DensityConversion {
     }
 }
 
-
 /// Converts a raster into the caller-owned ASCII frame without desktop or GPU dependencies.
 ///
 /// Use [`convert_density_detailed`] when the caller also needs the exact sampling transform,
@@ -368,11 +405,12 @@ pub fn convert_density_detailed(
         return Err(Error::Malformed(MalformedReason::InvalidConfiguration).into());
     }
     let glyph_count = u32::try_from(glyph_records.len()).map_err(|_| Error::SizeOverflow)?;
-    let size = settings.sizing.resolve(
+    let size = settings.sizing.resolve_for_sampling(
         input.width(),
         input.height(),
         glyphs.cell_width(),
         glyphs.cell_height(),
+        settings.sampling,
     )?;
     let grid_budget = validate_grid_budget(size, budget, settings.cancellation)?;
     let glyph_count_u64 = u64::try_from(glyph_records.len()).map_err(|_| Error::SizeOverflow)?;
@@ -380,35 +418,34 @@ pub fn convert_density_detailed(
         .cell_count()
         .checked_mul(glyph_count_u64)
         .ok_or(Error::SizeOverflow)?;
+    let frame_validation_work = grid_budget.work_units();
     let sampling = prepare_sampling(
-        input.width(),
-        input.height(),
+        &input,
         size,
         glyphs.cell_width(),
         glyphs.cell_height(),
         settings.sampling,
         matching_work,
+        frame_validation_work,
         budget,
     )?;
 
     let normalized = normalize_raster(input, budget, settings.cancellation)?;
     let normalization_warning = normalized.warning();
-    let mut patches = sampling.allocate_patches(grid_budget.cell_count_usize())?;
+    let mut patches =
+        sampling.allocate_patches(grid_budget.cell_count_usize(), settings.cancellation)?;
     let foreground_luminance = settings.foreground.luminance().value();
     let background_luminance = settings.background.luminance().value();
     let luminance_span = foreground_luminance - background_luminance;
     let foreground = output_color(settings.foreground);
     let background = output_color(settings.background);
 
-    let mut cells = Vec::new();
-    cells
-        .try_reserve_exact(grid_budget.cell_count_usize())
-        .map_err(|_| Error::AllocationFailed)?;
+    let mut cells = reserve_output_cells(grid_budget.cell_count_usize(), settings.cancellation)?;
 
     for row in 0..size.rows() {
         for column in 0..size.columns() {
             let index = cells.len();
-            if index % CANCELLATION_CELL_INTERVAL == 0
+            if index.is_multiple_of(CANCELLATION_CELL_INTERVAL)
                 && settings.cancellation.is_cancelled()
             {
                 return Err(Error::Cancelled.into());
@@ -442,7 +479,7 @@ pub fn convert_density_detailed(
             }
             let target_coverage =
                 ((target_luminance - background_luminance) / luminance_span).clamp(0.0, 1.0);
-            let glyph = best_glyph(glyph_records, target_coverage, || {
+            let glyph = best_glyph(glyph_records.iter(), target_coverage, || {
                 settings.cancellation.is_cancelled()
             })?;
             cells.push(AsciiCell::new(glyph, foreground, background));
@@ -469,19 +506,34 @@ pub fn convert_density_detailed(
     })
 }
 
+fn reserve_output_cells(
+    cell_count: usize,
+    cancellation: &CancellationToken,
+) -> Result<Vec<AsciiCell>, Error> {
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+
+    let mut cells = Vec::new();
+    cells
+        .try_reserve_exact(cell_count)
+        .map_err(|_| Error::AllocationFailed)?;
+    Ok(cells)
+}
+
 fn output_color(color: LinearRgb) -> [u8; 4] {
     let channels = encode_output(color, OutputEncoding::Srgb8).channels();
     [channels[0], channels[1], channels[2], u8::MAX]
 }
 
-fn best_glyph(
-    glyphs: &[crate::font::GlyphRecord],
+fn best_glyph<'a>(
+    glyphs: impl Iterator<Item = &'a crate::font::GlyphRecord>,
     target_coverage: f64,
     mut is_cancelled: impl FnMut() -> bool,
 ) -> Result<u32, Error> {
     let mut best: Option<(usize, f64, u16, u32)> = None;
-    for (table_position, glyph) in glyphs.iter().enumerate() {
-        if table_position % CANCELLATION_GLYPH_INTERVAL == 0 && is_cancelled() {
+    for (table_position, glyph) in glyphs.enumerate() {
+        if table_position.is_multiple_of(CANCELLATION_GLYPH_INTERVAL) && is_cancelled() {
             return Err(Error::Cancelled);
         }
         let coverage = f64::from(glyph.mean_coverage());
@@ -506,25 +558,31 @@ fn best_glyph(
             ));
         }
     }
-    let (table_position, _, _, _) = best.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+    let (table_position, _, _, _) =
+        best.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
     u32::try_from(table_position).map_err(|_| Error::SizeOverflow)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CANCELLATION_GLYPH_INTERVAL, best_glyph};
-    use crate::font::{GlyphConfig, build_glyph_table};
+    use super::{CANCELLATION_GLYPH_INTERVAL, best_glyph, reserve_output_cells};
+    use crate::font::{GlyphConfig, GlyphRepertoire, build_glyph_table};
     use ascii_core::{Budget, CancellationToken, Error};
 
-    #[path = "../tests/support/synthetic_font.rs"]
-    mod synthetic_font;
+    #[allow(dead_code)]
+    mod synthetic_font {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/synthetic_font.rs"
+        ));
+    }
 
     #[test]
     fn cancellation_interrupts_a_large_glyph_scan() {
         let font = synthetic_font::synthetic_font(false);
         let table = build_glyph_table(
             &font,
-            "BA ",
+            &GlyphRepertoire::new("BA ").unwrap(),
             &GlyphConfig::new(8.0, 8, 12, 9).unwrap(),
             &Budget::new(1_000_000, 2_000_000, 2_000_000),
             &CancellationToken::new(),
@@ -534,17 +592,26 @@ mod tests {
             .glyphs()
             .iter()
             .cycle()
-            .take(CANCELLATION_GLYPH_INTERVAL * 4)
-            .cloned()
-            .collect::<Vec<_>>();
+            .take(CANCELLATION_GLYPH_INTERVAL * 4);
         let mut cancellation_checks = 0;
 
-        let result = best_glyph(&glyphs, 0.5, || {
+        let result = best_glyph(glyphs, 0.5, || {
             cancellation_checks += 1;
             cancellation_checks == 2
         });
 
         assert_eq!(result, Err(Error::Cancelled));
         assert_eq!(cancellation_checks, 2);
+    }
+
+    #[test]
+    fn output_cell_reservation_checks_cancellation_before_impossible_reserve() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        assert_eq!(
+            reserve_output_cells(usize::MAX, &cancellation).err(),
+            Some(Error::Cancelled)
+        );
     }
 }

@@ -27,11 +27,11 @@ A fast mode uses calibrated glyph coverage. A quality mode shortlists masks by c
 
 Independent cell descriptors and candidate evaluation can be split across rows/tiles using a bounded pool. Error-diffusion dithering introduces order dependencies; do not parallelize it as though each pixel/cell were independent. Ordered dithering is a simpler deterministic parallel alternative.
 
-The density path checks cancellation every 32 output cells, every 64 glyph candidates, and every 256 sampling/patch operations. Results carry the caller's original generation, frame and timing identity so stale conversions can be discarded after settings change.
+The density path checks cancellation every 32 output cells, every 64 glyph candidates, and every 256 sampling/patch operations. It polls again immediately before output-cell allocation, and its aggregate work ceiling includes final frame-cell validation. Results carry the caller's original generation, frame and timing identity so stale conversions can be discarded after settings change.
 
 ## Numerical behavior
 
-Density matching clamps normalized coverage to `[0, 1]` for either foreground/background polarity and resolves equal-distance glyphs by font glyph index, Unicode scalar, then stable table order. Reject empty/overflowing geometry and indistinguishable foreground/background luminance; check cancellation at bounded work intervals. The initial implementation can use floating-point computation with tolerance-based GPU comparison; do not promise bit-identical output across all hardware.
+Density matching clamps normalized coverage to `[0, 1]` for either foreground/background polarity and resolves equal-distance glyphs by font glyph index, Unicode scalar, then stable table order. Reject empty/overflowing geometry and foreground/background colors that are indistinguishable by linear luminance or output sRGB8 encoding; check cancellation at bounded work intervals. The initial implementation can use floating-point computation with tolerance-based GPU comparison; do not promise bit-identical output across all hardware.
 
 ## Required tests
 
