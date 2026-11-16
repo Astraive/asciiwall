@@ -111,9 +111,14 @@ impl ConvertArgs {
     pub fn validate(&self, json: bool) -> Result<Format, CliError> {
         if self.image.as_os_str().is_empty()
             || self.output.as_os_str().is_empty()
-            || self.font.as_ref().is_some_and(|path| path.as_os_str().is_empty())
+            || self
+                .font
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().is_empty())
         {
-            return Err(CliError::usage("input, font, and output paths must not be empty"));
+            return Err(CliError::usage(
+                "input, font, and output paths must not be empty",
+            ));
         }
 
         let stdout = self.output.as_os_str() == OsStr::new("-");
@@ -131,7 +136,9 @@ impl ConvertArgs {
             None
         };
         if matches!(&output_metadata, Some(Ok(_))) {
-            return Err(CliError::usage("output already exists; use --overwrite to replace it"));
+            return Err(CliError::usage(
+                "output already exists; use --overwrite to replace it",
+            ));
         }
 
         if !stdout {
@@ -148,9 +155,15 @@ impl ConvertArgs {
             }
         }
 
-        let inferred = if stdout { None } else { Format::from_path(&self.output) };
+        let inferred = if stdout {
+            None
+        } else {
+            Format::from_path(&self.output)
+        };
         if self.format.is_some() && inferred.is_some() && self.format != inferred {
-            return Err(CliError::usage("output format conflicts with the file extension"));
+            return Err(CliError::usage(
+                "output format conflicts with the file extension",
+            ));
         }
         let format = match (self.format, inferred, stdout) {
             (Some(format), _, _) | (None, Some(format), _) => format,
@@ -166,7 +179,9 @@ impl ConvertArgs {
         // Unicode, controls, or duplicate glyphs into a future terminal exporter.
         let mut seen = [false; 95];
         if self.charset.is_empty() || self.charset.len() > 4096 {
-            return Err(CliError::validation("charset must contain 1 to 4096 printable ASCII glyphs"));
+            return Err(CliError::validation(
+                "charset must contain 1 to 4096 printable ASCII glyphs",
+            ));
         }
         for byte in self.charset.bytes() {
             if !(b' '..=b'~').contains(&byte) {

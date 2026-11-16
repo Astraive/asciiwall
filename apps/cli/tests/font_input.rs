@@ -1,4 +1,4 @@
-// Reuse the repository's generated, rights-cleared test font; it is not a production font.
+#[allow(dead_code)]
 #[path = "../../../crates/ascii-convert/tests/support/synthetic_font.rs"]
 mod synthetic_font;
 
@@ -8,7 +8,7 @@ use std::os::unix::fs::symlink;
 #[cfg(unix)]
 use std::process::Command;
 
-use ascii_convert::{GlyphConfig, build_glyph_table};
+use ascii_convert::{GlyphConfig, GlyphRepertoire, build_glyph_table};
 use ascii_core::{Budget, CancellationToken, Error};
 use asciiwall_cli::font::{FontLoadError, load_glyph_table};
 
@@ -21,8 +21,10 @@ fn explicit_font_path_builds_the_same_measured_table_as_the_engine() {
     let budget = Budget::new(8_000_000, 64_000_000, 16_000_000);
     let cancellation = CancellationToken::new();
     let geometry = GlyphConfig::new(8.0, 8, 12, 9).unwrap();
+    let repertoire = GlyphRepertoire::new(" AB").unwrap();
     let actual = load_glyph_table(&path, " AB", &geometry, &budget, &cancellation).unwrap();
-    let expected = build_glyph_table(&font, " AB", &geometry, &budget, &cancellation).unwrap();
+    let expected =
+        build_glyph_table(&font, &repertoire, &geometry, &budget, &cancellation).unwrap();
     assert_eq!(actual, expected);
 }
 
@@ -36,6 +38,21 @@ fn missing_explicit_font_is_an_error_not_a_fallback() {
     assert!(matches!(
         load_glyph_table(&path, " AB", &geometry, &budget, &cancellation),
         Err(FontLoadError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+}
+
+#[test]
+fn invalid_repertoire_is_rejected_before_font_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing-font.ttf");
+    let budget = Budget::new(8_000_000, 64_000_000, 16_000_000);
+    let cancellation = CancellationToken::new();
+    let geometry = GlyphConfig::new(8.0, 8, 12, 9).unwrap();
+    assert!(matches!(
+        load_glyph_table(&path, "\u{1b}", &geometry, &budget, &cancellation),
+        Err(FontLoadError::Engine(Error::Malformed(
+            ascii_core::MalformedReason::InvalidConfiguration
+        )))
     ));
 }
 
@@ -104,6 +121,8 @@ fn symlinks_to_regular_fonts_remain_supported() {
     let budget = Budget::new(8_000_000, 64_000_000, 16_000_000);
     let cancellation = CancellationToken::new();
     let actual = load_glyph_table(&link, " AB", &geometry, &budget, &cancellation).unwrap();
-    let expected = build_glyph_table(&font, " AB", &geometry, &budget, &cancellation).unwrap();
+    let repertoire = GlyphRepertoire::new(" AB").unwrap();
+    let expected =
+        build_glyph_table(&font, &repertoire, &geometry, &budget, &cancellation).unwrap();
     assert_eq!(actual, expected);
 }
