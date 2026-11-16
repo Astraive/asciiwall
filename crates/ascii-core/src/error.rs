@@ -15,10 +15,10 @@ pub enum MalformedReason {
     RowStrideTooSmall,
     /// A raster backing slice is shorter than the last required pixel byte.
     RasterBackingTooShort,
-    /// Encoded input is empty, unreadable, truncated, corrupt, or otherwise structurally invalid.
-    InvalidEncodedData,
     /// Caller-supplied input configuration violates its own bounds.
     InvalidConfiguration,
+    /// Encoded input data is empty, unreadable, or structurally invalid.
+    InvalidEncodedData,
 }
 
 /// A supported-core capability that the supplied input requires but this API does not support.
@@ -45,7 +45,7 @@ pub enum UnsupportedReason {
 pub enum BudgetKind {
     /// Owned ASCII cell-vector capacity, measured in bytes.
     FrameBytes,
-    /// The size of encoded input exceeds its configured byte limit.
+    /// The size of an encoded input asset, measured in bytes.
     EncodedBytes,
     /// The minimum readable raster extent, excluding trailing bytes and final-row padding.
     RasterBytes,
