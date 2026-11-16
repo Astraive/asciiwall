@@ -1045,11 +1045,12 @@ mod tests {
 
     #[test]
     fn padded_atlas_contains_the_immutable_glyph_masks_without_row_bleed() {
-        let builders: [fn() -> Vec<u8>; 4] = [
+        let builders: [fn() -> Vec<u8>; 5] = [
             || synthetic_font::synthetic_font(false),
             || synthetic_font::diagonal_font(false),
-            synthetic_font::quadratic_font,
-            synthetic_font::composite_font,
+            || synthetic_font::quadratic_font,
+            || synthetic_font::composite_font,
+            || synthetic_font::legacy_format2_font(false),
         ];
         for build_font in builders {
             assert_padded_atlas(&build_font());
@@ -1060,8 +1061,10 @@ mod tests {
         let budget = Budget::new(32 * 1024 * 1024, 32 * 1024 * 1024, 20_000_000);
         let cancellation = CancellationToken::new();
         let config = ascii_convert::GlyphConfig::new(4.0, 8, 4, 3).unwrap();
+        let repertoire = ascii_convert::GlyphRepertoire::new(" AB").unwrap();
         let table =
-            ascii_convert::build_glyph_table(font, " AB", &config, &budget, &cancellation).unwrap();
+            ascii_convert::build_glyph_table(font, &repertoire, &config, &budget, &cancellation)
+                .unwrap();
         assert!(
             table
                 .glyphs()
