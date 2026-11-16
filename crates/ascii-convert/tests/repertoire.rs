@@ -276,6 +276,95 @@ fn rendered_blocks_and_fixed_cell_metrics_come_from_masks() {
 }
 
 #[test]
+fn fractional_block_masks_match_cell_relative_eighths() {
+    let font = complete_repertoire_font(None);
+    let repertoire =
+        GlyphRepertoire::from_preset(GlyphRepertoirePreset::BlockElements).expect("block preset");
+    let table = build_glyph_table(
+        &font,
+        &repertoire,
+        &config(),
+        &budget(),
+        &CancellationToken::new(),
+    )
+    .expect("all block glyphs are present in the synthetic font");
+    let width = table.cell_width() as usize;
+    let height = table.cell_height() as usize;
+    assert_eq!((width, height), (8, 12));
+
+    let full_block = record(&table, '\u{2588}').mask();
+    let full_coverage = full_block
+        .iter()
+        .map(|&coverage| u64::from(coverage))
+        .sum::<u64>();
+    let first_full_column = (0..width)
+        .find(|&column| full_block.chunks_exact(width).any(|row| row[column] != 0))
+        .expect("full block has ink");
+    let last_full_column = (0..width)
+        .rfind(|&column| full_block.chunks_exact(width).any(|row| row[column] != 0))
+        .expect("full block has ink");
+
+    for (character, eighths, anchored_left) in [
+        ('\u{2589}', 7, true),
+        ('\u{258a}', 6, true),
+        ('\u{258b}', 5, true),
+        ('\u{258c}', 4, true),
+        ('\u{258d}', 3, true),
+        ('\u{258e}', 2, true),
+        ('\u{258f}', 1, true),
+        ('\u{2595}', 1, false),
+    ] {
+        let mask = record(&table, character).mask();
+        let coverage = mask
+            .iter()
+            .map(|&coverage| u64::from(coverage))
+            .sum::<u64>();
+        let expected_scaled_coverage = full_coverage * eighths;
+        let measured_scaled_coverage = coverage * 8;
+        let tolerance = expected_scaled_coverage / 20;
+        assert!(
+            measured_scaled_coverage.abs_diff(expected_scaled_coverage) <= tolerance,
+            "U+{:04X} mask should cover {eighths}/8 of the full-cell mask: \
+             scaled coverage {measured_scaled_coverage}, expected {expected_scaled_coverage} \
+             (tolerance {tolerance})",
+            character as u32,
+        );
+
+        for (row_index, (full_row, block_row)) in full_block
+            .chunks_exact(width)
+            .zip(mask.chunks_exact(width))
+            .enumerate()
+        {
+            assert_eq!(
+                block_row.iter().any(|&coverage| coverage != 0),
+                full_row.iter().any(|&coverage| coverage != 0),
+                "U+{:04X} must retain the full block's vertical extent on row {row_index}",
+                character as u32,
+            );
+        }
+
+        let (expected_column, measured_column) = if anchored_left {
+            let measured_column = (0..width)
+                .find(|&column| mask.chunks_exact(width).any(|row| row[column] != 0))
+                .expect("fractional block has ink");
+            (first_full_column, measured_column)
+        } else {
+            let measured_column = (0..width)
+                .rfind(|&column| mask.chunks_exact(width).any(|row| row[column] != 0))
+                .expect("right eighth block has ink");
+            (last_full_column, measured_column)
+        };
+        assert_eq!(
+            measured_column,
+            expected_column,
+            "U+{:04X} must remain aligned to the {} edge of the full block",
+            character as u32,
+            if anchored_left { "left" } else { "right" },
+        );
+    }
+}
+
+#[test]
 fn every_braille_dot_pattern_rasterizes_at_two_sizes_with_correct_orientation() {
     assert_braille_pattern_masks(config());
     assert_braille_pattern_masks(
