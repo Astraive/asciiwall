@@ -3,9 +3,9 @@ mod support;
 
 use ascii_convert::{
     ColorNormalizationError, ColorNormalizationWarning, ConversionSettings, CropRect,
-    DensityConversionError, FitMode, GlyphConfig, GlyphRepertoire, GlyphTable, GridSizing,
-    LinearRgb, PatchDimensions, SamplingFilter, SamplingOptions, UnsupportedColorReason,
-    build_glyph_table, convert_density, convert_density_detailed,
+    DensityConversionError, FitMode, FitTransform, GlyphConfig, GlyphRepertoire, GlyphTable,
+    GridSizing, LinearRgb, PatchDimensions, SamplingFilter, SamplingOptions,
+    UnsupportedColorReason, build_glyph_table, convert_density, convert_density_detailed,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, Error, FrameMetadata,
@@ -213,6 +213,24 @@ fn custom_crop_row_limit_is_checked_after_half_up_rounding() {
         convert_for_requested_rows(f64::from(u32::MAX) + 0.75),
         Err(DensityConversionError::Core(Error::SizeOverflow))
     );
+}
+
+#[test]
+fn custom_crop_preserves_narrow_extent_at_large_source_origin() {
+    let transform = FitTransform::new(
+        10_000_000,
+        1,
+        8,
+        12,
+        FitMode::CustomCrop(
+            CropRect::new(0.5, 0.0, 0.5000001, 1.0).expect("crop is valid"),
+        ),
+    )
+    .expect("representable crop edges tolerate rounding at their large origin");
+
+    assert_eq!(transform.source_rect().x(), 5_000_000.0);
+    assert!(transform.source_rect().width() > 0.0);
+    assert!(transform.map_display_to_source(4.0, 6.0).is_some());
 }
 
 #[test]
