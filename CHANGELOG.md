@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, the `ascii-convert` glyph-table implementation, and PNG/JPEG image decoding. **No application binary or published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable core/conversion contracts, bounded PNG/JPEG decoding, and a headless CLI request validator. The CLI does not yet produce converted artifacts. **No published release tag exists yet.**
 
 ### Added
 
@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
+- Headless `asciiwall convert` argument, format-conflict, overwrite, and stdout/JSON validation; terminal-safe structured diagnostics; bounded explicit-font loading and a real shared density-engine stage; and a cancellation-aware, no-clobber file-publication helper. Missing decoding, export, structural matching, source-color conversion, and production font/geometry selection return capability errors rather than fabricated output (`[CLI-001]`).
 
 ### Changed
 
@@ -54,3 +55,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Normalize box-sampling overlap per axis before combining weights, allowing valid subnormal footprints without requiring representable absolute 2D area (`[CNV-001]`).
 - Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
 - Import `ascii-render`'s synthetic-font test fixture from `CARGO_MANIFEST_DIR` for portable rustfmt resolution, keeping its description as ordinary comments so the shared source remains valid when included in a nested test module ([VID-010]).
+- CLI-001 now gives existing-output conflicts precedence over charset validation, derives parser-error command identity from Clap's error context, avoids echoing supplied parser values/paths, opens Unix font paths nonblocking and validates opened handles, and rejects Windows pipe/device handles before reads while preserving regular-file symlink support.
+- CLI-001 prioritizes existing-output conflicts over format and charset validation and constrains CLI diagnostics to static messages, preventing request paths, hosts, and option values from being disclosed. Missing font input never selects a default; conversion remains fail-closed until real decoder/export consumers are available.
