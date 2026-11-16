@@ -50,4 +50,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Account for local f64 coordinate precision when checking mapped crop edges, while rejecting extents that are collapsed beyond a conservative fraction of their size (`[CNV-001]`).
 - Normalize box-sampling overlap per axis before combining weights, allowing valid subnormal footprints without requiring representable absolute 2D area (`[CNV-001]`).
 - Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
-- Add CNV-003 regressions for exact-boundary sampling geometry, cache identity, padded strides, crop mapping, patch budgets, and 64-wide quality-patch conversion across subnormal and source-edge crops ([CNV-003]).
+- Add CNV-003 regressions for exact-boundary sampling geometry, cache identity, padded strides, crop mapping, patch budgets, 64-wide extreme/collapsed crops, and public cancellation conversion ([CNV-003]).
