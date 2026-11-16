@@ -826,11 +826,24 @@ pub(crate) fn prepare_sampling(
     frame_validation_work: u64,
     budget: &Budget,
 ) -> Result<SamplingPlan, Error> {
-    let bytes_per_pixel = match source.format().channels() {
-        ascii_core::PixelChannels::Gray => 1usize,
-        ascii_core::PixelChannels::Rgb => 3,
-        ascii_core::PixelChannels::Rgba => 4,
-        ascii_core::PixelChannels::Other(_) => {
+    let bytes_per_pixel = match (
+        source.format().channels(),
+        source.format().sample_depth_bits(),
+    ) {
+        (ascii_core::PixelChannels::Gray, 8) => 1usize,
+        (ascii_core::PixelChannels::Rgb, 8) => 3,
+        (ascii_core::PixelChannels::Rgba, 8) => 4,
+        (
+            ascii_core::PixelChannels::Gray
+            | ascii_core::PixelChannels::Rgb
+            | ascii_core::PixelChannels::Rgba,
+            _,
+        ) => {
+            return Err(Error::Unsupported(
+                ascii_core::UnsupportedReason::SampleDepth,
+            ));
+        }
+        (ascii_core::PixelChannels::Other(_), _) => {
             return Err(Error::Unsupported(
                 ascii_core::UnsupportedReason::PixelFormat,
             ));
