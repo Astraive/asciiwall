@@ -1,0 +1,2 @@
+# Trailing spaces are significant output bytes in the captured CLI golden.
+m1-cli-density-golden.txt -whitespace
