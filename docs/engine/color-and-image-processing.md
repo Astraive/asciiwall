@@ -16,13 +16,16 @@ Unknown source profile fields may use an sRGB assumption for SDR input, but norm
 a material `AssumedSrgbForUnknownProfile` warning. This is not HDR detection or full color
 management: explicit PQ/HLG input returns a typed unsupported-HDR failure, and explicit Display-P3
 or Rec. 2020 primaries return a typed unsupported-wide-gamut failure. There is no implicit tone map,
-wide-gamut conversion, clipping, or complete ICC-profile claim.
+wide-gamut conversion, clipping, or complete ICC-profile claim. The convenience
+`convert_density` API preserves its `Error::Unsupported(ColorDescription)` contract, but its
+display text directs callers to provide SDR sRGB input; `convert_density_detailed` retains
+the exact profile-specific normalization failure.
 
 ## Image preprocessing order
 
 Decode within limits and apply display orientation once in the decoder; then interpret source color metadata, decide alpha compositing background, select crop/contain/cover, resample, and apply artistic adjustments such as exposure, contrast, gamma, saturation, and edge emphasis. Distinguish physical color conversion from user-selected artistic distortion.
 
-An `ascii-media` decoder is planned to apply display orientation exactly once and return top-down pixels; that decoder is not implemented in this PR. The existing `ascii-convert` normalizer accepts top-down raster inputs and never transforms orientation. The planned pipeline should interpret supported source color metadata after decoding and before fit, crop, or resampling. A normalized raster is owned linear-premultiplied RGBA, and raster size, stride, input extent, output allocation size, work, and cancellation are checked before and during normalization.
+The IMG-001 `ascii-media` decoder applies display orientation once and returns top-down pixels, as described below. `ascii-convert` accepts these top-down raster inputs and never transforms orientation. The decoder rejects unsupported color metadata rather than converting profiles; `ascii-convert` then performs the linear-light normalization described above. A normalized raster is owned linear-premultiplied RGBA, and raster size, stride, input extent, output allocation size, work, and cancellation are checked before and during normalization.
 
 `ascii-convert` sizes column grids from the selected source geometry: custom-crop mode uses the
 crop's aspect rather than the full raster, while fixed-pixel surfaces retain floor division and
@@ -83,4 +86,40 @@ Area/box sampling is a practical baseline for shrink-heavy conversion. Compare a
 
 Start with PNG/JPEG and add WebP, GIF, APNG, and other formats only when the actual codec feature set and animation semantics are tested. Extensions are not codec guarantees. Check dimensions and allocation limits before large buffers; the image crate's limits are one layer of defense, not a substitute for process budgets. [S27](../research/source-register.md#s27) [S28](../research/source-register.md#s28)
 
-Future `ascii-media` decoder contract (not implemented by this PR): a decoder should accept caller-owned seekable streams and sniff PNG/JPEG content; it should not open paths or URLs or select codecs from suffixes. It should bound the encoded extent from the stream's current position, apply display orientation once, and return owned top-down RGB/RGBA with 8-bit samples labeled sRGB. If the image decoder reports an embedded ICC profile, the future decoder should reject the input rather than interpret or convert that profile. The sRGB label must not imply ICC/profile conversion or guarantee wide-gamut, HDR, or high-precision color management. Unsupported formats and malformed encoded data should remain distinct errors. Codec-local image limits should supplement, but not replace, the caller's pixel/work budget. This PR implements only the `ascii-convert` normalization behavior described above; it does not include an `ascii-media` decoder.
+### Image decoder implementation status (IMG-001)
+
+`ascii-media::decode_image` sniffs PNG/JPEG bytes from the caller's current stream position; it
+does not open paths or URLs. The stream is copied into a size-bounded, budgeted snapshot before
+codec parsing so all validation and decode passes observe identical bytes. PNG handling uses
+`png` 0.18.0 and validates every chunk CRC through an exact terminal IEND. JPEG handling uses
+the strict, safe-mode pure-Rust `zune-jpeg` 0.5.5 decoder; it does not cross a native decoder
+callback boundary. The `image` 0.25.10 dependency is used for orientation metadata and test
+helpers, not as the PNG/JPEG decode backend.
+
+Published rasters are top-down and tightly packed as 8-bit RGB or straight-alpha RGBA. Gray
+samples expand to RGB; indexed PNG transparency expands to RGBA; 16-bit PNG samples are rounded
+to 8 bits. PNG Adam7 and JPEG baseline/progressive inputs are supported. JPEG EXIF orientation
+is applied before enforcing output dimensions. Untagged content is assumed sRGB; embedded ICC
+profiles, APNG, unsupported JPEG color models/depths, and non-sRGB PNG `gAMA`/`cHRM` color
+descriptions are rejected as explicit capability errors rather than silently mislabeled.
+
+`DecodeLimits` carries the core per-operation `Budget`, decoder-local encoded/scratch limits,
+dimensions, and a shared `DecodeResources` ledger for concurrent decode slots and retained
+memory. The owned input snapshot, codec scratch and temporary rasters are preflighted and
+charged before output allocation. PNG scratch includes row/inflater and reader buffers plus the
+largest non-IDAT chunk buffer; large IDAT payloads are streamed and are not counted again as
+codec scratch. Progressive JPEG scan-block work is budgeted separately from pixel work. Retained
+output remains charged until its `DecodedFrame` is dropped; its `RasterFrameView` borrows from
+that owner. Cancellation is checked whenever either codec requests compressed input through a
+128-byte buffer. JPEG marker and entropy FF-fill loops poll at 8 KiB offsets. This is bounded
+input/parser cancellation, not CPU preemption: work over buffered input or between JPEG polls may
+continue until the next check. Deterministic tests cover regular/Adam7 PNG, progressive JPEG
+refills, and cancellation inside both JPEG FF-fill loops.
+Malformed input, cancellation, and failed budget checks release reservations without publishing
+partial frames. Codec-provided allocation limits remain defense in depth; application
+accounting is not an allocator-enforced process memory limit.
+
+Rights-cleared generated fixtures exercise PNG color/depth/interlace variants, JPEG baseline
+and progressive scans, malformed/truncated inputs, metadata policy, and budget/cancellation
+paths. Their generated configuration and SHA-256 values are printed/asserted by the focused
+tests. These fixture checks do not imply native-codec, performance, or platform-support claims.
