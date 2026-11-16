@@ -444,15 +444,14 @@ def _looks_like_json(raw: bytes) -> bool | None:
 
 
 class _SyntheticMarkerScanner:
-    """Find synthetic markers inside JSON-style strings, including Unicode escapes."""
+    """Find synthetic markers after Unicode escapes without trusting prefix quoting."""
 
     _markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
     _window_limit = max(map(len, _markers))
     _hex_digits = b"0123456789abcdefABCDEF"
 
     def __init__(self) -> None:
-        self.in_string = False
-        self.escaped = False
+        self.backslash_run = 0
         self.unicode_remaining = 0
         self.unicode_value = 0
         self.window = bytearray()
@@ -485,24 +484,19 @@ class _SyntheticMarkerScanner:
                 self.unicode_remaining = 0
                 self.unicode_value = 0
                 self._append(0)
-            if not self.in_string:
-                if byte == ord('"'):
-                    self.in_string = True
-                    self.window.clear()
+            if byte == ord("\\"):
+                self.backslash_run += 1
                 continue
-            if self.escaped:
-                self.escaped = False
-                if byte == ord("u"):
-                    self.unicode_remaining = 4
-                else:
+            if byte == ord("u") and self.backslash_run % 2:
+                if self.backslash_run > 1:
                     self._append(0)
-            elif byte == ord("\\"):
-                self.escaped = True
-            elif byte == ord('"'):
-                self.in_string = False
-                self.window.clear()
-            else:
-                self._append(byte)
+                self.backslash_run = 0
+                self.unicode_remaining = 4
+                continue
+            if self.backslash_run:
+                self._append(0)
+                self.backslash_run = 0
+            self._append(byte)
 
 
 def _contains_synthetic_bytes(raw: bytes) -> bool:

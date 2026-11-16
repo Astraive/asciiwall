@@ -55,9 +55,9 @@ def base_record(**overrides):
 def prefixed_unicode_escaped_report(report):
     text = evidence.canonical_json(report).decode("utf-8")
     for marker in ("synthetic-control-report", "synthetic-control-only", "cpu-grid-diff"):
-        escaped = "".join(f"\\u{ord(character):04x}" for character in marker)
+        escaped = f"\\u{ord(marker[0]):04x}" + marker[1:]
         text = text.replace(marker, escaped)
-    return b"note\n" + text.encode("utf-8")
+    return b'prefix " orphan ' + text.encode("utf-8")
 
 
 def _supports_safe_directory_access():
