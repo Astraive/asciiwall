@@ -23,6 +23,14 @@ name = "ascii-core"
 version = "0.1.0"
 
 [[package]]
+name = "ascii-render"
+version = "0.1.0"
+dependencies = [
+ "ascii-convert",
+ "ascii-core",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
