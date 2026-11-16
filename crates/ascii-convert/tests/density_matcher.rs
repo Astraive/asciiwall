@@ -695,6 +695,99 @@ fn unsupported_sample_depth_precedes_short_stride() {
 }
 
 #[test]
+fn unsupported_alpha_and_profiles_precede_sampling_work_and_stride_through_both_apis() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    );
+    let unsupported_alpha = RasterFrameView::new(
+        1,
+        1,
+        0,
+        PixelFormat::gray8(),
+        ColorDescription::srgb(AlphaMode::Straight),
+        RasterOrientation::TopDown,
+        &[],
+    );
+    let hdr = RasterFrameView::new(
+        1,
+        1,
+        0,
+        PixelFormat::gray8(),
+        ColorDescription::new(
+            ascii_core::ColorPrimaries::Srgb,
+            TransferFunction::Pq,
+            AlphaMode::Opaque,
+        ),
+        RasterOrientation::TopDown,
+        &[],
+    );
+    let wide_gamut = RasterFrameView::new(
+        1,
+        1,
+        0,
+        PixelFormat::gray8(),
+        ColorDescription::new(
+            ascii_core::ColorPrimaries::DisplayP3,
+            TransferFunction::Srgb,
+            AlphaMode::Opaque,
+        ),
+        RasterOrientation::TopDown,
+        &[],
+    );
+    let cases = [
+        (
+            unsupported_alpha,
+            DensityConversionError::ColorNormalization(ColorNormalizationError::Raster(
+                Error::Unsupported(ascii_core::UnsupportedReason::AlphaMode),
+            )),
+            Error::Unsupported(ascii_core::UnsupportedReason::AlphaMode),
+        ),
+        (
+            hdr,
+            DensityConversionError::ColorNormalization(ColorNormalizationError::UnsupportedColor(
+                UnsupportedColorReason::HdrTransfer(TransferFunction::Pq),
+            )),
+            Error::Unsupported(ascii_core::UnsupportedReason::ColorDescription),
+        ),
+        (
+            wide_gamut,
+            DensityConversionError::ColorNormalization(ColorNormalizationError::UnsupportedColor(
+                UnsupportedColorReason::WideGamutPrimaries(ascii_core::ColorPrimaries::DisplayP3),
+            )),
+            Error::Unsupported(ascii_core::UnsupportedReason::ColorDescription),
+        ),
+    ];
+    let insufficient_sampling_budget = Budget::new(12, u64::MAX, 1);
+
+    for (source, detailed_error, core_error) in cases {
+        assert_eq!(
+            convert_density_detailed(
+                source,
+                &table,
+                &conversion_settings,
+                &insufficient_sampling_budget,
+            ),
+            Err(detailed_error)
+        );
+        assert_eq!(
+            convert_density(
+                source,
+                &table,
+                &conversion_settings,
+                &insufficient_sampling_budget,
+            ),
+            Err(core_error)
+        );
+    }
+}
+
+#[test]
 fn shared_normalizer_failures_keep_their_typed_color_reason() {
     let table = build_table();
     let cancellation = CancellationToken::new();
