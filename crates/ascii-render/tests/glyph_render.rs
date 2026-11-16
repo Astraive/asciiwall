@@ -490,7 +490,7 @@ fn narrow_atlas_budget_boundary_and_gpu_copy() {
     let required_work = u64::from(output.width()) * u64::from(output.height()) * 2
         + width * height * 2
         + staging_bytes
-        + size.cell_count();
+        + size.cell_count() * 3;
     let mut work_rejected = Renderer::new(
         device.clone(),
         queue.clone(),

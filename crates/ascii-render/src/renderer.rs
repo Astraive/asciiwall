@@ -227,13 +227,18 @@ fn plan(input: PlanInput, limits: &wgpu::Limits, budget: &Budget) -> Result<Plan
     let pixels = u64::from(target_size.0)
         .checked_mul(u64::from(target_size.1))
         .ok_or(ascii_core::Error::SizeOverflow)?;
+    // A presentation validates cells, may compare a cached copy, then serializes changed cells.
+    // Preflight all three worst-case passes before the conditional comparison and serialization.
+    let cell_work = u64::from(count)
+        .checked_mul(3)
+        .ok_or(ascii_core::Error::SizeOverflow)?;
     let work = pixels
         .checked_mul(2)
         .and_then(|v| v.checked_add(atlas_len))
         .and_then(|v| v.checked_add(atlas_len))
         // wgpu zero-initializes the whole mapped staging buffer, including row padding.
         .and_then(|v| v.checked_add(atlas_staging_bytes))
-        .and_then(|v| v.checked_add(u64::from(count)))
+        .and_then(|v| v.checked_add(cell_work))
         .ok_or(ascii_core::Error::SizeOverflow)?;
     if work > budget.max_work_units() {
         return Err(ascii_core::Error::BudgetExceeded(BudgetKind::WorkUnits).into());
@@ -1030,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn padded_atlas_initialization_work_is_charged_before_allocation() {
+    fn padded_atlas_initialization_and_three_cell_passes_are_charged_before_allocation() {
         let mut input = PlanInput {
             size: GridSize::new(1, 1),
             glyph_count: 1,
@@ -1039,13 +1044,13 @@ mod tests {
             target_size: (1, 1),
         };
         let mut limits = wgpu::Limits::downlevel_defaults();
-        // Two target passes + two atlas copies + 512 padded initialization bytes + one cell.
-        let too_little_work = Budget::new(10_000, 10_000, 518);
+        // Two target passes + two atlas copies + 512 padded bytes + three cell traversals.
+        let too_little_work = Budget::new(10_000, 10_000, 520);
         assert_eq!(
             plan(input, &limits, &too_little_work).unwrap_err(),
             Error::Core(ascii_core::Error::BudgetExceeded(BudgetKind::WorkUnits))
         );
-        let exact_work = Budget::new(10_000, 10_000, 519);
+        let exact_work = Budget::new(10_000, 10_000, 521);
         assert_eq!(
             plan(input, &limits, &exact_work)
                 .unwrap()
