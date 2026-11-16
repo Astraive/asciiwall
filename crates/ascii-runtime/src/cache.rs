@@ -1458,6 +1458,8 @@ impl OutputRegistry {
 
     /// Writes into a unique sibling temporary file. Unix and Windows atomically replace an
     /// existing destination; other targets commit with no-clobber creation and reject replacement.
+    /// Relative destinations are resolved to an absolute path once at transaction start, and that
+    /// captured path is used for staging, verification, commit, errors, and registration.
     /// Registration follows commit only; failures preserve the destination and report any partial.
     ///
     /// The stage handle stays open and its file identity is checked before the path-based commit.
@@ -1476,11 +1478,11 @@ impl OutputRegistry {
         F: FnOnce(&mut dyn Write) -> io::Result<()>,
     {
         let mut registry = lock_unpoisoned(&self.state);
-        let destination = destination.as_ref();
-        let canonical_destination = canonical_output_destination(destination).map_err(|error| {
+        let destination = canonical_output_destination(destination.as_ref()).map_err(|error| {
             OutputWriteError::new(OutputFailureKind::TemporaryCreate, None, Some(error))
         })?;
-        let (temp_path, mut file) = create_output_temp(destination).map_err(|error| {
+        let canonical_destination = destination.clone();
+        let (temp_path, mut file) = create_output_temp(&destination).map_err(|error| {
             let kind = if is_disk_full(&error) {
                 OutputFailureKind::DiskFull
             } else {
@@ -1543,8 +1545,8 @@ impl OutputRegistry {
                 Some(error),
             ));
         }
-        let previous_destination_identity = existing_output_file_identity(destination);
-        if let Err(error) = replace_destination(&temp_path, destination) {
+        let previous_destination_identity = existing_output_file_identity(&destination);
+        if let Err(error) = replace_destination(&temp_path, &destination) {
             let kind = if is_disk_full(&error) {
                 OutputFailureKind::DiskFull
             } else {
@@ -1554,9 +1556,8 @@ impl OutputRegistry {
         }
         let committed_file_identity = output_file_identity_from_file(&file).ok().flatten();
         drop(file);
-        let committed_path = destination.to_path_buf();
-        let committed_canonical_destination =
-            canonical_output_destination(destination).unwrap_or(canonical_destination);
+        let committed_path = destination.clone();
+        let committed_canonical_destination = canonical_destination;
         registry.valid.retain(|_, output| {
             !same_output_destination(&output.canonical_path, &committed_canonical_destination)
                 && !previous_destination_identity
