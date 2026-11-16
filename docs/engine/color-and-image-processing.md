@@ -50,13 +50,15 @@ descriptions are rejected as explicit capability errors rather than silently mis
 `DecodeLimits` carries the core per-operation `Budget`, decoder-local encoded/scratch limits,
 dimensions, and a shared `DecodeResources` ledger for concurrent decode slots and retained
 memory. The owned input snapshot, codec scratch and temporary rasters are preflighted and
-charged before output allocation. Progressive JPEG scan-block work is budgeted separately
-from pixel work. Retained output remains charged until its `DecodedFrame` is dropped; its
-`RasterFrameView` borrows from that owner. Cancellation is checked whenever either codec
-requests compressed input through a 128-byte buffer; deterministic tests exercise regular and
-Adam7 PNG plus progressive JPEG interruption before the end of the compressed stream. This is
-bounded input cancellation, not CPU preemption: work on the current buffer continues until the
-codec requests more input.
+charged before output allocation. PNG scratch includes row/inflater and reader buffers plus the
+largest non-IDAT chunk buffer; large IDAT payloads are streamed and are not counted again as
+codec scratch. Progressive JPEG scan-block work is budgeted separately from pixel work. Retained
+output remains charged until its `DecodedFrame` is dropped; its `RasterFrameView` borrows from
+that owner. Cancellation is checked whenever either codec requests compressed input through a
+128-byte buffer. JPEG marker and entropy FF-fill loops poll at 8 KiB offsets. This is bounded
+input/parser cancellation, not CPU preemption: work over buffered input or between JPEG polls may
+continue until the next check. Deterministic tests cover regular/Adam7 PNG, progressive JPEG
+refills, and cancellation inside both JPEG FF-fill loops.
 Malformed input, cancellation, and failed budget checks release reservations without publishing
 partial frames. Codec-provided allocation limits remain defense in depth; application
 accounting is not an allocator-enforced process memory limit.

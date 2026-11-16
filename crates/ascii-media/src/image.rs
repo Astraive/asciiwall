@@ -90,6 +90,20 @@ pub fn decode_image(
     limits: &DecodeLimits,
     cancel: &CancellationToken,
 ) -> Result<DecodedFrame, Error> {
+    decode_image_with_jpeg_poller(input, limits, cancel, |offset| {
+        check_cancel_periodically(cancel, offset)
+    })
+}
+
+fn decode_image_with_jpeg_poller<F>(
+    input: &mut dyn ReadSeek,
+    limits: &DecodeLimits,
+    cancel: &CancellationToken,
+    mut jpeg_cancel_poller: F,
+) -> Result<DecodedFrame, Error>
+where
+    F: FnMut(usize) -> Result<(), Error>,
+{
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
@@ -137,7 +151,13 @@ pub fn decode_image(
 
     let result = match codec {
         Codec::Png => decode_png(&snapshot, limits, cancel),
-        Codec::Jpeg => decode_jpeg(&snapshot, limits, cancel),
+        Codec::Jpeg => decode_jpeg_with_reader_and_poller(
+            &snapshot,
+            limits,
+            cancel,
+            SnapshotReader::new(&snapshot, cancel),
+            &mut jpeg_cancel_poller,
+        ),
     };
     drop(snapshot);
     drop(snapshot_permit);
@@ -350,7 +370,7 @@ fn decode_png_with_reader<R: Read + Seek>(
         header.orientation,
         limits,
     )?;
-    let scratch_bytes = png_scratch_bound(&header, plan, encoded.len())?;
+    let scratch_bytes = png_scratch_bound(&header, plan)?;
     let encoded_bytes = u64::try_from(encoded.len()).map_err(|_| Error::SizeOverflow)?;
     let work_units = png_work_units(encoded_bytes, plan)?;
     let (_scratch_permit, _source_permit, output_permit) =
@@ -441,6 +461,7 @@ struct PngHeader {
     height: u32,
     bit_depth: u8,
     color_type: u8,
+    max_non_idat_chunk_bytes: usize,
     palette_entries: usize,
     transparency_len: Option<usize>,
     orientation: Orientation,
@@ -483,6 +504,7 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
         height: 0,
         bit_depth: 0,
         color_type: 0,
+        max_non_idat_chunk_bytes: 0,
         palette_entries: 0,
         transparency_len: None,
         orientation: Orientation::NoTransforms,
@@ -524,6 +546,9 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
         let chunk_type: [u8; 4] = encoded[offset + 4..offset + 8]
             .try_into()
             .map_err(|_| Error::Malformed(MalformedReason::InvalidEncodedData))?;
+        if &chunk_type != b"IDAT" {
+            header.max_non_idat_chunk_bytes = header.max_non_idat_chunk_bytes.max(chunk_len);
+        }
         let payload = &encoded[payload_start..payload_end];
         let expected_crc = u32::from_be_bytes(
             encoded[payload_end..chunk_end]
@@ -788,11 +813,7 @@ fn png_output_layout(
     Ok((layout, layout.is_sixteen_bit()))
 }
 
-fn png_scratch_bound(
-    header: &PngHeader,
-    plan: RasterPlan,
-    encoded_len: usize,
-) -> Result<u64, Error> {
+fn png_scratch_bound(header: &PngHeader, plan: RasterPlan) -> Result<u64, Error> {
     let encoded_samples = match header.color_type {
         0 | 3 => 1_u64,
         2 => 3,
@@ -814,9 +835,18 @@ fn png_scratch_bound(
         .checked_mul(2)
         .and_then(|value| value.checked_add(decoded_row.checked_mul(2)?))
         .ok_or(Error::SizeOverflow)?;
+    // The PNG stream decoder buffers one complete non-IDAT chunk at a time; IDAT is streamed.
+    let chunk_buffer_capacity = header
+        .max_non_idat_chunk_bytes
+        .max(CODEC_READER_BUFFER_BYTES)
+        .checked_next_power_of_two()
+        .ok_or(Error::SizeOverflow)?;
+    let chunk_buffer_bytes =
+        u64::try_from(chunk_buffer_capacity).map_err(|_| Error::SizeOverflow)?;
     PNG_FIXED_SCRATCH_BYTES
         .checked_add(row_scratch)
-        .and_then(|value| value.checked_add(u64::try_from(encoded_len).ok()?))
+        .and_then(|value| value.checked_add(CODEC_READER_BUFFER_BYTES as u64))
+        .and_then(|value| value.checked_add(chunk_buffer_bytes))
         .ok_or(Error::SizeOverflow)
 }
 
@@ -853,26 +883,18 @@ struct JpegHeader {
     unsupported: Option<UnsupportedReason>,
 }
 
-fn decode_jpeg(
-    encoded: &[u8],
-    limits: &DecodeLimits,
-    cancel: &CancellationToken,
-) -> Result<DecodedFrame, Error> {
-    decode_jpeg_with_reader(
-        encoded,
-        limits,
-        cancel,
-        SnapshotReader::new(encoded, cancel),
-    )
-}
-
-fn decode_jpeg_with_reader<R: Read + Seek>(
+fn decode_jpeg_with_reader_and_poller<R, F>(
     encoded: &[u8],
     limits: &DecodeLimits,
     cancel: &CancellationToken,
     codec_source: R,
-) -> Result<DecodedFrame, Error> {
-    let header = inspect_jpeg(encoded, cancel)?;
+    cancel_poller: &mut F,
+) -> Result<DecodedFrame, Error>
+where
+    R: Read + Seek,
+    F: FnMut(usize) -> Result<(), Error>,
+{
+    let header = inspect_jpeg_with_poller(encoded, cancel_poller)?;
     if let Some(reason) = header.unsupported {
         return Err(Error::Unsupported(reason));
     }
@@ -994,7 +1016,10 @@ fn decode_jpeg_with_reader<R: Read + Seek>(
     )
 }
 
-fn inspect_jpeg(encoded: &[u8], cancel: &CancellationToken) -> Result<JpegHeader, Error> {
+fn inspect_jpeg_with_poller<F>(encoded: &[u8], cancel_poller: &mut F) -> Result<JpegHeader, Error>
+where
+    F: FnMut(usize) -> Result<(), Error>,
+{
     if encoded.len() < 4 || encoded[..2] != [0xff, 0xd8] {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
@@ -1021,10 +1046,10 @@ fn inspect_jpeg(encoded: &[u8], cancel: &CancellationToken) -> Result<JpegHeader
     let mut saw_exif = false;
 
     loop {
-        check_cancel_periodically(cancel, offset)?;
+        cancel_poller(offset)?;
         let marker = match pending_marker.take() {
             Some(marker) => marker,
-            None => read_jpeg_marker(encoded, &mut offset)?,
+            None => read_jpeg_marker(encoded, &mut offset, cancel_poller)?,
         };
         if marker == 0xd9 {
             if !saw_sos || offset != encoded.len() {
@@ -1121,7 +1146,8 @@ fn inspect_jpeg(encoded: &[u8], cancel: &CancellationToken) -> Result<JpegHeader
                     .checked_add(jpeg_scan_blocks(payload, &header)?)
                     .ok_or(Error::SizeOverflow)?;
                 saw_sos = true;
-                let (marker, has_entropy_data) = scan_until_marker(encoded, &mut offset, cancel)?;
+                let (marker, has_entropy_data) =
+                    scan_until_marker(encoded, &mut offset, cancel_poller)?;
                 if !has_entropy_data {
                     return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
                 }
@@ -1418,11 +1444,19 @@ fn jpeg_work_units(header: JpegHeader, plan: RasterPlan, encoded_bytes: u64) -> 
         .ok_or(Error::SizeOverflow)
 }
 
-fn read_jpeg_marker(encoded: &[u8], offset: &mut usize) -> Result<u8, Error> {
+fn read_jpeg_marker<F>(
+    encoded: &[u8],
+    offset: &mut usize,
+    cancel_poller: &mut F,
+) -> Result<u8, Error>
+where
+    F: FnMut(usize) -> Result<(), Error>,
+{
     if encoded.get(*offset) != Some(&0xff) {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
     while encoded.get(*offset) == Some(&0xff) {
+        cancel_poller(*offset)?;
         *offset = offset.checked_add(1).ok_or(Error::SizeOverflow)?;
     }
     let marker = *encoded
@@ -1435,14 +1469,17 @@ fn read_jpeg_marker(encoded: &[u8], offset: &mut usize) -> Result<u8, Error> {
     Ok(marker)
 }
 
-fn scan_until_marker(
+fn scan_until_marker<F>(
     encoded: &[u8],
     offset: &mut usize,
-    cancel: &CancellationToken,
-) -> Result<(u8, bool), Error> {
+    cancel_poller: &mut F,
+) -> Result<(u8, bool), Error>
+where
+    F: FnMut(usize) -> Result<(), Error>,
+{
     let mut has_entropy_data = false;
     loop {
-        check_cancel_periodically(cancel, *offset)?;
+        cancel_poller(*offset)?;
         let byte = *encoded
             .get(*offset)
             .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
@@ -1452,6 +1489,7 @@ fn scan_until_marker(
             continue;
         }
         while encoded.get(*offset) == Some(&0xff) {
+            cancel_poller(*offset)?;
             *offset = offset.checked_add(1).ok_or(Error::SizeOverflow)?;
         }
         let marker = *encoded
@@ -1902,7 +1940,7 @@ mod tests {
 
 #[cfg(test)]
 mod codec_cancellation_tests {
-    use std::io::Cursor;
+    use std::{cell::Cell, io::Cursor};
 
     use super::*;
 
@@ -2156,7 +2194,14 @@ mod codec_cancellation_tests {
         let limits = limits();
         let mut source =
             CancelAfterCodecInput::new(&bytes, &cancellation, u64::try_from(cancel_at).unwrap());
-        let result = decode_jpeg_with_reader(&bytes, &limits, &cancellation, &mut source);
+        let mut poller = |offset| check_cancel_periodically(&cancellation, offset);
+        let result = decode_jpeg_with_reader_and_poller(
+            &bytes,
+            &limits,
+            &cancellation,
+            &mut source,
+            &mut poller,
+        );
 
         assert_cancelled_before_eof(
             result,
@@ -2165,6 +2210,64 @@ mod codec_cancellation_tests {
             &limits.resources,
             bytes.len(),
         );
+    }
+
+    const JPEG_FILL_RUN_BYTES: usize = 20_000;
+    const JPEG_FILL_CANCEL_OFFSET: usize = 16_384;
+
+    fn assert_jpeg_fill_cancellation_releases_reservations(bytes: &[u8]) {
+        let mut decode_limits = limits();
+        let resources = DecodeResources::new(1, 32 << 20);
+        decode_limits.resources = resources.clone();
+        let cancellation = CancellationToken::new();
+        let last_polled_offset = Cell::new(None);
+
+        let result = decode_image_with_jpeg_poller(
+            &mut Cursor::new(bytes),
+            &decode_limits,
+            &cancellation,
+            |offset| {
+                last_polled_offset.set(Some(offset));
+                if offset >= JPEG_FILL_CANCEL_OFFSET {
+                    cancellation.cancel();
+                }
+                check_cancel_periodically(&cancellation, offset)
+            },
+        );
+
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert!(cancellation.is_cancelled());
+        assert_eq!(
+            last_polled_offset.get(),
+            Some(JPEG_FILL_CANCEL_OFFSET),
+            "cancellation must be observed at the configured poll inside the fill run"
+        );
+        assert_eq!(resources.cpu_bytes_in_use(), 0);
+        assert_eq!(resources.active_decodes(), 0);
+    }
+
+    #[test]
+    fn cancellation_inside_jpeg_marker_fill_loop_releases_snapshot_reservation() {
+        let mut bytes = vec![0xff, 0xd8];
+        bytes.resize(bytes.len() + JPEG_FILL_RUN_BYTES, 0xff);
+        bytes.push(0xd9);
+        assert!(bytes.len() > JPEG_FILL_CANCEL_OFFSET);
+
+        assert_jpeg_fill_cancellation_releases_reservations(&bytes);
+    }
+
+    #[test]
+    fn cancellation_inside_jpeg_entropy_fill_loop_releases_snapshot_reservation() {
+        let jpeg = progressive_jpeg(WIDTH, HEIGHT);
+        let entropy_start = jpeg_entropy_start(&jpeg);
+        assert!(entropy_start < JPEG_FILL_CANCEL_OFFSET);
+
+        let mut bytes = jpeg[..entropy_start].to_vec();
+        bytes.resize(bytes.len() + JPEG_FILL_RUN_BYTES, 0xff);
+        bytes.push(0xd9);
+        assert!(bytes.len() > JPEG_FILL_CANCEL_OFFSET);
+
+        assert_jpeg_fill_cancellation_releases_reservations(&bytes);
     }
 
     #[test]
