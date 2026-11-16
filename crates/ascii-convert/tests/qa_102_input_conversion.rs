@@ -1,9 +1,11 @@
+#[allow(dead_code)]
 mod support;
 
 use ascii_convert::{
-    ColorNormalizationError, ConversionSettings, DensityConversionError, FitMode, GlyphConfig,
-    GlyphTable, GridSizing, LinearRgb, PatchDimensions, SamplingFilter, SamplingOptions,
-    UnsupportedColorReason, build_glyph_table, convert_density_detailed, normalize_raster,
+    ColorNormalizationError, ConversionSettings, CropRect, DensityConversionError, FitMode,
+    GlyphConfig, GlyphRepertoire, GlyphTable, GridSizing, LinearRgb, PatchDimensions,
+    SamplingFilter, SamplingOptions, UnsupportedColorReason, build_glyph_table,
+    convert_density_detailed, normalize_raster,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, Error,
@@ -16,9 +18,10 @@ const CELL_WIDTH: u32 = 8;
 const CELL_HEIGHT: u32 = 12;
 
 fn glyph_table() -> GlyphTable {
+    let repertoire = GlyphRepertoire::new("BA ").expect("fixture repertoire is supported");
     build_glyph_table(
         &synthetic_font(false),
-        "BA ",
+        &repertoire,
         &GlyphConfig::new(8.0, CELL_WIDTH, CELL_HEIGHT, 9)
             .expect("synthetic glyph geometry is valid"),
         &Budget::new(1_000_000, 2_000_000, 2_000_000),
@@ -46,12 +49,7 @@ fn conversion_budget() -> Budget {
     Budget::new(1_000_000, 2_000_000, 2_000_000)
 }
 
-fn gray_raster(
-    pixels: &[u8],
-    width: u32,
-    height: u32,
-    row_stride: usize,
-) -> RasterFrameView<'_> {
+fn gray_raster(pixels: &[u8], width: u32, height: u32, row_stride: usize) -> RasterFrameView<'_> {
     RasterFrameView::new(
         width,
         height,
@@ -109,9 +107,9 @@ fn ec_006_unsupported_hdr_and_profile_return_typed_reasons() {
 
         assert_eq!(
             error,
-            DensityConversionError::ColorNormalization(
-                ColorNormalizationError::UnsupportedColor(expected_reason)
-            )
+            DensityConversionError::ColorNormalization(ColorNormalizationError::UnsupportedColor(
+                expected_reason
+            ))
         );
         assert_eq!(error.to_string(), expected_message);
     }
@@ -161,18 +159,22 @@ fn ec_007_black_white_and_flat_images_map_stably_by_measured_glyph_coverage() {
         let first_glyph = first.frame().cells()[0].glyph();
 
         assert_eq!(first.frame().cells(), repeated.frame().cells());
-        assert!(first
-            .frame()
-            .cells()
-            .iter()
-            .all(|cell| cell.glyph() == first_glyph));
+        assert!(
+            first
+                .frame()
+                .cells()
+                .iter()
+                .all(|cell| cell.glyph() == first_glyph)
+        );
         match sample {
             0 => black_output_slot = Some(first_glyph),
             255 => white_output_slot = Some(first_glyph),
             _ => {}
         }
 
-        let patches = first.patches().expect("quality sampling retains its patches");
+        let patches = first
+            .patches()
+            .expect("quality sampling retains its patches");
         assert_eq!(patches.cell_count(), 4);
         for cell_index in 0..patches.cell_count() {
             let descriptor = patches
@@ -214,7 +216,6 @@ fn ec_007_black_white_and_flat_images_map_stably_by_measured_glyph_coverage() {
     assert!(white_glyph.mean_coverage() > black_glyph.mean_coverage());
 }
 
-
 #[test]
 fn ec_008_odd_row_stride_ignores_padding_through_density_conversion() {
     // Three gray pixels plus two poison padding bytes per row; the final row ends at its last pixel.
@@ -236,12 +237,16 @@ fn ec_008_odd_row_stride_ignores_padding_through_density_conversion() {
     assert_eq!(normalized, normalized_with_different_padding);
     assert_eq!((normalized.width(), normalized.height()), (3, 2));
     assert_eq!(normalized.pixels().len(), 6);
-    assert!(normalized.pixels()[..3]
-        .iter()
-        .all(|pixel| pixel.straight_rgb() == LinearRgb::BLACK));
-    assert!(normalized.pixels()[3..]
-        .iter()
-        .all(|pixel| pixel.straight_rgb() == LinearRgb::WHITE));
+    assert!(
+        normalized.pixels()[..3]
+            .iter()
+            .all(|pixel| pixel.straight_rgb() == LinearRgb::BLACK)
+    );
+    assert!(
+        normalized.pixels()[3..]
+            .iter()
+            .all(|pixel| pixel.straight_rgb() == LinearRgb::WHITE)
+    );
 
     let table = glyph_table();
     let cancellation = CancellationToken::new();
@@ -251,7 +256,9 @@ fn ec_008_odd_row_stride_ignores_padding_through_density_conversion() {
         GridSizing::fixed_pixel_surface(3 * CELL_WIDTH, 2 * CELL_HEIGHT),
     )
     .with_sampling(SamplingOptions::new(
-        FitMode::Stretch,
+        FitMode::CustomCrop(
+            CropRect::new(0.0, 0.0, 1.0, 1.0).expect("full-frame fixture crop is valid"),
+        ),
         SamplingFilter::Nearest,
         None,
     ));
