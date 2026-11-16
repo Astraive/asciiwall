@@ -33,6 +33,9 @@ const MAX_PATCH_PIXELS: u64 = 4096;
 const SAMPLER_CANCEL_INTERVAL: u64 = 256;
 const PATCH_INITIALIZATION_CANCEL_INTERVAL: usize = 256;
 
+#[cfg(test)]
+pub(crate) type SampleCancellationPoll<'a> = dyn Fn(usize, &[f32]) -> bool + 'a;
+
 /// A pixel-edge rectangle in source or destination coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SamplingRect {
@@ -700,6 +703,7 @@ impl SamplingPlan {
         background: LinearRgb,
         cancellation: &CancellationToken,
         patch_output: Option<&mut [f32]>,
+        #[cfg(test)] sample_cancel_poll: Option<&SampleCancellationPoll<'_>>,
     ) -> Result<(f64, Option<PatchDescriptors>), Error> {
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
@@ -728,10 +732,15 @@ impl SamplingPlan {
                         .checked_mul(patch_width)
                         .and_then(|start| start.checked_add(patch_x))
                         .ok_or(Error::SizeOverflow)?;
-                    if (index as u64).is_multiple_of(SAMPLER_CANCEL_INTERVAL)
-                        && cancellation.is_cancelled()
-                    {
-                        return Err(Error::Cancelled);
+                    if (index as u64).is_multiple_of(SAMPLER_CANCEL_INTERVAL) {
+                        #[cfg(test)]
+                        let injected_cancel =
+                            sample_cancel_poll.is_some_and(|poll| poll(index, output));
+                        #[cfg(not(test))]
+                        let injected_cancel = false;
+                        if cancellation.is_cancelled() || injected_cancel {
+                            return Err(Error::Cancelled);
+                        }
                     }
                     let x0 = display_x + display_width * patch_x as f64 / patch_width_f64;
                     let x1 = display_x + display_width * (patch_x + 1) as f64 / patch_width_f64;

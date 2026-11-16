@@ -599,35 +599,25 @@ fn cancelled_quality_conversion_returns_no_partial_result() {
 }
 
 #[test]
-fn concurrent_quality_patch_cancellation_returns_no_partial_conversion() {
+fn quality_conversion_recovers_after_cancelled_attempt() {
     let table = build_table();
-    let cancellation = CancellationToken::new();
-    let patch = PatchDimensions::new(64, 64).expect("maximum quality patch is valid");
-    let settings = settings(
-        &table,
-        &cancellation,
-        ascii_convert::GridSizing::fixed_pixel_surface(CELL_WIDTH * 2048, CELL_HEIGHT),
-        SamplingOptions::new(FitMode::Contain, SamplingFilter::Box, Some(patch)),
-    );
     let pixels = [128];
-    let patch_budget = Budget::new(64_000_000, 128_000_000, u64::MAX);
-
-    let conversion = std::thread::scope(|scope| {
-        scope.spawn(|| {
-            std::thread::sleep(std::time::Duration::from_micros(500));
-            cancellation.cancel();
-        });
+    let cancelled = CancellationToken::new();
+    let cancelled_settings = one_cell_settings(
+        &table,
+        &cancelled,
+        FitMode::Contain,
+        SamplingFilter::Box,
+        Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
+    );
+    cancelled.cancel();
+    assert_eq!(
         convert_density_detailed(
             linear_gray_raster(&pixels, 1, 1, 1),
             &table,
-            &settings,
-            &patch_budget,
-        )
-    });
-
-    assert!(cancellation.is_cancelled());
-    assert_eq!(
-        conversion,
+            &cancelled_settings,
+            &budget(),
+        ),
         Err(ascii_convert::DensityConversionError::Core(
             Error::Cancelled
         ))
