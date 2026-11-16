@@ -21,6 +21,9 @@ use crate::sampling::{
     FitMode, FitTransform, QualityPatches, SamplingError, SamplingIdentity, SamplingOptions,
     prepare_sampling,
 };
+
+#[cfg(test)]
+use crate::sampling::SampleCancellationPoll;
 const CANCELLATION_CELL_INTERVAL: usize = 32;
 const CANCELLATION_GLYPH_INTERVAL: usize = 64;
 
@@ -404,6 +407,23 @@ pub fn convert_density_detailed(
     settings: &ConversionSettings<'_>,
     budget: &Budget,
 ) -> Result<DensityConversion, DensityConversionError> {
+    convert_density_detailed_impl(
+        input,
+        glyphs,
+        settings,
+        budget,
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn convert_density_detailed_impl(
+    input: RasterFrameView<'_>,
+    glyphs: &GlyphTable,
+    settings: &ConversionSettings<'_>,
+    budget: &Budget,
+    #[cfg(test)] sample_cancel_poll: Option<&SampleCancellationPoll<'_>>,
+) -> Result<DensityConversion, DensityConversionError> {
     let settings = *settings;
     if settings.cancellation.is_cancelled() {
         return Err(Error::Cancelled.into());
@@ -473,6 +493,8 @@ pub fn convert_density_detailed(
                     settings.background,
                     settings.cancellation,
                     Some(patch_output),
+                    #[cfg(test)]
+                    sample_cancel_poll,
                 )?
             } else {
                 sampling.sample_cell(
@@ -484,6 +506,8 @@ pub fn convert_density_detailed(
                     settings.background,
                     settings.cancellation,
                     None,
+                    #[cfg(test)]
+                    sample_cancel_poll,
                 )?
             };
             if let (Some(patches), Some(descriptor)) = (patches.as_mut(), descriptors) {
@@ -577,9 +601,19 @@ fn best_glyph<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{CANCELLATION_GLYPH_INTERVAL, best_glyph, reserve_output_cells};
+    use super::{
+        CANCELLATION_GLYPH_INTERVAL, DensityConversionError, best_glyph,
+        convert_density_detailed_impl, reserve_output_cells,
+    };
+    use crate::color::LinearRgb;
     use crate::font::{GlyphConfig, GlyphRepertoire, build_glyph_table};
-    use ascii_core::{Budget, CancellationToken, Error};
+    use crate::sampling::{FitMode, PatchDimensions, SamplingFilter, SamplingOptions};
+    use ascii_core::{
+        AlphaMode, Budget, CancellationToken, ColorDescription, ColorPrimaries, Error,
+        FrameMetadata, GlyphTableId, PixelFormat, RasterFrameView, RasterOrientation,
+        TransferFunction,
+    };
+    use std::cell::Cell;
 
     #[allow(dead_code)]
     mod synthetic_font {
@@ -614,6 +648,75 @@ mod tests {
 
         assert_eq!(result, Err(Error::Cancelled));
         assert_eq!(cancellation_checks, 2);
+    }
+
+    #[test]
+    fn in_flight_quality_patch_cancellation_returns_no_partial_conversion() {
+        let cancellation = CancellationToken::new();
+        let table = build_glyph_table(
+            &synthetic_font::synthetic_font(false),
+            &GlyphRepertoire::new("BA ").unwrap(),
+            &GlyphConfig::new(8.0, 8, 12, 9).unwrap(),
+            &Budget::new(1_000_000, 2_000_000, 2_000_000),
+            &cancellation,
+        )
+        .unwrap();
+        let settings = super::ConversionSettings::new(
+            super::GridSizing::fixed_pixel_surface(8, 12),
+            FrameMetadata::new(GlyphTableId::new(*table.fingerprint()), 1, 0, 0, 1),
+            &cancellation,
+            LinearRgb::WHITE,
+            LinearRgb::BLACK,
+        )
+        .unwrap()
+        .with_sampling(SamplingOptions::new(
+            FitMode::Contain,
+            SamplingFilter::Box,
+            Some(PatchDimensions::new(64, 64).unwrap()),
+        ));
+        let pixels = [u8::MAX; 6];
+        let raster = RasterFrameView::new(
+            2,
+            3,
+            2,
+            PixelFormat::gray8(),
+            ColorDescription::new(
+                ColorPrimaries::Srgb,
+                TransferFunction::Linear,
+                AlphaMode::Opaque,
+            ),
+            RasterOrientation::TopDown,
+            &pixels,
+        );
+        let poll_count = Cell::new(0);
+        let reached_in_flight_poll = Cell::new(false);
+        let sample_cancel_poll = |index: usize, output: &[f32]| {
+            poll_count.set(poll_count.get() + 1);
+            if index == 256 {
+                reached_in_flight_poll.set(true);
+                assert_eq!(output.len(), 4096);
+                assert!(output[..index].iter().all(|value| *value > 0.0));
+                assert_eq!(output[index], 0.0);
+                true
+            } else {
+                false
+            }
+        };
+
+        let result = convert_density_detailed_impl(
+            raster,
+            &table,
+            &settings,
+            &Budget::new(64_000_000, 128_000_000, u64::MAX),
+            Some(&sample_cancel_poll),
+        );
+
+        assert!(reached_in_flight_poll.get());
+        assert_eq!(poll_count.get(), 2);
+        assert!(matches!(
+            result,
+            Err(DensityConversionError::Core(Error::Cancelled))
+        ));
     }
 
     #[test]
