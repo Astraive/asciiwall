@@ -826,6 +826,12 @@ pub(crate) fn prepare_sampling(
     frame_validation_work: u64,
     budget: &Budget,
 ) -> Result<SamplingPlan, Error> {
+    if source.orientation() != ascii_core::RasterOrientation::TopDown {
+        return Err(Error::Unsupported(
+            ascii_core::UnsupportedReason::Orientation,
+        ));
+    }
+
     let bytes_per_pixel = match (
         source.format().channels(),
         source.format().sample_depth_bits(),
