@@ -18,9 +18,9 @@ use crate::color::{
 };
 use crate::font::GlyphTable;
 use crate::sampling::{
-    FitMode, FitTransform, QualityPatches, SamplingIdentity, SamplingOptions, prepare_sampling,
+    FitMode, FitTransform, QualityPatches, SamplingError, SamplingIdentity, SamplingOptions,
+    prepare_sampling,
 };
-
 const CANCELLATION_CELL_INTERVAL: usize = 32;
 const CANCELLATION_GLYPH_INTERVAL: usize = 64;
 
@@ -296,6 +296,15 @@ impl From<ColorNormalizationError> for DensityConversionError {
         Self::ColorNormalization(error)
     }
 }
+impl From<SamplingError> for DensityConversionError {
+    fn from(error: SamplingError) -> Self {
+        match error {
+            SamplingError::Core(error) => Self::Core(error),
+            SamplingError::ColorNormalization(error) => Self::ColorNormalization(error),
+        }
+    }
+}
+
 impl DensityConversionError {
     fn into_core(self) -> Error {
         match self {

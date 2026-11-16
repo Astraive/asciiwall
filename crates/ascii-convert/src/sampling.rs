@@ -21,7 +21,10 @@ use ascii_core::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::color::{LinearPremultipliedRgba, LinearRgb, NormalizedRaster};
+use crate::color::{
+    ColorNormalizationError, LinearPremultipliedRgba, LinearRgb, NormalizedRaster,
+    resolve_raster_metadata,
+};
 
 const MAX_EXACT_F64_INTEGER: u64 = 1_u64 << 53;
 
@@ -814,6 +817,24 @@ impl SamplingPlan {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SamplingError {
+    Core(Error),
+    ColorNormalization(ColorNormalizationError),
+}
+
+impl From<Error> for SamplingError {
+    fn from(error: Error) -> Self {
+        Self::Core(error)
+    }
+}
+
+impl From<ColorNormalizationError> for SamplingError {
+    fn from(error: ColorNormalizationError) -> Self {
+        Self::ColorNormalization(error)
+    }
+}
+
 /// Preflights allocation, retained storage, and a conservative pixel-overlap work bound.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_sampling(
@@ -825,11 +846,9 @@ pub(crate) fn prepare_sampling(
     matching_work: u64,
     frame_validation_work: u64,
     budget: &Budget,
-) -> Result<SamplingPlan, Error> {
+) -> Result<SamplingPlan, SamplingError> {
     if source.orientation() != ascii_core::RasterOrientation::TopDown {
-        return Err(Error::Unsupported(
-            ascii_core::UnsupportedReason::Orientation,
-        ));
+        return Err(Error::Unsupported(ascii_core::UnsupportedReason::Orientation).into());
     }
 
     let bytes_per_pixel = match (
@@ -845,16 +864,13 @@ pub(crate) fn prepare_sampling(
             | ascii_core::PixelChannels::Rgba,
             _,
         ) => {
-            return Err(Error::Unsupported(
-                ascii_core::UnsupportedReason::SampleDepth,
-            ));
+            return Err(Error::Unsupported(ascii_core::UnsupportedReason::SampleDepth).into());
         }
         (ascii_core::PixelChannels::Other(_), _) => {
-            return Err(Error::Unsupported(
-                ascii_core::UnsupportedReason::PixelFormat,
-            ));
+            return Err(Error::Unsupported(ascii_core::UnsupportedReason::PixelFormat).into());
         }
     };
+    resolve_raster_metadata(source.format().channels(), source.color())?;
     let source_width = source.width();
     let source_height = source.height();
     let display_width = u64::from(grid.columns())
@@ -936,7 +952,7 @@ pub(crate) fn prepare_sampling(
         .and_then(|work| work.checked_add(frame_validation_work))
         .ok_or(Error::SizeOverflow)?;
     if total_work > budget.max_work_units() {
-        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
+        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits).into());
     }
 
     let normalized_bytes = source_pixel_count
@@ -968,7 +984,7 @@ pub(crate) fn prepare_sampling(
         .checked_mul(bytes_per_pixel)
         .ok_or(Error::SizeOverflow)?;
     if source.row_stride() < row_bytes {
-        return Err(Error::Malformed(MalformedReason::RowStrideTooSmall));
+        return Err(Error::Malformed(MalformedReason::RowStrideTooSmall).into());
     }
     let readable_extent = usize::try_from(source.height())
         .map_err(|_| Error::SizeOverflow)?
@@ -982,7 +998,7 @@ pub(crate) fn prepare_sampling(
         .and_then(|bytes| bytes.checked_add(retained_patch_bytes))
         .ok_or(Error::SizeOverflow)?;
     if whole_raster_bytes > budget.max_raster_bytes() {
-        return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
+        return Err(Error::BudgetExceeded(BudgetKind::RasterBytes).into());
     }
 
     let identity = sampling_identity(transform, grid, cell_width, cell_height, options);
