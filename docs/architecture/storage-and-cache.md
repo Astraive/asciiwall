@@ -69,13 +69,15 @@ Existing reservations are preserved; a later probe replaces prior consumed-byte 
 since that token was captured. Real writes may still fail.
 
 Output is staged beside its destination and becomes registered only after successful flush, sync,
-and commit. A callback cannot suppress an underlying write or flush error and publish truncated
-output. A failed write reports its temporary partial path when one exists, does not commit or
-register the failed result, and leaves the destination unchanged provided its parent is not
-concurrently modified by an untrusted actor. Replacing a registered destination invalidates any
-identity for the same canonical path or, where supported, the same filesystem file identity; this
-includes case-insensitive path aliases. Disk-full and quota failures are classified without
-claiming that a particular filesystem or quota limit was exercised.
+and commit. Relative output paths are normalized once to an absolute destination at transaction
+start; staging, verification, errors, commit, and registration all use that captured path even if
+the writer callback changes the process working directory. A callback cannot suppress an underlying
+write or flush error and publish truncated output. A failed write reports its temporary partial path
+when one exists, does not commit or register the failed result, and leaves the destination unchanged
+provided its parent is not concurrently modified by an untrusted actor. Replacing a registered
+destination invalidates any identity for the same canonical path or, where supported, the same
+filesystem file identity; this includes case-insensitive path aliases. Disk-full and quota failures
+are classified without claiming that a particular filesystem or quota limit was exercised.
 
 ## Privacy
 
