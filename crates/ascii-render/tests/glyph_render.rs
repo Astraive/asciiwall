@@ -4,7 +4,7 @@ mod synthetic_font;
 
 use std::{sync::Arc, time::Instant};
 
-use ascii_convert::{GlyphConfig, GlyphTable, build_glyph_table};
+use ascii_convert::{GlyphConfig, GlyphRepertoire, GlyphTable, build_glyph_table};
 use ascii_core::{
     AsciiCell, AsciiFrame, Budget, CancellationToken, FrameMetadata, GlyphTableId, GridSize,
     MalformedReason,
@@ -56,7 +56,8 @@ fn fixtures() -> (Arc<GlyphTable>, Budget, Arc<CancellationToken>) {
     let budget = Budget::new(32 * 1024 * 1024, 32 * 1024 * 1024, 20_000_000);
     let token = Arc::new(CancellationToken::new());
     let config = GlyphConfig::new(8.0, 8, 12, 9).unwrap();
-    let table = build_glyph_table(&font, " AB", &config, &budget, &token)
+    let repertoire = GlyphRepertoire::new(" AB").unwrap();
+    let table = build_glyph_table(&font, &repertoire, &config, &budget, &token)
         .expect("pinned synthetic font builds");
     println!(
         "font_sha256={:x}; table_fingerprint={:02x?}; raster=8 cell=8x12 baseline=9 repertoire=space,A,B",
@@ -317,6 +318,7 @@ fn complex_outline_masks_render_without_crossing_glyph_table_identity() {
     let (device, queue) = native_device();
     let (baseline_table, budget, token) = fixtures();
     let config = GlyphConfig::new(8.0, 8, 12, 9).unwrap();
+    let repertoire = GlyphRepertoire::new(" AB").unwrap();
     let size = GridSize::new(4, 4);
     let output = texture(&device, size);
     let target = RenderTarget::texture(&output, 1, 1);
@@ -337,7 +339,7 @@ fn complex_outline_masks_render_without_crossing_glyph_table_identity() {
     for (name, build_font) in fonts {
         let font = build_font();
         let table = Arc::new(
-            build_glyph_table(&font, " AB", &config, &budget, &token)
+            build_glyph_table(&font, &repertoire, &config, &budget, &token)
                 .expect("complex outline fixture builds"),
         );
         assert_ne!(table.fingerprint(), baseline_table.fingerprint());
