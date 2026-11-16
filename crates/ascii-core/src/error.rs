@@ -34,7 +34,7 @@ pub enum UnsupportedReason {
     ColorDescription,
     /// The alpha mode does not match the raster's channel layout.
     AlphaMode,
-    /// The font uses a character-map or kerning format this preflight does not support.
+    /// The input requires a format or feature this API does not support.
     UnsupportedFormat,
 }
 /// A glyph-specific single-cell validation failure.
@@ -61,6 +61,8 @@ pub enum BudgetKind {
     RasterBytes,
     /// The bounded per-cell or per-pixel validation work estimate.
     WorkUnits,
+    /// The shared number of active decoding jobs has reached its limit.
+    DecodeConcurrency,
 }
 
 /// A typed validation or operation failure.
