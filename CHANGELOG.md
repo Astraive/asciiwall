@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Bounded `ascii-convert` glyph tables with measured cell-clipped masks, descriptors, deterministic fingerprints, and typed font-validation failures ([FNT-001](docs/engine/glyph-matching-and-fonts.md)).
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
+- Bounded `ascii-render` wgpu glyph-atlas presenter with host-owned targets, explicit GPU record packing, baseline background and instanced glyph passes, cache invalidation, typed outcomes, and opt-in native evidence scenarios (`[RND-001]`). A reported offscreen Windows/Vulkan RTX 3050 run passed all six `glyph_render` scenarios, with maximum golden channel delta 1 on both 4×4 and 240×68 frames and one-run host p95 of 2,759 µs including GPU completion. Native surface loss/recovery remains unverified and blocks non-draft acceptance; this does not claim a reference-machine target, other backends/OSes, or application integration.
 
 ### Changed
 
