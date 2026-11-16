@@ -41,8 +41,14 @@ fn rectangle(width: u16, height: u16) -> Vec<u8> {
     push_i16(&mut glyph, 1);
     push_i16(&mut glyph, 0);
     push_i16(&mut glyph, 0);
-    push_i16(&mut glyph, i16::try_from(width).expect("fixture width fits"));
-    push_i16(&mut glyph, i16::try_from(height).expect("fixture height fits"));
+    push_i16(
+        &mut glyph,
+        i16::try_from(width).expect("fixture width fits"),
+    );
+    push_i16(
+        &mut glyph,
+        i16::try_from(height).expect("fixture height fits"),
+    );
     push_u16(&mut glyph, 3);
     push_u16(&mut glyph, 0);
     glyph.extend_from_slice(&[1, 1, 1, 1]);
@@ -130,10 +136,7 @@ fn cmap(mappings: &[(u16, u16)]) -> Vec<u8> {
         &mut subtable,
         u16::try_from(search_power.ilog2()).expect("fixture selector fits"),
     );
-    push_u16(
-        &mut subtable,
-        segment_count_u16 * 2 - search_power * 2,
-    );
+    push_u16(&mut subtable, segment_count_u16 * 2 - search_power * 2);
     for (character, _) in mappings {
         push_u16(&mut subtable, *character);
     }
@@ -175,7 +178,9 @@ fn sfnt(mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
         let table_offset = u32::try_from(offset).expect("fixture table offset fits");
         let table_length = u32::try_from(table.len()).expect("fixture table length fits");
         records.push((*tag, checksum(table), table_offset, table_length));
-        offset = offset.checked_add(table.len()).expect("fixture total size fits");
+        offset = offset
+            .checked_add(table.len())
+            .expect("fixture total size fits");
     }
 
     let mut font = Vec::with_capacity(align4(offset));
@@ -191,7 +196,10 @@ fn sfnt(mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
         push_u32(&mut font, *table_length);
     }
     for ((_, table), (_, _, table_offset, _)) in tables.iter().zip(&records) {
-        font.resize(usize::try_from(*table_offset).expect("fixture offset fits"), 0);
+        font.resize(
+            usize::try_from(*table_offset).expect("fixture offset fits"),
+            0,
+        );
         font.extend_from_slice(table);
     }
     font.resize(align4(font.len()), 0);
