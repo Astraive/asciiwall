@@ -62,7 +62,11 @@ fn io_or_cancel(error: io::Error, cancellation: &CancellationToken) -> FontLoadE
     }
 }
 
-fn open_font_file(
+/// Opens an explicit regular local input without blocking on Unix FIFOs.
+///
+/// The opened handle is authoritative: symlinks to regular files are supported, while pipes and
+/// device handles are rejected before any caller reads from them.
+pub(crate) fn open_regular_input_file(
     path: &Path,
     cancellation: &CancellationToken,
 ) -> Result<(File, u64), FontLoadError> {
@@ -142,7 +146,7 @@ pub fn load_glyph_table_with_repertoire(
     if !path_metadata.is_file() {
         return Err(FontLoadError::NotRegularFile);
     }
-    let (mut file, initial_len) = open_font_file(path, cancellation)?;
+    let (mut file, initial_len) = open_regular_input_file(path, cancellation)?;
     let max_bytes = MAX_FONT_BYTES.min(budget.max_raster_bytes());
     if initial_len > max_bytes {
         return Err(FontLoadError::TooLarge { max_bytes });
@@ -212,7 +216,7 @@ mod tests {
 
     use ascii_core::CancellationToken;
 
-    use super::{FontLoadError, open_font_file};
+    use super::{FontLoadError, open_regular_input_file};
 
     #[test]
     fn replacing_a_preflighted_symlink_target_with_a_fifo_never_blocks_open() {
@@ -230,7 +234,7 @@ mod tests {
             .expect("mkfifo is available on Unix");
         assert!(status.success());
 
-        let error = open_font_file(&link, &CancellationToken::new()).unwrap_err();
+        let error = open_regular_input_file(&link, &CancellationToken::new()).unwrap_err();
         assert!(matches!(error, FontLoadError::NotRegularFile));
     }
 }

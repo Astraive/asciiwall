@@ -59,7 +59,7 @@ pub struct ConvertArgs {
     /// Matching algorithm.
     #[arg(long, value_enum, default_value = "density")]
     pub matcher: Matcher,
-    /// Literal printable ASCII glyph repertoire.
+    /// Strict supported single-cell glyph repertoire.
     #[arg(long, default_value = " .:-=+*#%@", value_name = "GLYPHS")]
     pub charset: String,
     /// Monochrome cells or sampled source colors.
