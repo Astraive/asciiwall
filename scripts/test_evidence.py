@@ -52,6 +52,14 @@ def base_record(**overrides):
     return record
 
 
+def prefixed_unicode_escaped_report(report):
+    text = evidence.canonical_json(report).decode("utf-8")
+    for marker in ("synthetic-control-report", "synthetic-control-only", "cpu-grid-diff"):
+        escaped = "".join(f"\\u{ord(character):04x}" for character in marker)
+        text = text.replace(marker, escaped)
+    return b"note\n" + text.encode("utf-8")
+
+
 def _supports_safe_directory_access():
     if os.name == "nt":
         return True
@@ -248,6 +256,9 @@ class EvidenceRecordTests(unittest.TestCase):
             )
             with self.assertRaises(evidence.EvidenceError):
                 evidence.finalize_record(record)
+            artifact.write_bytes(prefixed_unicode_escaped_report(report))
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.finalize_record(record)
 
     def test_native_manual_manifest_binds_pass_to_binary_artifact(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
@@ -296,6 +307,14 @@ class EvidenceRecordTests(unittest.TestCase):
             synthetic_report = evidence.fake_control("timestamp-fault")
             self.assertEqual(synthetic_report["artifact_type"], "synthetic-control-report")
             synthetic_bytes = evidence.canonical_json(synthetic_report)
+            synthetic_path.write_bytes(synthetic_bytes)
+            write_manifest(
+                artifact_path=synthetic_path.relative_to(ROOT).as_posix(),
+                artifact_hash=hashlib.sha256(synthetic_bytes).hexdigest(),
+            )
+            with self.assertRaises(evidence.EvidenceError):
+                evidence.finalize_record(record)
+            synthetic_bytes = prefixed_unicode_escaped_report(synthetic_report)
             synthetic_path.write_bytes(synthetic_bytes)
             write_manifest(
                 artifact_path=synthetic_path.relative_to(ROOT).as_posix(),

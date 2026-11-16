@@ -443,10 +443,82 @@ def _looks_like_json(raw: bytes) -> bool | None:
     return prefix.startswith((b"{", b"[", b'"')) if prefix else None
 
 
+class _SyntheticMarkerScanner:
+    """Find synthetic markers inside JSON-style strings, including Unicode escapes."""
+
+    _markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
+    _window_limit = max(map(len, _markers))
+    _hex_digits = b"0123456789abcdefABCDEF"
+
+    def __init__(self) -> None:
+        self.in_string = False
+        self.escaped = False
+        self.unicode_remaining = 0
+        self.unicode_value = 0
+        self.window = bytearray()
+        self.found = False
+
+    def _append(self, value: int) -> None:
+        if value > 0x7f:
+            self.window.clear()
+            return
+        if 0x41 <= value <= 0x5a:
+            value += 0x20
+        self.window.append(value)
+        if len(self.window) > self._window_limit:
+            del self.window[0]
+        if any(marker in self.window for marker in self._markers):
+            self.found = True
+
+    def update(self, raw: bytes) -> None:
+        for byte in raw:
+            if self.found:
+                return
+            if self.unicode_remaining:
+                if byte in self._hex_digits:
+                    self.unicode_value = (self.unicode_value << 4) | int(bytes((byte,)), 16)
+                    self.unicode_remaining -= 1
+                    if not self.unicode_remaining:
+                        self._append(self.unicode_value)
+                        self.unicode_value = 0
+                    continue
+                self.unicode_remaining = 0
+                self.unicode_value = 0
+                self._append(0)
+            if not self.in_string:
+                if byte == ord('"'):
+                    self.in_string = True
+                    self.window.clear()
+                continue
+            if self.escaped:
+                self.escaped = False
+                if byte == ord("u"):
+                    self.unicode_remaining = 4
+                else:
+                    self._append(0)
+            elif byte == ord("\\"):
+                self.escaped = True
+            elif byte == ord('"'):
+                self.in_string = False
+                self.window.clear()
+            else:
+                self._append(byte)
+
+
+def _contains_synthetic_bytes(raw: bytes) -> bool:
+    markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
+    if any(marker in raw.lower() for marker in markers):
+        return True
+    scanner = _SyntheticMarkerScanner()
+    scanner.update(raw)
+    return scanner.found
+
+
 def _hash_native_stream(read: Callable[[int], bytes], limit: int) -> tuple[str, int]:
     digest = hashlib.sha256()
     prefix = bytearray()
     overlap = b""
+    escaped_marker_scanner = _SyntheticMarkerScanner()
     json_prefix: bool | None = None
     size = 0
     markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
@@ -457,6 +529,9 @@ def _hash_native_stream(read: Callable[[int], bytes], limit: int) -> tuple[str, 
         digest.update(chunk)
         if json_prefix is None:
             json_prefix = _looks_like_json(chunk)
+        escaped_marker_scanner.update(chunk)
+        if escaped_marker_scanner.found:
+            raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
         scan = (overlap + chunk).lower()
         if any(marker in scan for marker in markers):
             raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
@@ -595,8 +670,7 @@ def _validate_native_pass_artifact(record: dict[str, Any]) -> None:
 def _inspect_native_pass_content(raw: bytes, record: dict[str, Any]) -> None:
     if not raw:
         raise EvidenceError("native-manual pass requires a non-empty evidence artifact")
-    markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
-    if any(marker in raw.lower() for marker in markers):
+    if _contains_synthetic_bytes(raw):
         raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
     try:
         content = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
