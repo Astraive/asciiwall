@@ -19,6 +19,50 @@ This matrix defines **120 proposed scenarios** and expected outcomes. It is not 
 | EC-009 | P0 | Malformed/truncated image | Worker failure with safe UI error |
 | EC-010 | P0 | Small compressed image with huge dimensions | Reject against pixel/byte budget before full allocation |
 
+### QA-101 scenario coverage (EC-001–EC-005)
+
+`crates/ascii-convert/tests/qa_101_input_conversion.rs` defines deterministic consumer-boundary regressions using the rights-cleared generated synthetic font and in-memory pixel fixtures.
+
+| ID | Scenario regression status |
+|---|---|
+| EC-001 | Zero-width and zero-height rasters are passed through the converter with a zero frame/raster/work budget and must return `EmptyDimensions` with zero observed thread-local allocation requests. An empty-backed `u32::MAX × u32::MAX` raster with `u32::MAX` columns must return `SizeOverflow`, ahead of the zero frame-byte budget and malformed backing extent, also with zero allocation requests. A fully backed 129-byte padded 1×2 view with a 64-byte raster budget must return `BudgetExceeded(RasterBytes)` during sampling preflight, with no normalized-raster or output-cell allocation request. |
+| EC-002 | A source containing exactly two bytes (2×1, stride 2) is converted into four output cells through the bounded converter; the exact output glyph slots and four box-sampled luminances are asserted, and repeated conversion must match. |
+| EC-003 | Extreme 1×16 and 16×1 rasters with center markers are converted through both `Contain` and `Cover`. Converted patch samples and selected glyphs are asserted before checking metadata: contain retains the tiny marker area, while the aspect-preserving crop samples its complete centered marker. |
+| EC-004 | Not run. The exact open IMG-001 PR #301 head `112bd9b49fa0759c083de914a0d52ba4b95cb156` exposes `ascii-media` decoding but has no `ascii-convert/src/density.rs` consumer path; it cannot execute the required real decoder-to-converter chain. No QA-101 EXIF fixture or decoder-to-converter result is claimed. |
+| EC-005 | Two 2×1 RGBA fixtures vary fully transparent hidden RGB between saturated blue and magenta beside the same opaque yellow pixel. Both actual converter outputs must match the same expected composited luminance, select the background glyph, and be identical. |
+
+Fixtures are generated in memory from test constants and the rights-cleared synthetic-font generator; no personal or proprietary media is used. This consumer-boundary regression set creates no QA-004 evidence receipt and does not complete QA-101: EC-004 and hard dependency QA-004 #35 remain open, and no reviewer-linked acceptance or native evidence is claimed.
+
+Raster fixture hashes use SHA-256 over the domain tag `QA-101 raster fixture v1\0`, UTF-8 format name plus NUL, little-endian `u32` width and height, little-endian `u64` row stride, and exact pixel bytes. The font fixture hash covers the generated SFNT bytes; its rights-cleared generator is `crates/ascii-convert/tests/support/synthetic_font.rs`.
+
+`ascii-core::Budget` is an immutable ceiling, not a reservation ledger. EC-001 therefore observes the zero-budget error-precedence sentinel together with scoped allocation-request counts; no separate reservation counter is claimed.
+
+### QA-101 execution record (2026-11-16)
+
+- QA worktree branch: `test/qa-101-input-scenarios`; the worktree was fast-forwarded from `2013e4781ee6023b0302c6f96dd3eb00582b981f` to exact CNV-001 source head `63e145e228b9ec335294e4ea7961ae04af9a0e57` (`origin/feat/cnv-001-density-matching`). Source tree SHA-1: `aae6fed9ac5d2e1b9c65209a9f2f60a3d7101c09`.
+- QA test source SHA-256: `1b40a0fa11c534a1bef48945c36305e4898044500b319adfef3ce2ea9348fbf5`; generated test executable SHA-256: `63816cac18eb072a06fa7fc7a4154deff8e1cf8da73c39f55baf9a375c07cd58`; synthetic-font generator source SHA-256: `8a0b3b4e8ee150d6d16b084e51200525112ed6424855afa652a55ed3274176c8`.
+- Host: Microsoft Windows 11 Home Single Language, version `10.0.26300`, build `26300`, x64; Rust host `x86_64-pc-windows-msvc`, `rustc 1.100.0 (0ef1bc386 2026-11-09)`, LLVM `23.1.5`, `cargo 1.100.0 (3acc79c0c 2026-11-05)`. The process was not elevated. Intel UHD Graphics driver `32.0.101.7026` and NVIDIA GeForce RTX 3050 6GB Laptop GPU driver `32.0.15.9597` were detected but not used; these CPU-only tests required no GPU, media permission, or network access.
+- To isolate this worktree from QA-102, Cargo used external temporary directories `CARGO_HOME='../.qa101-cargo-home'` and `CARGO_TARGET_DIR='../.qa101-target'`; both were removed after validation.
+- Final commands and results:
+  - `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo test -p ascii-convert --test qa_101_input_conversion -- --nocapture` — PASS, 4 passed, 0 failed.
+  - `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo test --workspace` — PASS, 89 passed across 9 test suites; 0 failed.
+  - `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo fmt --all -- --check` — PASS. `cargo fmt --all` was applied to the QA test after the initial formatting check identified only that file.
+  - `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo clippy --workspace --all-targets --all-features -- -D warnings` — PASS.
+- Fixture SHA-256 values from the targeted run: generated SFNT font `c90ae34f722cdf8d9bc9ee9242fe6c54961bf1e123a999f59290e433666dbef3`; EC-001 zero-width `61d699a07234f8214a7b6fd1b33e9f352977c31e133d7ad26936474865c5b7ff`, zero-height `b37b98fe7572258ff576cb5fe52abf78a05eaea1abc3f8111c7ee55ff8788fd7`, overflow-grid `513dd1e971e3288a72cf580135a280a217787af71550779edc75fde992cd0a93`, and over-budget readable extent `390696c0cd30faad3bb1751ad6b06a3b6b7053af04d11b4c61f50c0f28845625`; EC-002 two-byte raster `f6ff3aa216383ebdb021c0c35f01b75ff36348b152f31ca3826409d2489ce15e`; EC-003 1×16 portrait `b564143e1c36569aa60a0b4e80fa42cb3e19b71e0cd20ff1d99b1ee88960e42e` and 16×1 wide `cca553452c99d51f03ea2d71ec5608e8ee2bb71f02c9250ff0c6ee08e2360e12`; EC-005 transparent-blue hidden RGB `5cccea941c6412ca123e6499ac0abd0f775b48f01cee6c781a9323ac96ad96b8` and transparent-magenta hidden RGB `e1f070235015d08caaa1066a205bb40466c90bef81432818de61efc7b5b87ac3`.
+- During fixture development, the original 128×1 `Cover` candidate returned `Core(SizeOverflow)`; no converted output or pass is claimed for that geometry. The committed EC-003 fixture therefore uses 1×16 and 16×1 (16:1 source aspect ratios) and asserts actual `Contain`/`Cover` converted samples and glyphs for both.
+- EC-004 remains not run: the checked-out workspace has only `ascii-core` and `ascii-convert` members and no `ascii-media` decoder-to-converter callsite. No EXIF fixture or decoder result is copied or fabricated.
+
+### Post-sync validation (2026-11-16)
+
+The following checks ran after rebasing the QA branch onto CNV-001 head `3faa42f40d673bbc44b86f8a79e214252947f899`, at QA commit `02f3221aea53735f6e9df0c5adbbaa50c90002dd` (tested source tree SHA-1 `f83842a75c853ec453661fe9b6f802c27d84f0e2`). The QA scenario fixtures and test source remain those hashed above.
+
+- `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo test --locked -p ascii-convert --test qa_101_input_conversion` — PASS, 4 tests.
+- `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo test --locked --workspace` — PASS, 90 tests across 9 suites.
+- `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo fmt --all -- --check` — PASS.
+- `CARGO_HOME='../.qa101-cargo-home' CARGO_TARGET_DIR='../.qa101-target' cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` — PASS.
+
+The initial targeted run with the default Cargo home stopped before test execution because Cargo could not create its registry-cache directory (Windows OS error 183); the isolated-cache run above passed. EC-004 remains not run because no decoder-to-converter callsite exists, QA-004 #35 remains a hard dependency, and no QA-101 acceptance or native result is claimed.
+
 ## Glyphs and rendering
 
 | ID | Priority | Condition | Required outcome |
