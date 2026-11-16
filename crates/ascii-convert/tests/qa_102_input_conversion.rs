@@ -281,6 +281,13 @@ fn ec_008_odd_row_stride_ignores_padding_through_density_conversion() {
         converted_with_different_padding.frame().cells()
     );
     assert_eq!(converted.frame().cells().len(), 6);
+    assert_eq!(
+        (
+            converted.frame().size().columns(),
+            converted.frame().size().rows()
+        ),
+        (3, 2)
+    );
     for (cell, expected_character) in converted
         .frame()
         .cells()
