@@ -67,4 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `buildhost` cannot survive under a generic field name.
 - [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
   explicitly labeled nonportable local backups.
-- COR-009 cache eviction uses marked ownership scopes and OS file locks; output reservations charge retained bytes, suppressed I/O failures cannot publish partial results, and filesystem file identity clears replaced-output registrations across case aliases.
+- COR-009 cache hardening preserves output bytes written after a disk-probe snapshot, captures
+  absolute output destinations, resolves case-variant registrations using filesystem semantics,
+  atomically publishes marked cache roots, and keeps lease acknowledgement retryable until its pin
+  is released. Existing retained-byte accounting, OS file locks, and failed-write protections remain.

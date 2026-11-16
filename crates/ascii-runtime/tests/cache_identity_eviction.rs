@@ -393,11 +393,8 @@ fn source_stat_and_path_are_revalidation_hints_not_identity() {
             .unwrap(),
         StoreOutcome::AlreadyPresent
     );
-    cache
-        .lease_observed(&key, &changed_hint)
-        .unwrap()
-        .acknowledge()
-        .unwrap();
+    let mut lease = cache.lease_observed(&key, &changed_hint).unwrap();
+    lease.acknowledge().unwrap();
     assert!(matches!(
         cache.store_observed(
             CacheIdentity::Conversion(conversion_key(SourceContent::Digest(digest(9)))),
@@ -434,7 +431,7 @@ fn byte_lru_pins_active_resources_until_explicit_acknowledgement() {
         cache.store(b.clone(), b"bbb").unwrap(),
         StoreOutcome::Inserted
     );
-    let lease = cache.lease(&a).expect("lease a");
+    let mut lease = cache.lease(&a).expect("lease a");
     let pinned_path = lease.path().to_path_buf();
     assert!(pinned_path.exists());
 
@@ -457,6 +454,44 @@ fn byte_lru_pins_active_resources_until_explicit_acknowledgement() {
     lease.acknowledge().expect("completion releases and trims");
     assert!(!pinned_path.exists());
     assert_eq!(cache.snapshot().unwrap().used_bytes, 0);
+}
+
+#[test]
+fn lease_acknowledgement_retries_after_lock_failure_before_release() {
+    let temp = TempDir::new();
+    let cache = DerivedCache::open(temp.path().join("cache"), 3).unwrap();
+    let key = identity(49);
+    cache.store(key.clone(), b"pin").unwrap();
+    let mut lease = cache.lease(&key).unwrap();
+    let pinned_path = lease.path().to_path_buf();
+
+    assert!(matches!(
+        cache.set_budget_bytes(0),
+        Err(CacheError::BudgetPinned { .. })
+    ));
+    let operations_lock = cache
+        .root()
+        .join(".asciiwall-cache-v1")
+        .join(".operations.lock");
+    fs::remove_file(&operations_lock).unwrap();
+    fs::create_dir(&operations_lock).unwrap();
+
+    let error = lease
+        .acknowledge()
+        .expect_err("a non-file operations lock prevents acknowledgement");
+    assert!(matches!(error, CacheError::UnsafeDerivedPath(_)));
+    assert!(pinned_path.exists());
+
+    fs::remove_dir(&operations_lock).unwrap();
+    drop(fs::File::create(&operations_lock).unwrap());
+    assert_eq!(cache.snapshot().unwrap().active_leases, 1);
+    lease
+        .acknowledge()
+        .expect("the retained lease can retry after the lock is repaired");
+    assert!(!pinned_path.exists());
+    let snapshot = cache.snapshot().unwrap();
+    assert_eq!(snapshot.active_leases, 0);
+    assert_eq!(snapshot.used_bytes, 0);
 }
 
 #[test]
@@ -564,7 +599,7 @@ fn a_second_cache_instance_cannot_evict_another_instances_live_lease() {
     let first_cache = DerivedCache::open(&cache_root, 16).unwrap();
     let key = identity(42);
     first_cache.store(key.clone(), b"leased").unwrap();
-    let lease = first_cache.lease(&key).unwrap();
+    let mut lease = first_cache.lease(&key).unwrap();
     let leased_path = lease.path().to_path_buf();
 
     assert!(matches!(
@@ -631,7 +666,7 @@ fn shared_root_budget_respects_a_lease_from_another_instance() {
     );
 
     let leased_key = identity(46);
-    let lease = first_cache.lease(&leased_key).unwrap();
+    let mut lease = first_cache.lease(&leased_key).unwrap();
     assert!(matches!(
         second_cache.store(identity(47), b"other"),
         Err(CacheError::BudgetPinned {
@@ -696,7 +731,7 @@ fn repeated_cross_instance_lease_failures_recover_after_acknowledgement() {
         let first_key = identity(round.wrapping_add(64));
         let second_key = identity(round.wrapping_add(128));
         first_cache.store(first_key.clone(), b"first").unwrap();
-        let lease = first_cache.lease(&first_key).unwrap();
+        let mut lease = first_cache.lease(&first_key).unwrap();
 
         assert!(matches!(
             second_cache.store(second_key.clone(), b"other"),

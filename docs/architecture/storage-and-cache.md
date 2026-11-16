@@ -71,7 +71,14 @@ byte budget. Each instance retains semantic identity and LRU state only for its 
 files discovered from another instance or after reopen remain accounted as orphans and are eviction
 candidates ordered by generated file ID, not available for semantic lookup by identity.
 
-Active decoder/upload users pin entries through non-cloneable leases; dropping a lease does not signal completion, and the owner must explicitly acknowledge completion. A live lease holds a shared OS file lock, and eviction must obtain an exclusive lock before deleting a file, so another cache instance cannot remove an actively leased artifact. Keep the managed cache root private and stable: project directories, imported packages, and unmanaged files remain outside the deletion scope.
+Active decoder/upload users pin entries through non-cloneable leases; dropping a lease does not
+signal completion, and the owner must explicitly acknowledge completion. Acknowledgement remains
+retryable: an error before pin release leaves the mutable lease available for retry, while an error
+during trimming leaves the pin released and a retry only retries trimming. A live lease holds a
+shared OS file lock, and eviction must obtain an exclusive lock before deleting a file, so another
+cache instance cannot remove an actively leased artifact. Keep the managed cache root private and
+stable: project directories, imported packages, and unmanaged files remain outside the deletion
+scope.
 
 Disk reservations account for expanded input, scratch, output capacity, and a safety reserve against
 a host-probed free-space estimate. Capture a `DiskBudgetProbe` with
