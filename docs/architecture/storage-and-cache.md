@@ -94,8 +94,11 @@ write or flush error and publish truncated output. A failed write reports its te
 when one exists, does not commit or register the failed result, and leaves the destination unchanged
 provided its parent is not concurrently modified by an untrusted actor. Replacing a registered
 destination invalidates any identity for the same canonical path or, where supported, the same
-filesystem file identity; this includes case-insensitive path aliases. Disk-full and quota failures
-are classified without claiming that a particular filesystem or quota limit was exercised.
+filesystem file identity. Unix case-variant names are compared by resolving existing paths through
+the actual filesystem, so case-insensitive volumes clear stale registrations while case-sensitive
+volumes retain distinct names; Windows uses the directory's case-sensitivity setting. Disk-full and
+quota failures are classified without claiming that a particular filesystem or quota limit was
+exercised.
 
 ## Privacy
 

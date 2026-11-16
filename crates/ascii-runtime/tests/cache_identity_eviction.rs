@@ -1309,7 +1309,7 @@ fn stage_path_substitution_before_commit_is_detected() {
 
 #[cfg(windows)]
 #[test]
-fn case_variant_regular_destination_removes_stale_identity_registration() {
+fn case_variant_replacement_after_deletion_clears_stale_windows_registration() {
     let temp = TempDir::new();
     let upper_destination = temp.path().join("Output.bin");
     let lower_destination = temp.path().join("output.bin");
@@ -1332,11 +1332,18 @@ fn case_variant_regular_destination_removes_stale_identity_registration() {
             |output| output.write_all(b"first"),
         )
         .unwrap();
-    // Some Windows directories opt into case-sensitive names; only exercise the alias when
-    // these spellings actually resolve to the same destination entry.
     if !lower_destination.exists() {
+        eprintln!("skipping case-alias assertion: this Windows directory is case-sensitive");
         return;
     }
+    assert_eq!(
+        registry.registered_path(&first_identity),
+        Some(upper_destination.clone())
+    );
+    fs::remove_file(&upper_destination).unwrap();
+    assert!(!upper_destination.exists());
+    assert!(!lower_destination.exists());
+
     registry
         .write_transactional(
             second_identity.clone(),
@@ -1354,9 +1361,9 @@ fn case_variant_regular_destination_removes_stale_identity_registration() {
     assert_eq!(fs::read(upper_destination).unwrap(), b"second");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 #[test]
-fn case_variant_regular_destination_removes_stale_identity_on_case_insensitive_volume() {
+fn case_variant_replacement_after_deletion_clears_stale_unix_registration() {
     let temp = TempDir::new();
     let upper_destination = temp.path().join("Output.bin");
     let lower_destination = temp.path().join("output.bin");
@@ -1380,8 +1387,22 @@ fn case_variant_regular_destination_removes_stale_identity_on_case_insensitive_v
         )
         .unwrap();
     if !lower_destination.exists() {
+        eprintln!("skipping case-alias assertion: this Unix directory is case-sensitive");
         return;
     }
+    assert_eq!(
+        fs::canonicalize(&upper_destination).unwrap(),
+        fs::canonicalize(&lower_destination).unwrap(),
+        "the test spellings must resolve to one filesystem entry"
+    );
+    assert_eq!(
+        registry.registered_path(&first_identity),
+        Some(upper_destination.clone())
+    );
+    fs::remove_file(&upper_destination).unwrap();
+    assert!(!upper_destination.exists());
+    assert!(!lower_destination.exists());
+
     registry
         .write_transactional(
             second_identity.clone(),
@@ -1394,10 +1415,15 @@ fn case_variant_regular_destination_removes_stale_identity_on_case_insensitive_v
     assert_eq!(registry.registered_path(&first_identity), None);
     assert_eq!(
         registry.registered_path(&second_identity),
-        Some(lower_destination)
+        Some(lower_destination.clone())
     );
-    assert_eq!(fs::read(upper_destination).unwrap(), b"second");
+    assert_eq!(fs::read(&upper_destination).unwrap(), b"second");
+    assert_eq!(
+        fs::canonicalize(&upper_destination).unwrap(),
+        fs::canonicalize(&lower_destination).unwrap()
+    );
 }
+
 
 #[test]
 fn failed_output_retry_preserves_previous_registration() {
