@@ -330,7 +330,15 @@ impl fmt::Display for ColorNormalizationError {
 impl std::error::Error for ColorNormalizationError {}
 
 /// An owned, top-down raster normalized to linear-premultiplied RGBA.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `NormalizedRaster` intentionally does not implement `Clone`; copying the pixel buffer outside a
+/// budgeted, cancellable operation could exceed raster limits or fail allocation infallibly.
+///
+/// ```compile_fail
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ascii_convert::NormalizedRaster>();
+/// ```
+#[derive(Debug, PartialEq)]
 pub struct NormalizedRaster {
     width: u32,
     height: u32,
@@ -475,8 +483,7 @@ fn normalize_raster_with_cancel_check(
             return Err(Error::Unsupported(UnsupportedReason::PixelFormat).into());
         }
     };
-    validate_alpha_layout(view.format().channels(), view.color().alpha_mode())?;
-    let (transfer, warning) = resolve_profile(view.color())?;
+    let (transfer, warning) = resolve_raster_metadata(view.format().channels(), view.color())?;
 
     let width = usize::try_from(u64::from(view.width())).map_err(|_| Error::SizeOverflow)?;
     let height = usize::try_from(u64::from(view.height())).map_err(|_| Error::SizeOverflow)?;
@@ -633,6 +640,14 @@ fn validate_premultiplied_pixels(
         return Err(Error::Cancelled.into());
     }
     Ok(())
+}
+
+pub(crate) fn resolve_raster_metadata(
+    channels: PixelChannels,
+    color: ColorDescription,
+) -> Result<(TransferFunction, Option<ColorNormalizationWarning>), ColorNormalizationError> {
+    validate_alpha_layout(channels, color.alpha_mode())?;
+    resolve_profile(color)
 }
 
 fn validate_alpha_layout(

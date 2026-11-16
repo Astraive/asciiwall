@@ -1,4 +1,5 @@
-//! Bounded CPU density conversion, font masks, shared geometry, and color normalization.
+//! Bounded CPU density conversion, font rasterization, immutable glyph-table primitives, and
+//! shared geometry with typed color normalization and alpha compositing.
 
 mod color;
 mod density;
