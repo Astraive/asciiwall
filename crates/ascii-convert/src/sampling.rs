@@ -775,8 +775,10 @@ impl SamplingPlan {
                 let (source_x1, source_y1) = self
                     .transform
                     .source_point_for_display(display_x1, display_y1);
-                let full_area = (source_x1 - source_x0) * (source_y1 - source_y0);
-                if !full_area.is_finite() || full_area <= 0.0 {
+                // Normalize each axis before multiplication to avoid requiring representable area.
+                let span_x = source_x1 - source_x0;
+                let span_y = source_y1 - source_y0;
+                if !span_x.is_finite() || span_x <= 0.0 || !span_y.is_finite() || span_y <= 0.0 {
                     return Err(Error::SizeOverflow);
                 }
                 let clipped_x0 = source_x0.max(self.transform.source_rect.x).max(0.0);
@@ -787,7 +789,7 @@ impl SamplingPlan {
                 let clipped_y1 = source_y1
                     .min(self.transform.source_rect.bottom())
                     .min(f64::from(raster.height()));
-                let mut covered_area = 0.0;
+                let mut covered_weight = 0.0;
                 let mut weighted_luminance = 0.0;
                 if clipped_x1 > clipped_x0 && clipped_y1 > clipped_y0 {
                     let first_x = clipped_x0.floor() as u32;
@@ -797,11 +799,15 @@ impl SamplingPlan {
                     for y in first_y..end_y {
                         let overlap_y =
                             clipped_y1.min(f64::from(y + 1)) - clipped_y0.max(f64::from(y));
+                        let weight_y = overlap_y / span_y;
+                        if weight_y <= 0.0 {
+                            continue;
+                        }
                         for x in first_x..end_x {
                             let overlap_x =
                                 clipped_x1.min(f64::from(x + 1)) - clipped_x0.max(f64::from(x));
-                            let area = overlap_x * overlap_y;
-                            if area <= 0.0 {
+                            let weight = (overlap_x / span_x) * weight_y;
+                            if weight <= 0.0 {
                                 continue;
                             }
                             *work = work.checked_add(1).ok_or(Error::SizeOverflow)?;
@@ -812,16 +818,13 @@ impl SamplingPlan {
                             }
                             let index = pixel_index(x, y, raster.width())?;
                             weighted_luminance +=
-                                pixel_luminance(raster.pixels()[index], background) * area;
-                            covered_area += area;
+                                pixel_luminance(raster.pixels()[index], background) * weight;
+                            covered_weight += weight;
                         }
                     }
                 }
-                let uncovered_area = (full_area - covered_area).max(0.0);
-                Ok(
-                    (weighted_luminance + background.luminance().value() * uncovered_area)
-                        / full_area,
-                )
+                let uncovered_weight = (1.0 - covered_weight).max(0.0);
+                Ok(weighted_luminance + background.luminance().value() * uncovered_weight)
             }
         }
     }

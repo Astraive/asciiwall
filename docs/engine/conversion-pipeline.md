@@ -19,7 +19,7 @@ Measure actual glyph advance and line height; do not assume characters are squar
 
 ## Analysis stages
 
-Normalize orientation, alpha interpretation, color transfer, and range first. Box sampling integrates pixel-square overlap weights over each destination-cell footprint in linear light; transparent pixels and contain letterboxes composite against the configured background. Nearest sampling chooses the pixel containing the inverse-mapped sample center using floor boundaries, with exact source right/bottom edges assigned to the final pixel. Quality modes may retain bounded sub-cell luminance patches and gradient descriptors; those dimensions belong in the cache identity.
+Normalize orientation, alpha interpretation, color transfer, and range first. Box sampling integrates pixel-square overlap weights over each destination-cell footprint in linear light, normalizing overlap independently per axis before multiplication so subnormal footprints do not require representable absolute 2D area; transparent pixels and contain letterboxes composite against the configured background. Nearest sampling chooses the pixel containing the inverse-mapped sample center using floor boundaries, with exact source right/bottom edges assigned to the final pixel. Quality modes may retain bounded sub-cell luminance patches and gradient descriptors; those dimensions belong in the cache identity.
 
 A fast mode uses calibrated glyph coverage. A quality mode shortlists masks by coverage and edge orientation, then minimizes bounded reconstruction error. A contour mode emphasizes structure and intentionally discards low-contrast texture; it must not be sold as universally more faithful.
 
