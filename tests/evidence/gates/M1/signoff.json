@@ -72,7 +72,7 @@
     {
       "criterion": "Image conversion exists in the M1 candidate",
       "status": "BLOCKED",
-      "scope": "CNV-002 color normalization merged via PR #307 head 4f1ab1b227d4fa21bf28a2b7b0923727dd662ca0 into main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea. CNV-001 density remains blocked in open/draft replacement PR #314 at exact head 8fffc12b174de4930dfeb00bffd47d5b865e5791 on main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; this supersedes closed PR #292, which had remained based on the closed #291 branch. Issue #118 remains OPEN. CNV-003 #302 is stacked on #292. The density source path is absent on current main, so there is still no integrated M1 conversion candidate."
+      "scope": "CNV-002 color normalization merged via PR #307 head 4f1ab1b227d4fa21bf28a2b7b0923727dd662ca0 into main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea. CNV-001 density remains blocked in open/draft replacement PR #314 at exact head b78920f82ff496e2ee9bd9b5ea454d906a003fa0 on main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; this supersedes closed PR #292, which had remained based on the closed #291 branch. Issue #118 remains OPEN. CNV-003 #302 is stacked on #292. The density source path is absent on current main, so there is still no integrated M1 conversion candidate."
     },
     {
       "criterion": "Standalone CLI build exists for the M1 candidate",
@@ -291,35 +291,35 @@
       "issue": 118,
       "pull_request": 314,
       "state": "OPEN_DRAFT",
-      "head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
+      "head_sha": "b78920f82ff496e2ee9bd9b5ea454d906a003fa0",
       "base_branch": "main",
       "base_sha": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
       "current_main_sha": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
       "merge_state": "CLEAN",
       "issue_state": "OPEN",
       "component_test_outcomes_reported": [
-        "PASS: cargo test --locked --package ascii-convert --test density_matcher (23 tests)",
-        "PASS: cargo test --locked --workspace (144 tests across 13 suites, including compile-fail API doctests)",
+        "PASS: cargo test --offline --locked -p ascii-convert (73 tests)",
+        "PASS: cargo test --offline --locked --workspace (149 tests)",
         "PASS: cargo fmt --all -- --check",
-        "PASS: cargo clippy --locked --workspace --all-targets -- -D warnings"
+        "PASS: cargo clippy --offline --locked --workspace --all-targets -- -D warnings"
       ],
       "ci": [
         {
-          "run": "https://github.com/Astraive/asciiwall/actions/runs/43858912787",
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43992778709",
           "workflow": "Repository checks",
           "status": "PASS",
           "checks": ["Repository quality", "Portable core (macos-latest)", "Portable core (ubuntu-latest)", "Portable core (windows-latest)"]
         },
         {
-          "run": "https://github.com/Astraive/asciiwall/actions/runs/43857985238",
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43992218980",
           "workflow": "Python security analysis",
           "status": "PASS",
           "checks": ["Python security analysis"]
         }
       ],
       "independent_exact_head_review": {
-        "reviewer": "Independent Luna xhigh review",
-        "head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
+        "reviewer": "Independent Luna max review",
+        "head_sha": "b78920f82ff496e2ee9bd9b5ea454d906a003fa0",
         "status": "PASS",
         "findings": "none",
         "evidence": "https://github.com/Astraive/asciiwall/pull/314"
@@ -334,7 +334,7 @@
       "head_sha": "5564df42a11664a9892a9bf64afb64a17f1cac50",
       "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
       "synchronization_status": "STALE_NOT_SYNCHRONIZED_TO_PR_314",
-      "current_cnv_001_replacement_head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
+      "current_cnv_001_replacement_head_sha": "b78920f82ff496e2ee9bd9b5ea454d906a003fa0",
       "component_test_outcomes_reported": [
         "PASS: cargo test --locked -p ascii-convert --test sampling_geometry (9 tests)",
         "PASS: cargo test --locked -p ascii-convert --test density_matcher (22 tests)",
@@ -353,7 +353,7 @@
           "status": "PASS"
         }
       ],
-      "limitations": "Open draft, still based on the old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and stale/not synchronized to replacement PR #314 at 8fffc12b174de4930dfeb00bffd47d5b865e5791. The recorded tests and checks are historical for this PR head; no exact integrated M1 candidate or native/UI evidence."
+      "limitations": "Open draft, still based on the old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and stale/not synchronized to replacement PR #314 at b78920f82ff496e2ee9bd9b5ea454d906a003fa0. The recorded tests and checks are historical for this PR head; no exact integrated M1 candidate or native/UI evidence."
     },
     {
       "work_item": "QA-101",
@@ -364,7 +364,7 @@
       "base_branch": "feat/cnv-001-density-matching",
       "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
       "synchronization_status": "STALE_NOT_SYNCHRONIZED_TO_PR_314",
-      "current_cnv_001_replacement_head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
+      "current_cnv_001_replacement_head_sha": "b78920f82ff496e2ee9bd9b5ea454d906a003fa0",
       "component_test_outcomes_reported": [
         "PASS: cargo test --locked -p ascii-convert --test qa_101_input_conversion (4 tests)",
         "PASS: cargo test --locked --workspace (147 tests across 14 suites)"
@@ -382,7 +382,7 @@
           "status": "PASS"
         }
       ],
-      "limitations": "EC-004 EXIF orientation is NOT RUN; the PR is still stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and is stale/not synchronized to replacement PR #314 at 8fffc12b174de4930dfeb00bffd47d5b865e5791. QA-004 #35 and reviewer-linked scenario receipts remain outstanding."
+      "limitations": "EC-004 EXIF orientation is NOT RUN; the PR is still stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and is stale/not synchronized to replacement PR #314 at b78920f82ff496e2ee9bd9b5ea454d906a003fa0. QA-004 #35 and reviewer-linked scenario receipts remain outstanding."
     },
     {
       "work_item": "QA-102",
@@ -393,7 +393,7 @@
       "base_branch": "feat/cnv-001-density-matching",
       "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
       "synchronization_status": "STALE_NOT_SYNCHRONIZED_TO_PR_314",
-      "current_cnv_001_replacement_head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
+      "current_cnv_001_replacement_head_sha": "b78920f82ff496e2ee9bd9b5ea454d906a003fa0",
       "component_test_outcomes_reported": [
         "PASS: cargo test --locked -p ascii-convert --test qa_102_input_conversion (5 tests)",
         "PASS: cargo test --locked -p ascii-convert --test density_matcher (22 tests)",
@@ -422,7 +422,7 @@
           "P2: PR #305 EC-010 text incorrectly says no decoder path exists, despite the compressed-raster budget regression in crates/ascii-media/tests/image_decode.rs:524."
         ]
       },
-      "limitations": "EC-009 restricted-worker/UI error and EC-008 decoder-to-converter traversal are NOT RUN. EC-010 QA-102 scenario acceptance remains outstanding; an existing compressed-raster budget regression at crates/ascii-media/tests/image_decode.rs:524 is not itself QA-102 acceptance evidence. This PR remains stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and is stale/not synchronized to replacement PR #314 at 8fffc12b174de4930dfeb00bffd47d5b865e5791. Its pre-restack independent review found two P2s, described above; no resolution is claimed. QA-004 #35 and reviewer-linked QA-102 scenario evidence remain outstanding; the tests and checks are historical for this PR head."
+      "limitations": "EC-009 restricted-worker/UI error and EC-008 decoder-to-converter traversal are NOT RUN. EC-010 QA-102 scenario acceptance remains outstanding; an existing compressed-raster budget regression at crates/ascii-media/tests/image_decode.rs:524 is not itself QA-102 acceptance evidence. This PR remains stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and is stale/not synchronized to replacement PR #314 at b78920f82ff496e2ee9bd9b5ea454d906a003fa0. Its pre-restack independent review found two P2s, described above; no resolution is claimed. QA-004 #35 and reviewer-linked QA-102 scenario evidence remain outstanding; the tests and checks are historical for this PR head."
     },
     {
       "work_item": "RND-001",
