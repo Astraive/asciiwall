@@ -28,7 +28,7 @@ This matrix defines **120 proposed scenarios** and expected outcomes. It is not 
 | EC-001 | Zero-width and zero-height rasters are passed through the converter with a zero frame/raster/work budget and must return `EmptyDimensions` with zero observed thread-local allocation requests. An empty-backed `u32::MAX × u32::MAX` raster with `u32::MAX` columns must return `SizeOverflow`, ahead of the zero frame-byte budget and malformed backing extent, also with zero allocation requests. A fully backed 129-byte padded 1×2 view with a 64-byte raster budget must return `BudgetExceeded(RasterBytes)` during sampling preflight, with no normalized-raster or output-cell allocation request. |
 | EC-002 | A source containing exactly two bytes (2×1, stride 2) is converted into four output cells through the bounded converter; the exact output glyph slots and four box-sampled luminances are asserted, and repeated conversion must match. |
 | EC-003 | Extreme 1×16 and 16×1 rasters with center markers are converted through both `Contain` and `Cover`. Converted patch samples and selected glyphs are asserted before checking metadata: contain retains the tiny marker area, while the aspect-preserving crop samples its complete centered marker. |
-| EC-004 | Not run. The exact open IMG-001 PR #301 head `112bd9b49fa0759c083de914a0d52ba4b95cb156` exposes `ascii-media` decoding but has no `ascii-convert/src/density.rs` consumer path; it cannot execute the required real decoder-to-converter chain. No QA-101 EXIF fixture or decoder-to-converter result is claimed. |
+| EC-004 | Not run. Although `ascii-media` includes EXIF-aware decoding tests, this QA-101 branch has no decoder-to-converter consumer callsite or scenario-specific EXIF fixture/receipt; the required real decoder-to-converter path was not exercised. No orientation result or pass is claimed. |
 | EC-005 | Two 2×1 RGBA fixtures vary fully transparent hidden RGB between saturated blue and magenta beside the same opaque yellow pixel. Both actual converter outputs must match the same expected composited luminance, select the background glyph, and be identical. |
 
 Fixtures are generated in memory from test constants and the rights-cleared synthetic-font generator; no personal or proprietary media is used. This consumer-boundary regression set creates no QA-004 evidence receipt and does not complete QA-101: EC-004 and hard dependency QA-004 #35 remain open, and no reviewer-linked acceptance or native evidence is claimed.
@@ -63,7 +63,7 @@ The following checks ran after rebasing the QA branch onto CNV-001 head `3faa42f
 
 The initial targeted run with the default Cargo home stopped before test execution because Cargo could not create its registry-cache directory (Windows OS error 183); the isolated-cache run above passed. EC-004 remains not run because no decoder-to-converter callsite exists, QA-004 #35 remains a hard dependency, and no QA-101 acceptance or native result is claimed.
 
-### Replacement PR exact-head validation (2026-11-16)
+### Historical replacement PR exact-head validation (2026-11-16; superseded base)
 
 The replacement branch `test/qa-101-input-boundaries-linear-r2` was validated at commit `88ca0b1d492c186fff90d471ca784be9e4cbb838`, based on CNV-001 PR #314 head `8fffc12b174de4930dfeb00bffd47d5b865e5791`. Tested source tree SHA-1: `79969e2d1ae2abe77da73303d0dee15f24adf319`.
 
@@ -77,6 +77,19 @@ The replacement branch `test/qa-101-input-boundaries-linear-r2` was validated at
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings` — PASS.
 - The focused run printed the same deterministic synthetic-font and EC-001–003/005 fixture SHA-256 values recorded in the initial execution record above.
 - EC-004 remains not run because no decoder-to-converter callsite exists. QA-004 #35 remains a hard dependency. Independent exact-head re-review and reviewer-linked scenario receipts are pending; no QA-101 acceptance or native result is claimed.
+
+### Rebuilt QA-101 exact-head validation (2026-11-17)
+
+The clean branch `test/qa-101-input-boundaries-linear-r5` starts at the exact CNV-001 PR #314 head `b78920f82ff496e2ee9bd9b5ea454d906a003fa0`. It replays only the two issue-scoped #317 commits (`88ca0b1d492c186fff90d471ca784be9e4cbb838` and `b2271b831c5add8169d9f65090dc2ec06e70638c`), without merge or unrelated commits. QA source/test commit `bef69c6ecfecdb5a8511f1766310267bbe262600` has source tree SHA-1 `f93acfec5cc10e93cc30a5ba9b2b2129bf870945`.
+
+- QA test source SHA-256: `1b40a0fa11c534a1bef48945c36305e4898044500b319adfef3ce2ea9348fbf5`; synthetic-font generator source SHA-256: `8a0b3b4e8ee150d6d16b084e51200525112ed6424855afa652a55ed3274176c8`; generated focused-test executable SHA-256: `a7f597fc1d424dd6a1050cc41421914e376eccf20c5d98dbb8520996fb4dff10`.
+- Host: Windows x64, build `10.0.26300`; `rustc 1.100.0 (0ef1bc386 2026-11-09)`, LLVM `23.1.5`, `cargo 1.100.0 (3acc79c0c 2026-11-05)`. CPU-only regression tests; no GPU or media permission was required. Cargo used the pre-warmed registry cache and a dedicated external target directory.
+- `cargo test --offline --locked -p ascii-convert --test qa_101_input_conversion -- --nocapture` — PASS, 4 passed, 0 failed.
+- `cargo test --offline --locked --workspace` — PASS, 153 passed across 14 suites, 0 failed.
+- `cargo fmt --all -- --check` — PASS.
+- `cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings` — PASS.
+- Fixture SHA-256 values printed by the focused run: generated SFNT font `c90ae34f722cdf8d9bc9ee9242fe6c54961bf1e123a999f59290e433666dbef3`; EC-001 zero-width `61d699a07234f8214a7b6fd1b33e9f352977c31e133d7ad26936474865c5b7ff`, zero-height `b37b98fe7572258ff576cb5fe52abf78a05eaea1abc3f8111c7ee55ff8788fd7`, overflow-grid `513dd1e971e3288a72cf580135a280a217787af71550779edc75fde992cd0a93`, and over-budget readable extent `390696c0cd30faad3bb1751ad6b06a3b6b7053af04d11b4c61f50c0f28845625`; EC-002 tiny raster `f6ff3aa216383ebdb021c0c35f01b75ff36348b152f31ca3826409d2489ce15e`; EC-003 portrait `b564143e1c36569aa60a0b4e80fa42cb3e19b71e0cd20ff1d99b1ee88960e42e` and wide `cca553452c99d51f03ea2d71ec5608e8ee2bb71f02c9250ff0c6ee08e2360e12`; EC-005 transparent-blue hidden `5cccea941c6412ca123e6499ac0abd0f775b48f01cee6c781a9323ac96ad96b8` and transparent-magenta hidden `e1f070235015d08caaa1066a205bb40466c90bef81432818de61efc7b5b87ac3`.
+- EC-004 remains not run. QA-004 #35 remains a hard dependency, and this regression suite creates no QA-004 evidence receipt. Native/manual evidence and reviewer-linked scenario acceptance remain blockers; no QA-101 acceptance pass is claimed.
 
 ## Glyphs and rendering
 
