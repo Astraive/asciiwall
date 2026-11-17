@@ -771,22 +771,20 @@ impl SamplingPlan {
             SamplingFilter::Box => {
                 let source_rect = self.transform.source_rect;
                 let display_rect = self.transform.display_rect;
-                // Keep mapped coordinates relative to the source crop's integer pixel origin.
-                // Adding a tiny, valid patch extent to a large absolute source origin can round
-                // both endpoints to the same f64 even when the crop itself remains representable.
-                let source_origin_x = source_rect.x.floor();
-                let source_origin_y = source_rect.y.floor();
-                let source_fraction_x = source_rect.x - source_origin_x;
-                let source_fraction_y = source_rect.y - source_origin_y;
-                let source_x0 = source_fraction_x
-                    + (display_x0 - display_rect.x) * source_rect.width / display_rect.width;
-                let source_y0 = source_fraction_y
-                    + (display_y0 - display_rect.y) * source_rect.height / display_rect.height;
-                // Compute spans directly instead of subtracting absolute source coordinates.
+                let source_origin_x = source_rect.x.floor() as u32;
+                let source_origin_y = source_rect.y.floor() as u32;
+                let source_fraction_x = source_rect.x - f64::from(source_origin_x);
+                let source_fraction_y = source_rect.y - f64::from(source_origin_y);
+                let source_offset_x0 =
+                    (display_x0 - display_rect.x) * source_rect.width / display_rect.width;
+                let source_offset_y0 =
+                    (display_y0 - display_rect.y) * source_rect.height / display_rect.height;
+                // Keep each positive span separate from its fractional start; adding them can
+                // round an endpoint back to the start when a patch is narrower than one ulp.
                 let span_x = (display_x1 - display_x0) * source_rect.width / display_rect.width;
                 let span_y = (display_y1 - display_y0) * source_rect.height / display_rect.height;
-                if !source_x0.is_finite()
-                    || !source_y0.is_finite()
+                if !source_offset_x0.is_finite()
+                    || !source_offset_y0.is_finite()
                     || !span_x.is_finite()
                     || span_x <= 0.0
                     || !span_y.is_finite()
@@ -794,35 +792,59 @@ impl SamplingPlan {
                 {
                     return Err(Error::SizeOverflow);
                 }
-                let source_x1 = source_x0 + span_x;
-                let source_y1 = source_y0 + span_y;
-                let clipped_x0 = source_x0.max(source_fraction_x).max(-source_origin_x);
-                let clipped_y0 = source_y0.max(source_fraction_y).max(-source_origin_y);
-                let clipped_x1 = source_x1
-                    .min(source_fraction_x + source_rect.width)
-                    .min(f64::from(raster.width()) - source_origin_x);
-                let clipped_y1 = source_y1
-                    .min(source_fraction_y + source_rect.height)
-                    .min(f64::from(raster.height()) - source_origin_y);
+                let raster_x_extent = raster
+                    .width()
+                    .checked_sub(source_origin_x)
+                    .ok_or(Error::SizeOverflow)?;
+                let raster_y_extent = raster
+                    .height()
+                    .checked_sub(source_origin_y)
+                    .ok_or(Error::SizeOverflow)?;
+                let crop_extent_x = source_rect
+                    .width
+                    .min(f64::from(raster_x_extent) - source_fraction_x);
+                let crop_extent_y = source_rect
+                    .height
+                    .min(f64::from(raster_y_extent) - source_fraction_y);
+                let x_interval = box_axis_interval(
+                    source_origin_x,
+                    source_fraction_x,
+                    source_offset_x0,
+                    span_x,
+                    crop_extent_x,
+                    raster.width(),
+                )?;
+                let y_interval = box_axis_interval(
+                    source_origin_y,
+                    source_fraction_y,
+                    source_offset_y0,
+                    span_y,
+                    crop_extent_y,
+                    raster.height(),
+                )?;
                 let mut covered_weight = 0.0;
                 let mut weighted_luminance = 0.0;
-                if clipped_x1 > clipped_x0 && clipped_y1 > clipped_y0 {
-                    let first_x = (source_origin_x + clipped_x0.floor()) as u32;
-                    let first_y = (source_origin_y + clipped_y0.floor()) as u32;
-                    let end_x =
-                        (source_origin_x + clipped_x1.ceil()).min(f64::from(raster.width())) as u32;
-                    let end_y = (source_origin_y + clipped_y1.ceil())
-                        .min(f64::from(raster.height())) as u32;
-                    for y in first_y..end_y {
-                        let pixel_y = f64::from(y) - source_origin_y;
-                        let overlap_y = clipped_y1.min(pixel_y + 1.0) - clipped_y0.max(pixel_y);
+                if let (Some(x_interval), Some(y_interval)) = (x_interval, y_interval) {
+                    let mut remaining_y = y_interval.clipped_span;
+                    for y in y_interval.first_pixel..y_interval.end_pixel {
+                        let overlap_y = if y == y_interval.first_pixel {
+                            y_interval.first_overlap
+                        } else {
+                            remaining_y.min(1.0)
+                        };
+                        remaining_y -= overlap_y;
                         let weight_y = overlap_y / span_y;
                         if weight_y <= 0.0 {
                             continue;
                         }
-                        for x in first_x..end_x {
-                            let pixel_x = f64::from(x) - source_origin_x;
-                            let overlap_x = clipped_x1.min(pixel_x + 1.0) - clipped_x0.max(pixel_x);
+                        let mut remaining_x = x_interval.clipped_span;
+                        for x in x_interval.first_pixel..x_interval.end_pixel {
+                            let overlap_x = if x == x_interval.first_pixel {
+                                x_interval.first_overlap
+                            } else {
+                                remaining_x.min(1.0)
+                            };
+                            remaining_x -= overlap_x;
                             let weight = (overlap_x / span_x) * weight_y;
                             if weight <= 0.0 {
                                 continue;
@@ -845,6 +867,104 @@ impl SamplingPlan {
             }
         }
     }
+}
+
+// Preserve the rounding residual when deciding which source pixel contains a fractional start.
+fn two_sum(left: f64, right: f64) -> (f64, f64) {
+    let sum = left + right;
+    let right_virtual = sum - left;
+    let left_roundoff = left - (sum - right_virtual);
+    let right_roundoff = right - right_virtual;
+    (sum, left_roundoff + right_roundoff)
+}
+
+/// A clipped interval with its first pixel overlap kept separate from its total span.
+#[derive(Clone, Copy, Debug)]
+struct BoxAxisInterval {
+    first_pixel: u32,
+    end_pixel: u32,
+    first_overlap: f64,
+    clipped_span: f64,
+}
+
+fn box_axis_interval(
+    source_origin: u32,
+    source_fraction: f64,
+    source_offset: f64,
+    span: f64,
+    crop_extent: f64,
+    raster_extent: u32,
+) -> Result<Option<BoxAxisInterval>, Error> {
+    if !source_fraction.is_finite()
+        || source_fraction < 0.0
+        || source_fraction >= 1.0
+        || !source_offset.is_finite()
+        || !span.is_finite()
+        || span <= 0.0
+        || !crop_extent.is_finite()
+        || crop_extent <= 0.0
+        || source_origin > raster_extent
+    {
+        return Err(Error::SizeOverflow);
+    }
+    let (clipped_start, clipped_span) = if source_offset < 0.0 {
+        let outside_span = -source_offset;
+        if span <= outside_span {
+            return Ok(None);
+        }
+        (0.0, (span - outside_span).min(crop_extent))
+    } else {
+        if source_offset >= crop_extent {
+            return Ok(None);
+        }
+        (source_offset, span.min(crop_extent - source_offset))
+    };
+    if clipped_span <= 0.0 {
+        return Ok(None);
+    }
+
+    let offset_integer = clipped_start.floor();
+    let offset_fraction = clipped_start - offset_integer;
+    let (fraction_sum, fraction_error) = two_sum(source_fraction, offset_fraction);
+    let starts_after_edge = fraction_sum > 1.0 || (fraction_sum == 1.0 && fraction_error >= 0.0);
+    let (pixel_offset, first_pixel_extent) = if starts_after_edge {
+        let (fraction_after_edge, fraction_after_edge_error) = two_sum(fraction_sum, -1.0);
+        (
+            offset_integer as u64 + 1,
+            1.0 - (fraction_after_edge + fraction_after_edge_error + fraction_error),
+        )
+    } else {
+        let (distance_to_edge, distance_error) = two_sum(1.0, -source_fraction);
+        let (first_pixel_extent, first_pixel_error) = two_sum(distance_to_edge, -offset_fraction);
+        (
+            offset_integer as u64,
+            first_pixel_extent + first_pixel_error + distance_error,
+        )
+    };
+    let raster_extent = u64::from(raster_extent);
+    let first_pixel = u64::from(source_origin)
+        .checked_add(pixel_offset)
+        .ok_or(Error::SizeOverflow)?;
+    if first_pixel >= raster_extent {
+        return Err(Error::SizeOverflow);
+    }
+    let first_overlap = clipped_span.min(first_pixel_extent);
+    if !first_overlap.is_finite() || first_overlap <= 0.0 {
+        return Err(Error::SizeOverflow);
+    }
+    let remaining_span = clipped_span - first_overlap;
+    let following_pixels = remaining_span.ceil() as u64;
+    let end_pixel = first_pixel
+        .checked_add(1)
+        .and_then(|end| end.checked_add(following_pixels))
+        .ok_or(Error::SizeOverflow)?
+        .min(raster_extent);
+    Ok(Some(BoxAxisInterval {
+        first_pixel: first_pixel as u32,
+        end_pixel: end_pixel as u32,
+        first_overlap,
+        clipped_span,
+    }))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

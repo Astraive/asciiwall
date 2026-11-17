@@ -427,6 +427,89 @@ fn box_quality_patch_subdivision_preserves_narrow_crop_at_large_origin() {
 }
 
 #[test]
+fn box_quality_patch_subdivision_preserves_fractional_source_origin() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let pixels = [128_u8; 8];
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::CustomCrop(
+            CropRect::new(0.1875, 0.0, 0.18750000000000003, 1.0)
+                .expect("narrow fractional-origin crop is valid"),
+        ),
+        SamplingFilter::Box,
+        Some(PatchDimensions::new(4, 1).expect("four-sample patch is valid")),
+    ));
+
+    let converted = convert_density_detailed(
+        linear_gray_raster(&pixels, 8, 1, pixels.len()),
+        &table,
+        &conversion_settings,
+        &budget(),
+    )
+    .expect("box quality-patch conversion preserves positive subintervals");
+    let patch = converted
+        .patches()
+        .expect("quality mode retains its sampled luminance")
+        .luminance_for_cell(0)
+        .expect("one-cell patch exists");
+
+    assert_eq!(converted.transform().source_rect().x(), 1.5);
+    assert!(converted.transform().source_rect().width() > 0.0);
+    assert_eq!(patch.len(), 4);
+    assert!(
+        patch
+            .iter()
+            .all(|value| (f64::from(*value) - 128.0 / 255.0).abs() < 1.0e-7)
+    );
+}
+
+#[test]
+fn box_quality_patch_subdivision_integrates_fractional_pixel_edges() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let pixels = [0_u8, u8::MAX];
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(8, 12),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::CustomCrop(
+            CropRect::new(0.25, 0.0, 0.875, 1.0).expect("fractional crop is valid"),
+        ),
+        SamplingFilter::Box,
+        Some(PatchDimensions::new(4, 1).expect("four-sample patch is valid")),
+    ));
+
+    let converted = convert_density_detailed(
+        linear_gray_raster(&pixels, 2, 1, pixels.len()),
+        &table,
+        &conversion_settings,
+        &budget(),
+    )
+    .expect("box quality patches integrate across source pixel edges");
+    let patch = converted
+        .patches()
+        .expect("quality mode retains its sampled luminance")
+        .luminance_for_cell(0)
+        .expect("one-cell patch exists");
+
+    assert_eq!(patch.len(), 4);
+    for (actual, expected) in patch.iter().zip([0.0, 0.4, 1.0, 1.0]) {
+        assert!((f64::from(*actual) - expected).abs() < 1.0e-7);
+    }
+}
+
+#[test]
 fn box_sampling_integrates_cell_footprint_and_never_reads_stride_padding() {
     let table = build_table();
     let cancellation = CancellationToken::new();
