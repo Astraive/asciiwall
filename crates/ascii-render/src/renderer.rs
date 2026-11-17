@@ -1015,6 +1015,128 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an offscreen wgpu adapter"]
+    fn present_charges_cpu_growth_peak_before_vec_reallocation() {
+        let font_bytes = synthetic_font::synthetic_font(false);
+        let table_budget = Budget::new(32 * 1024 * 1024, 32 * 1024 * 1024, 20_000_000);
+        let cancellation = Arc::new(CancellationToken::new());
+        let repertoire = ascii_convert::GlyphRepertoire::new(" AB").unwrap();
+        let config = ascii_convert::GlyphConfig::new(8.0, 8, 12, 9).unwrap();
+        let table = Arc::new(
+            ascii_convert::build_glyph_table(
+                &font_bytes,
+                &repertoire,
+                &config,
+                &table_budget,
+                &cancellation,
+            )
+            .unwrap(),
+        );
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            ..Default::default()
+        });
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("offscreen presenter boundary test requires an adapter");
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("presenter frame-budget boundary"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+            },
+            None,
+        ))
+        .expect("offscreen presenter boundary test requires a compatible device");
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        let table_id = GlyphTableId::new(*table.fingerprint());
+        let frame_budget = Budget::new(128, 32 * 1024 * 1024, 20_000_000);
+        let one_cell = AsciiFrame::try_new(
+            GridSize::new(1, 1),
+            ascii_core::FrameMetadata::new(table_id, 1, 1, 0, 0),
+            vec![AsciiCell::new(0, [255; 4], [0; 4])],
+            table.glyphs().len() as u32,
+            &frame_budget,
+            &cancellation,
+        )
+        .unwrap();
+        let two_cells = AsciiFrame::try_new(
+            GridSize::new(2, 1),
+            ascii_core::FrameMetadata::new(table_id, 1, 1, 0, 0),
+            vec![
+                AsciiCell::new(1, [255; 4], [0; 4]),
+                AsciiCell::new(2, [0; 4], [255; 4]),
+            ],
+            table.glyphs().len() as u32,
+            &frame_budget,
+            &cancellation,
+        )
+        .unwrap();
+        let target_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("presenter frame-budget target"),
+            size: wgpu::Extent3d {
+                width: 16,
+                height: 12,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target = RenderTarget::texture(&target_texture, 1, 1);
+        let renderer_budget =
+            |max_frame_bytes| Budget::new(max_frame_bytes, 32 * 1024 * 1024, 20_000_000);
+        let mut rejected = Renderer::new(
+            device.clone(),
+            queue.clone(),
+            table.clone(),
+            renderer_budget(127),
+            cancellation.clone(),
+            DeviceStatus::new(),
+        );
+        assert_eq!(
+            rejected.present(&one_cell, &target),
+            Ok(crate::surface::PresentOutcome::Presented { suboptimal: false })
+        );
+        assert_eq!(rejected.packed.capacity(), 16);
+        assert_eq!(rejected.resources.as_ref().unwrap().capacity, 16);
+        let stats_before_growth = rejected.stats();
+        assert_eq!(
+            rejected.present(&two_cells, &target),
+            Err(Error::Core(ascii_core::Error::BudgetExceeded(
+                BudgetKind::FrameBytes
+            )))
+        );
+        assert_eq!(rejected.packed.capacity(), 16);
+        assert_eq!(rejected.resources.as_ref().unwrap().capacity, 16);
+        assert_eq!(rejected.stats(), stats_before_growth);
+
+        let mut accepted = Renderer::new(
+            device,
+            queue,
+            table,
+            renderer_budget(128),
+            cancellation,
+            DeviceStatus::new(),
+        );
+        assert_eq!(
+            accepted.present(&one_cell, &target),
+            Ok(crate::surface::PresentOutcome::Presented { suboptimal: false })
+        );
+        assert_eq!(accepted.packed.capacity(), 16);
+        assert_eq!(accepted.resources.as_ref().unwrap().capacity, 16);
+        assert_eq!(
+            accepted.present(&two_cells, &target),
+            Ok(crate::surface::PresentOutcome::Presented { suboptimal: false })
+        );
+        assert_eq!(accepted.packed.capacity(), 32);
+        assert_eq!(accepted.resources.as_ref().unwrap().capacity, 32);
+    }
+
+    #[test]
     fn padded_atlas_staging_is_preflighted_at_exact_budget_and_device_limits() {
         let input = PlanInput {
             size: GridSize::new(1, 1),
