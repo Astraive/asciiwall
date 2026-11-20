@@ -216,6 +216,62 @@ fn custom_crop_row_limit_is_checked_after_half_up_rounding() {
 }
 
 #[test]
+fn unsupported_hdr_precedes_minimum_positive_crop_sizing() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::columns(1),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::CustomCrop(
+            CropRect::new(0.0, 0.0, f64::MIN_POSITIVE, 1.0).expect("crop is valid"),
+        ),
+        SamplingFilter::Box,
+        None,
+    ));
+    let pixels = [128_u8];
+    let hdr = RasterFrameView::new(
+        1,
+        1,
+        1,
+        PixelFormat::gray8(),
+        ColorDescription::new(
+            ascii_core::ColorPrimaries::Srgb,
+            TransferFunction::Pq,
+            AlphaMode::Opaque,
+        ),
+        RasterOrientation::TopDown,
+        &pixels,
+    );
+    let valid_profile = RasterFrameView::new(
+        1,
+        1,
+        1,
+        PixelFormat::gray8(),
+        ColorDescription::srgb(AlphaMode::Opaque),
+        RasterOrientation::TopDown,
+        &pixels,
+    );
+
+    assert_eq!(
+        convert_density_detailed(hdr, &table, &conversion_settings, &budget()),
+        Err(DensityConversionError::ColorNormalization(
+            ColorNormalizationError::UnsupportedColor(UnsupportedColorReason::HdrTransfer(
+                TransferFunction::Pq
+            ))
+        ))
+    );
+    assert_eq!(
+        convert_density_detailed(valid_profile, &table, &conversion_settings, &budget()),
+        Err(DensityConversionError::Core(Error::SizeOverflow))
+    );
+}
+
+#[test]
 fn custom_crop_preserves_narrow_extent_at_large_source_origin() {
     let transform = FitTransform::new(
         10_000_000,
