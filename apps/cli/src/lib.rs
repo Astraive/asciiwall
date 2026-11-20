@@ -16,7 +16,7 @@ use arguments::{Cli, Color, Command, Format, Matcher};
 use diagnostic::{CliError, print_error, print_help};
 
 use ascii_convert::{ColorNormalizationError, DensityConversionError, GlyphConfig};
-use ascii_core::{Budget, CancellationToken, Error, GlyphFailureReason};
+use ascii_core::{Budget, CancellationToken, Error, UnsupportedReason};
 use ascii_media::{DecodeLimits, DecodeResources, decode_image};
 use ascii_render::{AnsiColorMode, ExportError, ExportTarget, export};
 use font::{FontLoadError, load_glyph_table_with_repertoire, open_regular_input_file};
@@ -302,9 +302,6 @@ fn core_error(error: Error) -> CliError {
         Error::Malformed(_) | Error::Unsupported(_) => {
             CliError::media("image input is invalid or unsupported")
         }
-        Error::Glyph { .. } => {
-            CliError::validation("glyph repertoire or font metrics are unsupported")
-        }
         Error::BudgetExceeded(_) | Error::SizeOverflow | Error::AllocationFailed => {
             CliError::resource("image conversion exceeds configured resource limits")
         }
@@ -352,23 +349,15 @@ fn font_error(error: FontLoadError) -> CliError {
         FontLoadError::Engine(Error::TemporarilyUnavailable) => {
             CliError::capability("font measurement is temporarily unavailable")
         }
+        FontLoadError::Engine(Error::Unsupported(UnsupportedReason::GlyphUnavailable)) => {
+            CliError::validation("selected font lacks a requested glyph")
+        }
         FontLoadError::Engine(Error::Malformed(_) | Error::Unsupported(_)) => {
             CliError::validation("font is invalid or unsupported")
         }
         FontLoadError::Engine(
             Error::BudgetExceeded(_) | Error::SizeOverflow | Error::AllocationFailed,
         ) => CliError::resource("font exceeds configured resource limits"),
-        FontLoadError::Engine(Error::Glyph { reason, .. }) => match reason {
-            GlyphFailureReason::UnsupportedScalar | GlyphFailureReason::DuplicateScalar => {
-                CliError::validation("charset contains unsupported glyphs")
-            }
-            GlyphFailureReason::GlyphUnavailable => {
-                CliError::validation("selected font lacks a requested glyph")
-            }
-            GlyphFailureReason::MultiCellMetrics => {
-                CliError::validation("selected font has a glyph wider than one cell")
-            }
-        },
         FontLoadError::Engine(Error::Cancelled) => {
             CliError::cancelled("font loading was cancelled")
         }
