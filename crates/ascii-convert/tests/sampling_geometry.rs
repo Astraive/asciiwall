@@ -13,6 +13,7 @@ use ascii_core::{
     FrameMetadata, GlyphTableId, GridSize, MalformedReason, PixelFormat, RasterFrameView,
     RasterOrientation, TransferFunction,
 };
+use sha2::{Digest, Sha256};
 use support::synthetic_font::synthetic_font;
 
 const CELL_WIDTH: u32 = 8;
@@ -85,6 +86,156 @@ fn one_cell_settings<'a>(
         cancellation,
         ascii_convert::GridSizing::fixed_pixel_surface(CELL_WIDTH, CELL_HEIGHT),
         SamplingOptions::new(fit, filter, patch),
+    )
+}
+
+const FILTER_FIXTURE_WIDTH: usize = 4;
+const FILTER_FIXTURE_HEIGHT: usize = 6;
+const FILTER_FIXTURE_PIXEL_COUNT: usize = FILTER_FIXTURE_WIDTH * FILTER_FIXTURE_HEIGHT;
+const FILTER_PATCH_WIDTH: u32 = 2;
+const FILTER_PATCH_HEIGHT: u32 = 3;
+const AREA_COVERAGE_TOLERANCE: f32 = 1.0e-6;
+
+#[derive(Clone, Copy)]
+struct FilterComparisonFixture {
+    name: &'static str,
+    generator: &'static str,
+    pixels: [u8; FILTER_FIXTURE_PIXEL_COUNT],
+    expects_aliasing: bool,
+}
+
+fn filter_comparison_fixtures() -> [FilterComparisonFixture; 4] {
+    // Generator parameters are deliberately simple and source-local: a 1 px vertical line at
+    // x=1; a 1 px, phase-zero checkerboard; a fixed 4x6 A mask; and a fixed gradient formula.
+    let mut thin_line = [0; FILTER_FIXTURE_PIXEL_COUNT];
+    for y in 0..FILTER_FIXTURE_HEIGHT {
+        thin_line[y * FILTER_FIXTURE_WIDTH + 1] = u8::MAX;
+    }
+
+    let mut checkerboard = [0; FILTER_FIXTURE_PIXEL_COUNT];
+    for y in 0..FILTER_FIXTURE_HEIGHT {
+        for x in 0..FILTER_FIXTURE_WIDTH {
+            checkerboard[y * FILTER_FIXTURE_WIDTH + x] = if (x + y).is_multiple_of(2) {
+                u8::MAX
+            } else {
+                0
+            };
+        }
+    }
+
+    let mut text_like = [0; FILTER_FIXTURE_PIXEL_COUNT];
+    let text_rows = [0b0110_u8, 0b1001, 0b1111, 0b1001, 0b1001, 0b1001];
+    for (y, mask) in text_rows.into_iter().enumerate() {
+        for x in 0..FILTER_FIXTURE_WIDTH {
+            let bit = 1_u8 << (FILTER_FIXTURE_WIDTH - 1 - x);
+            if mask & bit != 0 {
+                text_like[y * FILTER_FIXTURE_WIDTH + x] = u8::MAX;
+            }
+        }
+    }
+
+    let mut photo_like = [0; FILTER_FIXTURE_PIXEL_COUNT];
+    for y in 0..FILTER_FIXTURE_HEIGHT {
+        for x in 0..FILTER_FIXTURE_WIDTH {
+            let x = i16::try_from(x).expect("fixture x coordinate fits i16");
+            let y = i16::try_from(y).expect("fixture y coordinate fits i16");
+            let texture = ((x * 5 + y * 3) % 5 - 2) * 4;
+            let value = (18 + 23 * x + 31 * y + texture).clamp(0, 255);
+            let index = usize::try_from(y).expect("fixture y coordinate fits usize")
+                * FILTER_FIXTURE_WIDTH
+                + usize::try_from(x).expect("fixture x coordinate fits usize");
+            photo_like[index] = u8::try_from(value).expect("fixture sample is in the byte range");
+        }
+    }
+
+    [
+        FilterComparisonFixture {
+            name: "thin-line",
+            generator: "4x6 gray8; x=1 is 255 for every row; all other pixels are 0",
+            pixels: thin_line,
+            expects_aliasing: true,
+        },
+        FilterComparisonFixture {
+            name: "checkerboard",
+            generator: "4x6 gray8; (x+y)%2==0 is 255, otherwise 0",
+            pixels: checkerboard,
+            expects_aliasing: true,
+        },
+        FilterComparisonFixture {
+            name: "text-like",
+            generator: "4x6 gray8; A mask rows 0110,1001,1111,1001,1001,1001; ink=255",
+            pixels: text_like,
+            expects_aliasing: false,
+        },
+        FilterComparisonFixture {
+            name: "photo-like",
+            generator: "4x6 gray8; clamp(18+23*x+31*y+4*((5*x+3*y)%5-2),0,255)",
+            pixels: photo_like,
+            expects_aliasing: false,
+        },
+    ]
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter().copied() {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    hex
+}
+
+fn filter_comparison_settings_record(
+    fixture: &FilterComparisonFixture,
+    filter: SamplingFilter,
+    fixture_sha256: &str,
+    font_sha256: &str,
+    table_fingerprint: &str,
+) -> String {
+    let filter_name = match filter {
+        SamplingFilter::Box => "box",
+        SamplingFilter::Nearest => "nearest",
+    };
+    format!(
+        concat!(
+            "record=cnv-003-filter-comparison-v1\n",
+            "fixture={}\n",
+            "generator={}\n",
+            "fixture_sha256={}\n",
+            "raster_dimensions={}x{}\n",
+            "row_stride_bytes={}\n",
+            "pixel_format=gray8\n",
+            "primaries=srgb\n",
+            "transfer=linear\n",
+            "alpha=opaque\n",
+            "orientation=top_down\n",
+            "fit=contain\n",
+            "crop=none; source=full-frame\n",
+            "grid_sizing=fixed_pixel_surface(8,12)\n",
+            "grid_dimensions=1x1\n",
+            "cell_dimensions=8x12\n",
+            "filter={}\n",
+            "patch=2x3\n",
+            "foreground=linear_rgb(1,1,1)\n",
+            "background=linear_rgb(0,0,0)\n",
+            "metadata=table_fingerprint:{},frame_id:1,generation:0,pts_us:0,duration_us:1\n",
+            "budget=max_frame_bytes:8000000,max_raster_bytes:64000000,max_work_units:16000000\n",
+            "font_generator=synthetic_font(false)\n",
+            "font_sha256={}\n",
+            "glyph_repertoire=BA<space>\n",
+            "glyph_config=point_size:8.0,cell_width:8,cell_height:12,baseline:9\n",
+        ),
+        fixture.name,
+        fixture.generator,
+        fixture_sha256,
+        FILTER_FIXTURE_WIDTH,
+        FILTER_FIXTURE_HEIGHT,
+        FILTER_FIXTURE_WIDTH,
+        filter_name,
+        table_fingerprint,
+        font_sha256,
     )
 }
 
@@ -640,4 +791,158 @@ fn quality_conversion_recovers_after_cancelled_attempt() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn box_and_nearest_filters_compare_area_coverage_on_synthetic_patterns() {
+    // The SFNT is assembled exclusively from tests/support/synthetic_font.rs source constants.
+    let font_bytes = synthetic_font(false);
+    let font_sha256 = sha256_hex(&font_bytes);
+    let table = build_glyph_table(
+        &font_bytes,
+        &GlyphRepertoire::new("BA ").expect("fixture repertoire is supported"),
+        &GlyphConfig::new(8.0, CELL_WIDTH, CELL_HEIGHT, 9)
+            .expect("fixture glyph geometry is valid"),
+        &Budget::new(1_000_000, 2_000_000, 2_000_000),
+        &CancellationToken::new(),
+    )
+    .expect("synthetic font builds a measured table");
+    let table_fingerprint = sha256_hex(table.fingerprint());
+    let patch = PatchDimensions::new(FILTER_PATCH_WIDTH, FILTER_PATCH_HEIGHT)
+        .expect("comparison patch dimensions are valid");
+    let cancellation = CancellationToken::new();
+    let raster_width =
+        u32::try_from(FILTER_FIXTURE_WIDTH).expect("fixture width fits a raster dimension");
+    let raster_height =
+        u32::try_from(FILTER_FIXTURE_HEIGHT).expect("fixture height fits a raster dimension");
+
+    for fixture in filter_comparison_fixtures() {
+        let fixture_sha256 = sha256_hex(&fixture.pixels);
+        println!("fixture={} sha256={fixture_sha256}", fixture.name);
+        let convert = |filter| {
+            let settings = settings(
+                &table,
+                &cancellation,
+                ascii_convert::GridSizing::fixed_pixel_surface(CELL_WIDTH, CELL_HEIGHT),
+                SamplingOptions::new(FitMode::Contain, filter, Some(patch)),
+            );
+            convert_density_detailed(
+                linear_gray_raster(
+                    &fixture.pixels,
+                    raster_width,
+                    raster_height,
+                    FILTER_FIXTURE_WIDTH,
+                ),
+                &table,
+                &settings,
+                &budget(),
+            )
+            .expect("synthetic filter-comparison fixture converts")
+        };
+        let box_conversion = convert(SamplingFilter::Box);
+        let nearest_conversion = convert(SamplingFilter::Nearest);
+        assert_eq!(box_conversion.frame().size(), GridSize::new(1, 1));
+        assert_eq!(
+            box_conversion.frame().metadata(),
+            nearest_conversion.frame().metadata(),
+            "fixture={}",
+            fixture.name
+        );
+        assert_eq!(
+            box_conversion.transform(),
+            nearest_conversion.transform(),
+            "fixture={}",
+            fixture.name
+        );
+
+        let box_values = box_conversion
+            .patches()
+            .expect("Box conversion retains its patch")
+            .luminance_for_cell(0)
+            .expect("Box conversion has one output cell");
+        let nearest_values = nearest_conversion
+            .patches()
+            .expect("Nearest conversion retains its patch")
+            .luminance_for_cell(0)
+            .expect("Nearest conversion has one output cell");
+        assert_eq!(box_values.len(), 6);
+        assert_eq!(nearest_values.len(), 6);
+
+        let patch_width = usize::try_from(FILTER_PATCH_WIDTH).expect("patch width fits usize");
+        let patch_height = usize::try_from(FILTER_PATCH_HEIGHT).expect("patch height fits usize");
+        let mut largest_filter_difference = 0.0_f32;
+        for patch_y in 0..patch_height {
+            for patch_x in 0..patch_width {
+                let patch_index = patch_y * patch_width + patch_x;
+                let source_x = patch_x * 2;
+                let source_y = patch_y * 2;
+                let area_sum =
+                    u16::from(fixture.pixels[source_y * FILTER_FIXTURE_WIDTH + source_x])
+                        + u16::from(fixture.pixels[source_y * FILTER_FIXTURE_WIDTH + source_x + 1])
+                        + u16::from(
+                            fixture.pixels[(source_y + 1) * FILTER_FIXTURE_WIDTH + source_x],
+                        )
+                        + u16::from(
+                            fixture.pixels[(source_y + 1) * FILTER_FIXTURE_WIDTH + source_x + 1],
+                        );
+                let area_reference = f32::from(area_sum) / 4.0 / 255.0;
+                assert!(
+                    (box_values[patch_index] - area_reference).abs() <= AREA_COVERAGE_TOLERANCE,
+                    "fixture={} patch=({}, {}) Box={} area_reference={} tolerance={}",
+                    fixture.name,
+                    patch_x,
+                    patch_y,
+                    box_values[patch_index],
+                    area_reference,
+                    AREA_COVERAGE_TOLERANCE
+                );
+
+                // With a 4x6 source, 8x12 destination cell, and 2x3 patch, each nearest
+                // footprint's center maps to the lower-right pixel of its 2x2 source block.
+                let nearest_source_index = (source_y + 1) * FILTER_FIXTURE_WIDTH + source_x + 1;
+                let nearest_reference = f32::from(fixture.pixels[nearest_source_index]) / 255.0;
+                assert!(
+                    (nearest_values[patch_index] - nearest_reference).abs()
+                        <= AREA_COVERAGE_TOLERANCE,
+                    "fixture={} patch=({}, {}) Nearest={} center_reference={} tolerance={}",
+                    fixture.name,
+                    patch_x,
+                    patch_y,
+                    nearest_values[patch_index],
+                    nearest_reference,
+                    AREA_COVERAGE_TOLERANCE
+                );
+                largest_filter_difference = largest_filter_difference
+                    .max((box_values[patch_index] - nearest_values[patch_index]).abs());
+            }
+        }
+        if fixture.expects_aliasing {
+            assert!(
+                largest_filter_difference >= 0.49,
+                "fixture={} did not expose thin-feature/checkerboard aliasing: max difference {}",
+                fixture.name,
+                largest_filter_difference
+            );
+        }
+
+        for filter in [SamplingFilter::Box, SamplingFilter::Nearest] {
+            let record = filter_comparison_settings_record(
+                &fixture,
+                filter,
+                &fixture_sha256,
+                &font_sha256,
+                &table_fingerprint,
+            );
+            println!(
+                "settings_record_sha256 fixture={} filter={} sha256={}\n{}",
+                fixture.name,
+                match filter {
+                    SamplingFilter::Box => "box",
+                    SamplingFilter::Nearest => "nearest",
+                },
+                sha256_hex(record.as_bytes()),
+                record
+            );
+        }
+    }
 }
