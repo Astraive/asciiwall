@@ -1,8 +1,15 @@
 use std::ffi::OsStr;
 use std::fs;
-#[cfg(unix)]
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::process::{Command, Output};
+
+use ascii_convert::{GlyphConfig, GlyphRepertoire};
+use ascii_core::{Budget, CancellationToken};
+use ascii_media::{DecodeLimits, DecodeResources, decode_image};
+use ascii_render::{AnsiColorMode, ExportTarget, export};
+use asciiwall_cli::convert::monochrome_density;
+use asciiwall_cli::font::load_glyph_table_with_repertoire;
 
 #[allow(dead_code)]
 #[path = "../../../crates/ascii-convert/tests/support/synthetic_font.rs"]
@@ -30,6 +37,49 @@ where
 
 fn status(output: &Output) -> i32 {
     output.status.code().expect("CLI exited with a status")
+}
+
+fn shared_engine_export(source_path: &Path, font_path: &Path, target: ExportTarget) -> Vec<u8> {
+    let budget = Budget::new(8_000_000, 64_000_000, 16_000_000);
+    let cancellation = CancellationToken::new();
+    let geometry = GlyphConfig::new(8.0, 8, 12, 9).unwrap();
+    let repertoire = GlyphRepertoire::new(" AB").unwrap();
+    let glyphs = load_glyph_table_with_repertoire(
+        font_path,
+        &repertoire,
+        &geometry,
+        &budget,
+        &cancellation,
+    )
+    .unwrap();
+    let decode_limits = DecodeLimits::new(
+        budget,
+        DecodeResources::new(1, budget.max_frame_bytes()),
+        16_384,
+        16_384,
+        budget.max_raster_bytes(),
+        budget.max_frame_bytes(),
+    );
+    let mut source = fs::File::open(source_path).unwrap();
+    let decoded = decode_image(&mut source, &decode_limits, &cancellation).unwrap();
+    let converted = monochrome_density(
+        decoded.view(),
+        &glyphs,
+        NonZeroU32::new(12).unwrap(),
+        &budget,
+        &cancellation,
+    )
+    .unwrap();
+    export(
+        converted.frame(),
+        &glyphs,
+        target,
+        &budget,
+        &cancellation,
+    )
+    .unwrap()
+    .bytes()
+    .to_vec()
 }
 
 #[test]
@@ -247,6 +297,10 @@ fn shared_decoder_density_and_text_ansi_export_are_wired_end_to_end() {
     assert_eq!(status(&text_output), 0);
     assert!(!text_output.stdout.is_empty());
     let text = String::from_utf8(text_output.stdout.clone()).unwrap();
+    assert_eq!(
+        text_output.stdout.as_slice(),
+        shared_engine_export(&source_path, &font_path, ExportTarget::Text)
+    );
     assert!(text.ends_with('\n'));
     assert!(text.lines().all(|line| line.chars().count() == 12));
     assert!(!text.contains('\x1b'));
@@ -301,6 +355,14 @@ fn shared_decoder_density_and_text_ansi_export_are_wired_end_to_end() {
     ]);
     assert_eq!(status(&ansi_output), 0);
     let ansi = String::from_utf8(ansi_output.stdout.clone()).unwrap();
+    assert_eq!(
+        ansi_output.stdout.as_slice(),
+        shared_engine_export(
+            &source_path,
+            &font_path,
+            ExportTarget::Ansi(AnsiColorMode::TrueColor)
+        )
+    );
     assert!(ansi.starts_with("\x1b[0m\x1b[38;2;255;255;255;48;2;0;0;0m"));
     assert!(ansi.ends_with("\x1b[0m\n"));
     assert!(!ansi.contains("\x1b]"));
