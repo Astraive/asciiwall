@@ -92,19 +92,13 @@ fn text_ansi_golden() {
     let budget = FONT_BUDGET;
     let cancellation = CancellationToken::new();
 
-    let text = export(
-        &frame,
-        &table,
-        ExportTarget::Text,
-        &budget,
-        &cancellation,
-    )
-    .expect("printable text export succeeds");
+    let text = export(&frame, &table, ExportTarget::Text, &budget, &cancellation)
+        .expect("printable text export succeeds");
     assert_eq!(text.bytes(), " █⠁\n⠁ █\n".as_bytes());
     assert_eq!(text.size(), GridSize::new(3, 2));
     assert_eq!(
         text.loss_notice(),
-        "Plain text preserves the printable character grid but loses font, colors, and motion; exact aspect depends on the viewer."
+        "Plain text preserves the printable character grid but loses the source font, colors, and motion; character-cell aspect depends on the viewer's font and layout."
     );
 
     let ansi = export(
@@ -116,14 +110,12 @@ fn text_ansi_golden() {
     )
     .expect("true-color ANSI export succeeds");
     let cell = "\x1b[38;2;255;0;0;48;2;0;0;255m";
-    let expected = format!(
-        "\x1b[0m{cell} {cell}█{cell}⠁\x1b[0m\n{cell}⠁{cell} {cell}█\x1b[0m\n"
-    );
+    let expected = format!("\x1b[0m{cell} {cell}█{cell}⠁\x1b[0m\n{cell}⠁{cell} {cell}█\x1b[0m\n");
     assert_eq!(ansi.bytes(), expected.as_bytes());
     assert_eq!(ansi.size(), GridSize::new(3, 2));
     assert_eq!(
         ansi.loss_notice(),
-        "ANSI true-color output flattens background alpha against black and foreground alpha against the flattened background; it uses direct sRGB color parameters but still depends on the terminal font and does not preserve live effects."
+        "ANSI true-color output flattens background alpha against black and foreground alpha against the flattened background; it uses direct sRGB color parameters but loses the source font and live effects, and character-cell aspect depends on the terminal font and layout."
     );
     for (mode, palette_cell) in [
         (AnsiColorMode::Ansi16, "\x1b[91;104m"),
@@ -147,14 +139,7 @@ fn text_ansi_golden() {
 #[test]
 fn ansi_alpha_flattening_and_palette_quantization_are_reported() {
     let table = build_table("█");
-    let frame = grid_frame_with_colors(
-        &table,
-        &['█'],
-        1,
-        1,
-        [255, 0, 0, 128],
-        [0, 0, 255, 128],
-    );
+    let frame = grid_frame_with_colors(&table, &['█'], 1, 1, [255, 0, 0, 128], [0, 0, 255, 128]);
     let cancellation = CancellationToken::new();
 
     let true_color = export(
@@ -171,7 +156,7 @@ fn ansi_alpha_flattening_and_palette_quantization_are_reported() {
     );
     assert_eq!(
         true_color.loss_notice(),
-        "ANSI true-color output flattens background alpha against black and foreground alpha against the flattened background; it uses direct sRGB color parameters but still depends on the terminal font and does not preserve live effects."
+        "ANSI true-color output flattens background alpha against black and foreground alpha against the flattened background; it uses direct sRGB color parameters but loses the source font and live effects, and character-cell aspect depends on the terminal font and layout."
     );
 
     let ansi16 = export(
@@ -182,13 +167,10 @@ fn ansi_alpha_flattening_and_palette_quantization_are_reported() {
         &cancellation,
     )
     .expect("ANSI16 export succeeds");
-    assert_eq!(
-        ansi16.bytes(),
-        "\x1b[0m\x1b[31;44m█\x1b[0m\n".as_bytes()
-    );
+    assert_eq!(ansi16.bytes(), "\x1b[0m\x1b[31;44m█\x1b[0m\n".as_bytes());
     assert_eq!(
         ansi16.loss_notice(),
-        "ANSI 16-color output flattens background alpha against black and foreground alpha against the flattened background, then quantizes both colors to the conventional 16-color palette; terminal palette and font affect appearance, and live effects are not preserved."
+        "ANSI 16-color output flattens background alpha against black and foreground alpha against the flattened background, then quantizes both colors to the conventional 16-color palette; the terminal palette affects color appearance, the source font and live effects are not preserved, and character-cell aspect depends on the terminal font and layout."
     );
 
     let ansi256 = export(
@@ -205,7 +187,27 @@ fn ansi_alpha_flattening_and_palette_quantization_are_reported() {
     );
     assert_eq!(
         ansi256.loss_notice(),
-        "ANSI 256-color output flattens background alpha against black and foreground alpha against the flattened background, then quantizes both colors to the xterm 256-color palette; terminal palette and font affect appearance, and live effects are not preserved."
+        "ANSI 256-color output flattens background alpha against black and foreground alpha against the flattened background, then quantizes both colors to the xterm 256-color palette; the terminal palette affects color appearance, the source font and live effects are not preserved, and character-cell aspect depends on the terminal font and layout."
+    );
+}
+
+#[test]
+fn ansi256_selects_nearest_grayscale_entry_from_exact_channel_sum() {
+    let table = build_table("█");
+    let frame = grid_frame_with_colors(&table, &['█'], 1, 1, [0, 0, 40, 255], [0, 0, 0, 255]);
+    let cancellation = CancellationToken::new();
+    let output = export(
+        &frame,
+        &table,
+        ExportTarget::Ansi(AnsiColorMode::Ansi256),
+        &FONT_BUDGET,
+        &cancellation,
+    )
+    .expect("ANSI256 export succeeds");
+
+    assert_eq!(
+        output.bytes(),
+        "\x1b[0m\x1b[38;5;233;48;5;0m█\x1b[0m\n".as_bytes()
     );
 }
 
@@ -243,19 +245,8 @@ fn terminal_safety() {
         assert!(is_supported_single_cell_scalar(character));
     }
     for character in [
-        '\x1b',
-        '\0',
-        '\n',
-        '\u{7f}',
-        '\u{85}',
-        '\u{202e}',
-        '\u{2066}',
-        '\u{200b}',
-        '\u{fe0f}',
-        '\u{200d}',
-        '\u{301}',
-        '界',
-        '😀',
+        '\x1b', '\0', '\n', '\u{7f}', '\u{85}', '\u{202e}', '\u{2066}', '\u{200b}', '\u{fe0f}',
+        '\u{200d}', '\u{301}', '界', '😀',
     ] {
         let mut encoded = [0; 4];
         assert!(
@@ -276,10 +267,7 @@ fn ansi_palette_work_budget_covers_both_color_encoding_passes() {
     let cancellation = CancellationToken::new();
     let glyph_work = u64::try_from(table.glyphs().len()).expect("fixture glyph count fits");
 
-    for (mode, work_per_cell) in [
-        (AnsiColorMode::Ansi16, 67),
-        (AnsiColorMode::Ansi256, 75),
-    ] {
+    for (mode, work_per_cell) in [(AnsiColorMode::Ansi16, 67), (AnsiColorMode::Ansi256, 75)] {
         let minimum_work = glyph_work + work_per_cell;
         let one_unit_short = Budget::new(1_000_000, 1_000_000, minimum_work - 1);
         assert_eq!(
@@ -290,7 +278,9 @@ fn ansi_palette_work_budget_covers_both_color_encoding_passes() {
                 &one_unit_short,
                 &cancellation,
             ),
-            Err(ExportError::Core(Error::BudgetExceeded(BudgetKind::WorkUnits)))
+            Err(ExportError::Core(Error::BudgetExceeded(
+                BudgetKind::WorkUnits
+            )))
         );
 
         let exact_work = Budget::new(1_000_000, 1_000_000, minimum_work);
@@ -353,7 +343,9 @@ fn budget_and_cancellation_fail_without_publishing_partial_bytes() {
             &constrained_bytes,
             &token,
         ),
-        Err(ExportError::Core(Error::BudgetExceeded(BudgetKind::FrameBytes)))
+        Err(ExportError::Core(Error::BudgetExceeded(
+            BudgetKind::FrameBytes
+        )))
     );
 
     let constrained_work = Budget::new(1_000_000, 1_000_000, 6);
@@ -365,18 +357,14 @@ fn budget_and_cancellation_fail_without_publishing_partial_bytes() {
             &constrained_work,
             &token,
         ),
-        Err(ExportError::Core(Error::BudgetExceeded(BudgetKind::WorkUnits)))
+        Err(ExportError::Core(Error::BudgetExceeded(
+            BudgetKind::WorkUnits
+        )))
     );
 
     token.cancel();
     assert_eq!(
-        export(
-            &frame,
-            &table,
-            ExportTarget::Text,
-            &FONT_BUDGET,
-            &token,
-        ),
+        export(&frame, &table, ExportTarget::Text, &FONT_BUDGET, &token,),
         Err(ExportError::Core(Error::Cancelled))
     );
 }
@@ -397,7 +385,11 @@ fn assert_only_glyphs_and_approved_sgr(bytes: &[u8], mode: AnsiColorMode) {
     let mut reset_count = 0usize;
     while cursor < bytes.len() {
         if bytes[cursor] == 0x1b {
-            assert_eq!(bytes.get(cursor + 1), Some(&b'['), "only CSI SGR is allowed");
+            assert_eq!(
+                bytes.get(cursor + 1),
+                Some(&b'['),
+                "only CSI SGR is allowed"
+            );
             let start = cursor + 2;
             let end = bytes[start..]
                 .iter()
@@ -413,7 +405,10 @@ fn assert_only_glyphs_and_approved_sgr(bytes: &[u8], mode: AnsiColorMode) {
             cursor = end + 1;
         } else {
             let suffix = core::str::from_utf8(&bytes[cursor..]).expect("glyph stream is UTF-8");
-            let character = suffix.chars().next().expect("nonempty suffix has a character");
+            let character = suffix
+                .chars()
+                .next()
+                .expect("nonempty suffix has a character");
             assert!(character == '\n' || is_fixture_glyph(character));
             if character != '\n' {
                 assert!(!character.is_control());
@@ -421,12 +416,19 @@ fn assert_only_glyphs_and_approved_sgr(bytes: &[u8], mode: AnsiColorMode) {
             cursor += character.len_utf8();
         }
     }
-    assert_eq!(reset_count, 3, "the stream starts clean and each row resets terminal attributes");
+    assert_eq!(
+        reset_count, 3,
+        "the stream starts clean and each row resets terminal attributes"
+    );
 }
 
 fn parse_sgr_parameters(parameters: &[u8]) -> Vec<u16> {
     assert!(!parameters.is_empty());
-    assert!(parameters.iter().all(|byte| byte.is_ascii_digit() || *byte == b';'));
+    assert!(
+        parameters
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || *byte == b';')
+    );
     parameters
         .split(|byte| *byte == b';')
         .map(|digits| {

@@ -6,8 +6,8 @@ use std::vec::Vec;
 
 use ascii_convert::GlyphTable;
 use ascii_core::{
-    AsciiCell, AsciiFrame, Budget, BudgetKind, CancellationToken, Error, GlyphTableId,
-    GridSize, MalformedReason, validate_frame,
+    AsciiCell, AsciiFrame, Budget, BudgetKind, CancellationToken, Error, GlyphTableId, GridSize,
+    MalformedReason, validate_frame,
 };
 
 const CANCELLATION_POLL_INTERVAL: usize = 1024;
@@ -114,16 +114,16 @@ impl ExportOutput {
     pub const fn loss_notice(&self) -> &'static str {
         match self.target {
             ExportTarget::Text => {
-                "Plain text preserves the printable character grid but loses font, colors, and motion; exact aspect depends on the viewer."
+                "Plain text preserves the printable character grid but loses the source font, colors, and motion; character-cell aspect depends on the viewer's font and layout."
             }
             ExportTarget::Ansi(AnsiColorMode::TrueColor) => {
-                "ANSI true-color output flattens background alpha against black and foreground alpha against the flattened background; it uses direct sRGB color parameters but still depends on the terminal font and does not preserve live effects."
+                "ANSI true-color output flattens background alpha against black and foreground alpha against the flattened background; it uses direct sRGB color parameters but loses the source font and live effects, and character-cell aspect depends on the terminal font and layout."
             }
             ExportTarget::Ansi(AnsiColorMode::Ansi16) => {
-                "ANSI 16-color output flattens background alpha against black and foreground alpha against the flattened background, then quantizes both colors to the conventional 16-color palette; terminal palette and font affect appearance, and live effects are not preserved."
+                "ANSI 16-color output flattens background alpha against black and foreground alpha against the flattened background, then quantizes both colors to the conventional 16-color palette; the terminal palette affects color appearance, the source font and live effects are not preserved, and character-cell aspect depends on the terminal font and layout."
             }
             ExportTarget::Ansi(AnsiColorMode::Ansi256) => {
-                "ANSI 256-color output flattens background alpha against black and foreground alpha against the flattened background, then quantizes both colors to the xterm 256-color palette; terminal palette and font affect appearance, and live effects are not preserved."
+                "ANSI 256-color output flattens background alpha against black and foreground alpha against the flattened background, then quantizes both colors to the xterm 256-color palette; the terminal palette affects color appearance, the source font and live effects are not preserved, and character-cell aspect depends on the terminal font and layout."
             }
         }
     }
@@ -152,17 +152,11 @@ pub fn export(
             MalformedReason::InvalidConfiguration,
         )));
     }
-    let glyph_count = u32::try_from(glyphs.len())
-        .map_err(|_| ExportError::Core(Error::SizeOverflow))?;
+    let glyph_count =
+        u32::try_from(glyphs.len()).map_err(|_| ExportError::Core(Error::SizeOverflow))?;
     let glyph_table_id = GlyphTableId::new(*glyph_table.fingerprint());
-    validate_frame(
-        frame,
-        glyph_table_id,
-        glyph_count,
-        budget,
-        cancellation,
-    )
-    .map_err(ExportError::Core)?;
+    validate_frame(frame, glyph_table_id, glyph_count, budget, cancellation)
+        .map_err(ExportError::Core)?;
 
     let size = frame.size();
     let cells = frame.cells();
@@ -195,17 +189,17 @@ pub fn export(
             BudgetKind::FrameBytes,
         )));
     }
-    let output_capacity = usize::try_from(output_len)
-        .map_err(|_| ExportError::Core(Error::SizeOverflow))?;
-    let _allocation_layout = isize::try_from(output_capacity)
-        .map_err(|_| ExportError::Core(Error::SizeOverflow))?;
+    let output_capacity =
+        usize::try_from(output_len).map_err(|_| ExportError::Core(Error::SizeOverflow))?;
+    let _allocation_layout =
+        isize::try_from(output_capacity).map_err(|_| ExportError::Core(Error::SizeOverflow))?;
 
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(output_capacity)
         .map_err(|_| ExportError::Core(Error::AllocationFailed))?;
-    let actual_capacity = u64::try_from(bytes.capacity())
-        .map_err(|_| ExportError::Core(Error::SizeOverflow))?;
+    let actual_capacity =
+        u64::try_from(bytes.capacity()).map_err(|_| ExportError::Core(Error::SizeOverflow))?;
     if actual_capacity > budget.max_frame_bytes() {
         return Err(ExportError::Core(Error::BudgetExceeded(
             BudgetKind::FrameBytes,
@@ -213,7 +207,8 @@ pub fn export(
     }
 
     serialize_into(&mut bytes, cells, columns, glyphs, target, cancellation)?;
-    if u64::try_from(bytes.len()).map_err(|_| ExportError::Core(Error::SizeOverflow))? != output_len {
+    if u64::try_from(bytes.len()).map_err(|_| ExportError::Core(Error::SizeOverflow))? != output_len
+    {
         return Err(ExportError::Core(Error::SizeOverflow));
     }
 
@@ -251,7 +246,7 @@ fn serialized_size(
     target: ExportTarget,
     cancellation: &CancellationToken,
 ) -> Result<u64, ExportError> {
-    let mut size = match target {
+    let mut size: u64 = match target {
         ExportTarget::Text => 0,
         ExportTarget::Ansi(_) => 4,
     };
@@ -259,11 +254,14 @@ fn serialized_size(
         if index % CANCELLATION_POLL_INTERVAL == 0 && cancellation.is_cancelled() {
             return Err(ExportError::Core(Error::Cancelled));
         }
-        let glyph_index = usize::try_from(cell.glyph())
-            .map_err(|_| ExportError::Core(Error::SizeOverflow))?;
+        let glyph_index =
+            usize::try_from(cell.glyph()).map_err(|_| ExportError::Core(Error::SizeOverflow))?;
         let glyph = glyphs[glyph_index].character();
         size = size
-            .checked_add(u64::try_from(glyph.len_utf8()).map_err(|_| ExportError::Core(Error::SizeOverflow))?)
+            .checked_add(
+                u64::try_from(glyph.len_utf8())
+                    .map_err(|_| ExportError::Core(Error::SizeOverflow))?,
+            )
             .ok_or(ExportError::Core(Error::SizeOverflow))?;
 
         if let ExportTarget::Ansi(mode) = target {
@@ -304,8 +302,8 @@ fn serialize_into(
         if index % CANCELLATION_POLL_INTERVAL == 0 && cancellation.is_cancelled() {
             return Err(ExportError::Core(Error::Cancelled));
         }
-        let glyph_index = usize::try_from(cell.glyph())
-            .map_err(|_| ExportError::Core(Error::SizeOverflow))?;
+        let glyph_index =
+            usize::try_from(cell.glyph()).map_err(|_| ExportError::Core(Error::SizeOverflow))?;
         if let ExportTarget::Ansi(mode) = target {
             append_ansi_sequence(output, encode_cell_colors(*cell, mode));
         }
@@ -328,9 +326,18 @@ fn serialize_into(
 
 #[derive(Clone, Copy)]
 enum EncodedColors {
-    Basic { foreground: u8, background: u8 },
-    Indexed { foreground: u8, background: u8 },
-    Rgb { foreground: [u8; 3], background: [u8; 3] },
+    Basic {
+        foreground: u8,
+        background: u8,
+    },
+    Indexed {
+        foreground: u8,
+        background: u8,
+    },
+    Rgb {
+        foreground: [u8; 3],
+        background: [u8; 3],
+    },
 }
 
 fn encode_cell_colors(cell: AsciiCell, mode: AnsiColorMode) -> EncodedColors {
@@ -398,11 +405,12 @@ fn nearest_xterm_256(color: [u8; 3]) -> u8 {
         best_distance = cube_distance;
     }
 
-    let mean = (u16::from(color[0]) + u16::from(color[1]) + u16::from(color[2]) + 1) / 3;
-    let gray_step = if mean <= 8 {
+    let channel_sum = u16::from(color[0]) + u16::from(color[1]) + u16::from(color[2]);
+    // Three times each midpoint is 39 + 30n; exact ties retain the lower gray index.
+    let gray_step = if channel_sum <= 39 {
         0
     } else {
-        ((mean - 8 + 4) / 10).min(23)
+        ((channel_sum - 39 + 29) / 30).min(23)
     };
     let gray_index = 232 + u8::try_from(gray_step).expect("grayscale index fits in a byte");
     let gray_value = 8 + 10 * u8::try_from(gray_step).expect("grayscale step fits in a byte");
