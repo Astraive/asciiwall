@@ -99,11 +99,13 @@ charged before output allocation. PNG scratch includes row/inflater and reader b
 largest non-IDAT chunk buffer; large IDAT payloads are streamed and are not counted again as
 codec scratch. Progressive JPEG scan-block work is budgeted separately from pixel work. Retained
 output remains charged until its `DecodedFrame` is dropped; its `RasterFrameView` borrows from
-that owner. Cancellation is checked whenever either codec requests compressed input through a
-128-byte buffer. JPEG marker and entropy FF-fill loops poll at 8 KiB offsets. This is bounded
-input/parser cancellation, not CPU preemption: work over buffered input or between JPEG polls may
-continue until the next check. Deterministic tests cover regular/Adam7 PNG, progressive JPEG
-refills, and cancellation inside both JPEG FF-fill loops.
+that owner. Snapshot acquisition requests at most 128 bytes per caller `Read` and checks the
+token between completed calls; cancellation cannot interrupt an underlying `Read` while it is
+blocked. Codec compressed-input reads use a 128-byte buffer, and JPEG marker/entropy FF-fill
+loops poll at 8 KiB offsets. This is bounded input/parser cancellation, not CPU preemption:
+work over codec-buffered input or between JPEG polls may continue until the next check.
+Deterministic tests cover regular/Adam7 PNG, progressive JPEG refills, and cancellation inside
+both JPEG FF-fill loops.
 Malformed input, cancellation, and failed budget checks release reservations without publishing
 partial frames. Codec-provided allocation limits remain defense in depth; application
 accounting is not an allocator-enforced process memory limit.

@@ -16,7 +16,7 @@ use crate::resources::{DecodeResources, MemoryPermit};
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const INPUT_PREFIX_BYTES: usize = 12;
-/// Maximum compressed bytes buffered between codec input cancellation checks.
+/// Maximum bytes requested from caller streams and buffered between codec input checks.
 const CODEC_READER_BUFFER_BYTES: usize = 128;
 const PNG_FIXED_SCRATCH_BYTES: u64 = 128 * 1024;
 const JPEG_FIXED_SCRATCH_BYTES: u64 = 64 * 1024;
@@ -81,6 +81,9 @@ impl DecodeLimits {
 /// 128 compressed bytes buffered between checks. Work over already-buffered data is not
 /// preempted; cancellation is also checked after each codec call. Both codecs receive preflighted
 /// scratch allowances; codec crate limits are additional defense in depth.
+///
+/// Caller-stream snapshot reads request no more than 128 bytes per `Read` and check cancellation
+/// between completed calls. A blocking caller `Read` cannot be interrupted by this API.
 ///
 /// Output is top-down, tightly packed 8-bit RGB or straight-alpha RGBA. Untagged input is
 /// assumed sRGB. PNGs with `gAMA` or `cHRM` but no `sRGB` declaration, and embedded ICC profiles,
@@ -1827,13 +1830,17 @@ fn read_exact_cancellable(
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let count = match input.read(output) {
+        let requested = output.len().min(CODEC_READER_BUFFER_BYTES);
+        let count = match input.read(&mut output[..requested]) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted && !cancel.is_cancelled() => {
                 continue;
             }
             Err(error) => return Err(map_io_error(error, cancel)),
             Ok(count) => count,
         };
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         if count == 0 {
             return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
         }
@@ -1980,16 +1987,17 @@ mod codec_cancellation_tests {
         input: Cursor<&'a [u8]>,
         cancellation: &'a CancellationToken,
         cancel_at: u64,
+        largest_request: usize,
         furthest_read: u64,
         interrupted_reads: usize,
     }
-
     impl<'a> CancelAfterCodecInput<'a> {
         fn new(bytes: &'a [u8], cancellation: &'a CancellationToken, cancel_at: u64) -> Self {
             Self {
                 input: Cursor::new(bytes),
                 cancellation,
                 cancel_at,
+                largest_request: 0,
                 furthest_read: 0,
                 interrupted_reads: 0,
             }
@@ -2006,6 +2014,7 @@ mod codec_cancellation_tests {
             if output.is_empty() {
                 return Ok(0);
             }
+            self.largest_request = self.largest_request.max(output.len());
             if self.cancellation.is_cancelled() {
                 return Err(self.interrupted());
             }
@@ -2156,6 +2165,32 @@ mod codec_cancellation_tests {
             &limits.resources,
             bytes.len(),
         );
+    }
+
+    #[test]
+    fn cancellation_during_snapshot_copy_uses_bounded_reads_and_releases_reservations() {
+        let bytes = random_rgb_png(WIDTH, HEIGHT);
+        let cancel_at = INPUT_PREFIX_BYTES + CODEC_READER_BUFFER_BYTES * 2;
+        assert!(cancel_at < bytes.len());
+
+        let cancellation = CancellationToken::new();
+        let resources = DecodeResources::new(1, 32 << 20);
+        let mut decode_limits = limits();
+        decode_limits.resources = resources.clone();
+        let mut source = CancelAfterCodecInput::new(
+            &bytes,
+            &cancellation,
+            u64::try_from(cancel_at).unwrap(),
+        );
+        let result = decode_image(&mut source, &decode_limits, &cancellation);
+
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert!(cancellation.is_cancelled());
+        assert_eq!(source.furthest_read, u64::try_from(cancel_at).unwrap());
+        assert!(source.furthest_read < u64::try_from(bytes.len()).unwrap());
+        assert!(source.largest_request <= CODEC_READER_BUFFER_BYTES);
+        assert_eq!(resources.cpu_bytes_in_use(), 0);
+        assert_eq!(resources.active_decodes(), 0);
     }
 
     #[test]
