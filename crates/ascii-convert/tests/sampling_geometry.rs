@@ -176,15 +176,18 @@ fn filter_comparison_fixtures() -> [FilterComparisonFixture; 4] {
     ]
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest.iter().copied() {
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes.iter().copied() {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         hex.push(char::from(HEX[usize::from(byte >> 4)]));
         hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     hex
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex_bytes(&Sha256::digest(bytes))
 }
 
 fn filter_comparison_settings_record(
@@ -807,7 +810,7 @@ fn box_and_nearest_filters_compare_area_coverage_on_synthetic_patterns() {
         &CancellationToken::new(),
     )
     .expect("synthetic font builds a measured table");
-    let table_fingerprint = sha256_hex(table.fingerprint());
+    let table_fingerprint = hex_bytes(table.fingerprint());
     let patch = PatchDimensions::new(FILTER_PATCH_WIDTH, FILTER_PATCH_HEIGHT)
         .expect("comparison patch dimensions are valid");
     let cancellation = CancellationToken::new();
