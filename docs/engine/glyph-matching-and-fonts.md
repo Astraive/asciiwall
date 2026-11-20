@@ -28,9 +28,9 @@ Version one enforces that repertoire at construction: C0/C1 controls, bidi forma
 
 ### FNT-002 verification evidence
 
-- Focused command: `cargo test -p ascii-convert --test repertoire` — 9 tests passed, including all 256 Braille dot patterns at 8×12 and 10×15, complete preset font availability, block alignment/coverage, strict rejections, preview-mask identity, and missing/invisible states.
-- Workspace command: `cargo test --workspace --all-targets` — 122 tests passed across 10 suites in `ascii-core`, `ascii-convert`, and `ascii-media`.
-- Quality commands: `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings` — passed.
+- Focused command: `cargo test --locked -p ascii-convert --test repertoire` — 9 tests passed, including all 256 Braille dot patterns at 8×12 and 10×15, complete preset font availability, block alignment/coverage, strict rejections, preview-mask identity, and missing/invisible states.
+- Workspace command: `cargo test --locked --workspace --all-targets` — 156 tests passed across 11 suites in `ascii-core`, `ascii-convert`, and `ascii-media`.
+- Quality commands: `cargo fmt --all -- --check` and `cargo clippy --locked --workspace --all-targets -- -D warnings` — passed.
 - Executable smoke: temporary offline path-dependent binary ran `cargo run --locked --offline` and asserted actual `A` preview-mask equality, blank space preservation, and `C` unavailable status. Output: `preview smoke passed: A=Available coverage=Some(0.21764706), space=Available, C=Unavailable`.
 - Fixture/config evidence (source-generated, rights-cleared, no downloaded assets): `crates/ascii-convert/tests/support/repertoire_font.rs` SHA-256 `c48600adeffe69204ec1352a4bbaa2df7609d3b22530408722d9c44df922a764`; `crates/ascii-convert/tests/repertoire.rs` (raster sizes, cells, baseline, budgets, assertions) SHA-256 `3476a20ee52113fd1efb2852eaa0dbeca4db951d30a4286cfb9bce02dac16ab8`.
 - Environment: Windows 10 x64, `x86_64-pc-windows-msvc`, Cargo/rustc 1.100.0; `CARGO_HOME=D:/.worktrees/.cargo-cache`, `CARGO_TARGET_DIR=D:/.worktrees/.targets/fnt-002`.
