@@ -961,12 +961,12 @@ fn sample_collapsed_box_footprint(
     {
         return Err(Error::SizeOverflow);
     }
-    let covered_fraction_x =
-        ((sample_end_x.min(1.0) - sample_start_x.max(0.0)).max(0.0) / footprint_width)
-            .clamp(0.0, 1.0);
-    let covered_fraction_y =
-        ((sample_end_y.min(1.0) - sample_start_y.max(0.0)).max(0.0) / footprint_height)
-            .clamp(0.0, 1.0);
+    let covered_fraction_x = ((sample_end_x.min(1.0) - sample_start_x.max(0.0)).max(0.0)
+        / footprint_width)
+        .clamp(0.0, 1.0);
+    let covered_fraction_y = ((sample_end_y.min(1.0) - sample_start_y.max(0.0)).max(0.0)
+        / footprint_height)
+        .clamp(0.0, 1.0);
     let mut weighted_luminance = 0.0;
     if covered_fraction_x > 0.0 && covered_fraction_y > 0.0 {
         let first_x = source_rect.x.floor().max(0.0) as u32;
@@ -997,9 +997,7 @@ fn sample_collapsed_box_footprint(
                     continue;
                 }
                 *work = work.checked_add(1).ok_or(Error::SizeOverflow)?;
-                if (*work).is_multiple_of(SAMPLER_CANCEL_INTERVAL)
-                    && cancellation.is_cancelled()
-                {
+                if (*work).is_multiple_of(SAMPLER_CANCEL_INTERVAL) && cancellation.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
                 let index = pixel_index(x, y, raster.width())?;
@@ -1011,7 +1009,6 @@ fn sample_collapsed_box_footprint(
     let uncovered_fraction = (1.0 - covered_fraction_x * covered_fraction_y).max(0.0);
     Ok(weighted_luminance + background.luminance().value() * uncovered_fraction)
 }
-
 
 // Preserve the rounding residual when deciding which source pixel contains a fractional start.
 fn two_sum(left: f64, right: f64) -> (f64, f64) {
