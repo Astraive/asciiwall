@@ -1,7 +1,7 @@
 //! Behavior-focused text/ANSI export goldens and terminal-safety regressions.
 //!
 //! Fixture parameters: locally generated TrueType outlines at 8x12 pixels, 8px em, baseline 9;
-//! Fixture metadata carries bidi and ESC sentinels which must never enter output.
+//! Fixture `FrameMetadata` uses numeric bidi/ESC sentinels that must never enter output.
 //! The fixture contains no external assets or I/O.
 
 mod support;
@@ -257,6 +257,11 @@ fn terminal_safety() {
         '界',
         '😀',
     ] {
+        let mut encoded = [0; 4];
+        assert!(
+            GlyphRepertoire::new(character.encode_utf8(&mut encoded)).is_err(),
+            "unsafe repertoire scalar accepted: {character:?}"
+        );
         assert!(
             !is_supported_single_cell_scalar(character),
             "unsafe scalar accepted: {character:?}"
@@ -448,11 +453,11 @@ fn approved_color_parameters(parameters: &[u16], mode: AnsiColorMode) -> bool {
                 && parameters[5] <= 255
         }
         AnsiColorMode::TrueColor => {
-            parameters.len() == 9
+            parameters.len() == 10
                 && parameters[0..2] == [38, 2]
                 && parameters[5..7] == [48, 2]
                 && parameters[2..5].iter().all(|value| *value <= 255)
-                && parameters[7..9].iter().all(|value| *value <= 255)
+                && parameters[7..10].iter().all(|value| *value <= 255)
         }
     }
 }
