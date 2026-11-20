@@ -44,14 +44,9 @@ fn shared_engine_export(source_path: &Path, font_path: &Path, target: ExportTarg
     let cancellation = CancellationToken::new();
     let geometry = GlyphConfig::new(8.0, 8, 12, 9).unwrap();
     let repertoire = GlyphRepertoire::new(" AB").unwrap();
-    let glyphs = load_glyph_table_with_repertoire(
-        font_path,
-        &repertoire,
-        &geometry,
-        &budget,
-        &cancellation,
-    )
-    .unwrap();
+    let glyphs =
+        load_glyph_table_with_repertoire(font_path, &repertoire, &geometry, &budget, &cancellation)
+            .unwrap();
     let decode_limits = DecodeLimits::new(
         budget,
         DecodeResources::new(1, budget.max_frame_bytes()),
@@ -70,16 +65,10 @@ fn shared_engine_export(source_path: &Path, font_path: &Path, target: ExportTarg
         &cancellation,
     )
     .unwrap();
-    export(
-        converted.frame(),
-        &glyphs,
-        target,
-        &budget,
-        &cancellation,
-    )
-    .unwrap()
-    .bytes()
-    .to_vec()
+    export(converted.frame(), &glyphs, target, &budget, &cancellation)
+        .unwrap()
+        .bytes()
+        .to_vec()
 }
 
 #[test]
