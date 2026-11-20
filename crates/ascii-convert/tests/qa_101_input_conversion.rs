@@ -113,6 +113,69 @@ fn report_font_fixture(font: &[u8]) {
         Sha256::digest(font)
     );
 }
+
+fn report_settings(name: &str, settings: &ConversionSettings<'_>) {
+    let mut digest = Sha256::new();
+    digest.update(b"QA-101 conversion settings v1\0");
+
+    match settings.sizing() {
+        GridSizing::Columns(columns) => {
+            digest.update([0]);
+            digest.update(columns.to_le_bytes());
+        }
+        GridSizing::FixedPixelSurface { width, height } => {
+            digest.update([1]);
+            digest.update(width.to_le_bytes());
+            digest.update(height.to_le_bytes());
+        }
+    }
+
+    let metadata = settings.metadata();
+    digest.update(metadata.glyph_table_id().as_bytes());
+    digest.update(metadata.frame_id().to_le_bytes());
+    digest.update(metadata.generation().to_le_bytes());
+    digest.update(metadata.pts_us().to_le_bytes());
+    digest.update(metadata.duration_us().to_le_bytes());
+
+    for channel in [
+        settings.foreground().red(),
+        settings.foreground().green(),
+        settings.foreground().blue(),
+        settings.background().red(),
+        settings.background().green(),
+        settings.background().blue(),
+    ] {
+        digest.update(channel.to_bits().to_le_bytes());
+    }
+
+    let sampling = settings.sampling();
+    match sampling.fit() {
+        FitMode::Contain => digest.update([0]),
+        FitMode::Cover => digest.update([1]),
+        FitMode::CustomCrop(crop) => {
+            digest.update([2]);
+            for edge in [crop.left(), crop.top(), crop.right(), crop.bottom()] {
+                digest.update(edge.to_bits().to_le_bytes());
+            }
+        }
+    }
+    digest.update([match sampling.filter() {
+        SamplingFilter::Box => 0,
+        SamplingFilter::Nearest => 1,
+    }]);
+    match sampling.patch() {
+        Some(patch) => {
+            digest.update([1]);
+            digest.update(patch.width().to_le_bytes());
+            digest.update(patch.height().to_le_bytes());
+        }
+        None => digest.update([0]),
+    }
+
+    println!("settings={name} sha256={:x}", digest.finalize());
+}
+
+// The cancellation token is transient runtime control state, not a stable conversion setting.
 const CELL_WIDTH: u32 = 8;
 const CELL_HEIGHT: u32 = 12;
 
@@ -201,6 +264,7 @@ fn ec_001_zero_and_overflow_geometry_precede_budget_and_output_allocations() {
         LinearRgb::WHITE,
         LinearRgb::BLACK,
     );
+    report_settings("ec001-zero-dimensions", &zero_settings);
 
     for (name, zero_dimension) in [
         ("ec001-zero-width", gray_raster(&[], 0, 1, 0)),
@@ -248,6 +312,7 @@ fn ec_001_zero_and_overflow_geometry_precede_budget_and_output_allocations() {
         LinearRgb::WHITE,
         LinearRgb::BLACK,
     );
+    report_settings("ec001-overflow-grid", &overflow_settings);
     let (overflow_result, overflow_allocations) = count_conversion_allocations(|| {
         convert_density_detailed(overflowing_grid, &table, &overflow_settings, &zero_budget)
     });
@@ -279,6 +344,7 @@ fn ec_001_zero_and_overflow_geometry_precede_budget_and_output_allocations() {
         LinearRgb::WHITE,
         LinearRgb::BLACK,
     );
+    report_settings("ec001-over-budget-readable-extent", &bounded_settings);
     let bounded_budget = Budget::new(1024, 64, 1024);
     let (bounded_result, bounded_allocations) = count_conversion_allocations(|| {
         convert_density_detailed(bounded_input, &table, &bounded_settings, &bounded_budget)
@@ -312,6 +378,7 @@ fn ec_002_tiny_raster_resamples_into_larger_grid_without_reading_past_source() {
         LinearRgb::BLACK,
     )
     .with_sampling(sampling);
+    report_settings("ec002-tiny-upsample", &conversion_settings);
     // Exactly two backing bytes for a 2x1 source; the 4-cell destination forces upsampling.
     let source = [0, u8::MAX];
     report_fixture(
@@ -384,6 +451,14 @@ fn converted_extreme_raster(
         SamplingFilter::Box,
         Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
     ));
+    report_settings(
+        match fit {
+            FitMode::Contain => "ec003-contain",
+            FitMode::Cover => "ec003-cover",
+            FitMode::CustomCrop(_) => "ec003-custom-crop",
+        },
+        &conversion_settings,
+    );
     let row_stride = usize::try_from(width).expect("fixture row stride fits usize");
     let result = convert_density_detailed(
         gray_raster(source, width, height, row_stride),
@@ -504,6 +579,7 @@ fn ec_005_contrasting_hidden_colors_do_not_create_an_alpha_halo() {
         SamplingFilter::Box,
         Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
     ));
+    report_settings("ec005-transparent-edge", &conversion_settings);
     // Two saturated, contradictory hidden RGB values share the same alpha-zero edge and opaque
     // yellow neighbor. Correct premultiplication makes their converted output identical.
     let hidden_blue = [0, 0, 255, 0, 255, 255, 0, 255];
