@@ -102,10 +102,12 @@ output remains charged until its `DecodedFrame` is dropped; its `RasterFrameView
 that owner. Snapshot acquisition requests at most 128 bytes per caller `Read` and checks the
 token between completed calls; cancellation cannot interrupt an underlying `Read` while it is
 blocked. Codec compressed-input reads use a 128-byte buffer, and JPEG marker/entropy FF-fill
-loops poll at 8 KiB offsets. This is bounded input/parser cancellation, not CPU preemption:
-work over codec-buffered input or between JPEG polls may continue until the next check.
-Deterministic tests cover regular/Adam7 PNG, progressive JPEG refills, and cancellation inside
-both JPEG FF-fill loops.
+loops poll at 8 KiB offsets. Pixel normalization polls at each row boundary and after each
+128 pixels within a row. These checks bound work intervals but are not CPU or I/O preemption:
+codec work may continue until its next poll, and a caller's in-progress `Read` cannot be
+interrupted until that call returns. Deterministic tests cover regular/Adam7 PNG, progressive JPEG
+refills, cancellation inside both JPEG FF-fill loops, and cancellation partway through a one-row
+grayscale PNG normalization pass.
 Malformed input, cancellation, and failed budget checks release reservations without publishing
 partial frames. Codec-provided allocation limits remain defense in depth; application
 accounting is not an allocator-enforced process memory limit.
