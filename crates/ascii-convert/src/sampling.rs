@@ -985,18 +985,10 @@ impl From<ColorNormalizationError> for SamplingError {
     }
 }
 
-/// Preflights allocation, retained storage, and a conservative pixel-overlap work bound.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare_sampling(
+/// Validates source orientation, sample format, and metadata before sampling geometry is prepared.
+pub(crate) fn preflight_sampling_source(
     source: &RasterFrameView<'_>,
-    grid: GridSize,
-    cell_width: u32,
-    cell_height: u32,
-    options: SamplingOptions,
-    matching_work: u64,
-    frame_validation_work: u64,
-    budget: &Budget,
-) -> Result<SamplingPlan, SamplingError> {
+) -> Result<usize, SamplingError> {
     if source.orientation() != ascii_core::RasterOrientation::TopDown {
         return Err(Error::Unsupported(ascii_core::UnsupportedReason::Orientation).into());
     }
@@ -1021,6 +1013,22 @@ pub(crate) fn prepare_sampling(
         }
     };
     resolve_raster_metadata(source.format().channels(), source.color())?;
+    Ok(bytes_per_pixel)
+}
+
+/// Preflights allocation, retained storage, and a conservative pixel-overlap work bound.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_sampling(
+    source: &RasterFrameView<'_>,
+    bytes_per_pixel: usize,
+    grid: GridSize,
+    cell_width: u32,
+    cell_height: u32,
+    options: SamplingOptions,
+    matching_work: u64,
+    frame_validation_work: u64,
+    budget: &Budget,
+) -> Result<SamplingPlan, SamplingError> {
     let source_width = source.width();
     let source_height = source.height();
     let display_width = u64::from(grid.columns())
