@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 mod support;
 
+use std::io::Cursor;
+
 use ascii_convert::{
     ColorNormalizationError, ConversionSettings, CropRect, DensityConversionError, FitMode,
     GlyphConfig, GlyphRepertoire, GlyphTable, GridSizing, LinearRgb, PatchDimensions,
@@ -12,6 +14,9 @@ use ascii_core::{
     FrameMetadata, GlyphTableId, MalformedReason, PixelFormat, RasterFrameView, RasterOrientation,
     TransferFunction,
 };
+use ascii_media::{DecodeLimits, DecodeResources, decode_image};
+use image::ImageEncoder;
+use sha2::{Digest, Sha256};
 use support::synthetic_font::synthetic_font;
 
 const CELL_WIDTH: u32 = 8;
@@ -287,6 +292,88 @@ fn ec_008_odd_row_stride_ignores_padding_through_density_conversion() {
             converted.frame().size().rows()
         ),
         (3, 2)
+    );
+    for (cell, expected_character) in converted
+        .frame()
+        .cells()
+        .iter()
+        .zip([' ', ' ', ' ', 'A', 'A', 'A'])
+    {
+        let glyph = table
+            .glyphs()
+            .get(cell.glyph() as usize)
+            .expect("converted glyph index is in the measured table");
+        assert_eq!(glyph.character(), expected_character);
+    }
+}
+
+#[test]
+fn ec_008_odd_width_png_decodes_into_density_conversion() {
+    const WIDTH: u32 = 3;
+    const HEIGHT: u32 = 2;
+    let source = [0, 0, 0, 255, 255, 255];
+    let mut encoded_png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut encoded_png)
+        .write_image(&source, WIDTH, HEIGHT, image::ColorType::L8.into())
+        .expect("synthetic odd-width PNG fixture encodes");
+    println!(
+        "EC-008 decoder smoke: fixture_sha256={:x}",
+        Sha256::digest(&encoded_png)
+    );
+
+    let limits = DecodeLimits::new(
+        conversion_budget(),
+        DecodeResources::new(1, 2_000_000),
+        64,
+        64,
+        1_000_000,
+        512 * 1024,
+    );
+    let cancellation = CancellationToken::new();
+    let mut encoded_input = Cursor::new(encoded_png.as_slice());
+    let decoded = decode_image(&mut encoded_input, &limits, &cancellation)
+        .expect("synthetic odd-width PNG decodes");
+
+    assert_eq!((decoded.width(), decoded.height()), (WIDTH, HEIGHT));
+    assert_eq!(decoded.row_stride(), 9);
+    assert_eq!(
+        decoded.pixels(),
+        &[
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255
+        ]
+    );
+
+    let table = glyph_table();
+    let settings = conversion_settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(WIDTH * CELL_WIDTH, HEIGHT * CELL_HEIGHT),
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::CustomCrop(
+            CropRect::new(0.0, 0.0, 1.0, 1.0).expect("full-frame fixture crop is valid"),
+        ),
+        SamplingFilter::Nearest,
+        None,
+    ));
+    let converted =
+        convert_density_detailed(decoded.view(), &table, &settings, &conversion_budget())
+            .expect("decoded frame converts directly without a pixel-buffer copy");
+
+    assert_eq!(
+        (
+            converted.frame().size().columns(),
+            converted.frame().size().rows()
+        ),
+        (WIDTH, HEIGHT)
+    );
+    println!(
+        "EC-008 decoder smoke: decoded={}x{} stride={} converted={}x{}",
+        decoded.width(),
+        decoded.height(),
+        decoded.row_stride(),
+        converted.frame().size().columns(),
+        converted.frame().size().rows()
     );
     for (cell, expected_character) in converted
         .frame()
