@@ -37,6 +37,6 @@ jobs:
         run: pip-audit
       - name: Report actual workflow Python dependency licenses
         run: pip-licenses --format=markdown --with-urls
-      # The workspace currently contains only dependency-free ascii-core; a reviewed Rust crate/license
-      # audit policy is still pending. Add pinned Rust audit gates after those policy prerequisites land
-      # under SEC-EPIC, REL-002, and REL-009.
+      # Third-party Rust dependencies currently exist in ascii-convert and ascii-media; a reviewed
+      # Rust crate/license audit policy is still pending. Add pinned Rust audit gates only after those
+      # prerequisites land under SEC-EPIC, REL-002, and REL-009.

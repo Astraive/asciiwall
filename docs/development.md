@@ -1,6 +1,6 @@
 # Development workflow and local tooling
 
-> **Current repository state:** `asciiwall` contains project governance, `.github/` configuration/templates, `.githooks/`, documentation, Python/PowerShell tooling, and a committed Rust workspace with one `ascii-core` member (resolver 3, edition 2024, Rust 1.100.0). `ascii-core` is dependency-free and `no_std`. There is no application binary, CLI, or buildable installer, and no image, video, native-host, catalog, or profiling workspace member/feature subset. The workspace commands below are runnable; future `asciiwall` CLI examples are not.
+> **Current repository state:** `asciiwall` contains project governance, `.github/` configuration/templates, `.githooks/`, documentation, Python/PowerShell tooling, and a committed Rust workspace with `ascii-core`, `ascii-convert`, and `ascii-media` members (resolver 3, edition 2024, Rust 1.100.0). `ascii-core` is dependency-free and `no_std`; the conversion and image-decoding crates have their own tested boundaries. There is no application binary, CLI, or buildable installer, and no video, native-host, catalog, or profiling workspace member/feature subset. The workspace commands below are runnable; future `asciiwall` CLI examples are not.
 
 ## Current repository tooling and prerequisites
 
@@ -64,18 +64,18 @@ Repository hooks live under `.githooks/` (`pre-commit`, `commit-msg`, and `.gith
 
 ## Rust workspace and feature boundaries
 
-The implemented workspace currently exercises the core-only boundary. Its portability CI checks the core on Windows, Linux, and macOS; no feature matrix is implied by the existence of the workspace:
+The workspace now has separate `ascii-core`, `ascii-convert`, and `ascii-media` package boundaries. Portability CI checks the dependency-free core on Windows, Linux, and macOS; the workspace's Rust formatting and Clippy gates also cover all members. This is not a complete feature matrix:
 
 | Subset | Current interface and blocker |
 |---|---|
 | Core-only | Implemented by dependency-free `ascii-core`; checks frame, borrowed-raster, budget, cancellation, and typed-error contracts. |
-| Image | No `ascii-media` member or decoder API exists on current `main`. IMG-001 owns `ReadSeek`, `DecodeLimits`, owned `DecodedFrame`, and tested PNG/JPEG decoding against the core raster/budget contracts. |
+| Image | Implemented in `ascii-media`: `ReadSeek`, `DecodeLimits`, owned `DecodedFrame`, and PNG/JPEG decoding with committed regression tests against core raster/budget contracts. This is a package boundary, not an optional Cargo feature or image-specific CI matrix. |
 | Video | No video decoder exists. VID-001 owns a restricted `VideoDecoder::next_frame` interface over approved local inputs and owned image frames, and depends on IMG-001. |
 | Native host | No host adapter or native surface interface exists. WPH-001 owns versioned capabilities/events and generation-bound `SurfaceLease`; it depends on WND-001 and requires evidence for each actual host tuple. |
 | Catalog | No catalog or local-library package exists in this workspace. Static catalog schema/fixtures belong to `asciiwall-library` CAT-001 (dependent on LIB-001 and engine PKG-001); the app-side local index belongs to LIBAPP-001 (dependent on PKG-008). |
 | Profiling | No metrics API or benchmark report exists. PERF-001 owns versioned stage metrics and deterministic synthetic report tests; host/GPU measurements require the corresponding implemented adapters and instrumentation. |
 
-These are real implementation blockers, not reasons to add empty crates or inert Cargo features. Add a workspace member or feature subset only with its owning, tested interface. In particular, `--all-features` is not a substitute for the independent portable and native-target gates.
+The core-only and image-decoding package boundaries are implemented, but PRJ-001 remains incomplete: video, native-host, catalog, and profiling interfaces and their exercised subsets are absent, as is app/CLI composition. Do not add empty crates or inert Cargo features to fill those gaps. In particular, `--all-features` is not a substitute for independent portable and native-target gates.
 
 The current CI Rust gates (also used for local verification) are:
 
