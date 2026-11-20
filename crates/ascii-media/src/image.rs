@@ -18,6 +18,7 @@ const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const INPUT_PREFIX_BYTES: usize = 12;
 /// Maximum bytes requested from caller streams and buffered between codec input checks.
 const CODEC_READER_BUFFER_BYTES: usize = 128;
+const NORMALIZATION_CANCEL_INTERVAL_PIXELS: usize = 128;
 const PNG_FIXED_SCRATCH_BYTES: u64 = 128 * 1024;
 const JPEG_FIXED_SCRATCH_BYTES: u64 = 64 * 1024;
 const JPEG_EXIF_SCRATCH_BYTES: u64 = 64 * 1024;
@@ -85,6 +86,8 @@ impl DecodeLimits {
 /// Caller-stream snapshot reads request no more than 128 bytes per `Read` and check cancellation
 /// between completed calls. A blocking caller `Read` cannot be interrupted by this API.
 ///
+/// Normalization checks cancellation at row boundaries and every 128 pixels within each row.
+///
 /// Output is top-down, tightly packed 8-bit RGB or straight-alpha RGBA. Untagged input is
 /// assumed sRGB. PNGs with `gAMA` or `cHRM` but no `sRGB` declaration, and embedded ICC profiles,
 /// are rejected rather than silently mislabeled. JPEG EXIF display orientation is applied once.
@@ -102,10 +105,26 @@ fn decode_image_with_jpeg_poller<F>(
     input: &mut dyn ReadSeek,
     limits: &DecodeLimits,
     cancel: &CancellationToken,
-    mut jpeg_cancel_poller: F,
+    jpeg_cancel_poller: F,
 ) -> Result<DecodedFrame, Error>
 where
     F: FnMut(usize) -> Result<(), Error>,
+{
+    decode_image_with_pollers(input, limits, cancel, jpeg_cancel_poller, || {
+        check_cancel(cancel)
+    })
+}
+
+fn decode_image_with_pollers<F, G>(
+    input: &mut dyn ReadSeek,
+    limits: &DecodeLimits,
+    cancel: &CancellationToken,
+    mut jpeg_cancel_poller: F,
+    mut normalization_cancel_poller: G,
+) -> Result<DecodedFrame, Error>
+where
+    F: FnMut(usize) -> Result<(), Error>,
+    G: FnMut() -> Result<(), Error>,
 {
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
@@ -153,13 +172,14 @@ where
     }
 
     let result = match codec {
-        Codec::Png => decode_png(&snapshot, limits, cancel),
-        Codec::Jpeg => decode_jpeg_with_reader_and_poller(
+        Codec::Png => decode_png(&snapshot, limits, cancel, &mut normalization_cancel_poller),
+        Codec::Jpeg => decode_jpeg_with_reader_and_pollers(
             &snapshot,
             limits,
             cancel,
             SnapshotReader::new(&snapshot, cancel),
             &mut jpeg_cancel_poller,
+            &mut normalization_cancel_poller,
         ),
     };
     drop(snapshot);
@@ -346,21 +366,45 @@ fn decode_png(
     encoded: &[u8],
     limits: &DecodeLimits,
     cancel: &CancellationToken,
+    normalization_cancel_poller: &mut impl FnMut() -> Result<(), Error>,
 ) -> Result<DecodedFrame, Error> {
-    decode_png_with_reader(
+    decode_png_with_reader_and_normalization_poller(
         encoded,
         limits,
         cancel,
         SnapshotReader::new(encoded, cancel),
+        normalization_cancel_poller,
     )
 }
 
+#[cfg(test)]
 fn decode_png_with_reader<R: Read + Seek>(
     encoded: &[u8],
     limits: &DecodeLimits,
     cancel: &CancellationToken,
     codec_source: R,
 ) -> Result<DecodedFrame, Error> {
+    let mut normalization_cancel_poller = || check_cancel(cancel);
+    decode_png_with_reader_and_normalization_poller(
+        encoded,
+        limits,
+        cancel,
+        codec_source,
+        &mut normalization_cancel_poller,
+    )
+}
+
+fn decode_png_with_reader_and_normalization_poller<R, F>(
+    encoded: &[u8],
+    limits: &DecodeLimits,
+    cancel: &CancellationToken,
+    codec_source: R,
+    normalization_cancel_poller: &mut F,
+) -> Result<DecodedFrame, Error>
+where
+    R: Read + Seek,
+    F: FnMut() -> Result<(), Error>,
+{
     let header = inspect_png(encoded, cancel)?;
     if let Some(reason) = header.unsupported {
         return Err(Error::Unsupported(reason));
@@ -433,7 +477,7 @@ fn decode_png_with_reader<R: Read + Seek>(
     }
 
     if let Some(source) = source.as_ref() {
-        normalize_pixels(source, &mut output, plan, true, cancel)?;
+        normalize_pixels(source, &mut output, plan, true, normalization_cancel_poller)?;
     }
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
@@ -886,6 +930,7 @@ struct JpegHeader {
     unsupported: Option<UnsupportedReason>,
 }
 
+#[cfg(test)]
 fn decode_jpeg_with_reader_and_poller<R, F>(
     encoded: &[u8],
     limits: &DecodeLimits,
@@ -896,6 +941,30 @@ fn decode_jpeg_with_reader_and_poller<R, F>(
 where
     R: Read + Seek,
     F: FnMut(usize) -> Result<(), Error>,
+{
+    let mut normalization_cancel_poller = || check_cancel(cancel);
+    decode_jpeg_with_reader_and_pollers(
+        encoded,
+        limits,
+        cancel,
+        codec_source,
+        cancel_poller,
+        &mut normalization_cancel_poller,
+    )
+}
+
+fn decode_jpeg_with_reader_and_pollers<R, F, G>(
+    encoded: &[u8],
+    limits: &DecodeLimits,
+    cancel: &CancellationToken,
+    codec_source: R,
+    cancel_poller: &mut F,
+    normalization_cancel_poller: &mut G,
+) -> Result<DecodedFrame, Error>
+where
+    R: Read + Seek,
+    F: FnMut(usize) -> Result<(), Error>,
+    G: FnMut() -> Result<(), Error>,
 {
     let header = inspect_jpeg_with_poller(encoded, cancel_poller)?;
     if let Some(reason) = header.unsupported {
@@ -999,7 +1068,13 @@ where
         return Err(Error::Cancelled);
     }
     if let Some(source) = source.as_ref() {
-        normalize_pixels(source, &mut output, plan, false, cancel)?;
+        normalize_pixels(
+            source,
+            &mut output,
+            plan,
+            false,
+            normalization_cancel_poller,
+        )?;
     }
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
@@ -1573,22 +1648,26 @@ fn orientation_swaps_axes(orientation: Orientation) -> bool {
     )
 }
 
-fn normalize_pixels(
+fn normalize_pixels<F>(
     source: &[u8],
     output: &mut [u8],
     plan: RasterPlan,
     source_big_endian: bool,
-    cancel: &CancellationToken,
-) -> Result<(), Error> {
+    normalization_cancel_poller: &mut F,
+) -> Result<(), Error>
+where
+    F: FnMut() -> Result<(), Error>,
+{
     let source_width = usize::try_from(plan.source_width).map_err(|_| Error::SizeOverflow)?;
     let source_height = usize::try_from(plan.source_height).map_err(|_| Error::SizeOverflow)?;
     let output_width = usize::try_from(plan.output_width).map_err(|_| Error::SizeOverflow)?;
     let output_channels = plan.layout.output_channels();
     for y in 0..source_height {
-        if cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
+        normalization_cancel_poller()?;
         for x in 0..source_width {
+            if x > 0 && x.is_multiple_of(NORMALIZATION_CANCEL_INTERVAL_PIXELS) {
+                normalization_cancel_poller()?;
+            }
             let source_offset = y
                 .checked_mul(plan.source_row_stride)
                 .and_then(|offset| {
@@ -1893,6 +1972,14 @@ fn zeroed_bytes(len: usize) -> Result<Vec<u8>, Error> {
     Ok(unsafe { Vec::from_raw_parts(pointer, len, len) })
 }
 
+fn check_cancel(cancel: &CancellationToken) -> Result<(), Error> {
+    if cancel.is_cancelled() {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 fn check_cancel_periodically(cancel: &CancellationToken, offset: usize) -> Result<(), Error> {
     if offset & 0x1fff == 0 && cancel.is_cancelled() {
         Err(Error::Cancelled)
@@ -2104,6 +2191,23 @@ mod codec_cancellation_tests {
         bytes
     }
 
+    fn grayscale_png(width: u32, height: u32) -> Vec<u8> {
+        let sample_count = usize::try_from(width.checked_mul(height).unwrap()).unwrap();
+        let samples = deterministic_bytes(sample_count, 0x1319_8a2e);
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, width, height);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&samples)
+                .unwrap();
+        }
+        bytes
+    }
+
     fn idat_payload_start(bytes: &[u8]) -> usize {
         let mut offset = PNG_SIGNATURE.len();
         while offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
@@ -2177,11 +2281,8 @@ mod codec_cancellation_tests {
         let resources = DecodeResources::new(1, 32 << 20);
         let mut decode_limits = limits();
         decode_limits.resources = resources.clone();
-        let mut source = CancelAfterCodecInput::new(
-            &bytes,
-            &cancellation,
-            u64::try_from(cancel_at).unwrap(),
-        );
+        let mut source =
+            CancelAfterCodecInput::new(&bytes, &cancellation, u64::try_from(cancel_at).unwrap());
         let result = decode_image(&mut source, &decode_limits, &cancellation);
 
         assert!(matches!(result, Err(Error::Cancelled)));
@@ -2189,6 +2290,37 @@ mod codec_cancellation_tests {
         assert_eq!(source.furthest_read, u64::try_from(cancel_at).unwrap());
         assert!(source.furthest_read < u64::try_from(bytes.len()).unwrap());
         assert!(source.largest_request <= CODEC_READER_BUFFER_BYTES);
+        assert_eq!(resources.cpu_bytes_in_use(), 0);
+        assert_eq!(resources.active_decodes(), 0);
+    }
+
+    #[test]
+    fn cancellation_inside_wide_png_row_releases_reservations_without_a_frame() {
+        let bytes = grayscale_png(1024, 1);
+        let cancellation = CancellationToken::new();
+        let resources = DecodeResources::new(1, 32 << 20);
+        let mut decode_limits = limits();
+        decode_limits.resources = resources.clone();
+        let mut input = Cursor::new(bytes.as_slice());
+        let mut normalization_polls = 0;
+
+        let result = decode_image_with_pollers(
+            &mut input,
+            &decode_limits,
+            &cancellation,
+            |_| Ok(()),
+            || {
+                normalization_polls += 1;
+                if normalization_polls == 2 {
+                    cancellation.cancel();
+                }
+                check_cancel(&cancellation)
+            },
+        );
+
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert!(cancellation.is_cancelled());
+        assert_eq!(normalization_polls, 2);
         assert_eq!(resources.cpu_bytes_in_use(), 0);
         assert_eq!(resources.active_decodes(), 0);
     }
