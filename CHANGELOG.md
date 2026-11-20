@@ -25,7 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
-- Expanded QA-102 portable EC-006–EC-008 regressions to assert actionable typed HDR/profile errors, black/white/flat density endpoints, and padded-stride conversion output; marked encoded decoder, restricted-worker/UI, and execution-evidence boundaries explicitly not-run in [the edge-case matrix](docs/quality/edge-case-matrix.md) (test execution pending).
+- Added decoder-to-converter EC-008 coverage using a rights-cleared odd-width PNG and borrowed `DecodedFrame::view()`; verified EC-010 through the existing bounded-JPEG decoder regression without duplicating it. Focused/workspace tests, formatting, and strict Clippy pass. EC-009 restricted-worker/UI, QA-004 #35 evidence receipt, and native/manual scenarios remain not-run. [The edge-case matrix](docs/quality/edge-case-matrix.md) records the exact CNV-001 base and portable evidence; QA-102 acceptance remains open.
 
 ### Changed
 
