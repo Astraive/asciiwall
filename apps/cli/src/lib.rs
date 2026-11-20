@@ -193,11 +193,7 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), CliError> {
         export(converted.frame(), &glyphs, target, &budget, cancellation).map_err(export_error)?;
     let bytes = exported.bytes();
     if request.output.as_os_str() == OsStr::new("-") {
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(bytes)
-            .and_then(|()| stdout.flush())
-            .map_err(|_| CliError::io("cannot write conversion output"))?;
+        publish_stdout(bytes, cancellation, &mut io::stdout().lock())?;
     } else {
         output::publish_file(&request.output, request.overwrite, cancellation, |file| {
             file.write_all(bytes)
@@ -213,8 +209,24 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), CliError> {
         exported.size().columns(),
         exported.size().rows(),
         exported.loss_notice(),
-    );
+    )?;
     Ok(())
+}
+
+fn publish_stdout(
+    bytes: &[u8],
+    cancellation: &CancellationToken,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
+    if cancellation.is_cancelled() {
+        return Err(CliError::cancelled(
+            "conversion was cancelled before output publication",
+        ));
+    }
+    stdout
+        .write_all(bytes)
+        .and_then(|()| stdout.flush())
+        .map_err(|_| CliError::io("cannot write conversion output"))
 }
 
 fn progress(enabled: bool, message: &'static str) {
@@ -231,7 +243,7 @@ fn report_success(
     columns: u32,
     rows: u32,
     loss_notice: &str,
-) {
+) -> Result<(), CliError> {
     if json {
         let status = serde_json::json!({
             "schema_version": 1,
@@ -241,9 +253,7 @@ fn report_success(
             "columns": columns,
             "rows": rows,
         });
-        let mut stdout = io::stdout().lock();
-        let _ = serde_json::to_writer(&mut stdout, &status);
-        let _ = stdout.write_all(b"\n");
+        write_success_status(&mut io::stdout().lock(), &status)?;
     } else if !quiet {
         let _ = writeln!(
             io::stderr().lock(),
@@ -253,6 +263,19 @@ fn report_success(
     if verbose && !quiet {
         let _ = writeln!(io::stderr().lock(), "{loss_notice}");
     }
+    Ok(())
+}
+
+fn write_success_status(
+    stdout: &mut impl Write,
+    status: &serde_json::Value,
+) -> Result<(), CliError> {
+    serde_json::to_writer(&mut *stdout, status)
+        .map_err(|_| CliError::io("cannot write conversion status"))?;
+    stdout
+        .write_all(b"\n")
+        .and_then(|()| stdout.flush())
+        .map_err(|_| CliError::io("cannot write conversion status"))
 }
 
 const fn format_name(format: Format) -> &'static str {
@@ -361,5 +384,80 @@ fn font_error(error: FontLoadError) -> CliError {
         FontLoadError::Engine(Error::Cancelled) => {
             CliError::cancelled("font loading was cancelled")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+
+    use ascii_core::CancellationToken;
+
+    use super::{publish_stdout, write_success_status};
+
+    struct FailOnNewline {
+        bytes: Vec<u8>,
+    }
+
+    impl Write for FailOnNewline {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes == b"\n" {
+                return Err(io::Error::other("simulated newline write failure"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FailOnWrite;
+
+    impl Write for FailOnWrite {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("simulated status write failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stdout_publication_checks_cancellation_before_writing() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let mut stdout = Vec::new();
+
+        let error = publish_stdout(b"artwork", &cancellation, &mut stdout).unwrap_err();
+
+        assert_eq!(error.category, "cancelled");
+        assert_eq!(error.exit, 10);
+        assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn success_json_writer_errors_are_reported() {
+        let mut stdout = FailOnWrite;
+
+        let error =
+            write_success_status(&mut stdout, &serde_json::json!({"status": "ok"})).unwrap_err();
+
+        assert_eq!(error.category, "io");
+        assert_eq!(error.exit, 8);
+    }
+
+    #[test]
+    fn success_json_newline_errors_are_reported() {
+        let mut stdout = FailOnNewline { bytes: Vec::new() };
+
+        let error =
+            write_success_status(&mut stdout, &serde_json::json!({"status": "ok"})).unwrap_err();
+
+        assert_eq!(error.category, "io");
+        assert_eq!(error.exit, 8);
+        assert!(!stdout.bytes.is_empty());
     }
 }
