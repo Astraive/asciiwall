@@ -393,7 +393,7 @@ fn nearest_xterm_256(color: [u8; 3]) -> u8 {
     let red = nearest_cube_level(color[0]);
     let green = nearest_cube_level(color[1]);
     let blue = nearest_cube_level(color[2]);
-    let cube_index = 16 + 36 * red + 6 * green + blue;
+    let cube_index = 16 + 36 * u16::from(red) + 6 * u16::from(green) + u16::from(blue);
     let cube_color = [
         XTERM_CUBE_LEVELS[usize::from(red)],
         XTERM_CUBE_LEVELS[usize::from(green)],
@@ -410,7 +410,7 @@ fn nearest_xterm_256(color: [u8; 3]) -> u8 {
     let gray_step = if channel_sum <= 39 {
         0
     } else {
-        ((channel_sum - 39 + 29) / 30).min(23)
+        (channel_sum - 39).div_ceil(30).min(23)
     };
     let gray_index = 232 + u8::try_from(gray_step).expect("grayscale index fits in a byte");
     let gray_value = 8 + 10 * u8::try_from(gray_step).expect("grayscale step fits in a byte");
