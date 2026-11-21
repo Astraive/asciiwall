@@ -664,10 +664,7 @@ fn stale_cache_entry_cannot_lease_another_identity_after_eviction_and_reopen() {
         .unwrap();
     let mut replacement_lease = fresh_cache.lease(&replacement_identity).unwrap();
     assert_ne!(replacement_lease.path(), stale_path.as_path());
-    assert_eq!(
-        fs::read(replacement_lease.path()).unwrap(),
-        b"replacement"
-    );
+    assert_eq!(fs::read(replacement_lease.path()).unwrap(), b"replacement");
     replacement_lease.acknowledge().unwrap();
 
     assert!(matches!(
@@ -682,7 +679,9 @@ fn legacy_generated_files_seed_the_persistent_file_id_high_water_mark() {
     let cache_root = temp.path().join("cache");
     let legacy_cache = DerivedCache::open(&cache_root, 16).unwrap();
     let legacy_identity = identity(52);
-    legacy_cache.store(legacy_identity.clone(), b"legacy").unwrap();
+    legacy_cache
+        .store(legacy_identity.clone(), b"legacy")
+        .unwrap();
     let mut legacy_lease = legacy_cache.lease(&legacy_identity).unwrap();
     let legacy_path = legacy_lease.path().to_path_buf();
     legacy_lease.acknowledge().unwrap();

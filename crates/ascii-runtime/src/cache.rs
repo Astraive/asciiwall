@@ -1088,9 +1088,7 @@ fn lock_cache_directory(root: &Path, managed_dir: &Path) -> Result<File, CacheEr
 fn file_id_high_water_initialized(managed_dir: &Path) -> Result<bool, CacheError> {
     let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER_MARKER);
     match fs::symlink_metadata(&path) {
-        Ok(metadata) if !metadata.file_type().is_file() => {
-            Err(CacheError::UnsafeDerivedPath(path))
-        }
+        Ok(metadata) if !metadata.file_type().is_file() => Err(CacheError::UnsafeDerivedPath(path)),
         Ok(metadata) if metadata.len() == 0 => Ok(true),
         Ok(_) => Err(invalid_file_id_high_water()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
@@ -1167,10 +1165,7 @@ fn write_file_id_high_water(
 
 fn mark_file_id_high_water_initialized(managed_dir: &Path) -> Result<(), CacheError> {
     let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER_MARKER);
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.sync_all()?;
     Ok(())
 }
@@ -1220,7 +1215,6 @@ fn reserve_file_id(managed_dir: &Path, state: &mut CacheState) -> Result<u64, Ca
     state.next_file_id = next_file_id;
     Ok(id)
 }
-
 
 fn create_derived_file(
     root: &Path,
