@@ -764,6 +764,35 @@ fn concurrent_registry_updates_preserve_independent_package_changes() {
 }
 
 #[test]
+fn registry_update_parent_sync_failure_restores_exact_prior_state() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let previous = registry("1.0.0");
+    storage
+        .save_registry(&previous)
+        .expect("save initial registry");
+    let path = storage.registry_path();
+    let previous_bytes = fs::read(&path).expect("capture initial registry bytes");
+
+    let result = storage.update_registry_with_hook(
+        |current| *current = registry("2.0.0"),
+        injected_failure(AtomicWriteStage::ParentDirectorySync),
+    );
+    assert!(matches!(
+        result,
+        Err(StorageError::Io(error)) if error.to_string() == "injected interruption"
+    ));
+    assert_eq!(
+        fs::read(&path).expect("read registry after failed update"),
+        previous_bytes
+    );
+    assert_eq!(
+        storage.load_registry().expect("load prior registry"),
+        previous
+    );
+}
+
+#[test]
 fn registry_write_rejects_newer_and_invalid_current_bytes() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
