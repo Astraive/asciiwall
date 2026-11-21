@@ -9,7 +9,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{mpsc, Arc, Barrier};
+use std::time::Duration;
 use toml::Value as TomlValue;
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
@@ -1261,6 +1262,109 @@ fn restore_config_from_backup_rejects_stale_current_revision_without_mutation() 
         backup_before
     );
     assert_ne!(stale_revision, expected_current);
+}
+
+#[test]
+fn restore_config_from_backup_holds_directory_lock_through_compare_and_swap() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let known_good = config(json!({"theme": "known-good"}));
+    save_current_config(&storage, &known_good, validate_test_config)
+        .expect("save known-good settings");
+    let current = config(json!({"theme": "current"}));
+    save_current_config(&storage, &current, validate_test_config)
+        .expect("save current settings");
+    let config_path = storage.config_path();
+    let backup_path = storage.config_backup_path();
+    let current_before = fs::read(&config_path).expect("current settings bytes");
+    let backup_before = fs::read(&backup_path).expect("last-good settings bytes");
+    let competing_write = config(json!({"theme": "competing writer"}));
+
+    let (restore_entered_tx, restore_entered_rx) = mpsc::channel();
+    let (resume_restore_tx, resume_restore_rx) = mpsc::channel();
+    let restore = {
+        let storage = storage.clone();
+        let expected_current = current_before.clone();
+        std::thread::spawn(move || {
+            storage.restore_config_from_backup(Some(&expected_current), move |value| {
+                restore_entered_tx
+                    .send(())
+                    .expect("signal restore validation");
+                resume_restore_rx
+                    .recv()
+                    .expect("resume restore validation");
+                validate_test_config(value)
+            })
+        })
+    };
+    restore_entered_rx
+        .recv()
+        .expect("restore reaches schema validation");
+
+    let (writer_ready_tx, writer_ready_rx) = mpsc::channel();
+    let (continue_writer_tx, continue_writer_rx) = mpsc::channel();
+    let (writer_done_tx, writer_done_rx) = mpsc::channel();
+    let writer = {
+        let storage = storage.clone();
+        std::thread::spawn(move || {
+            let validation_calls = AtomicUsize::new(0);
+            let result = storage.save_config(
+                Some(&current_before),
+                &competing_write,
+                move |value| {
+                    if validation_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        writer_ready_tx
+                            .send(())
+                            .expect("signal competing writer validation");
+                        continue_writer_rx
+                            .recv()
+                            .expect("continue competing writer");
+                    }
+                    validate_test_config(value)
+                },
+            );
+            writer_done_tx
+                .send(result)
+                .expect("report competing writer result");
+        })
+    };
+    writer_ready_rx
+        .recv()
+        .expect("competing writer validates its candidate");
+    continue_writer_tx
+        .send(())
+        .expect("allow competing writer to request the lock");
+
+    let writer_finished_during_restore =
+        writer_done_rx.recv_timeout(Duration::from_secs(1)).ok();
+    let writer_was_blocked = writer_finished_during_restore.is_none();
+    resume_restore_tx
+        .send(())
+        .expect("resume restore after competing writer attempt");
+    let restore_result = restore.join().expect("join restore");
+    let writer_result = match writer_finished_during_restore {
+        Some(result) => result,
+        None => writer_done_rx.recv().expect("competing writer result"),
+    };
+    writer.join().expect("join competing writer");
+
+    assert!(
+        writer_was_blocked,
+        "competing writer completed while restore validation held the directory lock"
+    );
+    assert!(restore_result.is_ok(), "restore failed: {restore_result:?}");
+    assert!(matches!(
+        writer_result,
+        Err(StorageError::StaleConfiguration)
+    ));
+    assert_eq!(
+        fs::read(&config_path).expect("restored current settings"),
+        backup_before
+    );
+    assert_eq!(
+        fs::read(&backup_path).expect("last-good remains unchanged"),
+        backup_before
+    );
 }
 
 #[test]
