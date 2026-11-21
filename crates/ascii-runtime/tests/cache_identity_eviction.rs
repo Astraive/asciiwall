@@ -693,9 +693,7 @@ fn legacy_generated_files_seed_the_persistent_file_id_high_water_mark() {
     fs::remove_file(managed_dir.join(".file-id-high-water-v1")).unwrap();
 
     let upgraded_cache = DerivedCache::open(&cache_root, 16).unwrap();
-    let mut restored_lease = upgraded_cache.lease(&legacy_identity).unwrap();
-    assert_eq!(fs::read(restored_lease.path()).unwrap(), b"legacy");
-    restored_lease.acknowledge().unwrap();
+    assert_eq!(fs::read(&legacy_path).unwrap(), b"legacy");
 
     let replacement_identity = identity(53);
     upgraded_cache
@@ -703,6 +701,7 @@ fn legacy_generated_files_seed_the_persistent_file_id_high_water_mark() {
         .unwrap();
     let mut replacement_lease = upgraded_cache.lease(&replacement_identity).unwrap();
     assert_ne!(replacement_lease.path(), legacy_path.as_path());
+    assert_eq!(fs::read(replacement_lease.path()).unwrap(), b"new");
     replacement_lease.acknowledge().unwrap();
 }
 
