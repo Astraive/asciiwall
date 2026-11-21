@@ -745,8 +745,9 @@ fn registry_write_rejects_newer_and_invalid_current_bytes() {
 
 #[test]
 fn duplicate_registry_package_keys_are_rejected_on_load_and_save() {
-    let temp = TempDir::new();
-    let storage = Storage::new(linux_roots(temp.path()));
+    let roots = linux_roots(temp.path());
+    roots.create_all().expect("create private storage roots");
+    let storage = Storage::new(roots);
     let path = storage.registry_path();
     let first_entry = registry("1.0.0")
         .packages
@@ -1318,8 +1319,9 @@ fn newer_settings_schema_is_not_replaced_by_older_writer_or_explicit_recovery() 
 
 #[test]
 fn restore_rejects_versioned_versionless_comparisons() {
-    let temp = TempDir::new();
-    let storage = Storage::new(linux_roots(temp.path()));
+    let roots = linux_roots(temp.path());
+    roots.create_all().expect("create private storage roots");
+    let storage = Storage::new(roots);
 
     for (current, backup) in [
         (
