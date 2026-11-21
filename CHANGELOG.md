@@ -85,8 +85,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   collision-safe sibling snapshots; verify bytes survive recovery retries after rollback failure.
 - [COR-008] Redact extensionless Unicode names and dotfiles beneath recognized local roots in
   portable exports.
-- [COR-008] Require recognized local-path context for extension-based redaction, preserving
-  harmless version text such as `Supported versions v1.0/v2.0`.
+- [COR-008] Redact dotted filenames beneath recognized local roots even when their suffixes are
+  Unicode or otherwise not ASCII extensions, while preserving harmless version text such as
+  `Supported versions v1.0/v2.0`.
 - [COR-008] Restore prior registry bytes when an update fails at the parent-directory sync
   boundary; expose the write hook for deterministic rollback coverage.
 - [COR-008] Bound diagnostic logs to 16 files of at most 16 MiB each and 64 KiB per record; bound

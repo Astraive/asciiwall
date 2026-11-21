@@ -2377,6 +2377,7 @@ fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
         "embedded_windows": "clip selected from Videos\\private.mp4 before import",
         "embedded_extensionless": "clip selected from Documents/private before import",
         "embedded_unicode_extensionless": "clip selected from Documents/秘密 before import",
+        "embedded_unicode_suffix": "clip selected from Documents/private.設定 before import",
         "embedded_dotfile": "credential file: Documents/.credentials",
         "harmless_slash_prose": "Choose input/output; the ratio is 3/4.",
         "harmless_supported_versions": "Supported versions v1.0/v2.0",
@@ -2390,6 +2391,7 @@ fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
         "embedded_windows",
         "embedded_extensionless",
         "embedded_unicode_extensionless",
+        "embedded_unicode_suffix",
         "embedded_dotfile",
     ] {
         assert!(
