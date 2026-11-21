@@ -457,6 +457,69 @@ fn byte_lru_pins_active_resources_until_explicit_acknowledgement() {
 }
 
 #[test]
+fn dropped_unacknowledged_lease_survives_reopen_and_is_scoped_to_its_root() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let independent_root = temp.path().join("independent-cache");
+    let cache = DerivedCache::open(&cache_root, 3).expect("open cache");
+    let key = identity(201);
+    cache.store(key.clone(), b"pin").unwrap();
+    let lease = cache.lease(&key).unwrap();
+    let pinned_path = lease.path().to_path_buf();
+
+    drop(cache);
+    drop(lease);
+
+    assert!(matches!(
+        DerivedCache::open(&cache_root, 0),
+        Err(CacheError::BudgetPinned {
+            used_bytes: 3,
+            budget_bytes: 0,
+            requested_bytes: 0,
+        })
+    ));
+    assert!(pinned_path.exists());
+
+    let independent_cache =
+        DerivedCache::open(&independent_root, 0).expect("independent root is unpinned");
+    assert_eq!(independent_cache.snapshot().unwrap().used_bytes, 0);
+}
+
+#[test]
+fn explicit_ack_releases_shared_pin_after_cache_handle_drop() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 3).expect("open first cache");
+    let key = identity(202);
+    first_cache.store(key.clone(), b"pin").unwrap();
+    let second_cache = DerivedCache::open(&cache_root, 3).expect("open second cache");
+    let mut lease = first_cache.lease(&key).unwrap();
+    let mut second_lease = first_cache.lease(&key).unwrap();
+    let pinned_path = lease.path().to_path_buf();
+    drop(first_cache);
+
+    assert!(matches!(
+        second_cache.store(identity(203), b"new"),
+        Err(CacheError::BudgetPinned { .. })
+    ));
+    lease
+        .acknowledge()
+        .expect("first acknowledgement releases one lease pin");
+    assert!(matches!(
+        second_cache.store(identity(203), b"new"),
+        Err(CacheError::BudgetPinned { .. })
+    ));
+    second_lease
+        .acknowledge()
+        .expect("last acknowledgement releases the shared pin");
+    assert_eq!(
+        second_cache.store(identity(203), b"new").unwrap(),
+        StoreOutcome::Inserted
+    );
+    assert!(!pinned_path.exists());
+}
+
+#[test]
 fn lease_acknowledgement_retries_after_lock_failure_before_release() {
     let temp = TempDir::new();
     let cache = DerivedCache::open(temp.path().join("cache"), 3).unwrap();
