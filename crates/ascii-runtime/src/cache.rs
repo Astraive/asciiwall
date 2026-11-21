@@ -1198,7 +1198,6 @@ fn mark_file_id_high_water_initialized_with_sync(
     Ok(())
 }
 
-
 // Callers hold the cache operations lock so migration and reservations serialize across instances.
 
 fn ensure_file_id_high_water(root: &Path, discovered_next_id: u64) -> Result<u64, CacheError> {
@@ -2329,10 +2328,8 @@ mod tests {
         fn new() -> Self {
             loop {
                 let id = CACHE_INITIALIZATION_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-                let path = std::env::temp_dir().join(format!(
-                    "asciiwall-cache-sync-{}-{id}",
-                    std::process::id()
-                ));
+                let path = std::env::temp_dir()
+                    .join(format!("asciiwall-cache-sync-{}-{id}", std::process::id()));
                 match fs::create_dir(&path) {
                     Ok(()) => return Self(path),
                     Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
