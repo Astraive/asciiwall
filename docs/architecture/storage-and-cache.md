@@ -51,10 +51,12 @@ read from its path; callers pass `None` only when the file was absent. Storage c
 expectation under the directory lock before replacement; a mismatch returns the typed
 `StaleConfiguration` error without changing either file.
 Ordinary saves never overwrite invalid, unsupported, or oversized current settings and do not rotate
-them into `.last-good`. Explicit recovery can restore a schema-valid `.last-good` to current settings;
-it leaves the backup in place. Recovery refuses a lower integer schema version and fails closed
-when exactly one parseable current or backup document declares an integer version. Hook-injected
-failures cover temporary creation, temporary sync, backup replacement, and destination replacement; tests
+them into `.last-good`. Explicit recovery applies the same recursive history-key policy to the
+backup and can restore a schema-valid one to current settings; it leaves the backup in place and
+rejects forbidden keys without changing either file. Recovery refuses a lower integer schema version
+and fails closed when exactly one parseable current or backup document declares an integer version.
+Hook-injected failures cover temporary creation, temporary sync, backup replacement, and
+destination replacement; tests
 check complete valid current and last-good documents, owned-temporary cleanup, rejection without byte
 changes, explicit recovery, and subsequent successful saves at each boundary. App-owned storage
 directories are mode `0700`; persisted state and diagnostic log files, including rotated logs, are

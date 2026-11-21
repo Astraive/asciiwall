@@ -619,20 +619,35 @@ fn config_schema_version(value: &TomlValue) -> Option<i64> {
 }
 
 fn reject_history_keys(value: &TomlValue) -> Result<(), StorageError> {
+    reject_history_keys_at(value, &mut String::new())
+}
+
+fn reject_history_keys_at(
+    value: &TomlValue,
+    normalized_path: &mut String,
+) -> Result<(), StorageError> {
     match value {
         TomlValue::Table(table) => {
             for (key, nested) in table {
-                if is_history_key(key) {
+                let path_length = normalized_path.len();
+                for character in key
+                    .chars()
+                    .filter(|character| character.is_ascii_alphanumeric())
+                {
+                    normalized_path.push(character.to_ascii_lowercase());
+                }
+                if is_normalized_history_key(normalized_path) {
                     return Err(StorageError::InvalidConfiguration(
                         "history settings are not allowed in local configuration".into(),
                     ));
                 }
-                reject_history_keys(nested)?;
+                reject_history_keys_at(nested, normalized_path)?;
+                normalized_path.truncate(path_length);
             }
         }
         TomlValue::Array(items) => {
             for nested in items {
-                reject_history_keys(nested)?;
+                reject_history_keys_at(nested, normalized_path)?;
             }
         }
         _ => {}
@@ -817,6 +832,7 @@ impl Storage {
             StorageError::InvalidConfiguration("last-good settings are missing".into())
         })?;
         let value = parse_toml_value(&bytes)?;
+        reject_history_keys(&value)?;
         validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
         let current_version = current.as_ref().and_then(config_schema_version);
         let backup_version = config_schema_version(&value);
@@ -1658,7 +1674,10 @@ fn normalize_key(key: &str) -> String {
 }
 
 fn is_history_key(key: &str) -> bool {
-    let key = normalize_key(key);
+    is_normalized_history_key(&normalize_key(key))
+}
+
+fn is_normalized_history_key(key: &str) -> bool {
     (key.contains("cursor") && key.contains("history"))
         || (key.contains("window") && key.contains("geometry") && key.contains("history"))
 }
