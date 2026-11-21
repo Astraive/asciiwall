@@ -9,3 +9,6 @@ publish = false
 [dependencies]
 fs2 = "=0.4.3"
 toml = "=0.8.23"
+
+[dev-dependencies]
+proptest = { version = "=1.9.0", default-features = false, features = ["std"] }

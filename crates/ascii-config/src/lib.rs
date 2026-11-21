@@ -18,6 +18,9 @@ mod resolve;
 mod startup;
 mod store;
 
+#[cfg(test)]
+mod property_tests;
+
 pub use controller::{ControllerStatus, SettingChange, SettingsController, SettingsSnapshot};
 pub use document::{
     CURRENT_SCHEMA_VERSION, DocumentError, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH, MAX_SETTING_ENTRIES,
