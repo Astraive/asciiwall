@@ -365,3 +365,67 @@ proptest! {
         prop_assert_eq!(backup_bytes.as_slice(), previous.as_slice());
     }
 }
+
+#[test]
+fn future_documents_exceeding_limits_remain_read_only_and_unchanged() {
+    use std::fmt::Write as _;
+
+    let directory = TestDirectory::new();
+    let oversized = {
+        let mut bytes =
+            format!("schema_version = {}\nrevision = 0\n", CURRENT_SCHEMA_VERSION + 1)
+                .into_bytes();
+        bytes.resize(crate::MAX_CONFIG_BYTES + 1, b' ');
+        bytes
+    };
+    let deep = format!(
+        "schema_version = {}\nrevision = 0\nvalue = {}true{}\n",
+        CURRENT_SCHEMA_VERSION + 1,
+        "[".repeat(MAX_NESTING_DEPTH + 1),
+        "]".repeat(MAX_NESTING_DEPTH + 1),
+    )
+    .into_bytes();
+    let mut entries = format!(
+        "schema_version = {}\nrevision = 0\n[settings]\n",
+        CURRENT_SCHEMA_VERSION + 1
+    );
+    for index in 0..crate::MAX_SETTING_ENTRIES + 2 {
+        writeln!(&mut entries, "\"future.key{index:04}\" = {index}").unwrap();
+    }
+    let cases = [
+        ("byte-limit", oversized),
+        ("depth-limit", deep),
+        ("entry-limit", entries.into_bytes()),
+    ];
+
+    for (name, original) in cases {
+        let path = directory.0.join(format!("{name}.toml"));
+        fs::write(&path, &original).unwrap();
+        let controller = SettingsController::open(&path, property_registry()).unwrap();
+        let before = controller.snapshot().unwrap();
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::ReadOnlyUnclassifiableDocument(_)
+        ));
+        assert!(matches!(
+            controller.repair(0),
+            Err(ConfigError::ReadOnlyUnclassifiableDocument)
+        ));
+        assert!(matches!(
+            controller.apply_batch(
+                0,
+                &[(
+                    SettingKey::new("application.enabled").unwrap(),
+                    SettingChange::Set(SettingValue::Boolean(true)),
+                )],
+            ),
+            Err(ConfigError::ReadOnlyUnclassifiableDocument)
+        ));
+        assert!(matches!(
+            controller.restore_backup(0),
+            Err(ConfigError::ReadOnlyUnclassifiableDocument)
+        ));
+        assert_eq!(controller.snapshot().unwrap(), before);
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+}

@@ -20,6 +20,7 @@ pub enum ControllerStatus {
     Ready,
     RepairRequired(ConfigError),
     ReadOnlyFutureSchema { schema_version: i64 },
+    ReadOnlyUnclassifiableDocument(ConfigError),
 }
 
 /// A complete, immutable settings revision published by the controller.
@@ -69,6 +70,11 @@ struct ControllerState {
     status: ControllerStatus,
     snapshot: Arc<SettingsSnapshot>,
     disk_bytes: Option<Vec<u8>>,
+}
+
+struct OpenDocumentError {
+    error: ConfigError,
+    can_repair: bool,
 }
 
 impl SettingsController {
@@ -130,19 +136,19 @@ impl SettingsController {
                         Some(bytes),
                     )
                 }
-                Err(error) => {
-                    let issue = error;
-                    (
-                        ControllerStatus::RepairRequired(issue),
-                        defaults,
-                        Some(bytes),
-                    )
+                Err(failure) => {
+                    let status = if failure.can_repair {
+                        ControllerStatus::RepairRequired(failure.error)
+                    } else {
+                        ControllerStatus::ReadOnlyUnclassifiableDocument(failure.error)
+                    };
+                    (status, defaults, Some(bytes))
                 }
             },
             Err(StoreError::TooLarge { limit, .. }) => (
-                ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::TooLarge {
-                    limit,
-                })),
+                ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+                    DocumentError::TooLarge { limit },
+                )),
                 defaults,
                 None,
             ),
@@ -164,8 +170,8 @@ impl SettingsController {
         Ok(self.lock()?.snapshot.clone())
     }
 
-    /// Returns whether changes are accepted, require repair, or are blocked by
-    /// a future schema.
+    /// Returns whether changes are accepted, require repair, or blocked by a
+    /// future schema or unclassifiable document.
     pub fn status(&self) -> Result<ControllerStatus, ConfigError> {
         Ok(self.lock()?.status.clone())
     }
@@ -229,9 +235,9 @@ impl SettingsController {
         Ok(snapshot)
     }
 
-    /// Replaces a corrupt document with registry defaults only after an
-    /// explicit caller action. The last-good backup is not overwritten by the
-    /// corrupt bytes; they are archived separately by the file store.
+    /// Replaces invalid data in a fully parsed, supported-schema document with
+    /// registry defaults only after explicit caller action. The file store
+    /// preserves the last-good backup and archives the replaced document.
     pub fn repair(&self, expected_revision: u64) -> Result<Arc<SettingsSnapshot>, ConfigError> {
         let mut state = self.lock()?;
         if !matches!(&state.status, ControllerStatus::RepairRequired(_)) {
@@ -256,8 +262,8 @@ impl SettingsController {
     }
 
     /// Explicitly restores the last-good `.bak`, revalidates it and publishes
-    /// it as a new current-schema revision. Future-schema files remain
-    /// read-only and cannot be overwritten through this API.
+    /// it as a new current-schema revision. Future-schema and unclassifiable
+    /// files remain read-only and cannot be overwritten through this API.
     pub fn restore_backup(
         &self,
         expected_revision: u64,
@@ -267,6 +273,9 @@ impl SettingsController {
             return Err(ConfigError::ReadOnlyFutureSchema {
                 schema_version: *schema_version,
             });
+        }
+        if matches!(&state.status, ControllerStatus::ReadOnlyUnclassifiableDocument(_)) {
+            return Err(ConfigError::ReadOnlyUnclassifiableDocument);
         }
         ensure_expected(expected_revision, state.snapshot.revision)?;
         ensure_disk_matches_for_repair(&mut state)?;
@@ -304,13 +313,25 @@ impl SettingsController {
     }
 }
 
-fn decode_and_validate(registry: &Registry, bytes: &[u8]) -> Result<DecodedDocument, ConfigError> {
-    let document = decode(bytes)?;
+fn decode_and_validate(
+    registry: &Registry,
+    bytes: &[u8],
+) -> Result<DecodedDocument, OpenDocumentError> {
+    let document = decode(bytes).map_err(|error| OpenDocumentError {
+        error: ConfigError::Document(error),
+        can_repair: false,
+    })?;
     if document.schema_version > CURRENT_SCHEMA_VERSION {
         return Ok(document);
     }
-    validate_overrides(registry, &document.overrides)?;
-    let _ = resolve_overrides(registry, &document.overrides)?;
+    validate_overrides(registry, &document.overrides).map_err(|error| OpenDocumentError {
+        can_repair: !matches!(&error, ConfigError::UnknownSetting(_)),
+        error,
+    })?;
+    resolve_overrides(registry, &document.overrides).map_err(|error| OpenDocumentError {
+        error: error.into(),
+        can_repair: true,
+    })?;
     Ok(document)
 }
 
@@ -383,6 +404,9 @@ fn ensure_writable(status: &ControllerStatus) -> Result<(), ConfigError> {
             Err(ConfigError::ReadOnlyFutureSchema {
                 schema_version: *schema_version,
             })
+        }
+        ControllerStatus::ReadOnlyUnclassifiableDocument(_) => {
+            Err(ConfigError::ReadOnlyUnclassifiableDocument)
         }
     }
 }

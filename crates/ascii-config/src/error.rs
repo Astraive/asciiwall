@@ -23,6 +23,7 @@ pub enum ConfigError {
     ReadOnlyFutureSchema {
         schema_version: i64,
     },
+    ReadOnlyUnclassifiableDocument,
     RepairRequired,
     NotRepairable,
     NoBackup,

@@ -492,7 +492,7 @@ fn independent_controllers_cannot_overwrite_the_same_revision() {
 }
 
 #[test]
-fn future_schema_is_read_only_and_corrupt_repair_keeps_library_data() {
+fn future_schema_and_unclassifiable_documents_are_read_only() {
     let directory = TestDirectory::new();
     let path = directory.config();
     fs::write(
@@ -514,27 +514,51 @@ fn future_schema_is_read_only_and_corrupt_repair_keeps_library_data() {
     fs::create_dir_all(library_file.parent().unwrap()).unwrap();
     fs::write(&library_file, b"immutable user library data").unwrap();
     let corrupt_path = directory.0.join("corrupt.toml");
-    fs::write(&corrupt_path, [0xff, 0xfe]).unwrap();
+    let original = [0xff, 0xfe];
+    fs::write(&corrupt_path, original).unwrap();
     let repair = SettingsController::open(&corrupt_path, registry()).unwrap();
     assert!(matches!(
         repair.status().unwrap(),
-        ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::InvalidUtf8))
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+            DocumentError::InvalidUtf8
+        ))
     ));
-    repair.repair(0).unwrap();
+    assert!(matches!(
+        repair.repair(0),
+        Err(ConfigError::ReadOnlyUnclassifiableDocument)
+    ));
+    assert!(matches!(
+        repair.apply_batch(0, &[]),
+        Err(ConfigError::ReadOnlyUnclassifiableDocument)
+    ));
+    assert!(matches!(
+        repair.restore_backup(0),
+        Err(ConfigError::ReadOnlyUnclassifiableDocument)
+    ));
+    assert_eq!(fs::read(&corrupt_path).unwrap().as_slice(), &original[..]);
     assert_eq!(
         fs::read(library_file).unwrap(),
         b"immutable user library data"
     );
-    let corrupt_archive_exists = fs::read_dir(&directory.0)
-        .unwrap()
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("corrupt.toml.corrupt-")
-        });
-    assert!(corrupt_archive_exists);
+}
+
+#[test]
+fn explicit_repair_remains_available_for_known_current_schema_data() {
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    let original =
+        b"schema_version = 2\nrevision = 17\n[settings]\n\"grid.columns\" = 0\n";
+    fs::write(&path, original).unwrap();
+    let controller = SettingsController::open(&path, registry()).unwrap();
+
+    assert!(matches!(
+        controller.status().unwrap(),
+        ControllerStatus::RepairRequired(ConfigError::InvalidPersistentValue { .. })
+    ));
+    let repaired = controller.repair(17).unwrap();
+    assert_eq!(repaired.revision(), 18);
+    assert!(repaired.overrides().is_empty());
+    assert_ne!(fs::read(path).unwrap().as_slice(), &original[..]);
 }
 
 #[test]
@@ -566,7 +590,9 @@ fn malformed_document_classes_are_rejected_before_snapshot_publication() {
         let controller = SettingsController::open(&path, registry()).unwrap();
         assert!(matches!(
             controller.status().unwrap(),
-            ControllerStatus::RepairRequired(ConfigError::Document(error)) if expected(&error)
+            ControllerStatus::ReadOnlyUnclassifiableDocument(
+                ConfigError::Document(error)
+            ) if expected(&error)
         ));
         assert_eq!(controller.snapshot().unwrap().revision(), 0);
     }
@@ -578,8 +604,11 @@ fn malformed_document_classes_are_rejected_before_snapshot_publication() {
     fs::write(&path, invalid_utf8).unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::InvalidUtf8))
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+            DocumentError::InvalidUtf8
+        ))
     ));
+
 }
 
 #[test]
@@ -594,7 +623,7 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
     fs::write(&path, nested).unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::RepairRequired(ConfigError::Document(
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
             DocumentError::ExcessiveNesting { .. }
         ))
     ));
@@ -606,7 +635,7 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
     .unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::RepairRequired(ConfigError::UnknownSetting(_))
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::UnknownSetting(_))
     ));
 
     let session_controller =
@@ -626,6 +655,8 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
     fs::write(&path, oversized).unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::TooLarge { .. }))
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+            DocumentError::TooLarge { .. }
+        ))
     ));
 }
