@@ -872,6 +872,7 @@ fn patch_size_and_aggregate_budgets_fail_at_exact_thresholds_before_allocation()
             &table,
             &settings,
             &exact,
+            unlimited_raster_resources(),
         )
         .is_ok()
     );
