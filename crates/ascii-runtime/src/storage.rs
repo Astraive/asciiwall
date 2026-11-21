@@ -31,7 +31,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use toml::Value as TomlValue;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
@@ -40,6 +39,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Weak};
+use toml::Value as TomlValue;
 
 const REGISTRY_VERSION: u32 = 1;
 const CONFIG_MAX_BYTES: u64 = 8 * 1024 * 1024;
@@ -707,8 +707,7 @@ impl Storage {
             StorageError::InvalidConfiguration("last-good settings are missing".into())
         })?;
         let value = parse_toml_value(&bytes)?;
-        validate(&value)
-            .map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
+        validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
         atomic_replace_locked(&destination, &bytes, None, None, &mut |_| Ok(()))?;
         Ok(())
     }
@@ -1461,17 +1460,14 @@ fn is_machine_local_string(value: &str) -> bool {
     }
     value.split_whitespace().any(|token| {
         let token = trim_export_punctuation(token);
-        token
-            .split([':', '='])
-            .any(|part| {
-                let part = trim_export_punctuation(part);
-                part.starts_with("~/")
-                    || looks_like_user_home_path(part)
-                    || part.starts_with('/')
-                    || part.starts_with("\\\\")
-                    || part.contains('\\')
-            })
-            || looks_like_network_endpoint(token)
+        token.split([':', '=']).any(|part| {
+            let part = trim_export_punctuation(part);
+            part.starts_with("~/")
+                || looks_like_user_home_path(part)
+                || part.starts_with('/')
+                || part.starts_with("\\\\")
+                || part.contains('\\')
+        }) || looks_like_network_endpoint(token)
     })
 }
 

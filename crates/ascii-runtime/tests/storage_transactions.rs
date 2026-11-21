@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use toml::Value as TomlValue;
 
-
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 struct TempDir(PathBuf);
@@ -245,11 +244,8 @@ fn storage_roots_and_persisted_files_are_owner_only() {
     let temp = TempDir::new();
     let roots = linux_roots(temp.path());
     fs::create_dir_all(&roots.config).expect("create previously permissive config root");
-    fs::set_permissions(
-        &roots.config,
-        fs::Permissions::from_mode(0o755),
-    )
-    .expect("make existing config root broadly accessible");
+    fs::set_permissions(&roots.config, fs::Permissions::from_mode(0o755))
+        .expect("make existing config root broadly accessible");
     let storage = Storage::new(roots.clone());
     roots.create_all().expect("create private storage roots");
     for directory in [
@@ -264,7 +260,10 @@ fn storage_roots_and_persisted_files_are_owner_only() {
         &roots.runtime,
     ] {
         assert_eq!(
-            fs::metadata(directory).expect("storage directory metadata").permissions().mode()
+            fs::metadata(directory)
+                .expect("storage directory metadata")
+                .permissions()
+                .mode()
                 & 0o777,
             0o700,
             "storage directory is private: {directory:?}"
@@ -285,10 +284,7 @@ fn storage_roots_and_persisted_files_are_owner_only() {
                             .is_some_and(|name| name.to_string_lossy().ends_with(".state.tmp"))
                     })
                     .ok_or_else(|| io::Error::other("atomic temporary was not created"))?;
-                assert_eq!(
-                    fs::metadata(temporary)?.permissions().mode() & 0o777,
-                    0o600
-                );
+                assert_eq!(fs::metadata(temporary)?.permissions().mode() & 0o777, 0o600);
             }
             Ok(())
         })
@@ -301,13 +297,13 @@ fn storage_roots_and_persisted_files_are_owner_only() {
             & 0o777,
         0o600
     );
-    fs::set_permissions(
-        storage.config_path(),
-        fs::Permissions::from_mode(0o644),
-    )
-    .expect("make old config broadly readable for replacement regression");
+    fs::set_permissions(storage.config_path(), fs::Permissions::from_mode(0o644))
+        .expect("make old config broadly readable for replacement regression");
     storage
-        .save_config(&config(json!({"theme": "replacement"})), validate_test_config)
+        .save_config(
+            &config(json!({"theme": "replacement"})),
+            validate_test_config,
+        )
         .expect("replace config without broadening permissions");
     assert_eq!(
         fs::metadata(storage.config_path())
@@ -322,11 +318,10 @@ fn storage_roots_and_persisted_files_are_owner_only() {
     storage
         .save_registry_with_hook(&initial_registry, |stage| {
             if stage == AtomicWriteStage::TemporaryCreated {
-                let temporary = roots.data.join(".ascii-runtime-install-registry.json.state.tmp");
-                assert_eq!(
-                    fs::metadata(temporary)?.permissions().mode() & 0o777,
-                    0o600
-                );
+                let temporary = roots
+                    .data
+                    .join(".ascii-runtime-install-registry.json.state.tmp");
+                assert_eq!(fs::metadata(temporary)?.permissions().mode() & 0o777, 0o600);
             }
             Ok(())
         })
@@ -342,11 +337,7 @@ fn storage_roots_and_persisted_files_are_owner_only() {
 
     let journal = ImportJournal::new(roots.staging.clone());
     journal
-        .begin(
-            "private-test",
-            "org.example.sample",
-            "imports/private-test",
-        )
+        .begin("private-test", "org.example.sample", "imports/private-test")
         .expect("write private journal");
     assert_eq!(
         fs::metadata(roots.staging.join("import-private-test.json"))
@@ -399,7 +390,6 @@ fn storage_roots_and_persisted_files_are_owner_only() {
         );
     }
 }
-
 
 #[test]
 fn root_resolution_separates_lexical_and_symlink_aliases() {
@@ -534,8 +524,10 @@ fn windows_filesystem_atomic_save_recovery_smoke() {
         replacement.value()
     );
     assert_eq!(
-        parse_config(&fs::read(storage.config_backup_path()).expect("read Windows last-good backup"))
-            .value(),
+        parse_config(
+            &fs::read(storage.config_backup_path()).expect("read Windows last-good backup")
+        )
+        .value(),
         second.value()
     );
     let subsequent = config(json!({"theme": "windows-subsequent"}));
@@ -930,8 +922,14 @@ fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly()
         ),
         Err(StorageError::InvalidConfiguration(_))
     ));
-    assert_eq!(fs::read(&config_path).expect("malformed file stays untouched"), malformed);
-    assert_eq!(fs::read(&backup_path).expect("backup stays untouched"), known_good_backup);
+    assert_eq!(
+        fs::read(&config_path).expect("malformed file stays untouched"),
+        malformed
+    );
+    assert_eq!(
+        fs::read(&backup_path).expect("backup stays untouched"),
+        known_good_backup
+    );
 
     let invalid_schema = b"theme = 42\n";
     fs::write(&config_path, invalid_schema).expect("write schema-invalid TOML");
@@ -951,7 +949,10 @@ fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly()
     storage
         .restore_config_from_backup(validate_theme_config)
         .expect("explicitly restore the validated last-good config");
-    assert_eq!(fs::read(&config_path).expect("restored config"), known_good_bytes);
+    assert_eq!(
+        fs::read(&config_path).expect("restored config"),
+        known_good_bytes
+    );
     assert_eq!(
         fs::read(&backup_path).expect("explicit recovery preserves last-good"),
         known_good_bytes
@@ -1213,7 +1214,11 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
         .restore_config_from_backup(validate_test_config)
         .expect("explicitly restore from last-good");
     assert_eq!(
-        storage.load_config(validate_test_config).unwrap().unwrap().value(),
+        storage
+            .load_config(validate_test_config)
+            .unwrap()
+            .unwrap()
+            .value(),
         original_config.value()
     );
     assert_eq!(
@@ -1685,11 +1690,7 @@ fn portable_export_redacts_machine_paths_after_colon_delimiters() {
         ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
             .expect("portable export");
     let encoded = String::from_utf8(portable.to_json().unwrap()).unwrap();
-    for private_key in [
-        "first_note",
-        "second_note",
-        "third_note",
-    ] {
+    for private_key in ["first_note", "second_note", "third_note"] {
         assert!(
             portable.content().get(private_key).is_none(),
             "portable export retained {private_key}"
