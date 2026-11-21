@@ -494,6 +494,9 @@ class _NativeJsonPrefixScanner:
             if not self._select_encoding(final=False):
                 return
         self._process(raw)
+    @property
+    def encoding(self) -> str | None:
+        return self._encoding
 
     def _select_encoding(self, *, final: bool) -> bool:
         if len(self._probe) < 4 and not final:
@@ -794,6 +797,9 @@ class _SyntheticMarkerScanner:
         self.window = bytearray()
         self.found = False
         self.raw_overlap = b""
+        self.encoding: str | None = None
+        self.encoding_probe = bytearray()
+        self.pending_utf16_byte: int | None = None
 
     def _append(self, value: int) -> None:
         if value > 0x7f:
@@ -807,7 +813,57 @@ class _SyntheticMarkerScanner:
         if any(marker in self.window for marker in self._markers):
             self.found = True
 
-    def update(self, raw: bytes) -> None:
+    def _consume(self, byte: int) -> None:
+        if self.found:
+            return
+        if self.unicode_remaining:
+            if byte in self._hex_digits:
+                self.unicode_value = (self.unicode_value << 4) | int(bytes((byte,)), 16)
+                self.unicode_remaining -= 1
+                if not self.unicode_remaining:
+                    self._append(self.unicode_value)
+                    self.unicode_value = 0
+                return
+            self.unicode_remaining = 0
+            self.unicode_value = 0
+            self._append(0)
+        if byte == ord("\\"):
+            self.backslash_run += 1
+            return
+        if byte == ord("u") and self.backslash_run % 2:
+            if self.backslash_run > 1:
+                self._append(0)
+            self.backslash_run = 0
+            self.unicode_remaining = 4
+            return
+        if self.backslash_run:
+            self._append(0)
+            self.backslash_run = 0
+        self._append(byte)
+
+    def _update_utf16(self, raw: bytes) -> None:
+        little_endian = self.encoding == "utf-16-le"
+        if self.pending_utf16_byte is not None:
+            if not raw:
+                return
+            first = self.pending_utf16_byte
+            second = raw[0]
+            self.pending_utf16_byte = None
+            unit = first | (second << 8) if little_endian else (first << 8) | second
+            self._consume(unit if unit < 0x80 else 0)
+            raw = raw[1:]
+        even_length = len(raw) & ~1
+        for index in range(0, even_length, 2):
+            first = raw[index]
+            second = raw[index + 1]
+            unit = first | (second << 8) if little_endian else (first << 8) | second
+            self._consume(unit if unit < 0x80 else 0)
+            if self.found:
+                return
+        if even_length < len(raw):
+            self.pending_utf16_byte = raw[-1]
+
+    def update(self, raw: bytes, *, encoding: str | None = None) -> None:
         if self.found:
             return
         scan = (self.raw_overlap + raw).lower()
@@ -815,37 +871,29 @@ class _SyntheticMarkerScanner:
             self.found = True
             return
         self.raw_overlap = scan[-self._raw_window_limit + 1:]
+        if self.encoding is None:
+            if encoding is None:
+                self.encoding_probe.extend(raw)
+                return
+            self.encoding = encoding
+            raw = bytes(self.encoding_probe) + raw
+            self.encoding_probe.clear()
+        if self.encoding in ("utf-16-le", "utf-16-be"):
+            self._update_utf16(raw)
+            return
         for byte in raw:
+            self._consume(byte)
             if self.found:
                 return
-            if self.unicode_remaining:
-                if byte in self._hex_digits:
-                    self.unicode_value = (self.unicode_value << 4) | int(bytes((byte,)), 16)
-                    self.unicode_remaining -= 1
-                    if not self.unicode_remaining:
-                        self._append(self.unicode_value)
-                        self.unicode_value = 0
-                    continue
-                self.unicode_remaining = 0
-                self.unicode_value = 0
-                self._append(0)
-            if byte == ord("\\"):
-                self.backslash_run += 1
-                continue
-            if byte == ord("u") and self.backslash_run % 2:
-                if self.backslash_run > 1:
-                    self._append(0)
-                self.backslash_run = 0
-                self.unicode_remaining = 4
-                continue
-            if self.backslash_run:
-                self._append(0)
-                self.backslash_run = 0
-            self._append(byte)
+
+
+
 
 def _contains_synthetic_bytes(raw: bytes) -> bool:
     scanner = _SyntheticMarkerScanner()
-    scanner.update(raw)
+    json_prefix = _NativeJsonPrefixScanner()
+    json_prefix.update(raw)
+    scanner.update(raw, encoding=json_prefix.encoding)
     return scanner.found
 
 
@@ -861,7 +909,7 @@ def _hash_native_stream(read: Callable[[int], bytes], limit: int) -> tuple[str, 
             raise EvidenceError("native evidence artifacts exceed their size limit")
         digest.update(chunk)
         json_prefix.update(chunk)
-        synthetic_marker_scanner.update(chunk)
+        synthetic_marker_scanner.update(chunk, encoding=json_prefix.encoding)
         if synthetic_marker_scanner.found:
             raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
         remaining = MAX_JSON_BYTES + 1 - len(prefix)

@@ -420,6 +420,76 @@ class EvidenceRecordTests(unittest.TestCase):
                     ):
                         evidence.finalize_record(record)
 
+    def test_native_manual_manifest_rejects_prefixed_oversized_utf16_unicode_escaped_synthetic_key_at_stream_boundary(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            manifest_path = directory / "native-evidence.json"
+            manifest_relative = manifest_path.relative_to(ROOT).as_posix()
+            procedure_id = "NATIVE-UTF16-ESCAPED-KEY-001"
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id=procedure_id,
+                ec_ids=[],
+                evidence_path=manifest_relative,
+            )
+            marker = "synthetic-control-report"
+            escaped_marker = r"\u0073" + marker[1:]
+            report_json = '{"' + escaped_marker + '":"synthetic evidence"}'
+            marker_offset = report_json.index(escaped_marker)
+            marker_start = evidence.MAX_JSON_BYTES - 32
+            encodings = (
+                ("utf-16-le", b"\xff\xfe"),
+                ("utf-16-be", b"\xfe\xff"),
+            )
+            for encoding, bom in encodings:
+                with self.subTest(encoding=encoding):
+                    padding = (
+                        (marker_start - len(bom)) // 2
+                        - len("note ")
+                        - marker_offset
+                    )
+                    prefix = "note " + " " * padding
+                    payload = bom + (prefix + report_json).encode(encoding)
+                    artifact = directory / f"oversized-{encoding}-escaped-key.bin"
+                    artifact.write_bytes(payload)
+                    marker_bytes = escaped_marker.encode(encoding)
+
+                    self.assertTrue(payload.startswith(bom + "note ".encode(encoding)))
+                    self.assertEqual(
+                        len(bom) + 2 * (len(prefix) + marker_offset),
+                        marker_start,
+                    )
+                    self.assertGreater(len(payload), evidence.MAX_JSON_BYTES)
+                    self.assertLessEqual(
+                        len(payload), evidence.MAX_NATIVE_ARTIFACT_BYTES
+                    )
+                    self.assertGreater(
+                        marker_start % 65_536 + len(marker_bytes),
+                        65_536,
+                    )
+                    artifact_relative = artifact.relative_to(ROOT).as_posix()
+                    manifest = {
+                        "schema_version": 1,
+                        "artifact_type": "native-manual-evidence",
+                        "execution": "manual",
+                        "procedure_id": procedure_id,
+                        "reviewer": record["reviewer"],
+                        "date": record["date"],
+                        "status": "pass",
+                        "artifacts": [{
+                            "path": artifact_relative,
+                            "sha256": hashlib.sha256(payload).hexdigest(),
+                        }],
+                    }
+                    manifest_path.write_bytes(evidence.canonical_json(manifest))
+                    with self.assertRaisesRegex(
+                        evidence.EvidenceError,
+                        "synthetic artifacts cannot support a native-manual pass",
+                    ):
+                        evidence.finalize_record(record)
+
+
 
     def test_native_manual_manifest_rejects_oversized_utf16_primitive_json(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
