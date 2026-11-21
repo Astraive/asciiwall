@@ -29,7 +29,7 @@ Version one enforces that repertoire at construction: C0/C1 controls, bidi forma
 ### FNT-002 verification evidence
 
 - Focused command: `cargo test --locked -p ascii-convert --test repertoire` — 10 tests passed, including all 256 Braille dot patterns at 8×12 and 10×15, complete preset font availability, block alignment/coverage, strict rejections, preview-mask identity, and missing/invisible states.
-- Workspace command: `cargo test --locked --workspace --all-targets` — 156 tests passed across 11 suites in `ascii-core`, `ascii-convert`, and `ascii-media`.
+- Workspace command: `cargo test --locked --workspace --all-targets` — 165 tests passed across 13 suites in `ascii-core`, `ascii-convert`, and `ascii-media`.
 - Quality commands: `cargo fmt --all -- --check` and `cargo clippy --locked --workspace --all-targets -- -D warnings` — passed.
 - Executable smoke: temporary offline path-dependent binary ran `cargo run --locked --offline` and asserted actual `A` preview-mask equality, blank space preservation, and `C` unavailable status. Output: `preview smoke passed: A=Available coverage=Some(0.21764706), space=Available, C=Unavailable`.
 - Fixture/config evidence (source-generated, rights-cleared, no downloaded assets): `crates/ascii-convert/tests/support/repertoire_font.rs` SHA-256 `5a9e260b31c2f43eacb758d1bedf2fcb1e5c16289ebabf9faeb3bfe637731868`; `crates/ascii-convert/tests/repertoire.rs` (raster sizes, cells, baseline, budgets, assertions) SHA-256 `ff80d09fa511f84a84fa662843382424f530facee9257788662488c1414b2228`.
