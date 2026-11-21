@@ -77,13 +77,14 @@ closed. After syncing newly created counter and initialization-marker files, the
 is synced where supported so eviction cannot erase the last durable ID evidence.
 
 Active decoder/upload users pin entries through non-cloneable leases; dropping a lease does not
-signal completion, and the owner must explicitly acknowledge completion. Acknowledgement remains
-retryable: an error before pin release leaves the mutable lease available for retry, while an error
-during trimming leaves the pin released and a retry only retries trimming. A live lease holds a
-shared OS file lock, and eviction must obtain an exclusive lock before deleting a file, so another
-cache instance cannot remove an actively leased artifact. Keep the managed cache root private and
-stable: project directories, imported packages, and unmanaged files remain outside the deletion
-scope.
+signal completion, and the owner must explicitly acknowledge completion. A process-wide keeper
+retains one shared OS file lock per pinned entry until every lease is acknowledged, even after the
+final cache or lease handles drop; an unacknowledged pin with no remaining lease handle lasts until
+process exit. Acknowledgement remains retryable: an error before pin release leaves the mutable
+lease available for retry, while an error during trimming leaves the pin released and a retry only
+retries trimming. Eviction must obtain an exclusive lock before deleting a file, so another cache
+instance cannot remove an actively leased artifact. Keep the managed cache root private and stable:
+project directories, imported packages, and unmanaged files remain outside the deletion scope.
 
 Disk reservations account for expanded input, scratch, output capacity, and a safety reserve against
 a host-probed free-space estimate. Capture a `DiskBudgetProbe` with

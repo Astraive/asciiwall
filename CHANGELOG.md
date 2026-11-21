@@ -72,8 +72,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   explicitly labeled nonportable local backups.
 - COR-009 cache hardening preserves output bytes written after a disk-probe snapshot, captures
   absolute output destinations, resolves case-variant registrations using filesystem semantics,
-  atomically publishes marked cache roots, and keeps lease acknowledgement retryable until its pin
-  is released. Existing retained-byte accounting, OS file locks, and failed-write protections remain.
+  atomically publishes marked cache roots, and retains a process-wide shared file lock per pinned
+  entry until all its leases are acknowledged, even after cache and lease handles drop.
+  Lease acknowledgement remains retryable; retained-byte accounting, OS file locks, and failed-write
+  protections remain.
 - [COR-009] Persist a monotonic generated-file ID high-water mark before file creation, reconcile
   legacy files, and fail closed on damaged initialized or exhausted counter state to prevent
   filename reuse after eviction.

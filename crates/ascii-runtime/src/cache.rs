@@ -11,7 +11,7 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 const CACHE_INSTANCE_DIR: &str = ".asciiwall-cache-v1";
 const CACHE_OWNER_FILE: &str = ".asciiwall-owner";
@@ -25,6 +25,9 @@ const CACHE_INITIALIZATION_LOCK: &str = ".asciiwall-cache-v1.init.lock";
 
 static CACHE_INITIALIZATION_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 static CACHE_FILE_ID_HIGH_WATER_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+/// Retains one shared file lock per path until every issued lease is explicitly acknowledged.
+static CACHE_LEASE_PINS: LazyLock<Mutex<HashMap<PathBuf, CacheLeasePin>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A caller-computed cryptographic digest of content or shader bytes.
 ///
@@ -418,6 +421,12 @@ struct CacheEntry {
     source_observation: Option<SourceObservation>,
 }
 
+#[derive(Debug)]
+struct CacheLeasePin {
+    _file: File,
+    lease_count: u64,
+}
+
 /// Generated file recovered on reopen without an in-memory identity; it remains accounted and
 /// evictable, but cannot be leased as a semantic cache entry.
 #[derive(Debug)]
@@ -437,7 +446,6 @@ struct CacheState {
     entries: HashMap<CacheIdentity, CacheEntry>,
     entries_by_file_id: HashMap<u64, CacheIdentity>,
     orphaned_files: Vec<OrphanedFile>,
-    active_lease_files: HashMap<CacheIdentity, Vec<File>>,
 }
 
 #[derive(Debug)]
@@ -452,9 +460,10 @@ struct CacheInner {
 /// accounted and are selected as orphaned eviction candidates by generated file ID. Operations
 /// that account for root-wide byte usage reconcile under an OS lock; instances sharing a root must
 /// use the same budget.
-/// Active leases hold portable OS shared file locks; deletion obtains an exclusive file lock and
-/// fails closed while any instance holds a lease. The caller must keep the root private and stable;
-/// portable path APIs cannot defend against a hostile concurrent root-directory replacement.
+/// Active leases keep process-wide portable OS shared file locks until explicit acknowledgement;
+/// deletion obtains an exclusive file lock and fails closed while any process holds a lease. The
+/// caller must keep the root private and stable; portable path APIs cannot defend against a hostile
+/// concurrent root-directory replacement.
 #[derive(Clone, Debug)]
 pub struct DerivedCache {
     inner: Arc<CacheInner>,
@@ -484,7 +493,6 @@ impl DerivedCache {
             entries: HashMap::new(),
             entries_by_file_id: HashMap::new(),
             orphaned_files,
-            active_lease_files: HashMap::new(),
         };
         trim_to_budget(&root, &mut state)?;
         Ok(Self {
@@ -654,23 +662,23 @@ impl DerivedCache {
             }
             Err(error) => return Err(CacheError::Io(error)),
         }
-        let lease_file = File::open(&path)?;
-        lease_file.try_lock_shared().map_err(io::Error::from)?;
-        let tick = next_tick(&mut state)?;
-        let entry = state
-            .entries
-            .get_mut(identity)
-            .ok_or(CacheError::NotFound)?;
-        entry.active_leases = entry
+        let path = entry.path.clone();
+        let next_active_leases = entry
             .active_leases
             .checked_add(1)
             .ok_or(CacheError::ArithmeticOverflow)?;
+        let tick = state
+            .lru_clock
+            .checked_add(1)
+            .ok_or(CacheError::ArithmeticOverflow)?;
+        retain_cache_lease_pin(&path)?;
+        state.lru_clock = tick;
+        let entry = state
+            .entries
+            .get_mut(identity)
+            .expect("validated leased entry remains present under the state lock");
+        entry.active_leases = next_active_leases;
         entry.last_used = tick;
-        state
-            .active_lease_files
-            .entry(identity.clone())
-            .or_default()
-            .push(lease_file);
         Ok(CacheLease {
             inner: Arc::clone(&self.inner),
             identity: identity.clone(),
@@ -715,9 +723,10 @@ impl DerivedCache {
     }
 }
 
-/// A non-cloneable resource pin. Dropping it intentionally does not release the pin; call
-/// `acknowledge` only when every decoder/upload/user of this resource has completed. A lock failure
-/// before release leaves the lease available for retry.
+/// A non-cloneable resource pin. Dropping it intentionally does not release the pin; a
+/// process-wide keeper retains the shared file lock even after the lease and cache handles drop.
+/// With no remaining lease handle to acknowledge, the pin remains until process exit.
+/// Call `acknowledge` only when every decoder/upload/user has completed.
 #[must_use = "explicitly acknowledge resource completion to unpin this cache entry"]
 #[derive(Debug)]
 pub struct CacheLease {
@@ -750,29 +759,11 @@ impl CacheLease {
                 .active_leases
                 .checked_sub(1)
                 .ok_or(CacheError::InvalidLease)?;
-            if !state
-                .active_lease_files
-                .get(&self.identity)
-                .is_some_and(|handles| !handles.is_empty())
-            {
-                return Err(CacheError::InvalidLease);
-            }
             let tick = state
                 .lru_clock
                 .checked_add(1)
                 .ok_or(CacheError::ArithmeticOverflow)?;
-            let handle = state
-                .active_lease_files
-                .get_mut(&self.identity)
-                .and_then(Vec::pop)
-                .expect("validated lease file handle remains present under the state lock");
-            if state
-                .active_lease_files
-                .get(&self.identity)
-                .is_some_and(|handles| handles.is_empty())
-            {
-                state.active_lease_files.remove(&self.identity);
-            }
+            let released_pin = release_cache_lease_pin(&self.path)?;
             state.lru_clock = tick;
             let entry = state
                 .entries
@@ -780,11 +771,53 @@ impl CacheLease {
                 .expect("validated leased entry remains present under the state lock");
             entry.active_leases = active_leases;
             entry.last_used = tick;
-            drop(handle);
             self.released = true;
+            drop(released_pin);
         }
         trim_to_budget(&self.inner.root, &mut state)
     }
+}
+
+fn retain_cache_lease_pin(path: &Path) -> Result<(), CacheError> {
+    let mut pins = lock_unpoisoned(&CACHE_LEASE_PINS);
+    if let Some(pin) = pins.get_mut(path) {
+        pin.lease_count = pin
+            .lease_count
+            .checked_add(1)
+            .ok_or(CacheError::ArithmeticOverflow)?;
+        return Ok(());
+    }
+
+    let file = File::open(path)?;
+    file.try_lock_shared().map_err(io::Error::from)?;
+    pins.insert(
+        path.to_path_buf(),
+        CacheLeasePin {
+            _file: file,
+            lease_count: 1,
+        },
+    );
+    Ok(())
+}
+
+fn release_cache_lease_pin(path: &Path) -> Result<Option<CacheLeasePin>, CacheError> {
+    let mut pins = lock_unpoisoned(&CACHE_LEASE_PINS);
+    let remaining = pins
+        .get(path)
+        .ok_or(CacheError::InvalidLease)?
+        .lease_count
+        .checked_sub(1)
+        .ok_or(CacheError::InvalidLease)?;
+    if remaining == 0 {
+        return pins
+            .remove(path)
+            .map(Some)
+            .ok_or(CacheError::InvalidLease);
+    }
+    pins.get_mut(path)
+        .ok_or(CacheError::InvalidLease)?
+        .lease_count = remaining;
+    Ok(None)
 }
 
 fn next_tick(state: &mut CacheState) -> Result<u64, CacheError> {
