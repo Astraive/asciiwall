@@ -3,8 +3,9 @@ mod support;
 
 use ascii_convert::{
     ConversionSettings, DensityConversion, DensityConversionError, FitMode, GlyphConfig,
-    GlyphRepertoire, GlyphTable, GridSizing, LinearRgb, PatchDimensions, SamplingFilter,
-    SamplingOptions, build_glyph_table, convert_density_detailed,
+    GlyphRepertoire, GlyphTable, GridSizing, LinearPremultipliedRgba, LinearRgb,
+    NormalizedRasterResources, PatchDimensions, SamplingFilter, SamplingOptions, build_glyph_table,
+    convert_density_detailed,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, Error,
@@ -197,6 +198,21 @@ fn budget() -> Budget {
     Budget::new(8_000_000, 64_000_000, 16_000_000)
 }
 
+fn resources_for_raster(
+    width: u32,
+    height: u32,
+    budget: &Budget,
+) -> NormalizedRasterResources {
+    let bytes_per_pixel = u64::try_from(std::mem::size_of::<LinearPremultipliedRgba>())
+        .expect("normalized pixel size fits u64");
+    let output_bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+        .unwrap_or(budget.max_raster_bytes());
+
+    NormalizedRasterResources::new(output_bytes.min(budget.max_raster_bytes()))
+}
+
 fn metadata(table: &GlyphTable) -> FrameMetadata {
     FrameMetadata::new(GlyphTableId::new(*table.fingerprint()), 19, 7, -123, 41_000)
 }
@@ -278,8 +294,16 @@ fn ec_001_zero_and_overflow_geometry_precede_budget_and_output_allocations() {
             0,
             &[],
         );
+        let resources =
+            resources_for_raster(zero_dimension.width(), zero_dimension.height(), &zero_budget);
         let (result, allocation_requests) = count_conversion_allocations(|| {
-            convert_density_detailed(zero_dimension, &table, &zero_settings, &zero_budget)
+            convert_density_detailed(
+                zero_dimension,
+                &table,
+                &zero_settings,
+                &zero_budget,
+                &resources,
+            )
         });
         assert_eq!(
             result,
@@ -313,8 +337,19 @@ fn ec_001_zero_and_overflow_geometry_precede_budget_and_output_allocations() {
         LinearRgb::BLACK,
     );
     report_settings("ec001-overflow-grid", &overflow_settings);
+    let resources = resources_for_raster(
+        overflowing_grid.width(),
+        overflowing_grid.height(),
+        &zero_budget,
+    );
     let (overflow_result, overflow_allocations) = count_conversion_allocations(|| {
-        convert_density_detailed(overflowing_grid, &table, &overflow_settings, &zero_budget)
+        convert_density_detailed(
+            overflowing_grid,
+            &table,
+            &overflow_settings,
+            &zero_budget,
+            &resources,
+        )
     });
     assert_eq!(
         overflow_result,
@@ -346,8 +381,19 @@ fn ec_001_zero_and_overflow_geometry_precede_budget_and_output_allocations() {
     );
     report_settings("ec001-over-budget-readable-extent", &bounded_settings);
     let bounded_budget = Budget::new(1024, 64, 1024);
+    let bounded_resources = resources_for_raster(
+        bounded_input.width(),
+        bounded_input.height(),
+        &bounded_budget,
+    );
     let (bounded_result, bounded_allocations) = count_conversion_allocations(|| {
-        convert_density_detailed(bounded_input, &table, &bounded_settings, &bounded_budget)
+        convert_density_detailed(
+            bounded_input,
+            &table,
+            &bounded_settings,
+            &bounded_budget,
+            &bounded_resources,
+        )
     });
     assert_eq!(
         bounded_result,
@@ -390,18 +436,22 @@ fn ec_002_tiny_raster_resamples_into_larger_grid_without_reading_past_source() {
         &source,
     );
 
+    let conversion_budget = budget();
+    let resources = resources_for_raster(2, 1, &conversion_budget);
     let first = convert_density_detailed(
         gray_raster(&source, 2, 1, 2),
         &table,
         &conversion_settings,
-        &budget(),
+        &conversion_budget,
+        &resources,
     )
     .expect("small source converts to a larger requested grid");
     let repeated = convert_density_detailed(
         gray_raster(&source, 2, 1, 2),
         &table,
         &conversion_settings,
-        &budget(),
+        &conversion_budget,
+        &resources,
     )
     .expect("repeated small-source conversion succeeds");
 
@@ -460,11 +510,14 @@ fn converted_extreme_raster(
         &conversion_settings,
     );
     let row_stride = usize::try_from(width).expect("fixture row stride fits usize");
+    let conversion_budget = budget();
+    let resources = resources_for_raster(width, height, &conversion_budget);
     let result = convert_density_detailed(
         gray_raster(source, width, height, row_stride),
         table,
         &conversion_settings,
-        &budget(),
+        &conversion_budget,
+        &resources,
     );
     result.unwrap_or_else(|error| {
         panic!("extreme-aspect source {width}x{height} fails with {fit:?}: {error:?}")
@@ -601,6 +654,8 @@ fn ec_005_contrasting_hidden_colors_do_not_create_an_alpha_halo() {
         &hidden_magenta,
     );
 
+    let conversion_budget = budget();
+    let resources = resources_for_raster(2, 1, &conversion_budget);
     let convert_edge = |source: &[u8]| {
         let raster = RasterFrameView::new(
             2,
@@ -615,8 +670,14 @@ fn ec_005_contrasting_hidden_colors_do_not_create_an_alpha_halo() {
             RasterOrientation::TopDown,
             source,
         );
-        convert_density_detailed(raster, &table, &conversion_settings, &budget())
-            .expect("transparent colored edge converts")
+        convert_density_detailed(
+            raster,
+            &table,
+            &conversion_settings,
+            &conversion_budget,
+            &resources,
+        )
+        .expect("transparent colored edge converts")
     };
     let blue_hidden = convert_edge(&hidden_blue);
     let magenta_hidden = convert_edge(&hidden_magenta);
