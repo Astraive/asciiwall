@@ -1599,6 +1599,7 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                     content = _decode_json(raw, "input is not valid UTF-8 JSON")
                 except (EvidenceError, OSError) as exc:
                     if os.name == "nt" and isinstance(exc, evidence_windows.FileCloseError):
+                        # Close failure remains fatal when chained with a scan/type/read error.
                         raise EvidenceError("cannot close an archive evidence artifact handle") from exc
                     break
                 identity = match.group(1)

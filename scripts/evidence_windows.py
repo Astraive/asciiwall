@@ -158,6 +158,10 @@ def _unsafe(message: str = "filesystem object is inaccessible or unsafe") -> OSE
     return OSError(errno.EINVAL, message)
 
 
+class FileCloseError(OSError):
+    """A native evidence handle failed to close."""
+
+
 def _close(handle: int | wintypes.HANDLE) -> None:
     if not _CloseHandle(handle):
         raise _error()
@@ -172,11 +176,17 @@ def _note_cleanup_error(primary: BaseException, cleanup: BaseException) -> None:
             pass
 
 
+def _raise_close_failure(primary: BaseException, cleanup: BaseException) -> None:
+    _note_cleanup_error(primary, cleanup)
+    raise FileCloseError("native evidence file handle could not be closed") from primary
+
+
 def _close_preserving(handle: int | wintypes.HANDLE, primary: BaseException) -> None:
     try:
         _close(handle)
     except BaseException as cleanup:
-        _note_cleanup_error(primary, cleanup)
+        _raise_close_failure(primary, cleanup)
+
 
 
 def _handle_slots(count: int) -> list[int | None]:
@@ -351,10 +361,6 @@ def _snapshot(handle: int) -> Snapshot:
                     (basic.LastWriteTime - _FILETIME_UNIX_EPOCH) * 100)
 
 
-class FileCloseError(OSError):
-    """A native evidence file handle failed to close."""
-
-
 class File:
     """An opened, non-reparse regular file with write/delete sharing denied."""
 
@@ -373,7 +379,7 @@ class File:
         try:
             self.close()
         except BaseException as cleanup:
-            _note_cleanup_error(exc, cleanup)
+            _raise_close_failure(exc, cleanup)
 
     def _get_handle(self) -> int:
         if self._handle is None:

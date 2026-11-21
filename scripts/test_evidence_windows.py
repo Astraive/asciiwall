@@ -58,7 +58,7 @@ class WindowsEvidenceHandleTests(unittest.TestCase):
                 evidence_windows.Directory([1]).names(10)
         self.assertEqual(calls, 2)
 
-    def test_relative_open_cleanup_does_not_mask_type_failure(self):
+    def test_relative_open_cleanup_surfaces_close_failure_with_type_failure_cause(self):
         failure = RuntimeError("type check failure")
         closed = []
 
@@ -73,9 +73,10 @@ class WindowsEvidenceHandleTests(unittest.TestCase):
         with patch.object(evidence_windows, "_NtCreateFile", side_effect=create_file):
             with patch.object(evidence_windows, "_check_type", side_effect=failure):
                 with patch.object(evidence_windows, "_close", side_effect=close_with_failure):
-                    with self.assertRaises(RuntimeError) as raised:
+                    with self.assertRaises(evidence_windows.FileCloseError) as raised:
                         evidence_windows._open_relative(10, "entry", directory=False)
-        self.assertIs(raised.exception, failure)
+        self.assertIsInstance(raised.exception, evidence_windows.FileCloseError)
+        self.assertIs(raised.exception.__cause__, failure)
         self.assertEqual(closed, [37])
 
     def test_relative_open_closes_handle_when_python_value_conversion_fails(self):
@@ -125,9 +126,10 @@ class WindowsEvidenceHandleTests(unittest.TestCase):
         with patch.object(evidence_windows, "_open_relative", return_value=41):
             with patch.object(evidence_windows, "File", side_effect=failure):
                 with patch.object(evidence_windows, "_close", side_effect=close_with_failure):
-                    with self.assertRaises(RuntimeError) as raised:
+                    with self.assertRaises(evidence_windows.FileCloseError) as raised:
                         evidence_windows.Directory([10]).open_file("entry")
-        self.assertIs(raised.exception, failure)
+        self.assertIsInstance(raised.exception, evidence_windows.FileCloseError)
+        self.assertIs(raised.exception.__cause__, failure)
         self.assertEqual(closed, [41])
 
     def test_fixed_volume_check_uses_opened_volume_identity(self):
@@ -148,9 +150,9 @@ class WindowsEvidenceHandleTests(unittest.TestCase):
 
             with patch.object(evidence_windows, "_GetDriveTypeW", side_effect=drive_type):
                 with patch.object(evidence_windows, "_close", side_effect=close_then_fail):
-                    with self.assertRaises(OSError) as raised:
+                    with self.assertRaises(evidence_windows.FileCloseError) as raised:
                         evidence_windows.open_directory(Path(temporary))
-            self.assertEqual(raised.exception.errno, evidence_windows.errno.EINVAL)
+            self.assertEqual(raised.exception.__cause__.errno, evidence_windows.errno.EINVAL)
             self.assertTrue(checked_paths)
             self.assertTrue(all(evidence_windows._VOLUME_ROOT.fullmatch(path) for path in checked_paths))
 
@@ -225,13 +227,13 @@ class WindowsEvidenceHandleTests(unittest.TestCase):
         self.assertEqual(closed, [12, 11, 10])
 
 
-    def test_context_cleanup_errors_do_not_mask_body_exception(self):
-        primary = RuntimeError("body failure")
+    def test_context_cleanup_surfaces_file_close_failure_and_preserves_body_error(self):
         owners = (
             (evidence_windows.File(21, False), [21]),
             (evidence_windows.Directory([31, 32]), [32, 31]),
         )
         for owner, expected_closed in owners:
+            primary = RuntimeError("body failure")
             closed = []
 
             def close_with_failure(handle):
@@ -239,11 +241,20 @@ class WindowsEvidenceHandleTests(unittest.TestCase):
                 raise OSError("close failure")
 
             with patch.object(evidence_windows, "_close", side_effect=close_with_failure):
-                with self.assertRaises(RuntimeError) as raised:
+                expected_error = (
+                    evidence_windows.FileCloseError
+                    if isinstance(owner, evidence_windows.File)
+                    else RuntimeError
+                )
+                with self.assertRaises(expected_error) as raised:
                     with owner:
                         raise primary
-            self.assertIs(raised.exception, primary)
+            if isinstance(owner, evidence_windows.File):
+                self.assertIs(raised.exception.__cause__, primary)
+            else:
+                self.assertIs(raised.exception, primary)
             self.assertEqual(closed, expected_closed)
+
 
     def test_parent_and_open_file_cannot_be_replaced(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -1460,6 +1460,56 @@ class RetentionTests(unittest.TestCase):
             self.assertTrue(close_failed)
             self.assertIsInstance(raised.exception.__cause__, evidence_windows.FileCloseError)
             self.assertEqual(artifact_path.read_bytes(), artifact_bytes)
+
+    @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
+    def test_prune_surfaces_close_failure_with_scan_failure_active(self):
+        import evidence_windows
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            record = evidence.finalize_record(base_record(date="2026-11-14"))
+            artifact_name = f"qa-evidence-{record['record_id']}.json"
+            artifact_path = archive / artifact_name
+            artifact_bytes = evidence.canonical_json(record)
+            artifact_path.write_bytes(artifact_bytes)
+            original_open_file = evidence_windows.Directory.open_file
+            original_close = evidence_windows._close
+            file_handles: set[int] = set()
+            scan_error = evidence.EvidenceError("injected scan failure")
+            close_failed = False
+
+            def track_file_handle(directory, name, *, for_delete=False):
+                artifact = original_open_file(directory, name, for_delete=for_delete)
+                file_handles.add(artifact._handle)
+                return artifact
+
+            def fail_scan(artifact):
+                raise scan_error
+
+            def close_file_then_fail(handle):
+                nonlocal close_failed
+                original_close(handle)
+                if handle in file_handles and not close_failed:
+                    close_failed = True
+                    raise OSError("injected file close failure")
+
+            with patch.object(evidence_windows.Directory, "open_file", new=track_file_handle):
+                with patch.object(evidence, "_read_windows_regular", new=fail_scan):
+                    with patch.object(evidence_windows, "_close", side_effect=close_file_then_fail):
+                        with self.assertRaisesRegex(
+                            evidence.EvidenceError, "cannot close an archive evidence artifact handle"
+                        ) as raised:
+                            evidence.prune_archive(archive, keep=1)
+
+            self.assertTrue(close_failed)
+            close_error = raised.exception.__cause__
+            self.assertIsInstance(close_error, evidence_windows.FileCloseError)
+            self.assertIs(close_error.__cause__, scan_error)
+            cleanup_error = close_error.__context__
+            self.assertIsInstance(cleanup_error, evidence_windows.FileCloseError)
+            self.assertIsInstance(cleanup_error.__cause__, OSError)
+            self.assertEqual(artifact_path.read_bytes(), artifact_bytes)
+
     @unittest.skipUnless(
         os.name == "posix" and _supports_safe_directory_access(),
         "disappearance injection requires POSIX directory-relative access",
