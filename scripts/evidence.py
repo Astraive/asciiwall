@@ -1631,16 +1631,24 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                         with directory_fd.open_file(name, for_delete=True) as artifact:
                             try:
                                 raw, current = _read_windows_regular(artifact)
-                            except EvidenceError:
-                                continue
+                            except EvidenceError as exc:
+                                raise EvidenceError(
+                                    f"archive changed during pruning of expired artifact {name}"
+                                ) from exc
                             if current != snapshot or sha256_bytes(raw) != digest:
-                                continue
+                                raise EvidenceError(
+                                    f"archive changed during pruning of expired artifact {name}"
+                                )
                             if not artifact.delete(snapshot):
-                                continue
+                                raise EvidenceError(
+                                    f"archive changed during pruning of expired artifact {name}"
+                                )
                     else:
                         current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                         if not _same_file_snapshot(snapshot, current):
-                            continue
+                            raise EvidenceError(
+                                f"archive changed during pruning of expired artifact {name}"
+                            )
                         # POSIX cannot unlink an entry conditional on its inode.
                         # Refuse the deletion rather than risk removing a same-name
                         # replacement installed after the snapshot check.
@@ -1648,8 +1656,10 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                             "cannot safely prune expired artifacts on POSIX: "
                             "atomic compare-and-unlink is unavailable"
                         )
-                except FileNotFoundError:
-                    continue
+                except FileNotFoundError as exc:
+                    raise EvidenceError(
+                        f"expired artifact disappeared during pruning: {name}"
+                    ) from exc
                 except OSError as exc:
                     raise EvidenceError("cannot remove an expired evidence artifact") from exc
                 removed.append(name)

@@ -1318,7 +1318,7 @@ class RetentionTests(unittest.TestCase):
         os.name == "posix" and _supports_safe_directory_access(),
         "same-directory replacement injection requires POSIX directory-relative access",
     )
-    def test_prune_skips_same_directory_replacement_before_snapshot_recheck(self):
+    def test_prune_fails_closed_for_same_directory_replacement_before_snapshot_recheck(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
             old = evidence.finalize_record(base_record(date="2026-11-12"))
@@ -1353,17 +1353,55 @@ class RetentionTests(unittest.TestCase):
                 return original_stat(name, *args, **kwargs)
 
             with patch.object(evidence.os, "stat", side_effect=replace_before_snapshot_recheck):
-                result = evidence.prune_archive(archive, keep=1)
+                with self.assertRaisesRegex(evidence.EvidenceError, "archive changed during pruning"):
+                    evidence.prune_archive(archive, keep=1)
 
             self.assertTrue(replaced)
-            self.assertEqual(result["removed"], 0)
             self.assertEqual(old_path.read_bytes(), replacement_bytes)
             self.assertEqual(displaced_path.read_bytes(), old_bytes)
+            self.assertEqual(recent_path.read_bytes(), recent_bytes)
+    @unittest.skipUnless(
+        os.name == "posix" and _supports_safe_directory_access(),
+        "disappearance injection requires POSIX directory-relative access",
+    )
+    def test_prune_fails_closed_when_candidate_disappears_after_scan(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            old = evidence.finalize_record(base_record(date="2026-11-12"))
+            recent = evidence.finalize_record(base_record(date="2026-11-14"))
+            old_name = f"qa-evidence-{old['record_id']}.json"
+            recent_name = f"qa-evidence-{recent['record_id']}.json"
+            old_path = archive / old_name
+            recent_path = archive / recent_name
+            old_path.write_bytes(evidence.canonical_json(old))
+            recent_bytes = evidence.canonical_json(recent)
+            recent_path.write_bytes(recent_bytes)
+            original_stat = os.stat
+            disappeared = False
+
+            def disappear_before_snapshot_recheck(name, *args, **kwargs):
+                nonlocal disappeared
+                if (
+                    not disappeared
+                    and name == old_name
+                    and kwargs.get("dir_fd") is not None
+                    and kwargs.get("follow_symlinks") is False
+                ):
+                    old_path.unlink()
+                    disappeared = True
+                return original_stat(name, *args, **kwargs)
+
+            with patch.object(evidence.os, "stat", side_effect=disappear_before_snapshot_recheck):
+                with self.assertRaisesRegex(evidence.EvidenceError, "disappeared during pruning"):
+                    evidence.prune_archive(archive, keep=1)
+
+            self.assertTrue(disappeared)
+            self.assertFalse(old_path.exists())
             self.assertEqual(recent_path.read_bytes(), recent_bytes)
 
 
     @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
-    def test_prune_revalidates_ntfs_entry_after_candidate_replacement(self):
+    def test_prune_fails_closed_for_ntfs_entry_replaced_before_delete(self):
         import evidence_windows
 
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
@@ -1406,18 +1444,16 @@ class RetentionTests(unittest.TestCase):
                 return original_open_file(directory, name, for_delete=for_delete)
 
             with patch.object(evidence_windows.Directory, "open_file", new=replace_before_delete):
-                result = evidence.prune_archive(archive, keep=1)
+                with self.assertRaisesRegex(evidence.EvidenceError, "archive changed during pruning"):
+                    evidence.prune_archive(archive, keep=1)
 
             self.assertTrue(attempted)
+            self.assertTrue(replaced)
+            self.assertFalse(mutation_denied)
+            self.assertEqual(old_path.read_bytes(), replacement_bytes)
+            self.assertEqual(moved_path.read_bytes(), evidence.canonical_json(old))
             self.assertEqual(recent_path.read_bytes(), recent_bytes)
             self.assertEqual(unrelated.read_bytes(), b"keep")
-            if replaced:
-                self.assertEqual(old_path.read_bytes(), replacement_bytes)
-                self.assertTrue(moved_path.is_file())
-                self.assertEqual(result["removed"], 0)
-            else:
-                self.assertTrue(mutation_denied)
-                self.assertTrue(replacement_path.is_file())
 
     @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
     def test_prune_rejects_duplicate_windows_names_before_deletion(self):
