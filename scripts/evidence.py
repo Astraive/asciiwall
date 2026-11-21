@@ -766,11 +766,25 @@ class _NativeJsonPrefixScanner:
         )
 
 
-class _SyntheticMarkerScanner:
-    """Find synthetic markers after Unicode escapes without trusting prefix quoting."""
+_SYNTHETIC_MARKERS = (
+    b"synthetic-control-report",
+    b"synthetic-control-only",
+    b"cpu-grid-diff",
+)
+_SYNTHETIC_UTF16_MARKERS = tuple(
+    marker.decode("ascii").encode(encoding)
+    for marker in _SYNTHETIC_MARKERS
+    for encoding in ("utf-16-le", "utf-16-be")
+)
+_SYNTHETIC_BYTE_MARKERS = _SYNTHETIC_MARKERS + _SYNTHETIC_UTF16_MARKERS
 
-    _markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
+class _SyntheticMarkerScanner:
+    """Find raw UTF-8/UTF-16 markers and Unicode escapes in bounded windows."""
+
+    _markers = _SYNTHETIC_MARKERS
+    _byte_markers = _SYNTHETIC_BYTE_MARKERS
     _window_limit = max(map(len, _markers))
+    _raw_window_limit = max(map(len, _byte_markers))
     _hex_digits = b"0123456789abcdefABCDEF"
 
     def __init__(self) -> None:
@@ -779,6 +793,7 @@ class _SyntheticMarkerScanner:
         self.unicode_value = 0
         self.window = bytearray()
         self.found = False
+        self.raw_overlap = b""
 
     def _append(self, value: int) -> None:
         if value > 0x7f:
@@ -793,6 +808,13 @@ class _SyntheticMarkerScanner:
             self.found = True
 
     def update(self, raw: bytes) -> None:
+        if self.found:
+            return
+        scan = (self.raw_overlap + raw).lower()
+        if any(marker in scan for marker in self._byte_markers):
+            self.found = True
+            return
+        self.raw_overlap = scan[-self._raw_window_limit + 1:]
         for byte in raw:
             if self.found:
                 return
@@ -822,9 +844,6 @@ class _SyntheticMarkerScanner:
             self._append(byte)
 
 def _contains_synthetic_bytes(raw: bytes) -> bool:
-    markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
-    if any(marker in raw.lower() for marker in markers):
-        return True
     scanner = _SyntheticMarkerScanner()
     scanner.update(raw)
     return scanner.found
@@ -833,24 +852,18 @@ def _contains_synthetic_bytes(raw: bytes) -> bool:
 def _hash_native_stream(read: Callable[[int], bytes], limit: int) -> tuple[str, int]:
     digest = hashlib.sha256()
     prefix = bytearray()
-    overlap = b""
-    escaped_marker_scanner = _SyntheticMarkerScanner()
+    synthetic_marker_scanner = _SyntheticMarkerScanner()
     json_prefix = _NativeJsonPrefixScanner()
     size = 0
-    markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
     while chunk := read(min(65_536, limit - size + 1)):
         size += len(chunk)
         if size > limit:
             raise EvidenceError("native evidence artifacts exceed their size limit")
         digest.update(chunk)
         json_prefix.update(chunk)
-        escaped_marker_scanner.update(chunk)
-        if escaped_marker_scanner.found:
+        synthetic_marker_scanner.update(chunk)
+        if synthetic_marker_scanner.found:
             raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
-        scan = (overlap + chunk).lower()
-        if any(marker in scan for marker in markers):
-            raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
-        overlap = scan[-max(map(len, markers)) + 1:]
         remaining = MAX_JSON_BYTES + 1 - len(prefix)
         if remaining > 0:
             prefix.extend(chunk[:remaining])
