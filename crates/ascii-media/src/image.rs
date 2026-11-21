@@ -110,21 +110,28 @@ fn decode_image_with_jpeg_poller<F>(
 where
     F: FnMut(usize) -> Result<(), Error>,
 {
-    decode_image_with_pollers(input, limits, cancel, jpeg_cancel_poller, || {
-        check_cancel(cancel)
-    })
+    decode_image_with_pollers(
+        input,
+        limits,
+        cancel,
+        jpeg_cancel_poller,
+        || check_cancel(cancel),
+        zeroed_bytes,
+    )
 }
 
-fn decode_image_with_pollers<F, G>(
+fn decode_image_with_pollers<F, G, A>(
     input: &mut dyn ReadSeek,
     limits: &DecodeLimits,
     cancel: &CancellationToken,
     mut jpeg_cancel_poller: F,
     mut normalization_cancel_poller: G,
+    mut allocate_output: A,
 ) -> Result<DecodedFrame, Error>
 where
     F: FnMut(usize) -> Result<(), Error>,
     G: FnMut() -> Result<(), Error>,
+    A: FnMut(usize) -> Result<Vec<u8>, Error>,
 {
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
@@ -173,13 +180,14 @@ where
 
     let result = match codec {
         Codec::Png => decode_png(&snapshot, limits, cancel, &mut normalization_cancel_poller),
-        Codec::Jpeg => decode_jpeg_with_reader_and_pollers(
+        Codec::Jpeg => decode_jpeg_with_reader_and_pollers_and_output_allocator(
             &snapshot,
             limits,
             cancel,
             SnapshotReader::new(&snapshot, cancel),
             &mut jpeg_cancel_poller,
             &mut normalization_cancel_poller,
+            &mut allocate_output,
         ),
     };
     drop(snapshot);
@@ -943,28 +951,32 @@ where
     F: FnMut(usize) -> Result<(), Error>,
 {
     let mut normalization_cancel_poller = || check_cancel(cancel);
-    decode_jpeg_with_reader_and_pollers(
+    let mut allocate_output = |len| zeroed_bytes(len);
+    decode_jpeg_with_reader_and_pollers_and_output_allocator(
         encoded,
         limits,
         cancel,
         codec_source,
         cancel_poller,
         &mut normalization_cancel_poller,
+        &mut allocate_output,
     )
 }
 
-fn decode_jpeg_with_reader_and_pollers<R, F, G>(
+fn decode_jpeg_with_reader_and_pollers_and_output_allocator<R, F, G, A>(
     encoded: &[u8],
     limits: &DecodeLimits,
     cancel: &CancellationToken,
     codec_source: R,
     cancel_poller: &mut F,
     normalization_cancel_poller: &mut G,
+    allocate_output: &mut A,
 ) -> Result<DecodedFrame, Error>
 where
     R: Read + Seek,
     F: FnMut(usize) -> Result<(), Error>,
     G: FnMut() -> Result<(), Error>,
+    A: FnMut(usize) -> Result<Vec<u8>, Error>,
 {
     let header = inspect_jpeg_with_poller(encoded, cancel_poller)?;
     if let Some(reason) = header.unsupported {
@@ -1051,7 +1063,7 @@ where
     }
 
     let mut output =
-        zeroed_bytes(usize::try_from(plan.output_bytes).map_err(|_| Error::SizeOverflow)?)?;
+        allocate_output(usize::try_from(plan.output_bytes).map_err(|_| Error::SizeOverflow)?)?;
     let mut source = if plan.temporary_source_bytes == 0 {
         None
     } else {
@@ -2248,6 +2260,87 @@ mod codec_cancellation_tests {
         let segment_length =
             usize::from(u16::from_be_bytes([bytes[marker + 2], bytes[marker + 3]]));
         marker + 2 + segment_length
+    }
+
+    fn small_jpeg_advertising(width: u16, height: u16) -> Vec<u8> {
+        use image::ImageEncoder;
+
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100)
+            .encode(&[255, 0, 0, 0, 255, 0], 2, 1, image::ColorType::Rgb8.into())
+            .unwrap();
+        let mut patched = bytes;
+        let mut offset = 2;
+        while offset < patched.len() {
+            assert_eq!(patched[offset], 0xff);
+            while offset < patched.len() && patched[offset] == 0xff {
+                offset += 1;
+            }
+            let marker = *patched.get(offset).expect("JPEG marker must exist");
+            offset += 1;
+            if marker == 0xda || marker == 0xd9 {
+                break;
+            }
+            if marker == 0x01 || (0xd0..=0xd8).contains(&marker) {
+                continue;
+            }
+
+            let length_end = offset.checked_add(2).expect("segment offset fits");
+            let segment_length = usize::from(u16::from_be_bytes(
+                patched[offset..length_end]
+                    .try_into()
+                    .expect("segment length has two bytes"),
+            ));
+            let segment_end = offset
+                .checked_add(segment_length)
+                .expect("segment extent fits");
+            assert!(segment_end <= patched.len());
+            if marker == 0xc0 {
+                let height_start = offset.checked_add(3).expect("SOF offset fits");
+                let width_start = offset.checked_add(5).expect("SOF offset fits");
+                patched[height_start..height_start + 2].copy_from_slice(&height.to_be_bytes());
+                patched[width_start..width_start + 2].copy_from_slice(&width.to_be_bytes());
+                return patched;
+            }
+            offset = segment_end;
+        }
+        panic!("baseline JPEG must contain a SOF0 marker");
+    }
+
+    #[test]
+    fn oversized_jpeg_is_rejected_before_output_allocation() {
+        let bytes = small_jpeg_advertising(4096, 4096);
+        assert!(bytes.len() < 1024);
+
+        let mut decode_limits = limits();
+        decode_limits.max_width = 8192;
+        decode_limits.max_height = 8192;
+        let allocation_attempted = Cell::new(None);
+        let mut allocate_output = |len| {
+            allocation_attempted.set(Some(len));
+            Err(Error::AllocationFailed)
+        };
+
+        // The public decoder uses this same path with `zeroed_bytes`; this sentinel proves the
+        // advertised raster is rejected before that output-allocation seam is reached.
+        let cancellation = CancellationToken::new();
+        let result = decode_image_with_pollers(
+            &mut Cursor::new(bytes.as_slice()),
+            &decode_limits,
+            &cancellation,
+            |_| Ok(()),
+            || check_cancel(&cancellation),
+            &mut allocate_output,
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            Error::BudgetExceeded(BudgetKind::RasterBytes)
+        );
+        assert_eq!(
+            allocation_attempted.get(),
+            None,
+            "oversized JPEG reached output allocation before budget rejection"
+        );
     }
 
     #[test]
