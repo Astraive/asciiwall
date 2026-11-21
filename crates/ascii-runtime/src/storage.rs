@@ -2530,12 +2530,12 @@ struct DirectoryLockGuard<'a> {
 }
 
 #[cfg(unix)]
-fn sync_parent_directory(parent: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_directory(parent: &Path) -> io::Result<()> {
     File::open(parent)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 

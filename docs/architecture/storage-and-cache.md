@@ -89,6 +89,11 @@ byte budget. Each instance retains semantic identity and LRU state only for its 
 files discovered from another instance or after reopen remain accounted as orphans and are eviction
 candidates ordered by generated file ID, not available for semantic lookup by identity.
 
+Generated derived-file IDs reserve a root-wide monotonic high-water mark and sync it before
+creating each file. Legacy filenames seed the counter; malformed or missing initialized state fails
+closed. After syncing newly created counter and initialization-marker files, the managed directory
+is synced where supported so eviction cannot erase the last durable ID evidence.
+
 Active decoder/upload users pin entries through non-cloneable leases; dropping a lease does not
 signal completion, and the owner must explicitly acknowledge completion. Acknowledgement remains
 retryable: an error before pin release leaves the mutable lease available for retry, while an error
