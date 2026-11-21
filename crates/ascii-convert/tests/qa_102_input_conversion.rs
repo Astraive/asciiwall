@@ -118,14 +118,9 @@ fn ec_006_unsupported_hdr_and_profile_return_typed_reasons() {
             RasterOrientation::TopDown,
             &source,
         );
-        let error = convert_density_detailed(
-            input,
-            &table,
-            &settings,
-            &conversion_budget(),
-            &resources,
-        )
-        .expect_err("unsupported color metadata must fail rather than emit a wrong frame");
+        let error =
+            convert_density_detailed(input, &table, &settings, &conversion_budget(), &resources)
+                .expect_err("unsupported color metadata must fail rather than emit a wrong frame");
 
         assert_eq!(
             error,
@@ -175,22 +170,12 @@ fn ec_007_black_white_and_flat_images_map_stably_by_measured_glyph_coverage() {
     for sample in [0_u8, 128, 255] {
         let source = [sample; 8 * 12];
         let input = gray_raster(&source, 8, 12, 8);
-        let first = convert_density_detailed(
-            input,
-            &table,
-            &settings,
-            &conversion_budget(),
-            &resources,
-        )
-        .expect("a constant gray raster converts");
-        let repeated = convert_density_detailed(
-            input,
-            &table,
-            &settings,
-            &conversion_budget(),
-            &resources,
-        )
-        .expect("repeating the flat-raster conversion remains valid");
+        let first =
+            convert_density_detailed(input, &table, &settings, &conversion_budget(), &resources)
+                .expect("a constant gray raster converts");
+        let repeated =
+            convert_density_detailed(input, &table, &settings, &conversion_budget(), &resources)
+                .expect("repeating the flat-raster conversion remains valid");
         let first_glyph = first.frame().cells()[0].glyph();
 
         assert_eq!(first.frame().cells(), repeated.frame().cells());
@@ -445,13 +430,7 @@ fn density_conversion_rejects_short_raster_backing_with_a_typed_error() {
     let input = gray_raster(&truncated_pixels, 2, 2, 2);
 
     assert_eq!(
-        convert_density_detailed(
-            input,
-            &table,
-            &settings,
-            &conversion_budget(),
-            &resources,
-        ),
+        convert_density_detailed(input, &table, &settings, &conversion_budget(), &resources,),
         Err(DensityConversionError::ColorNormalization(
             ColorNormalizationError::Raster(Error::Malformed(
                 MalformedReason::RasterBackingTooShort
