@@ -1350,6 +1350,76 @@ class SyntheticControlsTests(unittest.TestCase):
 
 
 class RetentionTests(unittest.TestCase):
+    def _write_native_budget_candidates(self, archive, count):
+        payload = b"Observed native UI state.\n"
+        candidates = []
+        scan_bytes = 0
+        windows_recheck_bytes = 0
+        for index in range(count):
+            artifact_path = archive / f"native-artifact-{index}.txt"
+            manifest_path = archive / f"native-manifest-{index}.json"
+            artifact_relative = artifact_path.relative_to(ROOT).as_posix()
+            manifest_relative = manifest_path.relative_to(ROOT).as_posix()
+            artifact_path.write_bytes(payload)
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id=f"NATIVE-BUDGET-{index:03}",
+                ec_ids=[],
+                evidence_path=manifest_relative,
+                date=f"2026-11-{14 - index:02}",
+            )
+            manifest = {
+                "schema_version": 1,
+                "artifact_type": "native-manual-evidence",
+                "execution": "manual",
+                "procedure_id": record["procedure_id"],
+                "reviewer": record["reviewer"],
+                "date": record["date"],
+                "status": "pass",
+                "artifacts": [{
+                    "path": artifact_relative,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }],
+            }
+            manifest_bytes = evidence.canonical_json(manifest)
+            manifest_path.write_bytes(manifest_bytes)
+            finalized = evidence.finalize_record(record)
+            record_bytes = evidence.canonical_json(finalized)
+            record_path = archive / f"qa-evidence-{finalized['record_id']}.json"
+            record_path.write_bytes(record_bytes)
+            candidates.append((record_path, record_bytes))
+            scan_bytes += len(record_bytes) + len(manifest_bytes) + len(payload)
+            windows_recheck_bytes += len(record_bytes)
+        if os.name == "nt":
+            scan_bytes += windows_recheck_bytes
+        return candidates, scan_bytes
+
+    def test_prune_verification_byte_budget_accepts_exact_boundary(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            candidates, exact_budget = self._write_native_budget_candidates(archive, 3)
+
+            with patch.object(evidence, "MAX_PRUNE_VERIFICATION_BYTES", exact_budget):
+                result = evidence.prune_archive(archive, keep=3)
+
+            self.assertEqual(result["kept_by_type"]["evidence"], 3)
+            self.assertEqual(result["removed"], 0)
+            for path, content in candidates:
+                self.assertEqual(path.read_bytes(), content)
+
+    def test_prune_verification_byte_budget_fails_before_deletion(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            candidates, exact_budget = self._write_native_budget_candidates(archive, 3)
+
+            with patch.object(evidence, "MAX_PRUNE_VERIFICATION_BYTES", exact_budget - 1):
+                with self.assertRaisesRegex(evidence.EvidenceError, "verification-byte budget"):
+                    evidence.prune_archive(archive, keep=2)
+
+            for path, content in candidates:
+                self.assertEqual(path.read_bytes(), content)
+
     def test_prune_removes_only_old_valid_tool_records_and_skips_malformed_inputs(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
@@ -1544,9 +1614,9 @@ class RetentionTests(unittest.TestCase):
             original_validate = evidence.validate_record
             replaced = False
 
-            def replace_after_scan_validation(record):
+            def replace_after_scan_validation(record, **kwargs):
                 nonlocal replaced
-                errors = original_validate(record)
+                errors = original_validate(record, **kwargs)
                 if not replaced and record.get("record_id") == retained["record_id"]:
                     retained_path.rename(displaced_path)
                     replacement_path.rename(retained_path)

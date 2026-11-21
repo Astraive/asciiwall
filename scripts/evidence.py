@@ -35,6 +35,7 @@ MAX_NATIVE_TOTAL_BYTES = 67_108_864
 MAX_NATIVE_ARTIFACTS = 16
 MAX_ARCHIVE_KEEP = 1000
 MAX_ARCHIVE_ENTRIES = 8192
+MAX_PRUNE_VERIFICATION_BYTES = 268_435_456
 _SAFE_DIRECTORY_ACCESS = (
     os.name == "posix"
     and all(function in os.supports_dir_fd for function in (os.open, os.stat, os.unlink))
@@ -162,6 +163,23 @@ def _is_log_character(character: str) -> bool:
 class EvidenceError(ValueError):
     """Expected, user-correctable evidence-tool failure."""
 
+
+class _PruneBudgetExceeded(EvidenceError):
+    """Archive verification exceeded its aggregate byte budget."""
+
+
+class _PruneByteBudget:
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.used = 0
+
+    def charge(self, amount: int) -> None:
+        if amount < 0 or amount > self.limit - self.used:
+            raise _PruneBudgetExceeded(
+                "archive prune exceeds its aggregate verification-byte budget "
+                f"({self.limit} bytes); no artifacts were deleted"
+            )
+        self.used += amount
 
 def canonical_json(value: Any) -> bytes:
     try:
@@ -416,15 +434,24 @@ def _same_file_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
-def _read_regular_at(directory_fd: int, name: str) -> tuple[bytes, os.stat_result]:
+def _read_regular_at(
+    directory_fd: int,
+    name: str,
+    *,
+    budget: _PruneByteBudget | None = None,
+) -> tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(name, flags, dir_fd=directory_fd)
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise EvidenceError("evidence artifact must be a regular file")
+        read_limit = MAX_JSON_BYTES + 1
+        if budget is not None:
+            read_limit = min(read_limit, before.st_size)
+            budget.charge(read_limit)
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            raw = stream.read(MAX_JSON_BYTES + 1)
+            raw = stream.read(read_limit)
         after = os.fstat(descriptor)
         if not _same_file_snapshot(before, after):
             raise EvidenceError("evidence artifact changed while being read")
@@ -435,12 +462,22 @@ def _read_regular_at(directory_fd: int, name: str) -> tuple[bytes, os.stat_resul
         os.close(descriptor)
 
 
-def _read_windows_regular(artifact: evidence_windows.File) -> tuple[bytes, evidence_windows.Snapshot]:
+def _read_windows_regular(
+    artifact: evidence_windows.File,
+    *,
+    budget: _PruneByteBudget | None = None,
+) -> tuple[bytes, evidence_windows.Snapshot]:
     before = artifact.snapshot()
     if before.st_size > MAX_JSON_BYTES:
         raise EvidenceError("evidence artifact exceeds the 1 MiB limit")
+    if budget is not None:
+        budget.charge(before.st_size)
     raw = bytearray()
-    while chunk := artifact.read(min(65_536, MAX_JSON_BYTES - len(raw) + 1)):
+    read_limit = before.st_size if budget is not None else MAX_JSON_BYTES + 1
+    while len(raw) < read_limit:
+        chunk = artifact.read(min(65_536, read_limit - len(raw)))
+        if not chunk:
+            break
         raw.extend(chunk)
         if len(raw) > MAX_JSON_BYTES:
             raise EvidenceError("evidence artifact exceeds the 1 MiB limit")
@@ -897,13 +934,28 @@ def _contains_synthetic_bytes(raw: bytes) -> bool:
     return scanner.found
 
 
-def _hash_native_stream(read: Callable[[int], bytes], limit: int) -> tuple[str, int]:
+def _hash_native_stream(
+    read: Callable[[int], bytes],
+    limit: int,
+    *,
+    expected_size: int | None = None,
+) -> tuple[str, int]:
     digest = hashlib.sha256()
     prefix = bytearray()
     synthetic_marker_scanner = _SyntheticMarkerScanner()
     json_prefix = _NativeJsonPrefixScanner()
     size = 0
-    while chunk := read(min(65_536, limit - size + 1)):
+    while True:
+        if expected_size is None:
+            read_size = min(65_536, limit - size + 1)
+        else:
+            remaining = expected_size - size
+            if remaining <= 0:
+                break
+            read_size = min(65_536, limit - size + 1, remaining)
+        chunk = read(read_size)
+        if not chunk:
+            break
         size += len(chunk)
         if size > limit:
             raise EvidenceError("native evidence artifacts exceed their size limit")
@@ -915,6 +967,8 @@ def _hash_native_stream(read: Callable[[int], bytes], limit: int) -> tuple[str, 
         remaining = MAX_JSON_BYTES + 1 - len(prefix)
         if remaining > 0:
             prefix.extend(chunk[:remaining])
+    if expected_size is not None and size != expected_size:
+        raise EvidenceError("native evidence artifact changed while being read")
     if not size:
         raise EvidenceError("native evidence artifact must not be empty")
     if size > MAX_JSON_BYTES:
@@ -932,7 +986,12 @@ def _hash_native_stream(read: Callable[[int], bytes], limit: int) -> tuple[str, 
     return digest.hexdigest(), size
 
 
-def _hash_native_artifact(relative_path: str, limit: int) -> tuple[str, int]:
+def _hash_native_artifact(
+    relative_path: str,
+    limit: int,
+    *,
+    budget: _PruneByteBudget | None = None,
+) -> tuple[str, int]:
     if not _safe_relative_evidence_path(relative_path):
         raise EvidenceError("native evidence artifact path must be safe and repository-relative")
     _require_safe_directory_access()
@@ -944,7 +1003,13 @@ def _hash_native_artifact(relative_path: str, limit: int) -> tuple[str, int]:
                     before = artifact.snapshot()
                     if before.st_size > limit:
                         raise EvidenceError("native evidence artifacts exceed their size limit")
-                    identity, size = _hash_native_stream(artifact.read, limit)
+                    if budget is not None:
+                        budget.charge(before.st_size)
+                    identity, size = _hash_native_stream(
+                        artifact.read,
+                        limit,
+                        expected_size=before.st_size if budget is not None else None,
+                    )
                     after = artifact.snapshot()
                     if before != after or after.st_size != size:
                         raise EvidenceError("native evidence artifact changed while being read")
@@ -971,8 +1036,14 @@ def _hash_native_artifact(relative_path: str, limit: int) -> tuple[str, int]:
             raise EvidenceError("native evidence artifact must be a regular file")
         if before.st_size > limit:
             raise EvidenceError("native evidence artifacts exceed their size limit")
+        if budget is not None:
+            budget.charge(before.st_size)
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            identity, size = _hash_native_stream(stream.read, limit)
+            identity, size = _hash_native_stream(
+                stream.read,
+                limit,
+                expected_size=before.st_size if budget is not None else None,
+            )
         after = os.fstat(descriptor)
         if not _same_file_snapshot(before, after) or after.st_size != size:
             raise EvidenceError("native evidence artifact changed while being read")
@@ -983,7 +1054,12 @@ def _hash_native_artifact(relative_path: str, limit: int) -> tuple[str, int]:
         os.close(descriptor)
 
 
-def _validate_native_manifest(content: dict[str, Any], record: dict[str, Any]) -> None:
+def _validate_native_manifest(
+    content: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    budget: _PruneByteBudget | None = None,
+) -> None:
     """Check manifest consistency and artifact hashes, not reviewer identity."""
     if (
         content.keys() != {
@@ -1013,13 +1089,21 @@ def _validate_native_manifest(content: dict[str, Any], record: dict[str, Any]) -
         if path in seen:
             raise EvidenceError("native-manual evidence artifact paths must be unique")
         seen.add(path)
-        identity, size = _hash_native_artifact(path, min(MAX_NATIVE_ARTIFACT_BYTES, MAX_NATIVE_TOTAL_BYTES - total))
+        identity, size = _hash_native_artifact(
+            path,
+            min(MAX_NATIVE_ARTIFACT_BYTES, MAX_NATIVE_TOTAL_BYTES - total),
+            budget=budget,
+        )
         if identity != expected:
             raise EvidenceError("native-manual evidence artifact hash does not match")
         total += size
 
 
-def _validate_native_pass_artifact(record: dict[str, Any]) -> None:
+def _validate_native_pass_artifact(
+    record: dict[str, Any],
+    *,
+    budget: _PruneByteBudget | None = None,
+) -> None:
     _require_safe_directory_access()
     parts = PurePosixPath(record["evidence_path"]).parts
     try:
@@ -1028,12 +1112,12 @@ def _validate_native_pass_artifact(record: dict[str, Any]) -> None:
             # referenced artifacts are inspected.
             with evidence_windows.open_directory(ROOT.joinpath(*parts[:-1])) as directory:
                 with directory.open_file(parts[-1]) as artifact:
-                    raw, _ = _read_windows_regular(artifact)
-                    _inspect_native_pass_content(raw, record)
+                    raw, _ = _read_windows_regular(artifact, budget=budget)
+                    _inspect_native_pass_content(raw, record, budget=budget)
             return
         directory_fd = _open_directory(ROOT.joinpath(*parts[:-1]))
         try:
-            raw, _ = _read_regular_at(directory_fd, parts[-1])
+            raw, _ = _read_regular_at(directory_fd, parts[-1], budget=budget)
         finally:
             os.close(directory_fd)
     except OSError as exc:
@@ -1044,10 +1128,15 @@ def _validate_native_pass_artifact(record: dict[str, Any]) -> None:
                 "native-manual pass requires accessible evidence on local fixed NTFS without reparse points"
             ) from exc
         raise EvidenceError("native-manual pass requires an accessible non-symlink evidence artifact") from exc
-    _inspect_native_pass_content(raw, record)
+    _inspect_native_pass_content(raw, record, budget=budget)
 
 
-def _inspect_native_pass_content(raw: bytes, record: dict[str, Any]) -> None:
+def _inspect_native_pass_content(
+    raw: bytes,
+    record: dict[str, Any],
+    *,
+    budget: _PruneByteBudget | None = None,
+) -> None:
     if not raw:
         raise EvidenceError("native-manual pass requires a non-empty evidence artifact")
     if _contains_synthetic_bytes(raw):
@@ -1069,12 +1158,17 @@ def _inspect_native_pass_content(raw: bytes, record: dict[str, Any]) -> None:
         if _contains_synthetic_marker(content):
             raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
         if isinstance(content, dict) and content.get("artifact_type") == "native-manual-evidence":
-            _validate_native_manifest(content, record)
+            _validate_native_manifest(content, record, budget=budget)
         elif not validate_log_report(content):
             raise EvidenceError("native-manual JSON evidence must be a native manifest or sanitized log")
 
 
-def validate_record(record: Any, *, check_identity: bool = True) -> list[str]:
+def validate_record(
+    record: Any,
+    *,
+    check_identity: bool = True,
+    _prune_budget: _PruneByteBudget | None = None,
+) -> list[str]:
     errors: list[str] = []
     if not isinstance(record, dict):
         return ["record must be a JSON object"]
@@ -1169,7 +1263,9 @@ def validate_record(record: Any, *, check_identity: bool = True) -> list[str]:
         errors.append("evidence_path must be a safe repository-relative path")
     elif level == "native-manual" and status == "pass":
         try:
-            _validate_native_pass_artifact(record)
+            _validate_native_pass_artifact(record, budget=_prune_budget)
+        except _PruneBudgetExceeded:
+            raise
         except EvidenceError as exc:
             errors.append(str(exc))
     if not isinstance(record.get("issue"), str) or not ISSUE_RE.fullmatch(record["issue"]):
@@ -1642,6 +1738,7 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
             ("grid-diff", ARCHIVE_DIFF_RE),
             ("log", ARCHIVE_LOG_RE),
         )
+        budget = _PruneByteBudget(MAX_PRUNE_VERIFICATION_BYTES)
         validators = {
             "control": validate_control_report,
             "grid-diff": validate_grid_diff_report,
@@ -1658,10 +1755,12 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                 try:
                     if os.name == "nt":
                         with directory_fd.open_file(name) as artifact:
-                            raw, snapshot = _read_windows_regular(artifact)
+                            raw, snapshot = _read_windows_regular(artifact, budget=budget)
                     else:
-                        raw, snapshot = _read_regular_at(directory_fd, name)
+                        raw, snapshot = _read_regular_at(directory_fd, name, budget=budget)
                     content = _decode_json(raw, "input is not valid UTF-8 JSON")
+                except _PruneBudgetExceeded:
+                    raise
                 except (EvidenceError, OSError) as exc:
                     if os.name == "nt" and isinstance(exc, evidence_windows.FileCloseError):
                         # Close failure remains fatal when chained with a scan/type/read error.
@@ -1673,7 +1772,7 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                         accepted = (
                             isinstance(content, dict)
                             and content.get("record_id") == identity
-                            and not validate_record(content)
+                            and not validate_record(content, _prune_budget=budget)
                         )
                     except OSError as exc:
                         if os.name == "nt" and isinstance(exc, evidence_windows.FileCloseError):
@@ -1695,6 +1794,12 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                     digest = sha256_bytes(raw) if os.name == "nt" else ""
                     valid[kind].append((order, identity, name, snapshot, digest))
                 break
+        if os.name == "nt":
+            # Precharge every validation reread before any deletion. If the
+            # aggregate budget is exhausted, pruning has made no mutations.
+            for candidates in valid.values():
+                for _, _, _, snapshot, _ in candidates:
+                    budget.charge(snapshot.st_size)
         removed: list[str] = []
         kept: dict[str, int] = {}
         try:
