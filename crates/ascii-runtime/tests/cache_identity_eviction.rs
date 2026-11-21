@@ -860,7 +860,6 @@ fn shared_root_budget_respects_a_lease_from_another_instance() {
     assert_eq!(derived_file_bytes(&cache_root), 5);
 }
 
-
 #[test]
 fn repeated_cross_instance_lease_failures_recover_after_acknowledgement() {
     let temp = TempDir::new();

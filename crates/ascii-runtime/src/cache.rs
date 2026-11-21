@@ -2714,7 +2714,6 @@ fn notify_root_operation_test_hook(point: RootOperationTestPoint, lock: &Mutex<(
     });
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3397,5 +3396,4 @@ mod tests {
         assert_eq!(first_cache.snapshot().unwrap().used_bytes, 5);
         assert_eq!(second_cache.snapshot().unwrap().used_bytes, 5);
     }
-
 }
