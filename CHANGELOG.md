@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
 - Bounded `ascii-runtime` handoff queues, buffer leases, completion acknowledgements, and shared concurrency/memory budgets ([COR-005](docs/architecture/resource-ownership-and-shutdown.md)).
+- Added COR-008 storage support for platform-specific roots, a versioned atomic JSON install registry, schema-validated configuration with last-good recovery, importer transaction journaling, bounded redacted diagnostics, and privacy-filtered portable exports, with focused storage transaction tests.
 
 ### Changed
 
@@ -53,6 +54,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Linearize urgent Stop/revocation publication against the final ordinary FIFO dequeue with an atomic dequeue-commit bit; a pending urgent event wins the commit race (`[COR-005]`).
 - Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
 - Reject a queued-frame replacement cancelled during its buffer copy before publication, with public `submit_frame` regression coverage (`[COR-005]`).
+- [COR-008] Serialize atomic writes, importer journal transitions, and diagnostic-log rotation by
+  storage directory; clean owned interrupted-write temporaries, sync newly created directory
+  entries where supported, preserve only schema-valid last-good configs, and redact clipped
+  diagnostics plus portable file URIs and network endpoints.
+- [COR-008] Inject failures at every config/registry atomic-write hook boundary and verify recovery
+  yields only complete valid state, cleans owned temporaries, and permits subsequent writes; race
+  retained concurrent log records through rotation without loss or corruption.
+- [COR-008] Bound diagnostic logs to 16 files of at most 16 MiB each and 64 KiB per record; bound
+  portable-export traversal and serialized output, reject over-budget exports without partial data,
+  and redact single-label host-and-port endpoints such as `buildhost:9000` with trailing sentence,
+  angle, or colon punctuation while retaining non-endpoint text.
+- [COR-008] Filter bare `host` keys from portable exports so single-label machine names such as
+  `buildhost` cannot survive under a generic field name.
+- [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
+  explicitly labeled nonportable local backups.
+- [COR-008] Redact user-qualified home paths in generic portable-export strings, including
+  `=`-prefixed values, while preserving tilde text without a path; reject over-limit journal paths
+  before cloning and retain the final whole-document size guard.
+- [COR-008] Persist canonical TOML settings and reject replacement of malformed or unsupported current
+  state without changing its bytes or `.last-good`. Provide explicit validated recovery, restrict
+  app-owned directories and persisted files to owner-only Unix permissions, and redact machine-local
+  paths after colon delimiters.
+- [COR-008] Reject nested cursor and window-geometry history keys in local settings before
+  saving or rotating last-good.
+- [COR-008] Fail closed when recovery compares versioned settings with a versionless last-good file.
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
 - Size density grids from the selected custom-crop geometry, retain normalized profile warnings in detailed conversion results, and preflight and cancellably initialize bounded quality-patch storage ([CNV-001]).
 - Charge premultiplied validation and readable input extent to density-conversion work and simultaneous-memory budgets; cancel before quality-patch buffer reservations and reject sRGB8-indistinguishable foreground/background colors ([CNV-001]).
