@@ -1387,13 +1387,14 @@ fn portable_export_redacts_user_qualified_home_paths_in_generic_strings() {
         "nested": {
             "note": "~bob\\Documents\\private.mp4"
         },
+        "prefixed_posix": "note=~alice/Documents/private.mov",
+        "prefixed_windows": "note=~bob\\Documents\\private.mp4",
         "ordinary": "ordinary note about ~visitor without a path"
     });
     let portable =
         PortableExport::from_value(&source, ExportMode::Portable).expect("portable export");
     let encoded = String::from_utf8(portable.to_json().unwrap()).unwrap();
-
-    for private_value in ["alice", "private.mov", "bob", "private.mp4"] {
+    for private_value in ["alice", "Documents", "private.mov", "bob", "private.mp4"] {
         assert!(
             !encoded.contains(private_value),
             "portable export retained {private_value}"
