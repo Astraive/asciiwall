@@ -1983,14 +1983,8 @@ fn looks_like_relative_local_path(value: &str) -> bool {
     if recognized_root && final_component.starts_with('.') {
         return true;
     }
-    if let Some((stem, extension)) = final_component.rsplit_once('.') {
-        return recognized_root
-            && !stem.is_empty()
-            && !extension.is_empty()
-            && extension.len() <= 10
-            && extension
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric());
+    if let Some((stem, _)) = final_component.rsplit_once('.') {
+        return recognized_root && !stem.is_empty();
     }
     recognized_root && !final_component.is_empty()
 }
