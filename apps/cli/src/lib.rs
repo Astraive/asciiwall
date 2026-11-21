@@ -236,13 +236,15 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), ExecutionEr
     }
 
     report_success(
-        json,
-        quiet,
-        verbose,
-        format,
-        exported.size().columns(),
-        exported.size().rows(),
-        exported.loss_notice(),
+        SuccessReport {
+            json,
+            quiet,
+            verbose,
+            format,
+            columns: exported.size().columns(),
+            rows: exported.size().rows(),
+            loss_notice: exported.loss_notice(),
+        },
         |status| {
             let stdout = io::stdout();
             write_success_status(&mut stdout.lock(), status)
@@ -274,16 +276,29 @@ fn progress(enabled: bool, message: &'static str) {
     }
 }
 
-fn report_success(
+struct SuccessReport<'a> {
     json: bool,
     quiet: bool,
     verbose: bool,
     format: Format,
     columns: u32,
     rows: u32,
-    loss_notice: &str,
+    loss_notice: &'a str,
+}
+
+fn report_success(
+    report: SuccessReport<'_>,
     status_writer: impl FnOnce(&serde_json::Value) -> Result<(), CliError>,
 ) -> Result<(), CliError> {
+    let SuccessReport {
+        json,
+        quiet,
+        verbose,
+        format,
+        columns,
+        rows,
+        loss_notice,
+    } = report;
     if json {
         let status = serde_json::json!({
             "schema_version": 1,
@@ -451,8 +466,8 @@ mod tests {
     use ascii_core::CancellationToken;
 
     use super::{
-        ExecutionError, Format, finish_execution, publish_error, publish_stdout, report_success,
-        write_success_status,
+        ExecutionError, Format, SuccessReport, finish_execution, publish_error, publish_stdout,
+        report_success, write_success_status,
     };
 
     struct FailOnNewline {
@@ -578,9 +593,18 @@ mod tests {
     #[test]
     fn failed_success_status_does_not_attempt_a_second_json_response() {
         let mut stdout = FailOnNewline { bytes: Vec::new() };
-        let result = report_success(true, false, false, Format::Txt, 12, 4, "", |status| {
-            write_success_status(&mut stdout, status)
-        })
+        let result = report_success(
+            SuccessReport {
+                json: true,
+                quiet: false,
+                verbose: false,
+                format: Format::Txt,
+                columns: 12,
+                rows: 4,
+                loss_notice: "",
+            },
+            |status| write_success_status(&mut stdout, status),
+        )
         .map_err(ExecutionError::SuccessStatus);
         let mut error_response_attempts = 0;
 
