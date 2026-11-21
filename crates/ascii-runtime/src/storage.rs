@@ -1420,41 +1420,40 @@ fn is_machine_local_string(value: &str) -> bool {
         return true;
     }
     value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|character: char| {
-            matches!(
-                character,
-                '"' | '\''
-                    | '('
-                    | ')'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | '='
-                    | ','
-                    | ';'
-                    | '.'
-                    | '!'
-                    | '<'
-                    | '>'
-            )
-        });
-        let bytes = token.as_bytes();
-        token.starts_with("~/")
-            || looks_like_user_home_path(token)
-            || token
-                .split_once('=')
-                .is_some_and(|(_, value)| looks_like_user_home_path(value))
-            || token.starts_with('/')
-            || token.starts_with("\\\\")
-            || token.contains('\\')
-            || token.contains("=/")
-            || token.contains("=\\")
-            || (bytes.len() >= 3
-                && bytes[0].is_ascii_alphabetic()
-                && bytes[1] == b':'
-                && matches!(bytes[2], b'/' | b'\\'))
+        let token = trim_export_punctuation(token);
+        token
+            .split([':', '='])
+            .any(|part| {
+                let part = trim_export_punctuation(part);
+                part.starts_with("~/")
+                    || looks_like_user_home_path(part)
+                    || part.starts_with('/')
+                    || part.starts_with("\\\\")
+                    || part.contains('\\')
+            })
             || looks_like_network_endpoint(token)
+    })
+}
+
+fn trim_export_punctuation(value: &str) -> &str {
+    value.trim_matches(|character: char| {
+        matches!(
+            character,
+            '"' | '\''
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '='
+                | ','
+                | ';'
+                | '.'
+                | '!'
+                | '<'
+                | '>'
+        )
     })
 }
 
