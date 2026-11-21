@@ -973,16 +973,22 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
 
     let staging_root = temp.path().join("journal-staging");
     let journal = ImportJournal::new(staging_root.clone());
-    journal
-        .begin("preserved", "org.example.package", "imports/preserved")
-        .expect("save valid journal");
     let oversized_path = "x".repeat(JOURNAL_MAX_BYTES + 1);
     assert!(matches!(
         journal.begin("too-large", "org.example.package", &oversized_path),
         Err(StorageError::DocumentTooLarge)
     ));
+    let journal_directory = staging_root.join("import-journal");
+    assert!(
+        !journal_directory.exists(),
+        "oversized input created the journal directory"
+    );
+
+    journal
+        .begin("preserved", "org.example.package", "imports/preserved")
+        .expect("save valid journal");
     assert!(journal.load("preserved").unwrap().is_some());
-    let oversized_journal_path = staging_root.join("import-journal/import-too-large.json");
+    let oversized_journal_path = journal_directory.join("import-too-large.json");
     assert!(!oversized_journal_path.exists());
     fs::write(&oversized_journal_path, vec![b' '; JOURNAL_MAX_BYTES + 1])
         .expect("write oversized journal");
