@@ -198,15 +198,27 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
                 Quote::MultiBasic => {
                     if byte == b'\\' {
                         index = index.saturating_add(1);
-                    } else if bytes.get(index..index.saturating_add(3)) == Some(&b"\"\"\""[..]) {
-                        quote = None;
-                        index = index.saturating_add(2);
+                    } else if byte == b'"' {
+                        let quote_run = bytes[index..]
+                            .iter()
+                            .take_while(|next| **next == b'"')
+                            .count();
+                        if quote_run >= 3 {
+                            quote = None;
+                            index += quote_run - 1;
+                        }
                     }
                 }
                 Quote::MultiLiteral => {
-                    if bytes.get(index..index.saturating_add(3)) == Some(&b"'''"[..]) {
-                        quote = None;
-                        index = index.saturating_add(2);
+                    if byte == b'\'' {
+                        let quote_run = bytes[index..]
+                            .iter()
+                            .take_while(|next| **next == b'\'')
+                            .count();
+                        if quote_run >= 3 {
+                            quote = None;
+                            index += quote_run - 1;
+                        }
                     }
                 }
             }
@@ -408,6 +420,44 @@ mod tests {
                 .get(&SettingKey::new("grid.columns").unwrap()),
             Some(&SettingValue::Integer(240))
         );
+    }
+
+    #[test]
+    fn preflight_detects_nesting_after_multiline_basic_closing_quote_run() {
+        let nested_array = format!(
+            "{}0{}",
+            "[".repeat(MAX_NESTING_DEPTH + 1),
+            "]".repeat(MAX_NESTING_DEPTH + 1)
+        );
+        let document = format!(
+            "schema_version = 2\nrevision = 0\n[settings]\n\"string.key\" = \"\"\"text\"\"\"\"\n\"grid.columns\" = {nested_array}\n"
+        );
+
+        assert!(matches!(
+            decode(document.as_bytes()),
+            Err(DocumentError::ExcessiveNesting {
+                limit: MAX_NESTING_DEPTH
+            })
+        ));
+    }
+
+    #[test]
+    fn preflight_detects_nesting_after_multiline_literal_closing_quote_run() {
+        let nested_array = format!(
+            "{}0{}",
+            "[".repeat(MAX_NESTING_DEPTH + 1),
+            "]".repeat(MAX_NESTING_DEPTH + 1)
+        );
+        let document = format!(
+            "schema_version = 2\nrevision = 0\n[settings]\n\"string.key\" = '''text''''\n\"grid.columns\" = {nested_array}\n"
+        );
+
+        assert!(matches!(
+            decode(document.as_bytes()),
+            Err(DocumentError::ExcessiveNesting {
+                limit: MAX_NESTING_DEPTH
+            })
+        ));
     }
 
     fn document_with_entries(count: usize) -> Vec<u8> {
