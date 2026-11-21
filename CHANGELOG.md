@@ -95,6 +95,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   file paths while preserving harmless prose and slash-separated text; add public export coverage.
 - [COR-008] Retain the pre-recovery settings copy when rollback rename fails and expose its path in a
   typed error; deterministic public fault injection verifies the copy remains recoverable.
+- [COR-008] Redact extensionless relative paths beneath recognized local directories in generic
+  portable-export strings while preserving ordinary slash prose; add embedded path coverage.
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
 - Size density grids from the selected custom-crop geometry, retain normalized profile warnings in detailed conversion results, and preflight and cancellably initialize bounded quality-patch storage ([CNV-001]).
 - Charge premultiplied validation and readable input extent to density-conversion work and simultaneous-memory budgets; cancel before quality-patch buffer reservations and reject sRGB8-indistinguishable foreground/background colors ([CNV-001]).
