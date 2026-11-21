@@ -1,7 +1,7 @@
 use ascii_runtime::storage::{
     AtomicWriteStage, DiagnosticLog, DirectoryInputs, ExportMode, ImportJournal, InstallEntry,
-    InstallRegistry, JournalState, LogLimits, RecoveryAction, Storage, StorageError, StorageRoots,
-    ValidatedConfig, validate_application_id,
+    InstallRegistry, JournalRecord, JournalState, LogLimits, RecoveryAction, Storage, StorageError,
+    StorageRoots, ValidatedConfig, validate_application_id,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -982,6 +982,29 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
     assert!(
         !journal_directory.exists(),
         "oversized input created the journal directory"
+    );
+    let boundary_record_size_without_path = serde_json::to_vec_pretty(&JournalRecord {
+        schema_version: 1,
+        transaction_id: "boundary".to_owned(),
+        package_id: "org.example.package".to_owned(),
+        staging_path: String::new(),
+        state: JournalState::Staged,
+    })
+    .expect("serialize empty-path journal record")
+    .len()
+        + 1;
+    let boundary_path = "x".repeat(JOURNAL_MAX_BYTES - boundary_record_size_without_path);
+    journal
+        .begin("boundary", "org.example.package", &boundary_path)
+        .expect("a journal serialized exactly at its byte limit is valid");
+    assert_eq!(
+        usize::try_from(
+            fs::metadata(journal_directory.join("import-boundary.json"))
+                .expect("read boundary journal metadata")
+                .len()
+        )
+        .expect("journal size fits usize"),
+        JOURNAL_MAX_BYTES
     );
 
     journal
