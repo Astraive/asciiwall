@@ -60,6 +60,29 @@ jobs:
           export PR_COMMIT_BODIES
           python scripts/check-conventions.py --coauthor-check-env PR_COMMIT_BODIES
 
+  offline-evidence:
+    name: Offline evidence (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Run offline evidence tests
+        run: python scripts/test_evidence.py
+      - name: Exercise NTFS evidence handles
+        if: runner.os == 'Windows'
+        run: python scripts/test_evidence_windows.py
+
   core-portability:
     name: Portable core (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

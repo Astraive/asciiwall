@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
+- Added offline evidence recording and synthetic decoder/host controls (`scripts/evidence.py`, `scripts/test_evidence.py`, `tests/evidence/`): seven distinct evidence levels with required hashes and environment/permission/reviewer metadata, absent native environments enforced as `not-run`, exact CPU-grid diffs, sanitized logs, and bounded per-type retention. The new evidence tests run on Linux, macOS, and Windows, including Windows NTFS handle tests. Documented usage, evidence limits, and outstanding native procedures in [test strategy](docs/quality/test-strategy.md).
 
 ### Changed
 
@@ -43,6 +44,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Poll cancellation inside JPEG marker/entropy fill-byte runs and stop charging the owned PNG snapshot again as codec scratch; bound PNG scratch by row/inflater buffers and the largest non-IDAT chunk buffer, with large ancillary and IDAT regressions (`[IMG-001]`).
 - Preflight premultiplied raster channels before allocating normalized output, charge the cancellable validation pass to work budgets, and test cancellation within that pass ([CNV-002]).
 - Made `NormalizedRaster` intentionally non-`Clone` to prevent unbudgeted pixel-buffer copies, and clarified that `ascii-media` decoding is outside this PR's scope ([CNV-002]).
+- Validate synthetic-control reports against scenario-specific fault/output expectations and configured bounds; reject invalid Unicode during canonical serialization and C1 controls in evidence metadata or sanitized-log reports.
+- Harden native/manual evidence inspection and bounded retention with descriptor-relative POSIX access and handle-anchored local NTFS access on Windows; typed manifests hash-check binary evidence without claiming to authenticate execution, and unsupported Windows volumes fail closed. Native handles are closed if conversion to a Python value fails. Documented privacy and concurrent-writer limitations in the [test strategy](docs/quality/test-strategy.md).
+- Redact dotted private-field labels and Windows drive-relative paths from sanitized logs and free-text record metadata; document that artifact content still requires human privacy review.
+- Reject recognized synthetic reports in native-manual manifest references, including oversized JSON disguised by leading whitespace; matching hashes do not authenticate native execution.
+- Reject prefixed synthetic evidence with Unicode-escaped markers regardless of prefix quoting in both manifest and direct-artifact inspection ([QA-004]).
+- Visibly escape bidi formatting controls in sanitized evidence metadata and logs before canonical JSON output ([QA-004]).
+- Classify streamed JSON primitives across chunk boundaries, rejecting oversized UTF-16 and long-number JSON while preserving numeric-leading and NUL-padded binary artifacts ([QA-004]).
+- Reject oversized UTF-16/UTF-32 JSON native evidence, including primitive scalars, before it can bypass the 1 MiB inspection limit; fail closed on POSIX archive deletion because compare-inode-and-unlink is unavailable, preserving entries and reporting the limitation ([QA-004]).
+- Exercise UTF-32 scalar carry-over across a short 64 KiB stream read, BOM-less LE/BE synthetic JSON detection, and invalid scalar rejection in both byte orders while retaining ordinary-binary controls ([QA-004]).
+- Detect UTF-16 LE/BE synthetic markers in oversized native manifest artifacts after non-JSON prefixes, without narrowing the binary artifact size contract ([QA-004]).
+- Fail closed when expired archive entries change or disappear and when retained-candidate identities change; preserve replacements and report incomplete pruning instead of stale `kept_by_type` counts. POSIX bounded retention against hostile concurrent writers remains unavailable without atomic compare-and-unlink ([QA-004]).
+- Surface Windows archive file-handle close failures during pruning even alongside scan, type, or read errors; preserve the primary failure in the cause chain instead of silently skipping the candidate ([QA-004]).
+- Preserve completed Windows archive deletions and the primary partial-prune error if directory cleanup also fails, keeping cleanup failures secondary and observable ([QA-004]).
+- Surface Windows archive directory-close failures after a successful prune, even inside an unrelated active exception; preserve prune errors as primary when cleanup fails ([QA-004]).
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
 - Size density grids from the selected custom-crop geometry, retain normalized profile warnings in detailed conversion results, and preflight and cancellably initialize bounded quality-patch storage ([CNV-001]).
 - Charge premultiplied validation and readable input extent to density-conversion work and simultaneous-memory budgets; cancel before quality-patch buffer reservations and reject sRGB8-indistinguishable foreground/background colors ([CNV-001]).
@@ -54,3 +69,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reject contain transforms when f64 rounding cannot preserve centered letterbox margins at extreme destination sizes (`#294`).
 - Normalize box-sampling overlap per axis before combining weights, allowing valid subnormal footprints without requiring representable absolute 2D area (`[CNV-001]`).
 - Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
+- Reject uninspectable long-integer JSON in direct native evidence instead of treating it as non-JSON text ([QA-004]).
