@@ -161,9 +161,17 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
         MultiLiteral,
     }
 
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum Container {
+        Array,
+        InlineTable,
+    }
+
     let bytes = text.as_bytes();
     let mut quote: Option<Quote> = None;
     let mut escaped = false;
+    let mut containers = [Container::Array; MAX_NESTING_DEPTH];
+    let mut inline_key_starts = [0usize; MAX_NESTING_DEPTH];
     let mut depth = 0usize;
     let mut assignments = 0usize;
     let mut index = 0usize;
@@ -234,15 +242,26 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
                         enforce_path_depth(&bytes[content_start..content_start + relative_end])?;
                     }
                 }
-                depth = depth.saturating_add(1);
-                if depth > MAX_NESTING_DEPTH {
+                if depth == MAX_NESTING_DEPTH {
                     return Err(DocumentError::ExcessiveNesting {
                         limit: MAX_NESTING_DEPTH,
                     });
                 }
+                containers[depth] = if byte == b'{' {
+                    inline_key_starts[depth] = index + 1;
+                    Container::InlineTable
+                } else {
+                    Container::Array
+                };
+                depth += 1;
             }
             b']' | b'}' => {
                 depth = depth.saturating_sub(1);
+            }
+            b',' => {
+                if depth > 0 && containers[depth - 1] == Container::InlineTable {
+                    inline_key_starts[depth - 1] = index + 1;
+                }
             }
             b'=' => {
                 assignments += 1;
@@ -257,6 +276,8 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
                         .rposition(|byte| *byte == b'\n')
                         .map_or(0, |position| position + 1);
                     enforce_path_depth(&bytes[line_start..index])?;
+                } else if containers[depth - 1] == Container::InlineTable {
+                    enforce_path_depth(&bytes[inline_key_starts[depth - 1]..index])?;
                 }
             }
             _ => {}
@@ -277,7 +298,30 @@ fn is_line_prefix_whitespace(bytes: &[u8], index: usize) -> bool {
 }
 
 fn enforce_path_depth(path: &[u8]) -> Result<(), DocumentError> {
-    let depth = path.iter().filter(|byte| **byte == b'.').count() + 1;
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for byte in path {
+        if let Some(quote_byte) = quote {
+            if quote_byte == b'"' {
+                if escaped {
+                    escaped = false;
+                } else if *byte == b'\\' {
+                    escaped = true;
+                } else if *byte == quote_byte {
+                    quote = None;
+                }
+            } else if *byte == quote_byte {
+                quote = None;
+            }
+        } else {
+            match *byte {
+                b'"' | b'\'' => quote = Some(*byte),
+                b'.' => depth += 1,
+                _ => {}
+            }
+        }
+    }
     if depth > MAX_NESTING_DEPTH {
         Err(DocumentError::ExcessiveNesting {
             limit: MAX_NESTING_DEPTH,
@@ -313,3 +357,86 @@ impl std::fmt::Display for DocumentError {
 }
 
 impl std::error::Error for DocumentError {}
+#[cfg(test)]
+mod tests {
+    use super::{
+        decode, DocumentError, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH, MAX_SETTING_ENTRIES,
+    };
+    use crate::model::{SettingKey, SettingValue};
+    use std::fmt::Write as _;
+
+    #[test]
+    fn inline_table_dotted_key_depth_accepts_limit_and_rejects_over_limit() {
+        let dotted_key = (0..MAX_NESTING_DEPTH)
+            .map(|_| "segment")
+            .collect::<Vec<_>>()
+            .join(".");
+        let at_limit = format!(
+            "schema_version = 2\nrevision = 0\nsettings = {{ {dotted_key} = 1 }}\n"
+        );
+        assert!(at_limit.len() <= MAX_CONFIG_BYTES);
+        assert!(matches!(
+            decode(at_limit.as_bytes()),
+            Err(DocumentError::UnsupportedStructure)
+        ));
+
+        let dotted_key = (0..=MAX_NESTING_DEPTH)
+            .map(|_| "segment")
+            .collect::<Vec<_>>()
+            .join(".");
+        let over_limit = format!(
+            "schema_version = 2\nrevision = 0\nsettings = {{ {dotted_key} = 1 }}\n"
+        );
+        assert!(matches!(
+            decode(over_limit.as_bytes()),
+            Err(DocumentError::ExcessiveNesting {
+                limit: MAX_NESTING_DEPTH
+            })
+        ));
+    }
+
+    #[test]
+    fn shallow_inline_settings_table_keeps_quoted_dotted_setting_keys() {
+        let document = decode(
+            b"schema_version = 2\nrevision = 4\nsettings = { \"grid.columns\" = 240 }\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            document
+                .overrides
+                .get(&SettingKey::new("grid.columns").unwrap()),
+            Some(&SettingValue::Integer(240))
+        );
+    }
+
+    fn document_with_entries(count: usize) -> Vec<u8> {
+        let mut text = String::from("schema_version = 2\nrevision = 0\n[settings]\n");
+        for index in 0..count {
+            writeln!(&mut text, "\"setting.key{index:04}\" = {index}").unwrap();
+        }
+        text.into_bytes()
+    }
+
+    #[test]
+    fn decode_accepts_exact_setting_entry_limit() {
+        let document = document_with_entries(MAX_SETTING_ENTRIES);
+        assert!(document.len() <= MAX_CONFIG_BYTES);
+
+        let decoded = decode(&document).unwrap();
+        assert_eq!(decoded.overrides.len(), MAX_SETTING_ENTRIES);
+    }
+
+    #[test]
+    fn decode_rejects_one_more_than_setting_entry_limit() {
+        let document = document_with_entries(MAX_SETTING_ENTRIES + 1);
+        assert!(document.len() <= MAX_CONFIG_BYTES);
+
+        assert!(matches!(
+            decode(&document),
+            Err(DocumentError::TooManyEntries {
+                limit: MAX_SETTING_ENTRIES
+            })
+        ));
+    }
+}
