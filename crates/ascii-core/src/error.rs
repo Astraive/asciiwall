@@ -85,6 +85,9 @@ impl core::fmt::Display for Error {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Malformed(_) => formatter.write_str("malformed input"),
+            Self::Unsupported(UnsupportedReason::ColorDescription) => formatter.write_str(
+                "unsupported color profile: provide SDR sRGB input; HDR tone mapping and wide-gamut conversion are not supported",
+            ),
             Self::Unsupported(_) => formatter.write_str("unsupported input"),
             Self::BudgetExceeded(_) => formatter.write_str("resource budget exceeded"),
             Self::AllocationFailed => formatter.write_str("allocation failed"),

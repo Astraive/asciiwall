@@ -1311,6 +1311,11 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
         "address": "localhost:1234",
         "connection": "localhost:1234",
         "note": "backend at buildhost:9000",
+        "punctuated_endpoint": "backend at buildhost:9000!",
+        "angle_endpoint": "backend at <buildhost:9443>",
+        "trailing_colon_endpoint": "backend at buildhost:9000:",
+        "benign_colon_control": "status:",
+        "control": "backend at buildhost:65536!",
         "nested": {
             "safe": true,
             "machine_value": "C:\\Users\\Alice\\Videos\\private.mp4"
@@ -1323,12 +1328,20 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
     assert_eq!(portable.mode(), "portable");
     let encoded = String::from_utf8(portable.to_json().unwrap()).unwrap();
     assert!(encoded.len() <= 1024 * 1024);
+    assert!(portable.content().get("punctuated_endpoint").is_none());
+    assert!(portable.content().get("angle_endpoint").is_none());
+    assert_eq!(
+        portable.content()["control"],
+        json!("backend at buildhost:65536!")
+    );
+    assert!(portable.content().get("trailing_colon_endpoint").is_none());
+    assert_eq!(portable.content()["benign_colon_control"], json!("status:"));
     for private_value in [
         "source",
         "address",
         "connection",
         "localhost",
-        "buildhost",
+        "9443",
         "9000",
         "file:/home/alice/private",
         "source_path",
@@ -1366,6 +1379,10 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
     assert!(backup_json.contains("DP-1"));
     assert!(backup_json.contains("com.example.player"));
     assert!(backup_json.contains("com.example.second-player"));
+    assert!(backup_json.contains("backend at buildhost:9000!"));
+    assert!(backup_json.contains("backend at <buildhost:9443>"));
+    assert!(backup_json.contains("backend at buildhost:65536!"));
+    assert!(backup_json.contains("backend at buildhost:9000:"));
     for private_history in [
         "cursor_history",
         "window_geometry_history",

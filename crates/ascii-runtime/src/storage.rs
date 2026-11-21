@@ -1374,7 +1374,20 @@ fn is_machine_local_string(value: &str) -> bool {
         let token = token.trim_matches(|character: char| {
             matches!(
                 character,
-                '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '=' | ',' | ';' | '.'
+                '"' | '\''
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '='
+                    | ','
+                    | ';'
+                    | '.'
+                    | '!'
+                    | '<'
+                    | '>'
             )
         });
         let bytes = token.as_bytes();
@@ -1432,6 +1445,7 @@ fn contains_file_uri(value: &str) -> bool {
 
 fn looks_like_network_endpoint(token: &str) -> bool {
     let candidate = token.split(['/', '\\', '?', '#']).next().unwrap_or(token);
+    let candidate = candidate.strip_suffix(':').unwrap_or(candidate);
     if candidate
         .trim_matches(|character| matches!(character, '[' | ']'))
         .parse::<std::net::IpAddr>()
