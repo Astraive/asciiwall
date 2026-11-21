@@ -2333,6 +2333,7 @@ fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
         "embedded_unicode_extensionless": "clip selected from Documents/秘密 before import",
         "embedded_dotfile": "credential file: Documents/.credentials",
         "harmless_slash_prose": "Choose input/output; the ratio is 3/4.",
+        "harmless_supported_versions": "Supported versions v1.0/v2.0",
         "harmless_filename_prose": "The terms private.mov and Documents are examples."
     });
     let portable =
@@ -2357,6 +2358,10 @@ fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
     assert_eq!(
         portable.content()["harmless_filename_prose"],
         json!("The terms private.mov and Documents are examples.")
+    );
+    assert_eq!(
+        portable.content()["harmless_supported_versions"],
+        json!("Supported versions v1.0/v2.0")
     );
 }
 
