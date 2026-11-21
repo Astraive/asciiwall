@@ -1313,6 +1313,8 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
         "note": "backend at buildhost:9000",
         "punctuated_endpoint": "backend at buildhost:9000!",
         "angle_endpoint": "backend at <buildhost:9443>",
+        "trailing_colon_endpoint": "backend at buildhost:9000:",
+        "benign_colon_control": "status:",
         "control": "backend at buildhost:65536!",
         "nested": {
             "safe": true,
@@ -1332,6 +1334,8 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
         portable.content()["control"],
         json!("backend at buildhost:65536!")
     );
+    assert!(portable.content().get("trailing_colon_endpoint").is_none());
+    assert_eq!(portable.content()["benign_colon_control"], json!("status:"));
     for private_value in [
         "source",
         "address",
@@ -1378,6 +1382,7 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
     assert!(backup_json.contains("backend at buildhost:9000!"));
     assert!(backup_json.contains("backend at <buildhost:9443>"));
     assert!(backup_json.contains("backend at buildhost:65536!"));
+    assert!(backup_json.contains("backend at buildhost:9000:"));
     for private_history in [
         "cursor_history",
         "window_geometry_history",
