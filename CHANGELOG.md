@@ -108,3 +108,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   names such as `cursor.history`, without changing current settings or backup bytes.
 - [COR-008] Reject duplicate package identifiers in persisted install-registry JSON during load and
   save validation, preserving the original bytes on either rejection.
+- [COR-008] Roll back restored settings after parent-directory sync failure, preserving pre-recovery
+  current and last-good bytes; report rollback failures explicitly and cover the public recovery
+  sync hook with a deterministic byte-preservation regression.
