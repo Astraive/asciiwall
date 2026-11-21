@@ -603,14 +603,9 @@ mod tests {
             ExportTarget::Ansi(AnsiColorMode::TrueColor),
         ] {
             let cancellation = CancellationToken::new();
-            let output_len = serialized_size(
-                &cells,
-                columns,
-                glyph_table.glyphs(),
-                target,
-                &cancellation,
-            )
-            .expect("uncancelled sizing succeeds");
+            let output_len =
+                serialized_size(&cells, columns, glyph_table.glyphs(), target, &cancellation)
+                    .expect("uncancelled sizing succeeds");
             let output_capacity = usize::try_from(output_len).expect("fixture output size fits");
             let mut output = Vec::new();
 
@@ -636,5 +631,4 @@ mod tests {
             assert_eq!(output.as_slice(), expected_partial_output);
         }
     }
-
 }
