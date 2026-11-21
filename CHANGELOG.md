@@ -113,3 +113,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   sync hook with a deterministic byte-preservation regression.
 - [COR-008] Redact generic portable-export strings containing embedded POSIX or Windows relative
   file paths while preserving harmless prose and slash-separated text; add public export coverage.
+- [COR-008] Retain the pre-recovery settings copy when rollback rename fails and expose its path in a
+  typed error; deterministic public fault injection verifies the copy remains recoverable.
