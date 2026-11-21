@@ -712,6 +712,58 @@ fn registry_is_versioned_atomic_and_failed_replacement_preserves_old_state() {
 }
 
 #[test]
+fn concurrent_registry_updates_preserve_independent_package_changes() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    storage
+        .save_registry(&registry("1.0.0"))
+        .expect("save initial registry");
+    let start = Arc::new(Barrier::new(3));
+    let writers = [
+        ("org.example.first", "2.0.0"),
+        ("org.example.second", "3.0.0"),
+    ];
+    let handles: Vec<_> = writers
+        .into_iter()
+        .map(|(package_id, version)| {
+            let storage = storage.clone();
+            let start = Arc::clone(&start);
+            let package_id = package_id.to_owned();
+            let version = version.to_owned();
+            std::thread::spawn(move || {
+                let digest = "b".repeat(64);
+                let entry = InstallEntry {
+                    package_version: version.clone(),
+                    sha256: digest.clone(),
+                    relative_path: format!("packages/{package_id}/{version}/{digest}"),
+                };
+                start.wait();
+                storage
+                    .update_registry(|registry| {
+                        registry.packages.insert(package_id, entry);
+                    })
+                    .expect("apply serialized registry update");
+            })
+        })
+        .collect();
+    start.wait();
+    for handle in handles {
+        handle.join().expect("registry update worker");
+    }
+
+    let updated = storage.load_registry().expect("load merged registry");
+    assert!(updated.packages.contains_key("org.example.sample"));
+    assert_eq!(
+        updated.packages["org.example.first"].package_version,
+        "2.0.0"
+    );
+    assert_eq!(
+        updated.packages["org.example.second"].package_version,
+        "3.0.0"
+    );
+}
+
+#[test]
 fn registry_write_rejects_newer_and_invalid_current_bytes() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));

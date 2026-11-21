@@ -8,9 +8,9 @@
 //! # API and recovery semantics
 //!
 //! Construct [`DirectoryInputs`] explicitly (or use [`DirectoryInputs::current`]), resolve
-//! [`StorageRoots`], and pass them to [`Storage`]. [`Storage::load_registry`] and
-//! [`Storage::save_registry`] operate on the single versioned install registry. Settings use
-//! `settings.toml`: [`ParsedToml::from_toml`] validates bounded TOML syntax only, while
+//! [`StorageRoots`], and pass them to [`Storage`]. [`Storage::load_registry`] reads the current
+//! install registry; [`Storage::save_registry`] replaces the entire document. Use
+//! [`Storage::update_registry`] for serialized read-modify-write updates against the latest state.
 //! [`Storage::load_config`] and [`Storage::save_config`] invoke the caller-owned schema validator.
 //! Settings saves and explicit recovery require the exact current bytes previously observed by the
 //! caller (`None` for absence); stale snapshots fail under the directory lock before any mutation.
@@ -720,7 +720,8 @@ impl Storage {
         Ok(registry)
     }
 
-    /// Atomically replaces the registry only after existing bytes pass version and integrity checks.
+    /// Atomically replaces the entire registry after existing bytes pass version and integrity checks.
+    /// This is a full-document replacement; use [`Self::update_registry`] to modify the latest state.
     pub fn save_registry(&self, registry: &InstallRegistry) -> Result<(), StorageError> {
         self.save_registry_with_hook(registry, |_| Ok(()))
     }
@@ -744,6 +745,58 @@ impl Storage {
             Some((REGISTRY_MAX_BYTES, &validate_existing)),
             None,
             &mut hook,
+        )?;
+        Ok(())
+    }
+
+    /// Applies a read-modify-write closure to the latest validated registry under its directory lock.
+    ///
+    /// Use this method to preserve independent updates from concurrent callers. `save_registry`
+    /// replaces the whole document and is appropriate only when replacing it intentionally.
+    pub fn update_registry(
+        &self,
+        update: impl FnOnce(&mut InstallRegistry),
+    ) -> Result<(), StorageError> {
+        let destination = self.registry_path();
+        let parent = destination
+            .parent()
+            .ok_or(StorageError::InvalidDirectories(
+                "state file has no parent directory",
+            ))?;
+        create_directory_durable(parent)?;
+        let directory_lock = DirectoryLock::new(parent);
+        let _guard = directory_lock.lock()?;
+
+        let current_bytes = read_optional_bounded(&destination, REGISTRY_MAX_BYTES)?;
+        let mut registry = match current_bytes.as_deref() {
+            Some(bytes) => {
+                let registry: InstallRegistry = serde_json::from_slice(bytes)?;
+                registry.validate()?;
+                registry
+            }
+            None => InstallRegistry::default(),
+        };
+        update(&mut registry);
+        registry.validate()?;
+        let bytes = json_bytes_bounded(&registry, REGISTRY_MAX_BYTES)?;
+        let validate_existing = |current: &[u8]| {
+            let current: InstallRegistry = serde_json::from_slice(current)?;
+            current.validate()
+        };
+        let expected_current = match current_bytes.as_deref() {
+            Some(bytes) => CurrentExpectation::Bytes(bytes),
+            None => CurrentExpectation::Missing,
+        };
+        atomic_replace_locked(
+            &destination,
+            &bytes,
+            expected_current,
+            Some((REGISTRY_MAX_BYTES, &validate_existing)),
+            None,
+            &mut |_| Ok(()),
+            &mut || Ok(()),
+            &mut || Ok(()),
+            None,
         )?;
         Ok(())
     }
