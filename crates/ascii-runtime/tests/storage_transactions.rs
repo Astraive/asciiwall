@@ -9,7 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Barrier};
+use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 use toml::Value as TomlValue;
 
@@ -1273,8 +1273,7 @@ fn restore_config_from_backup_holds_directory_lock_through_compare_and_swap() {
     save_current_config(&storage, &known_good, validate_test_config)
         .expect("save known-good settings");
     let current = config(json!({"theme": "current"}));
-    save_current_config(&storage, &current, validate_test_config)
-        .expect("save current settings");
+    save_current_config(&storage, &current, validate_test_config).expect("save current settings");
     let config_path = storage.config_path();
     let backup_path = storage.config_backup_path();
     let current_before = fs::read(&config_path).expect("current settings bytes");
@@ -1291,9 +1290,7 @@ fn restore_config_from_backup_holds_directory_lock_through_compare_and_swap() {
                 restore_entered_tx
                     .send(())
                     .expect("signal restore validation");
-                resume_restore_rx
-                    .recv()
-                    .expect("resume restore validation");
+                resume_restore_rx.recv().expect("resume restore validation");
                 validate_test_config(value)
             })
         })
@@ -1309,10 +1306,8 @@ fn restore_config_from_backup_holds_directory_lock_through_compare_and_swap() {
         let storage = storage.clone();
         std::thread::spawn(move || {
             let validation_calls = AtomicUsize::new(0);
-            let result = storage.save_config(
-                Some(&current_before),
-                &competing_write,
-                move |value| {
+            let result =
+                storage.save_config(Some(&current_before), &competing_write, move |value| {
                     if validation_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                         writer_ready_tx
                             .send(())
@@ -1322,8 +1317,7 @@ fn restore_config_from_backup_holds_directory_lock_through_compare_and_swap() {
                             .expect("continue competing writer");
                     }
                     validate_test_config(value)
-                },
-            );
+                });
             writer_done_tx
                 .send(result)
                 .expect("report competing writer result");
@@ -1336,8 +1330,7 @@ fn restore_config_from_backup_holds_directory_lock_through_compare_and_swap() {
         .send(())
         .expect("allow competing writer to request the lock");
 
-    let writer_finished_during_restore =
-        writer_done_rx.recv_timeout(Duration::from_secs(1)).ok();
+    let writer_finished_during_restore = writer_done_rx.recv_timeout(Duration::from_secs(1)).ok();
     let writer_was_blocked = writer_finished_during_restore.is_none();
     resume_restore_tx
         .send(())
