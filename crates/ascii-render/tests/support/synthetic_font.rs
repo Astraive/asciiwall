@@ -1,7 +1,7 @@
-//! Rights-cleared synthetic TrueType fixture built entirely from local constants.
-//!
-//! Glyph 1 is blank (space); glyphs 2 and 3 are simple outlines mapped to the block and Braille
-//! cells.
+// Rights-cleared synthetic TrueType fixture built entirely from local constants.
+//
+// Glyph 1 is blank (space); glyphs 2 and 3 are simple outlines mapped to the block and Braille
+// cells.
 
 pub fn synthetic_font() -> Vec<u8> {
     let mut glyphs = vec![
