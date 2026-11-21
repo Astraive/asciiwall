@@ -1595,7 +1595,9 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                     else:
                         raw, snapshot = _read_regular_at(directory_fd, name)
                     content = _decode_json(raw, "input is not valid UTF-8 JSON")
-                except (EvidenceError, OSError):
+                except (EvidenceError, OSError) as exc:
+                    if os.name == "nt" and isinstance(exc, evidence_windows.FileCloseError):
+                        raise EvidenceError("cannot close an archive evidence artifact handle") from exc
                     break
                 identity = match.group(1)
                 if kind == "evidence":
@@ -1665,6 +1667,36 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                     except OSError as exc:
                         raise EvidenceError("cannot remove an expired evidence artifact") from exc
                     removed.append(name)
+            for kind, _ in patterns:
+                candidates = sorted(valid[kind], key=lambda item: (item[0], item[1]), reverse=True)
+                for _, _, name, snapshot, digest in candidates[:keep]:
+                    try:
+                        if os.name == "nt":
+                            # Do not report scan-time retention counts for a
+                            # retained entry that changed during this prune.
+                            with directory_fd.open_file(name) as artifact:
+                                try:
+                                    raw, current = _read_windows_regular(artifact)
+                                except EvidenceError as exc:
+                                    raise EvidenceError(
+                                        f"archive changed during pruning of retained artifact {name}"
+                                    ) from exc
+                                if current != snapshot or sha256_bytes(raw) != digest:
+                                    raise EvidenceError(
+                                        f"archive changed during pruning of retained artifact {name}"
+                                    )
+                        else:
+                            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                            if not _same_file_snapshot(snapshot, current):
+                                raise EvidenceError(
+                                    f"archive changed during pruning of retained artifact {name}"
+                                )
+                    except FileNotFoundError as exc:
+                        raise EvidenceError(
+                            f"retained artifact disappeared during pruning: {name}"
+                        ) from exc
+                    except OSError as exc:
+                        raise EvidenceError("cannot verify a retained evidence artifact") from exc
         except EvidenceError as exc:
             if removed:
                 removed_names = ", ".join(sorted(removed))

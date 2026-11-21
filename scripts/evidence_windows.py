@@ -351,6 +351,10 @@ def _snapshot(handle: int) -> Snapshot:
                     (basic.LastWriteTime - _FILETIME_UNIX_EPOCH) * 100)
 
 
+class FileCloseError(OSError):
+    """A native evidence file handle failed to close."""
+
+
 class File:
     """An opened, non-reparse regular file with write/delete sharing denied."""
 
@@ -379,7 +383,10 @@ class File:
     def close(self) -> None:
         if self._handle is not None:
             handle, self._handle = self._handle, None
-            _close(handle)
+            try:
+                _close(handle)
+            except OSError as exc:
+                raise FileCloseError("native evidence file handle could not be closed") from exc
 
     def snapshot(self) -> Snapshot:
         return _snapshot(self._get_handle())

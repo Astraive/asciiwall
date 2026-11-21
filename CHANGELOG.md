@@ -53,7 +53,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Classify streamed JSON primitives across chunk boundaries, rejecting oversized UTF-16 and long-number JSON while preserving numeric-leading and NUL-padded binary artifacts ([QA-004]).
 - Reject oversized UTF-16/UTF-32 JSON native evidence, including primitive scalars, before it can bypass the 1 MiB inspection limit; fail closed on POSIX archive deletion because compare-inode-and-unlink is unavailable, preserving entries and reporting the limitation ([QA-004]).
 - Exercise UTF-32 scalar carry-over across a short 64 KiB stream read, BOM-less LE/BE synthetic JSON detection, and invalid scalar rejection in both byte orders while retaining ordinary-binary controls ([QA-004]).
-- Fail closed when expired archive entries change or disappear after scan; replacements are preserved. Portable POSIX bounded retention remains unavailable without atomic compare-and-unlink ([QA-004]).
+- Fail closed when expired archive entries change or disappear and when retained-candidate identities change; preserve replacements and report incomplete pruning instead of stale `kept_by_type` counts. POSIX bounded retention against hostile concurrent writers remains unavailable without atomic compare-and-unlink ([QA-004]).
+- Surface Windows archive file-handle close failures during pruning instead of silently skipping candidates ([QA-004]).
 - Preserve completed Windows archive deletions and the primary partial-prune error if directory cleanup also fails, keeping cleanup failures secondary and observable ([QA-004]).
 - Surface Windows archive directory-close failures after a successful prune, even inside an unrelated active exception; preserve prune errors as primary when cleanup fails ([QA-004]).
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
