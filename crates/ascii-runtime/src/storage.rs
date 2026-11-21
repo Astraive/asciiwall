@@ -729,18 +729,17 @@ impl Storage {
         if let (Some(current_version), Some(backup_version)) = (
             current.as_ref().and_then(config_schema_version),
             config_schema_version(&value),
-        ) {
-            if current_version > backup_version {
-                let version = u32::try_from(current_version).map_err(|_| {
-                    StorageError::InvalidConfiguration(format!(
-                        "current settings schema version {current_version} is newer than last-good version {backup_version}"
-                    ))
-                })?;
-                return Err(StorageError::UnsupportedVersion {
-                    kind: "settings configuration",
-                    version,
-                });
-            }
+        ) && current_version > backup_version
+        {
+            let version = u32::try_from(current_version).map_err(|_| {
+                StorageError::InvalidConfiguration(format!(
+                    "current settings schema version {current_version} is newer than last-good version {backup_version}"
+                ))
+            })?;
+            return Err(StorageError::UnsupportedVersion {
+                kind: "settings configuration",
+                version,
+            });
         }
         atomic_replace_locked(&destination, &bytes, None, None, &mut |_| Ok(()))?;
         Ok(())
