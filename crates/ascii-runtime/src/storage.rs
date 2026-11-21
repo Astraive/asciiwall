@@ -1968,7 +1968,7 @@ fn looks_like_relative_local_path(value: &str) -> bool {
         return true;
     }
     if let Some((stem, extension)) = final_component.rsplit_once('.') {
-        return (relative_prefix || first.chars().any(char::is_alphanumeric))
+        return recognized_root
             && !stem.is_empty()
             && !extension.is_empty()
             && extension.len() <= 10
