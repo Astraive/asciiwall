@@ -89,6 +89,13 @@ impl FileStore {
         let metadata = file
             .metadata()
             .map_err(|error| StoreError::io(StoreOperation::Read, error))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = owner_only_mode(metadata.permissions().mode());
+            file.set_permissions(fs::Permissions::from_mode(mode))
+                .map_err(|error| StoreError::io(StoreOperation::ReadPermissions, error))?;
+        }
         if metadata.len() > MAX_CONFIG_BYTES as u64 {
             return Err(StoreError::TooLarge {
                 limit: MAX_CONFIG_BYTES,
@@ -587,10 +594,7 @@ fn restrictive_mode(path: &Path) -> std::io::Result<u32> {
     {
         use std::os::unix::fs::PermissionsExt;
         match fs::metadata(path) {
-            Ok(metadata) => {
-                let owner_bits = metadata.permissions().mode() & 0o600;
-                Ok(if owner_bits == 0 { 0o600 } else { owner_bits })
-            }
+            Ok(metadata) => Ok(owner_only_mode(metadata.permissions().mode())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0o600),
             Err(error) => Err(error),
         }
@@ -601,6 +605,12 @@ fn restrictive_mode(path: &Path) -> std::io::Result<u32> {
         Ok(0o600)
     }
 }
+#[cfg(unix)]
+fn owner_only_mode(mode: u32) -> u32 {
+    let owner_bits = mode & 0o600;
+    if owner_bits == 0 { 0o600 } else { owner_bits }
+}
+
 
 fn open_restrictive(path: &Path, mode: u32) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
@@ -822,6 +832,73 @@ mod tests {
             StoreError::Stale {
                 current: Some(secret.to_vec())
             }
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn reads_tighten_existing_main_and_backup_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let backup = directory.0.join("settings.toml.bak");
+        fs::write(&path, b"main").unwrap();
+        fs::write(&backup, b"backup").unwrap();
+        for existing in [&path, &backup] {
+            fs::set_permissions(existing, fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(
+                fs::metadata(existing).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
+
+        let mut store = FileStore::new(&path);
+        assert_eq!(store.read_main().unwrap(), Some(b"main".to_vec()));
+        assert_eq!(store.read_backup().unwrap(), Some(b"backup".to_vec()));
+        for existing in [&path, &backup] {
+            assert_eq!(
+                fs::metadata(existing).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_repair_archive_remains_owner_only_after_rename() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        fs::write(
+            &path,
+            vec![b'x'; crate::document::MAX_CONFIG_BYTES + 1],
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut store = FileStore::new(&path);
+        store
+            .commit(None, b"safe-settings", BackupMode::PreserveLastGood)
+            .unwrap();
+
+        let archive = fs::read_dir(&directory.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.corrupt-")
+            })
+            .expect("oversized config archived separately");
+        assert_eq!(
+            fs::metadata(archive.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
         );
     }
 }
