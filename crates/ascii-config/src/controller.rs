@@ -75,6 +75,7 @@ struct ControllerState {
 struct OpenDocumentError {
     error: ConfigError,
     can_repair: bool,
+    revision: Option<u64>,
 }
 
 impl SettingsController {
@@ -137,12 +138,16 @@ impl SettingsController {
                     )
                 }
                 Err(failure) => {
+                    let snapshot = match failure.revision {
+                        Some(revision) => build_snapshot(&registry, revision, BTreeMap::new())?,
+                        None => defaults,
+                    };
                     let status = if failure.can_repair {
                         ControllerStatus::RepairRequired(failure.error)
                     } else {
                         ControllerStatus::ReadOnlyUnclassifiableDocument(failure.error)
                     };
-                    (status, defaults, Some(bytes))
+                    (status, snapshot, Some(bytes))
                 }
             },
             Err(StoreError::TooLarge { limit, .. }) => (
@@ -320,17 +325,20 @@ fn decode_and_validate(
     let document = decode(bytes).map_err(|error| OpenDocumentError {
         error: ConfigError::Document(error),
         can_repair: false,
+        revision: None,
     })?;
     if document.schema_version > CURRENT_SCHEMA_VERSION {
         return Ok(document);
     }
     validate_overrides(registry, &document.overrides).map_err(|error| OpenDocumentError {
+        revision: Some(document.revision),
         can_repair: !matches!(&error, ConfigError::UnknownSetting(_)),
         error,
     })?;
     resolve_overrides(registry, &document.overrides).map_err(|error| OpenDocumentError {
         error: error.into(),
         can_repair: true,
+        revision: Some(document.revision),
     })?;
     Ok(document)
 }

@@ -555,10 +555,17 @@ fn explicit_repair_remains_available_for_known_current_schema_data() {
         controller.status().unwrap(),
         ControllerStatus::RepairRequired(ConfigError::InvalidPersistentValue { .. })
     ));
+    assert_eq!(controller.snapshot().unwrap().revision(), 17);
+    assert_eq!(fs::read(&path).unwrap().as_slice(), &original[..]);
     let repaired = controller.repair(17).unwrap();
     assert_eq!(repaired.revision(), 18);
     assert!(repaired.overrides().is_empty());
-    assert_ne!(fs::read(path).unwrap().as_slice(), &original[..]);
+    assert_ne!(fs::read(&path).unwrap().as_slice(), &original[..]);
+    let reopened = SettingsController::open(&path, registry()).unwrap();
+    assert_eq!(reopened.status().unwrap(), ControllerStatus::Ready);
+    let persisted = reopened.snapshot().unwrap();
+    assert_eq!(persisted.revision(), 18);
+    assert!(persisted.overrides().is_empty());
 }
 
 #[test]
