@@ -33,6 +33,15 @@ pub fn run_with_cancellation(
     args: impl IntoIterator<Item = OsString>,
     cancellation: &CancellationToken,
 ) -> ExitCode {
+    let stdout = io::stdout();
+    run_with_cancellation_to(args, cancellation, &mut stdout.lock())
+}
+
+fn run_with_cancellation_to(
+    args: impl IntoIterator<Item = OsString>,
+    cancellation: &CancellationToken,
+    stdout: &mut impl Write,
+) -> ExitCode {
     let args: Vec<OsString> = args.into_iter().collect();
     let json_requested = args
         .iter()
@@ -48,7 +57,7 @@ pub fn run_with_cancellation(
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             ) =>
         {
-            return if print_help(&error.to_string()).is_ok() {
+            return if print_help(&error.to_string(), stdout).is_ok() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(8)
@@ -57,14 +66,13 @@ pub fn run_with_cancellation(
         Err(_) => {
             let error =
                 CliError::usage("invalid command-line arguments; consult --help for usage details");
-            return report_error(&error, json_requested, command);
+            return report_error(&error, json_requested, command, stdout);
         }
     };
 
     let json = cli.json;
-    finish_execution(execute(cli, cancellation), |error| {
-        report_error(error, json, "convert")
-    })
+    let result = execute(cli, cancellation, stdout);
+    finish_execution(result, |error| report_error(error, json, "convert", stdout))
 }
 
 fn parse_error_command(args: &[OsString]) -> &'static str {
@@ -104,8 +112,13 @@ fn parse_error_command(args: &[OsString]) -> &'static str {
     "asciiwall"
 }
 
-fn report_error(error: &CliError, json: bool, command: &'static str) -> ExitCode {
-    if print_error(error, json, command).is_ok() {
+fn report_error(
+    error: &CliError,
+    json: bool,
+    command: &'static str,
+    stdout: &mut impl Write,
+) -> ExitCode {
+    if print_error(error, json, command, stdout).is_ok() {
         ExitCode::from(error.exit)
     } else {
         ExitCode::from(8)
@@ -134,7 +147,11 @@ impl From<CliError> for ExecutionError {
     }
 }
 
-fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), ExecutionError> {
+fn execute(
+    cli: Cli,
+    cancellation: &CancellationToken,
+    stdout: &mut impl Write,
+) -> Result<(), ExecutionError> {
     let Cli {
         json,
         quiet,
@@ -227,7 +244,7 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), ExecutionEr
         export(converted.frame(), &glyphs, target, &budget, cancellation).map_err(export_error)?;
     let bytes = exported.bytes();
     if request.output.as_os_str() == OsStr::new("-") {
-        publish_stdout(bytes, cancellation, &mut io::stdout().lock())?;
+        publish_stdout(bytes, cancellation, stdout)?;
     } else {
         output::publish_file(&request.output, request.overwrite, cancellation, |file| {
             file.write_all(bytes)
@@ -245,10 +262,7 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), ExecutionEr
             rows: exported.size().rows(),
             loss_notice: exported.loss_notice(),
         },
-        |status| {
-            let stdout = io::stdout();
-            write_success_status(&mut stdout.lock(), status)
-        },
+        |status| write_success_status(stdout, status),
     )
     .map_err(ExecutionError::SuccessStatus)?;
     Ok(())
@@ -460,15 +474,48 @@ fn font_error(error: FontLoadError) -> CliError {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::io::{self, Write};
     use std::process::ExitCode;
 
     use ascii_core::CancellationToken;
 
     use super::{
-        ExecutionError, Format, SuccessReport, finish_execution, publish_error, publish_stdout,
-        report_success, write_success_status,
+        Format, SuccessReport, publish_error, publish_stdout, run_with_cancellation_to,
+        write_success_status,
     };
+
+    #[allow(dead_code)]
+    mod synthetic_font {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/ascii-convert/tests/support/synthetic_font.rs"
+        ));
+    }
+
+    struct FailAfterPartialResponse {
+        bytes: Vec<u8>,
+        response_attempts: usize,
+    }
+
+    impl Write for FailAfterPartialResponse {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes.first() == Some(&b'{') {
+                self.response_attempts += 1;
+            }
+            let remaining = 4usize.saturating_sub(self.bytes.len());
+            if remaining == 0 {
+                return Err(io::Error::other("simulated partial status write failure"));
+            }
+            let written = remaining.min(bytes.len());
+            self.bytes.extend_from_slice(&bytes[..written]);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     struct FailOnNewline {
         bytes: Vec<u8>,
@@ -591,35 +638,56 @@ mod tests {
     }
 
     #[test]
-    fn failed_success_status_does_not_attempt_a_second_json_response() {
-        let mut stdout = FailOnNewline { bytes: Vec::new() };
-        let result = report_success(
-            SuccessReport {
-                json: true,
-                quiet: false,
-                verbose: false,
-                format: Format::Txt,
-                columns: 12,
-                rows: 4,
-                loss_notice: "",
-            },
-            |status| write_success_status(&mut stdout, status),
+    fn top_level_partial_success_status_write_does_not_attempt_second_json_response() {
+        const RIGHTS_CLEARED_PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+            0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+            0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
+            0xff, 0xff, 0xff, 0x7f, 0x00, 0x09, 0xfb, 0x03, 0xfd, 0x2a, 0x86, 0xe3, 0x8a, 0x00, 0x00,
+            0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        let directory = tempfile::tempdir().unwrap();
+        let image = directory.path().join("image.png");
+        let font = directory.path().join("font.ttf");
+        let output = directory.path().join("published.txt");
+        std::fs::write(&image, RIGHTS_CLEARED_PNG).unwrap();
+        std::fs::write(
+            &font,
+            synthetic_font::synthetic_font(false),
         )
-        .map_err(ExecutionError::SuccessStatus);
-        let mut error_response_attempts = 0;
+        .unwrap();
 
-        let exit = finish_execution(result, |error| {
-            error_response_attempts += 1;
-            let response = serde_json::json!({"status": "error"});
-            let _ = serde_json::to_writer(&mut stdout, &response);
-            let _ = stdout.write_all(b"\n");
-            ExitCode::from(error.exit)
-        });
+        let mut stdout = FailAfterPartialResponse {
+            bytes: Vec::new(),
+            response_attempts: 0,
+        };
+        let exit = run_with_cancellation_to(
+            [
+                OsString::from("asciiwall"),
+                OsString::from("--json"),
+                OsString::from("--quiet"),
+                OsString::from("convert"),
+                image.as_os_str().to_owned(),
+                OsString::from("--font"),
+                font.as_os_str().to_owned(),
+                OsString::from("--output"),
+                output.as_os_str().to_owned(),
+                OsString::from("--columns"),
+                OsString::from("12"),
+            ],
+            &CancellationToken::new(),
+            &mut stdout,
+        );
 
         assert_eq!(exit, ExitCode::from(8));
-        assert_eq!(error_response_attempts, 0);
-        let response: serde_json::Value = serde_json::from_slice(&stdout.bytes).unwrap();
-        assert_eq!(response["status"], "ok");
-        assert!(!stdout.bytes.ends_with(b"\n"));
+        assert_eq!(stdout.bytes.len(), 4, "status write must fail after a prefix");
+        assert_eq!(
+            stdout.response_attempts, 1,
+            "the error response must not be attempted on partially written stdout"
+        );
+        assert!(
+            !std::fs::read(&output).unwrap().is_empty(),
+            "status failure must not roll back the published artifact"
+        );
     }
 }

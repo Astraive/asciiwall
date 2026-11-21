@@ -107,14 +107,17 @@ fn skip_control_string(chars: &mut std::str::Chars<'_>, bell_terminates: bool) {
     }
 }
 
-pub fn print_error(error: &CliError, json: bool, command: &'static str) -> io::Result<()> {
+pub fn print_error(
+    error: &CliError,
+    json: bool,
+    command: &'static str,
+    stdout: &mut impl Write,
+) -> io::Result<()> {
     let mut message = strip_terminal_controls(error.message);
     if let Some((index, _)) = message.char_indices().nth(4096) {
         message.truncate(index);
     }
     if json {
-        let stdout = io::stdout();
-        let mut stream = stdout.lock();
         let result = serde_json::json!({
             "schema_version": 1,
             "command": command,
@@ -127,9 +130,9 @@ pub fn print_error(error: &CliError, json: bool, command: &'static str) -> io::R
             },
             "result": null
         });
-        serde_json::to_writer(&mut stream, &result)?;
-        writeln!(stream)?;
-        stream.flush()
+        serde_json::to_writer(&mut *stdout, &result)?;
+        writeln!(stdout)?;
+        stdout.flush()
     } else {
         let stderr = io::stderr();
         let mut stream = stderr.lock();
@@ -138,11 +141,9 @@ pub fn print_error(error: &CliError, json: bool, command: &'static str) -> io::R
     }
 }
 
-pub fn print_help(text: &str) -> io::Result<()> {
-    let stdout = io::stdout();
-    let mut stream = stdout.lock();
-    write!(stream, "{}", strip_terminal_controls(text))?;
-    stream.flush()
+pub fn print_help(text: &str, stdout: &mut impl Write) -> io::Result<()> {
+    write!(stdout, "{}", strip_terminal_controls(text))?;
+    stdout.flush()
 }
 
 #[cfg(test)]
