@@ -74,3 +74,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
 - Reject uninspectable long-integer JSON in direct native evidence instead of treating it as non-JSON text ([QA-004]).
 - Bound aggregate QA-004 prune verification reads to 256 MiB across candidate records, native manifests, referenced artifacts, and Windows rereads; report over-budget scans as errors before deletion or successful counts ([QA-004]).
+- Scan fixed synthetic markers across UTF-8, UTF-16LE/BE, and UTF-32LE/BE independently of JSON classification, including escaped markers in oversized non-ASCII-prefixed artifacts ([QA-004]).
