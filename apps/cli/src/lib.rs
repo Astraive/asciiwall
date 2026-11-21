@@ -449,7 +449,10 @@ mod tests {
 
         assert_eq!(error.code, "cli.usage");
         assert_eq!(error.exit, 2);
-        assert_eq!(error.message, "output already exists; use --overwrite to replace it");
+        assert_eq!(
+            error.message,
+            "output already exists; use --overwrite to replace it"
+        );
     }
 
     #[test]
