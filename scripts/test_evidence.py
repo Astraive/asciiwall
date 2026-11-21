@@ -384,7 +384,10 @@ class EvidenceRecordTests(unittest.TestCase):
             directory = Path(temporary)
             manifest_path = directory / "native-evidence.json"
             binary_path = directory / "synthetic-screenshot.bin"
-            binary = b"\x00\xff\x89PNG\r\n\x1a\n" + bytes(range(32))
+            binary = b"123\xffPNG\r\n\x1a\n" + bytes(range(256)) * (
+                evidence.MAX_JSON_BYTES // 256 + 1
+            )
+            self.assertGreater(len(binary), evidence.MAX_JSON_BYTES)
             binary_path.write_bytes(binary)
             binary_relative = binary_path.relative_to(ROOT).as_posix()
             manifest_relative = manifest_path.relative_to(ROOT).as_posix()

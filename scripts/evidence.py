@@ -467,7 +467,21 @@ def _contains_synthetic_marker(value: Any) -> bool:
     return False
 
 
+def _looks_like_json_scalar(prefix: str | bytes) -> bool:
+    if isinstance(prefix, str):
+        if not prefix or prefix[0] not in "tfn-0123456789":
+            return False
+    elif not prefix or prefix[:1] not in b"tfn-0123456789":
+        return False
+    try:
+        json.loads(prefix)
+    except (ValueError, UnicodeError, RecursionError):
+        return False
+    return True
+
+
 def _looks_like_json(raw: bytes) -> bool | None:
+    raw = raw[:65_536]
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         try:
             prefix = raw.decode("utf-16").lstrip()
@@ -475,19 +489,15 @@ def _looks_like_json(raw: bytes) -> bool | None:
             return True
         if not prefix:
             return None
-        return (
-            prefix.startswith(("{", "[", '"', "true", "false", "null"))
-            or prefix[0] in "0123456789"
-            or (prefix.startswith("-") and len(prefix) > 1 and prefix[1] in "0123456789")
-        )
+        if prefix.startswith(("{", "[", '"')):
+            return True
+        return _looks_like_json_scalar(prefix)
     prefix = raw.replace(b"\x00", b"").lstrip(b"\xef\xbb\xbf \t\r\n")
     if not prefix:
         return None
-    return (
-        prefix.startswith((b"{", b"[", b'"', b"true", b"false", b"null"))
-        or prefix[:1] in b"0123456789"
-        or (prefix.startswith(b"-") and len(prefix) > 1 and prefix[1:2] in b"0123456789")
-    )
+    if prefix.startswith((b"{", b"[", b'"')):
+        return True
+    return _looks_like_json_scalar(prefix)
 
 
 class _SyntheticMarkerScanner:
