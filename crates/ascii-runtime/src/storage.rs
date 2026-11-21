@@ -574,6 +574,10 @@ fn parse_toml_value(bytes: &[u8]) -> Result<TomlValue, StorageError> {
     toml::from_str(text).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))
 }
 
+fn config_schema_version(value: &TomlValue) -> Option<i64> {
+    value.get("schema_version")?.as_integer()
+}
+
 /// Authoritative local state paths and atomic registry/settings operations.
 #[derive(Clone, Debug)]
 pub struct Storage {
@@ -689,7 +693,9 @@ impl Storage {
         Ok(())
     }
 
-    /// Explicitly restores the schema-valid last-good TOML without changing the backup.
+    /// Explicitly restores schema-valid last-good TOML without changing the backup.
+    /// A parseable current document with a newer `schema_version` is preserved rather than
+    /// downgraded.
     pub fn restore_config_from_backup<E: fmt::Display>(
         &self,
         validate: impl FnOnce(&TomlValue) -> Result<(), E>,
@@ -701,13 +707,42 @@ impl Storage {
                 "state file has no parent directory",
             ))?;
         create_directory_durable(parent)?;
-        let _guard = DirectoryLock::new(parent).lock()?;
+        let directory_lock = DirectoryLock::new(parent);
+        let _guard = directory_lock.lock()?;
+
+        let current = match read_optional_bounded(&destination, CONFIG_MAX_BYTES) {
+            Ok(Some(bytes)) => match parse_toml_value(&bytes) {
+                Ok(value) => Some(value),
+                Err(StorageError::InvalidConfiguration(_)) | Err(StorageError::DocumentTooLarge) => {
+                    None
+                }
+                Err(error) => return Err(error),
+            },
+            Ok(None) | Err(StorageError::DocumentTooLarge) => None,
+            Err(error) => return Err(error),
+        };
         let backup = self.config_backup_path();
         let bytes = read_optional_bounded(&backup, CONFIG_MAX_BYTES)?.ok_or_else(|| {
             StorageError::InvalidConfiguration("last-good settings are missing".into())
         })?;
         let value = parse_toml_value(&bytes)?;
         validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
+        if let (Some(current_version), Some(backup_version)) = (
+            current.as_ref().and_then(config_schema_version),
+            config_schema_version(&value),
+        ) {
+            if current_version > backup_version {
+                let version = u32::try_from(current_version).map_err(|_| {
+                    StorageError::InvalidConfiguration(format!(
+                        "current settings schema version {current_version} is newer than last-good version {backup_version}"
+                    ))
+                })?;
+                return Err(StorageError::UnsupportedVersion {
+                    kind: "settings configuration",
+                    version,
+                });
+            }
+        }
         atomic_replace_locked(&destination, &bytes, None, None, &mut |_| Ok(()))?;
         Ok(())
     }
@@ -907,18 +942,16 @@ fn create_sibling_temp(destination: &Path, label: &str) -> io::Result<OwnedTempF
         options.mode(0o600);
     }
     let file = options.open(&candidate)?;
-    let mut temporary = OwnedTempFile {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    let temporary = OwnedTempFile {
         path: candidate,
         file: Some(file),
         cleanup: true,
     };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temporary
-            .file_mut()
-            .set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
     Ok(temporary)
 }
 
@@ -964,12 +997,15 @@ fn create_directory_durable(path: &Path) -> io::Result<()> {
 }
 
 fn create_storage_directory(path: &Path) -> io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
         builder.mode(0o700);
-    }
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
     match builder.create(path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
