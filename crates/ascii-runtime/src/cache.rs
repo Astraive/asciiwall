@@ -1145,6 +1145,7 @@ fn write_file_id_high_water(
         managed_dir,
         high_water,
         create_new,
+        File::sync_all,
         crate::storage::sync_parent_directory,
     )
 }
@@ -1153,6 +1154,7 @@ fn write_file_id_high_water_with_sync(
     managed_dir: &Path,
     high_water: u64,
     create_new: bool,
+    sync_file: impl FnOnce(&File) -> io::Result<()>,
     sync_parent_directory: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<(), CacheError> {
     let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
@@ -1173,7 +1175,7 @@ fn write_file_id_high_water_with_sync(
         value >>= 4;
     }
     file.write_all(&encoded)?;
-    file.sync_all()?;
+    sync_file(&file)?;
     if create_new {
         sync_parent_directory(managed_dir)?;
     }
@@ -1183,17 +1185,19 @@ fn write_file_id_high_water_with_sync(
 fn mark_file_id_high_water_initialized(managed_dir: &Path) -> Result<(), CacheError> {
     mark_file_id_high_water_initialized_with_sync(
         managed_dir,
+        File::sync_all,
         crate::storage::sync_parent_directory,
     )
 }
 
 fn mark_file_id_high_water_initialized_with_sync(
     managed_dir: &Path,
+    sync_file: impl FnOnce(&File) -> io::Result<()>,
     sync_parent_directory: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<(), CacheError> {
     let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER_MARKER);
     let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.sync_all()?;
+    sync_file(&file)?;
     sync_parent_directory(managed_dir)?;
     Ok(())
 }
@@ -2347,40 +2351,85 @@ mod tests {
 
     #[test]
     fn high_water_counter_and_marker_sync_their_parent_after_file_sync() {
+        use std::cell::RefCell;
+
+        #[derive(Debug, Eq, PartialEq)]
+        enum SyncEvent {
+            File,
+            ParentDirectory,
+        }
+
         let managed_dir = TempManagedDirectory::new();
-        let mut counter_synced = false;
-        write_file_id_high_water_with_sync(&managed_dir.0, 7, true, |directory| {
-            assert_eq!(directory, managed_dir.0.as_path());
-            assert_eq!(
-                fs::read(directory.join(CACHE_FILE_ID_HIGH_WATER))?,
-                b"0000000000000007\n"
-            );
-            counter_synced = true;
-            Ok(())
-        })
+        let counter_events = RefCell::new(Vec::with_capacity(2));
+        write_file_id_high_water_with_sync(
+            &managed_dir.0,
+            7,
+            true,
+            |_| {
+                counter_events.borrow_mut().push(SyncEvent::File);
+                Ok(())
+            },
+            |directory| {
+                assert_eq!(directory, managed_dir.0.as_path());
+                assert_eq!(
+                    fs::read(directory.join(CACHE_FILE_ID_HIGH_WATER))?,
+                    b"0000000000000007\n"
+                );
+                counter_events
+                    .borrow_mut()
+                    .push(SyncEvent::ParentDirectory);
+                Ok(())
+            },
+        )
         .unwrap();
-        assert!(counter_synced);
+        assert_eq!(
+            counter_events.into_inner(),
+            vec![SyncEvent::File, SyncEvent::ParentDirectory]
+        );
 
-        let mut update_synced = false;
-        write_file_id_high_water_with_sync(&managed_dir.0, 8, false, |_| {
-            update_synced = true;
-            Ok(())
-        })
+        let update_events = RefCell::new(Vec::with_capacity(1));
+        write_file_id_high_water_with_sync(
+            &managed_dir.0,
+            8,
+            false,
+            |_| {
+                update_events.borrow_mut().push(SyncEvent::File);
+                Ok(())
+            },
+            |_| {
+                update_events
+                    .borrow_mut()
+                    .push(SyncEvent::ParentDirectory);
+                Ok(())
+            },
+        )
         .unwrap();
-        assert!(!update_synced);
+        assert_eq!(update_events.into_inner(), vec![SyncEvent::File]);
 
-        let mut marker_synced = false;
-        mark_file_id_high_water_initialized_with_sync(&managed_dir.0, |directory| {
-            assert_eq!(directory, managed_dir.0.as_path());
-            assert_eq!(
-                fs::symlink_metadata(directory.join(CACHE_FILE_ID_HIGH_WATER_MARKER))?.len(),
-                0
-            );
-            marker_synced = true;
-            Ok(())
-        })
+        let marker_events = RefCell::new(Vec::with_capacity(2));
+        mark_file_id_high_water_initialized_with_sync(
+            &managed_dir.0,
+            |_| {
+                marker_events.borrow_mut().push(SyncEvent::File);
+                Ok(())
+            },
+            |directory| {
+                assert_eq!(directory, managed_dir.0.as_path());
+                assert_eq!(
+                    fs::symlink_metadata(directory.join(CACHE_FILE_ID_HIGH_WATER_MARKER))?.len(),
+                    0
+                );
+                marker_events
+                    .borrow_mut()
+                    .push(SyncEvent::ParentDirectory);
+                Ok(())
+            },
+        )
         .unwrap();
-        assert!(marker_synced);
+        assert_eq!(
+            marker_events.into_inner(),
+            vec![SyncEvent::File, SyncEvent::ParentDirectory]
+        );
     }
 
     struct DiskFullAfterPrefix {
