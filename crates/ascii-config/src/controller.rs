@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::Path,
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -77,7 +77,7 @@ impl SettingsController {
     /// Opens canonical TOML settings at the path selected by the platform-aware
     /// application path provider. This crate does not guess OS config paths.
     pub fn open(
-        path: impl Into<PathBuf>,
+        path: impl AsRef<Path>,
         registry: Arc<Registry>,
     ) -> Result<Self, ConfigError> {
         Self::open_with_store(registry, Box::new(FileStore::new(path)))

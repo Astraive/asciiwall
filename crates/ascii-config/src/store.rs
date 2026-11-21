@@ -37,9 +37,9 @@ pub(crate) struct FileStore {
 }
 
 impl FileStore {
-    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(path: impl AsRef<Path>) -> Self {
         Self {
-            path: path.into(),
+            path: path.as_ref().to_path_buf(),
             #[cfg(test)]
             fail_at: None,
             #[cfg(test)]
