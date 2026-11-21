@@ -25,6 +25,7 @@ name = "ascii-convert"
 version = "0.1.0"
 dependencies = [
  "ascii-core",
+ "ascii-media",
  "fontdue",
  "sha2",
  "ttf-parser",
