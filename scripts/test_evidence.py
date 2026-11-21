@@ -1724,6 +1724,65 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(old_path.read_bytes(), old_bytes)
             self.assertEqual(recent_path.read_bytes(), recent_bytes)
 
+    @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
+    def test_prune_reports_deletion_when_close_fails_after_ntfs_delete(self):
+        import evidence_windows
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            old = evidence.finalize_record(base_record(date="2026-11-12"))
+            recent = evidence.finalize_record(base_record(date="2026-11-14"))
+            old_name = f"qa-evidence-{old['record_id']}.json"
+            old_path = archive / old_name
+            recent_path = archive / f"qa-evidence-{recent['record_id']}.json"
+            old_path.write_bytes(evidence.canonical_json(old))
+            recent_bytes = evidence.canonical_json(recent)
+            recent_path.write_bytes(recent_bytes)
+            original_open_file = evidence_windows.Directory.open_file
+            original_delete = evidence_windows.File.delete
+            original_close = evidence_windows._close
+            delete_handles: set[int] = set()
+            deleted_handles: set[int] = set()
+            close_failed = False
+
+            def track_delete_handle(directory, name, *, for_delete=False):
+                artifact = original_open_file(directory, name, for_delete=for_delete)
+                if for_delete and name == old_name:
+                    delete_handles.add(artifact._handle)
+                return artifact
+
+            def delete_and_track(artifact, expected):
+                deleted = original_delete(artifact, expected)
+                if deleted:
+                    deleted_handles.add(artifact._handle)
+                return deleted
+
+            def close_after_delete(handle):
+                nonlocal close_failed
+                original_close(handle)
+                if handle in delete_handles and handle in deleted_handles and not close_failed:
+                    close_failed = True
+                    raise OSError("injected close failure after successful deletion")
+
+            with patch.object(evidence_windows.Directory, "open_file", new=track_delete_handle):
+                with patch.object(evidence_windows.File, "delete", new=delete_and_track):
+                    with patch.object(evidence_windows, "_close", side_effect=close_after_delete):
+                        with self.assertRaisesRegex(
+                            evidence.EvidenceError,
+                            f"already removed 1 expired archive artifact\\(s\\): {old_name}",
+                        ) as raised:
+                            evidence.prune_archive(archive, keep=1)
+
+            self.assertTrue(close_failed)
+            self.assertFalse(old_path.exists())
+            self.assertEqual(recent_path.read_bytes(), recent_bytes)
+            self.assertIsInstance(raised.exception.__cause__, evidence.EvidenceError)
+            self.assertIsInstance(
+                raised.exception.__cause__.__cause__,
+                evidence_windows.FileCloseError,
+            )
+
+
     @unittest.skipUnless(
         os.name == "posix" and _supports_safe_directory_access(),
         "disappearance injection requires POSIX directory-relative access",

@@ -1722,6 +1722,7 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                                     raise EvidenceError(
                                         f"archive changed during pruning of expired artifact {name}"
                                     )
+                                removed.append(name)
                         else:
                             current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                             if not _same_file_snapshot(snapshot, current):
@@ -1749,7 +1750,6 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                         ) from exc
                     except OSError as exc:
                         raise EvidenceError("cannot remove an expired evidence artifact") from exc
-                    removed.append(name)
             for kind, _ in patterns:
                 candidates = sorted(valid[kind], key=lambda item: (item[0], item[1]), reverse=True)
                 for _, _, name, snapshot, digest in candidates[:keep]:

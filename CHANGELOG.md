@@ -59,6 +59,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Surface Windows archive file-handle close failures during pruning even alongside scan, type, or read errors; preserve the primary failure in the cause chain instead of silently skipping the candidate ([QA-004]).
 - Propagate Windows native manifest/artifact handle-close failures through record validation and abort pruning instead of skipping candidates ([QA-004]).
 - Preserve completed Windows archive deletions and the primary partial-prune error if directory cleanup also fails, keeping cleanup failures secondary and observable ([QA-004]).
+- Include a Windows archive entry deleted before its handle-close failure in partial-prune reports ([QA-004]).
 - Surface Windows archive directory-close failures after a successful prune, even inside an unrelated active exception; preserve prune errors as primary when cleanup fails ([QA-004]).
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
 - Size density grids from the selected custom-crop geometry, retain normalized profile warnings in detailed conversion results, and preflight and cancellably initialize bounded quality-patch storage ([CNV-001]).
