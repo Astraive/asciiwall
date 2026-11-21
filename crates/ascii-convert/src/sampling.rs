@@ -28,6 +28,9 @@ use crate::color::{
 
 const MAX_EXACT_F64_INTEGER: u64 = 1_u64 << 53;
 
+// Bound centering error independently of content extent to avoid visible margin skew.
+const MAX_CENTERING_ERROR_PIXELS: f64 = 0.125;
+
 const MAX_PATCH_DIMENSION: u32 = 64;
 const MAX_PATCH_PIXELS: u64 = 4096;
 const SAMPLER_CANCEL_INTERVAL: u64 = 256;
@@ -110,6 +113,18 @@ impl SamplingRect {
     fn bottom(self) -> f64 {
         self.y + self.height
     }
+}
+
+fn centered_offset(container_extent: f64, content_extent: f64) -> Result<f64, Error> {
+    let offset = ((container_extent - content_extent).max(0.0)) * 0.5;
+    let end = offset + content_extent;
+    let trailing_margin = (container_extent - end).max(0.0);
+    let local_precision = 8.0 * f64::EPSILON * offset.abs().max(end.abs()).max(content_extent);
+    let centering_tolerance = local_precision.min(MAX_CENTERING_ERROR_PIXELS);
+    if (offset - trailing_margin).abs() > centering_tolerance {
+        return Err(Error::SizeOverflow);
+    }
+    Ok(offset)
 }
 
 // Account for precision at the coordinate origin, but cap tolerance at a safe fraction of extent.
@@ -306,8 +321,8 @@ pub struct FitTransform {
 
 impl FitTransform {
     /// Builds the transform from source and destination pixel-edge extents.
-    /// Returns `SizeOverflow` when edge arithmetic loses an extent beyond
-    /// bounded local f64 rounding error.
+    /// Returns `SizeOverflow` when edge extents or contain letterbox margins cannot be represented
+    /// within bounded local f64 rounding error.
     pub fn new(
         source_width: u32,
         source_height: u32,
@@ -334,14 +349,11 @@ impl FitTransform {
                 }
                 let content_width = (sw * scale).min(dw);
                 let content_height = (sh * scale).min(dh);
+                let display_x = centered_offset(dw, content_width)?;
+                let display_y = centered_offset(dh, content_height)?;
                 (
                     SamplingRect::new(0.0, 0.0, sw, sh)?,
-                    SamplingRect::new(
-                        ((dw - content_width).max(0.0)) * 0.5,
-                        ((dh - content_height).max(0.0)) * 0.5,
-                        content_width,
-                        content_height,
-                    )?,
+                    SamplingRect::new(display_x, display_y, content_width, content_height)?,
                 )
             }
             FitMode::Cover => {
