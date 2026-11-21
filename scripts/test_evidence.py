@@ -2097,6 +2097,83 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(unrelated.read_bytes(), b"keep")
 
     @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
+    def test_prune_bounds_windows_reread_to_scan_size_after_growth(self):
+        import evidence_windows
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            root = Path(temporary)
+            archive = root / "archive"
+            archive.mkdir()
+            older = evidence.finalize_record(base_record(date="2026-11-12"))
+            newer_expired = evidence.finalize_record(base_record(date="2026-11-13"))
+            retained = evidence.finalize_record(base_record(date="2026-11-14"))
+            older_name = f"qa-evidence-{older['record_id']}.json"
+            newer_expired_name = f"qa-evidence-{newer_expired['record_id']}.json"
+            retained_name = f"qa-evidence-{retained['record_id']}.json"
+            older_path = archive / older_name
+            newer_expired_path = archive / newer_expired_name
+            retained_path = archive / retained_name
+            older_bytes = evidence.canonical_json(older)
+            newer_expired_bytes = evidence.canonical_json(newer_expired)
+            retained_bytes = evidence.canonical_json(retained)
+            grown_bytes = older_bytes + b"x" * 131_072
+            older_path.write_bytes(older_bytes)
+            newer_expired_path.write_bytes(newer_expired_bytes)
+            retained_path.write_bytes(retained_bytes)
+            original_open_file = evidence_windows.Directory.open_file
+            original_read = evidence_windows.File.read
+            original_delete = evidence_windows.File.delete
+            opened_names = {}
+            reread_bytes = 0
+            grew_candidate = False
+
+            def track_open_file(directory, name, *, for_delete=False):
+                artifact = original_open_file(
+                    directory, name, for_delete=for_delete
+                )
+                opened_names[artifact._handle] = (name, for_delete)
+                return artifact
+
+            def grow_before_delete(artifact, snapshot):
+                nonlocal grew_candidate
+                if (
+                    opened_names[artifact._handle][0] == newer_expired_name
+                    and not grew_candidate
+                ):
+                    older_path.write_bytes(grown_bytes)
+                    grew_candidate = True
+                return original_delete(artifact, snapshot)
+
+            def track_read(artifact, size):
+                nonlocal reread_bytes
+                chunk = original_read(artifact, size)
+                if opened_names[artifact._handle] == (older_name, True):
+                    reread_bytes += len(chunk)
+                return chunk
+
+            expected_error = (
+                f"archive changed during pruning of expired artifact {older_name}; "
+                f"already removed 1 expired archive artifact(s): {newer_expired_name}"
+            )
+            with patch.object(
+                evidence_windows.Directory, "open_file", new=track_open_file
+            ):
+                with patch.object(evidence_windows.File, "read", new=track_read):
+                    with patch.object(
+                        evidence_windows.File, "delete", new=grow_before_delete
+                    ):
+                        with self.assertRaises(evidence.EvidenceError) as raised:
+                            evidence.prune_archive(archive, keep=1)
+
+            self.assertEqual(str(raised.exception), expected_error)
+            self.assertTrue(grew_candidate)
+            self.assertLessEqual(reread_bytes, len(older_bytes))
+            self.assertFalse(newer_expired_path.exists())
+            self.assertEqual(older_path.read_bytes(), grown_bytes)
+            self.assertEqual(retained_path.read_bytes(), retained_bytes)
+
+
+    @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
     def test_prune_propagates_ntfs_directory_close_error_without_primary_error(self):
         import evidence_windows
 

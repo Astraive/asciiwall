@@ -466,14 +466,26 @@ def _read_windows_regular(
     artifact: evidence_windows.File,
     *,
     budget: _PruneByteBudget | None = None,
+    expected_snapshot: evidence_windows.Snapshot | None = None,
 ) -> tuple[bytes, evidence_windows.Snapshot]:
+    """Read at most the scan-time reservation, when one is supplied."""
     before = artifact.snapshot()
+    if expected_snapshot is not None and before != expected_snapshot:
+        raise EvidenceError("evidence artifact changed before bounded reread")
     if before.st_size > MAX_JSON_BYTES:
         raise EvidenceError("evidence artifact exceeds the 1 MiB limit")
+    reservation = (
+        expected_snapshot.st_size
+        if expected_snapshot is not None
+        else before.st_size
+    )
     if budget is not None:
-        budget.charge(before.st_size)
+        budget.charge(reservation)
     raw = bytearray()
-    read_limit = before.st_size if budget is not None else MAX_JSON_BYTES + 1
+    if budget is not None or expected_snapshot is not None:
+        read_limit = reservation
+    else:
+        read_limit = MAX_JSON_BYTES + 1
     while len(raw) < read_limit:
         chunk = artifact.read(min(65_536, read_limit - len(raw)))
         if not chunk:
@@ -1822,11 +1834,33 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                     valid[kind].append((order, identity, name, snapshot, digest))
                 break
         if os.name == "nt":
-            # Precharge every validation reread before any deletion. If the
-            # aggregate budget is exhausted, pruning has made no mutations.
+            # Precharge each candidate's scan-time size for its single reread
+            # before deletion; expected_snapshot bounds that reread to the charge.
             for candidates in valid.values():
                 for _, _, _, snapshot, _ in candidates:
                     budget.charge(snapshot.st_size)
+            # Check every candidate again before the first mutation; per-entry
+            # rereads below close the race after this snapshot preflight.
+            for candidates in valid.values():
+                for _, _, name, snapshot, _ in candidates:
+                    try:
+                        with directory_fd.open_file(name) as artifact:
+                            if artifact.snapshot() != snapshot:
+                                raise EvidenceError(
+                                    f"archive changed before pruning of candidate {name}"
+                                )
+                    except FileNotFoundError as exc:
+                        raise EvidenceError(
+                            f"archive candidate disappeared before pruning: {name}"
+                        ) from exc
+                    except OSError as exc:
+                        if isinstance(exc, evidence_windows.FileCloseError):
+                            raise EvidenceError(
+                                "cannot close an archive evidence artifact handle"
+                            ) from exc
+                        raise EvidenceError(
+                            "cannot verify archive candidates before pruning"
+                        ) from exc
         removed: list[str] = []
         kept: dict[str, int] = {}
         try:
@@ -1841,7 +1875,9 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                             # snapshot and the bytes must match the validated scan.
                             with directory_fd.open_file(name, for_delete=True) as artifact:
                                 try:
-                                    raw, current = _read_windows_regular(artifact)
+                                    raw, current = _read_windows_regular(
+                                        artifact, expected_snapshot=snapshot
+                                    )
                                 except EvidenceError as exc:
                                     raise EvidenceError(
                                         f"archive changed during pruning of expired artifact {name}"
@@ -1891,7 +1927,9 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                             # retained entry that changed during this prune.
                             with directory_fd.open_file(name) as artifact:
                                 try:
-                                    raw, current = _read_windows_regular(artifact)
+                                    raw, current = _read_windows_regular(
+                                        artifact, expected_snapshot=snapshot
+                                    )
                                 except EvidenceError as exc:
                                     raise EvidenceError(
                                         f"archive changed during pruning of retained artifact {name}"
