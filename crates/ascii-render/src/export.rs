@@ -189,12 +189,33 @@ pub fn export(
             BudgetKind::FrameBytes,
         )));
     }
+    let mut bytes = Vec::new();
+    allocate_serialized_output(&mut bytes, output_len, budget, |bytes| {
+        serialize_into(bytes, cells, columns, glyphs, target, cancellation)
+    })?;
+    if u64::try_from(bytes.len()).map_err(|_| ExportError::Core(Error::SizeOverflow))? != output_len
+    {
+        return Err(ExportError::Core(Error::SizeOverflow));
+    }
+
+    Ok(ExportOutput {
+        bytes,
+        size,
+        target,
+    })
+}
+
+fn allocate_serialized_output(
+    bytes: &mut Vec<u8>,
+    output_len: u64,
+    budget: &Budget,
+    serialize: impl FnOnce(&mut Vec<u8>) -> Result<(), ExportError>,
+) -> Result<(), ExportError> {
     let output_capacity =
         usize::try_from(output_len).map_err(|_| ExportError::Core(Error::SizeOverflow))?;
     let _allocation_layout =
         isize::try_from(output_capacity).map_err(|_| ExportError::Core(Error::SizeOverflow))?;
 
-    let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(output_capacity)
         .map_err(|_| ExportError::Core(Error::AllocationFailed))?;
@@ -206,17 +227,7 @@ pub fn export(
         )));
     }
 
-    serialize_into(&mut bytes, cells, columns, glyphs, target, cancellation)?;
-    if u64::try_from(bytes.len()).map_err(|_| ExportError::Core(Error::SizeOverflow))? != output_len
-    {
-        return Err(ExportError::Core(Error::SizeOverflow));
-    }
-
-    Ok(ExportOutput {
-        bytes,
-        size,
-        target,
-    })
+    serialize(bytes)
 }
 
 fn estimated_work(
@@ -552,7 +563,15 @@ const fn decimal_size(value: u8) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{nearest_cube_level, nearest_xterm_256};
+    use super::{
+        AnsiColorMode, ExportError, ExportTarget, allocate_serialized_output, nearest_cube_level,
+        nearest_xterm_256, serialize_into, serialized_size,
+    };
+    use ascii_convert::{GlyphConfig, GlyphRepertoire, build_glyph_table};
+    use ascii_core::{AsciiCell, Budget, CancellationToken, Error};
+
+    #[path = "../tests/support/mod.rs"]
+    mod support;
 
     #[test]
     fn xterm_palette_ties_choose_the_lower_index() {
@@ -562,4 +581,60 @@ mod tests {
         assert_eq!(nearest_cube_level(235), 4);
         assert_eq!(nearest_xterm_256([13, 13, 13]), 232);
     }
+
+    #[test]
+    fn cancellation_after_output_allocation_interrupts_serialization() {
+        let font = support::synthetic_font::synthetic_font();
+        let repertoire = GlyphRepertoire::new("█").expect("fixture glyph is supported");
+        let budget = Budget::new(1_000_000, 1_000_000, 1_000_000);
+        let glyph_table = build_glyph_table(
+            &font,
+            &repertoire,
+            &GlyphConfig::new(8.0, 8, 12, 9).expect("fixture geometry is valid"),
+            &budget,
+            &CancellationToken::new(),
+        )
+        .expect("synthetic glyph table builds");
+        let cells = [AsciiCell::new(0, [255, 0, 0, 255], [0, 0, 255, 255])];
+        let columns = 1;
+
+        for target in [
+            ExportTarget::Text,
+            ExportTarget::Ansi(AnsiColorMode::TrueColor),
+        ] {
+            let cancellation = CancellationToken::new();
+            let output_len = serialized_size(
+                &cells,
+                columns,
+                glyph_table.glyphs(),
+                target,
+                &cancellation,
+            )
+            .expect("uncancelled sizing succeeds");
+            let output_capacity = usize::try_from(output_len).expect("fixture output size fits");
+            let mut output = Vec::new();
+
+            assert_eq!(
+                allocate_serialized_output(&mut output, output_len, &budget, |bytes| {
+                    assert!(bytes.capacity() >= output_capacity);
+                    cancellation.cancel();
+                    serialize_into(
+                        bytes,
+                        &cells,
+                        columns,
+                        glyph_table.glyphs(),
+                        target,
+                        &cancellation,
+                    )
+                }),
+                Err(ExportError::Core(Error::Cancelled))
+            );
+            let expected_partial_output: &[u8] = match target {
+                ExportTarget::Text => b"",
+                ExportTarget::Ansi(_) => b"\x1b[0m",
+            };
+            assert_eq!(output.as_slice(), expected_partial_output);
+        }
+    }
+
 }
