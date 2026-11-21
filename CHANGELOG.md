@@ -75,6 +75,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   files, and fail closed on damaged or exhausted counter state to prevent filename reuse after eviction.
 - [COR-009] Sync the managed directory after durably creating the high-water counter and initialization
   marker on platforms that support directory sync, preserving ID evidence across eviction.
+- [COR-009] Update existing generated-file ID high-water marks via a synced sibling and atomic replacement,
+  so write or replacement failures leave the prior counter intact.
 - [COR-008] Redact user-qualified home paths in generic portable-export strings, including
   `=`-prefixed values, while preserving tilde text without a path; reject over-limit journal paths
   before cloning and retain the final whole-document size guard.
