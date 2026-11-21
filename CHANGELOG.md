@@ -98,3 +98,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   paths after colon delimiters.
 - [COR-008] Reject nested cursor and window-geometry history keys in local settings before
   saving or rotating last-good.
+- [COR-008] Fail closed when recovery compares versioned settings with a versionless last-good file.
