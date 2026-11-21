@@ -70,6 +70,8 @@ pub enum AtomicWriteStage {
     BackupReplaced,
     /// The new destination has been atomically installed and its parent synced where supported.
     TargetReplaced,
+    /// Recovery is about to sync the parent directory after installing its restored target.
+    ParentDirectorySync,
 }
 
 /// Filesystem error, malformed persisted state, or rejected input.
@@ -82,8 +84,11 @@ pub enum StorageError {
     InvalidRegistry(&'static str),
     InvalidJournal(&'static str),
     InvalidConfiguration(String),
-    InvalidStoredState(&'static str),
     StaleConfiguration,
+    RecoveryRollbackFailed {
+        sync_error: io::Error,
+        rollback_error: io::Error,
+    },
     DocumentTooLarge,
     InvalidLogLimits,
     UnsupportedVersion { kind: &'static str, version: u32 },
@@ -100,10 +105,16 @@ impl fmt::Display for StorageError {
                 write!(f, "storage directories are invalid: {reason}")
             }
             Self::InvalidRegistry(reason) => write!(f, "install registry is invalid: {reason}"),
-            Self::InvalidJournal(reason) => write!(f, "import journal is invalid: {reason}"),
             Self::InvalidConfiguration(_) => f.write_str("configuration is invalid"),
             Self::InvalidStoredState(_) => f.write_str("stored state is invalid"),
             Self::StaleConfiguration => f.write_str("configuration changed since it was read"),
+            Self::RecoveryRollbackFailed {
+                sync_error,
+                rollback_error,
+            } => write!(
+                f,
+                "recovery parent-directory sync failed ({sync_error}); restoring prior settings also failed ({rollback_error})"
+            ),
             Self::DocumentTooLarge => f.write_str("document exceeds size limit"),
             Self::InvalidLogLimits => f.write_str("diagnostic log bounds are invalid"),
             Self::UnsupportedVersion { kind, version } => {
@@ -121,6 +132,7 @@ impl Error for StorageError {
         match self {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
+            Self::RecoveryRollbackFailed { rollback_error, .. } => Some(rollback_error),
             _ => None,
         }
     }
@@ -792,6 +804,20 @@ impl Storage {
         expected_current: Option<&[u8]>,
         validate: impl FnOnce(&TomlValue) -> Result<(), E>,
     ) -> Result<(), StorageError> {
+        self.restore_config_from_backup_with_hook(expected_current, validate, |_| Ok(()))
+    }
+
+    /// Sync-hook counterpart of [`Self::restore_config_from_backup`].
+    ///
+    /// The hook runs immediately before the parent-directory sync after replacement. If either the
+    /// hook or sync fails, recovery restores the original current-file bytes (or absence) before
+    /// returning the error. A failed rollback is reported as [`StorageError::RecoveryRollbackFailed`].
+    pub fn restore_config_from_backup_with_hook<E: fmt::Display>(
+        &self,
+        expected_current: Option<&[u8]>,
+        validate: impl FnOnce(&TomlValue) -> Result<(), E>,
+        mut hook: impl FnMut(AtomicWriteStage) -> io::Result<()>,
+    ) -> Result<(), StorageError> {
         let destination = self.config_path();
         let parent = destination
             .parent()
@@ -859,6 +885,8 @@ impl Storage {
             }
             _ => {}
         }
+        let rollback = prepare_replace_rollback(&destination)?;
+        let mut sync_hook = || hook(AtomicWriteStage::ParentDirectorySync);
         atomic_replace_locked(
             &destination,
             &bytes,
@@ -866,6 +894,8 @@ impl Storage {
             None,
             None,
             &mut |_| Ok(()),
+            &mut sync_hook,
+            Some(rollback),
         )?;
         Ok(())
     }
@@ -1011,6 +1041,8 @@ fn atomic_replace(
         validate_existing,
         backup,
         hook,
+        &mut || Ok(()),
+        None,
     )
 }
 
@@ -1022,6 +1054,8 @@ fn atomic_replace_locked(
     validate_existing: Option<ExistingValidator<'_>>,
     backup: Option<AtomicBackup<'_>>,
     hook: &mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
+    before_parent_sync: &mut dyn FnMut() -> io::Result<()>,
+    rollback_on_sync_error: Option<ReplaceRollback>,
 ) -> Result<(), StorageError> {
     let parent = destination
         .parent()
@@ -1066,15 +1100,75 @@ fn atomic_replace_locked(
             None,
             None,
             &mut |_| Ok(()),
+            &mut || Ok(()),
+            None,
         )?;
         hook(AtomicWriteStage::BackupReplaced)?;
     }
     fs::rename(temporary.path(), destination)?;
     temporary.disarm();
-    sync_parent_directory(parent)?;
+    if let Err(sync_error) = before_parent_sync().and_then(|()| sync_parent_directory(parent)) {
+        if let Some(rollback) = rollback_on_sync_error {
+            if let Err(rollback_error) = rollback
+                .restore(destination)
+                .and_then(|()| sync_parent_directory(parent))
+            {
+                return Err(StorageError::RecoveryRollbackFailed {
+                    sync_error,
+                    rollback_error,
+                });
+            }
+        }
+        return Err(sync_error.into());
+    }
     hook(AtomicWriteStage::TargetReplaced)?;
     Ok(())
 }
+
+enum ReplaceRollback {
+    Restore(OwnedTempFile),
+    Remove,
+}
+
+impl ReplaceRollback {
+    fn restore(self, destination: &Path) -> io::Result<()> {
+        match self {
+            Self::Restore(mut original) => {
+                original.close();
+                fs::rename(original.path(), destination)?;
+                original.disarm();
+                Ok(())
+            }
+            Self::Remove => match fs::remove_file(destination) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            },
+        }
+    }
+}
+
+fn prepare_replace_rollback(destination: &Path) -> io::Result<ReplaceRollback> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
+    match fs::symlink_metadata(destination) {
+        Ok(_) => {
+            let mut original = File::open(destination)?;
+            let mut temporary = create_sibling_temp(destination, "recovery-original")?;
+            io::copy(&mut original, temporary.file_mut())?;
+            temporary.file_mut().flush()?;
+            temporary.file_mut().sync_all()?;
+            temporary.close();
+            sync_parent_directory(parent)?;
+            Ok(ReplaceRollback::Restore(temporary))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ReplaceRollback::Remove),
+        Err(error) => Err(error),
+    }
+}
+ 
+
 
 fn read_guarded_state(
     path: &Path,
