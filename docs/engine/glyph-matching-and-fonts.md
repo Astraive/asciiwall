@@ -32,7 +32,7 @@ Version one enforces that repertoire at construction: C0/C1 controls, bidi forma
 - Workspace command: `cargo test --locked --workspace --all-targets` — 156 tests passed across 11 suites in `ascii-core`, `ascii-convert`, and `ascii-media`.
 - Quality commands: `cargo fmt --all -- --check` and `cargo clippy --locked --workspace --all-targets -- -D warnings` — passed.
 - Executable smoke: temporary offline path-dependent binary ran `cargo run --locked --offline` and asserted actual `A` preview-mask equality, blank space preservation, and `C` unavailable status. Output: `preview smoke passed: A=Available coverage=Some(0.21764706), space=Available, C=Unavailable`.
-- Fixture/config evidence (source-generated, rights-cleared, no downloaded assets): `crates/ascii-convert/tests/support/repertoire_font.rs` SHA-256 `c48600adeffe69204ec1352a4bbaa2df7609d3b22530408722d9c44df922a764`; `crates/ascii-convert/tests/repertoire.rs` (raster sizes, cells, baseline, budgets, assertions) SHA-256 `3476a20ee52113fd1efb2852eaa0dbeca4db951d30a4286cfb9bce02dac16ab8`.
+- Fixture/config evidence (source-generated, rights-cleared, no downloaded assets): `crates/ascii-convert/tests/support/repertoire_font.rs` SHA-256 `5a9e260b31c2f43eacb758d1bedf2fcb1e5c16289ebabf9faeb3bfe637731868`; `crates/ascii-convert/tests/repertoire.rs` (raster sizes, cells, baseline, budgets, assertions) SHA-256 `ff80d09fa511f84a84fa662843382424f530facee9257788662488c1414b2228`.
 - Environment: Windows 10 x64, `x86_64-pc-windows-msvc`, Cargo/rustc 1.100.0; `CARGO_HOME=D:/.worktrees/.cargo-cache`, `CARGO_TARGET_DIR=D:/.worktrees/.targets/fnt-002`.
 
 ## Density matching
