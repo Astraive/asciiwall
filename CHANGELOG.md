@@ -79,6 +79,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   so write or replacement failures leave the prior counter intact.
 - [COR-009] Sync the marked-cache staging directory before publishing it and sync the root after rename
   on platforms that support directory sync; report either barrier's failure.
+- [COR-009] Sync destination directories after transactional output replacement and before registering
+  output identities; directory-sync failures return an unregistered transaction error.
 - [COR-008] Redact user-qualified home paths in generic portable-export strings, including
   `=`-prefixed values, while preserving tilde text without a path; reject over-limit journal paths
   before cloning and retain the final whole-document size guard.

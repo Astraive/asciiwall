@@ -1668,11 +1668,13 @@ pub enum OutputFailureKind {
     Commit,
 }
 
-/// Failed output transaction. Once a temporary file has been created its path is retained and
-/// returned for caller-directed cleanup or recovery; it is never registered as valid output.
+/// Failed output transaction. Before replacement, the staged path is retained and returned for
+/// caller-directed cleanup or recovery. If parent sync fails after replacement, the committed
+/// destination is returned instead; failed transactions are never registered as valid output.
 #[derive(Debug)]
 pub struct OutputWriteError {
     pub kind: OutputFailureKind,
+    /// The staged path before replacement, or the committed destination after a parent-sync failure.
     pub partial_temp_path: Option<PathBuf>,
     source: Option<io::Error>,
 }
@@ -1725,8 +1727,8 @@ struct RegisteredOutput {
 }
 
 /// Valid-output registry. A key is inserted only after its staged file has been flushed, synced,
-/// and committed at the destination. Transactions for this registry are serialized; writer
-/// callbacks must not re-enter the same registry.
+/// committed at the destination, and the destination parent has been synced. Transactions for
+/// this registry are serialized; writer callbacks must not re-enter the same registry.
 #[derive(Clone, Debug, Default)]
 pub struct OutputRegistry {
     state: Arc<Mutex<OutputRegistryState>>,
@@ -1744,7 +1746,9 @@ impl OutputRegistry {
     /// existing destination; other targets commit with no-clobber creation and reject replacement.
     /// Relative destinations are resolved to an absolute path once at transaction start, and that
     /// captured path is used for staging, verification, commit, errors, and registration.
-    /// Registration follows commit only; failures preserve the destination and report any partial.
+    /// Registration follows parent-directory sync. Pre-commit failures preserve the destination
+    /// and report the staged temporary; a sync failure after replacement reports the committed
+    /// destination, which remains unregistered.
     ///
     /// The stage handle stays open and its file identity is checked before the path-based commit.
     /// Unix/Windows use stable file identifiers; other targets compare available file metadata.
@@ -1761,8 +1765,32 @@ impl OutputRegistry {
     where
         F: FnOnce(&mut dyn Write) -> io::Result<()>,
     {
+        self.write_transactional_with_sync(
+            identity,
+            destination.as_ref(),
+            reservation,
+            writer,
+            File::sync_all,
+            replace_destination,
+            crate::storage::sync_parent_directory,
+        )
+    }
+
+    fn write_transactional_with_sync<F>(
+        &self,
+        identity: CacheIdentity,
+        destination: &Path,
+        reservation: &DiskReservation,
+        writer: F,
+        sync_file: impl FnOnce(&File) -> io::Result<()>,
+        replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
+        sync_parent_directory: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<PathBuf, OutputWriteError>
+    where
+        F: FnOnce(&mut dyn Write) -> io::Result<()>,
+    {
         let mut registry = lock_unpoisoned(&self.state);
-        let destination = absolute_output_destination(destination.as_ref()).map_err(|error| {
+        let destination = absolute_output_destination(destination).map_err(|error| {
             OutputWriteError::new(OutputFailureKind::TemporaryCreate, None, Some(error))
         })?;
         let canonical_destination =
@@ -1817,7 +1845,7 @@ impl OutputRegistry {
             };
             return Err(OutputWriteError::new(kind, Some(temp_path), Some(error)));
         }
-        if let Err(error) = file.sync_all() {
+        if let Err(error) = sync_file(&file) {
             let kind = if is_disk_full(&error) {
                 OutputFailureKind::DiskFull
             } else {
@@ -1833,7 +1861,7 @@ impl OutputRegistry {
             ));
         }
         let previous_destination_identity = existing_output_file_identity(&destination);
-        if let Err(error) = replace_destination(&temp_path, &destination) {
+        if let Err(error) = replace(&temp_path, &destination) {
             let kind = if is_disk_full(&error) {
                 OutputFailureKind::DiskFull
             } else {
@@ -1850,6 +1878,22 @@ impl OutputRegistry {
                 && !previous_destination_identity
                     .is_some_and(|file_identity| output.file_identity == Some(file_identity))
         });
+        let destination_parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if let Err(error) = sync_parent_directory(destination_parent) {
+            let kind = if is_disk_full(&error) {
+                OutputFailureKind::DiskFull
+            } else {
+                OutputFailureKind::Sync
+            };
+            return Err(OutputWriteError::new(
+                kind,
+                Some(destination.clone()),
+                Some(error),
+            ));
+        }
         registry.valid.insert(
             identity,
             RegisteredOutput {
@@ -2604,6 +2648,149 @@ mod tests {
         assert_eq!(
             marker_events.into_inner(),
             vec![SyncEvent::File, SyncEvent::ParentDirectory]
+        );
+    }
+
+    #[test]
+    fn transactional_output_syncs_parent_after_publish_before_registration() {
+        use std::cell::RefCell;
+
+        #[derive(Debug, Eq, PartialEq)]
+        enum CommitEvent {
+            FileSync,
+            Replace,
+            ParentDirectorySync,
+        }
+
+        let identity = |digest: u8| {
+            CacheIdentity::Conversion(ConversionKey {
+                source: SourceContent::Missing,
+                decode_version: "decode-v1".into(),
+                orientation_version: "orientation-v1".into(),
+                color_version: "color-v1".into(),
+                algorithm_version: "algorithm-v1".into(),
+                font_digest: ContentDigest([0; 32]),
+                font_raster_settings: FontRasterSettings::default(),
+                glyphs: Vec::new(),
+                grid: GridSize {
+                    columns: 1,
+                    rows: 1,
+                },
+                fit_crop: FitCrop {
+                    mode: FitMode::Fit,
+                    crop: None,
+                },
+                sampling_identity_digest: ContentDigest([1; 32]),
+                sampling_filter: "nearest".into(),
+                cell_geometry: CellGeometry {
+                    cell_width_milli_px: 1_000,
+                    cell_height_milli_px: 1_000,
+                },
+                patch_dimensions: None,
+                palette: Vec::new(),
+                settings_digest: ContentDigest([digest; 32]),
+            })
+        };
+
+        let directory = TempManagedDirectory::new();
+        let output_dir = fs::canonicalize(&directory.0).unwrap();
+        let destination = output_dir.join("committed-output");
+        let failed_destination = output_dir.join("failed-output");
+        let committed_identity = identity(0);
+        let failed_identity = identity(1);
+        let registry = OutputRegistry::default();
+        let budget = DiskBudget::new(128, 0);
+        let reservation = budget
+            .reserve(DiskRequirements {
+                output_bytes: 32,
+                ..DiskRequirements::default()
+            })
+            .unwrap();
+
+        let commit_events = RefCell::new(Vec::with_capacity(3));
+        let committed = registry
+            .write_transactional_with_sync(
+                committed_identity.clone(),
+                &destination,
+                &reservation,
+                |output| output.write_all(b"committed"),
+                |_| {
+                    commit_events.borrow_mut().push(CommitEvent::FileSync);
+                    Ok(())
+                },
+                |temporary, destination| {
+                    commit_events.borrow_mut().push(CommitEvent::Replace);
+                    replace_destination(temporary, destination)
+                },
+                |parent| {
+                    assert_eq!(parent, output_dir.as_path());
+                    assert_eq!(fs::read(&destination)?, b"committed");
+                    commit_events
+                        .borrow_mut()
+                        .push(CommitEvent::ParentDirectorySync);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(committed, destination);
+        assert_eq!(
+            commit_events.into_inner(),
+            vec![
+                CommitEvent::FileSync,
+                CommitEvent::Replace,
+                CommitEvent::ParentDirectorySync
+            ]
+        );
+        assert_eq!(
+            registry.registered_path(&committed_identity),
+            Some(destination.clone())
+        );
+
+        let failed_events = RefCell::new(Vec::with_capacity(3));
+        let error = registry
+            .write_transactional_with_sync(
+                failed_identity.clone(),
+                &failed_destination,
+                &reservation,
+                |output| output.write_all(b"not registered"),
+                |_| {
+                    failed_events.borrow_mut().push(CommitEvent::FileSync);
+                    Ok(())
+                },
+                |temporary, destination| {
+                    failed_events.borrow_mut().push(CommitEvent::Replace);
+                    replace_destination(temporary, destination)
+                },
+                |parent| {
+                    assert_eq!(parent, output_dir.as_path());
+                    assert_eq!(fs::read(&failed_destination)?, b"not registered");
+                    failed_events
+                        .borrow_mut()
+                        .push(CommitEvent::ParentDirectorySync);
+                    Err(io::Error::other(
+                        "injected output parent-directory sync failure",
+                    ))
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, OutputFailureKind::Sync);
+        assert_eq!(
+            error.partial_temp_path.as_deref(),
+            Some(failed_destination.as_path())
+        );
+        assert_eq!(
+            failed_events.into_inner(),
+            vec![
+                CommitEvent::FileSync,
+                CommitEvent::Replace,
+                CommitEvent::ParentDirectorySync
+            ]
+        );
+        assert_eq!(fs::read(&failed_destination).unwrap(), b"not registered");
+        assert_eq!(registry.registered_path(&failed_identity), None);
+        assert_eq!(
+            registry.registered_path(&committed_identity),
+            Some(destination)
         );
     }
 
