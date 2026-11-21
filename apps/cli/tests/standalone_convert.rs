@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use ascii_convert::{GlyphConfig, GlyphRepertoire};
+use ascii_convert::{GlyphConfig, GlyphRepertoire, NormalizedRasterResources};
 use ascii_core::{Budget, CancellationToken};
 use ascii_media::{DecodeLimits, DecodeResources, decode_image};
 use ascii_render::{AnsiColorMode, ExportTarget, export};
@@ -41,6 +41,7 @@ fn status(output: &Output) -> i32 {
 
 fn shared_engine_export(source_path: &Path, font_path: &Path, target: ExportTarget) -> Vec<u8> {
     let budget = Budget::new(8_000_000, 64_000_000, 16_000_000);
+    let raster_resources = NormalizedRasterResources::new(budget.max_raster_bytes());
     let cancellation = CancellationToken::new();
     let geometry = GlyphConfig::new(8.0, 8, 12, 9).unwrap();
     let repertoire = GlyphRepertoire::new(" AB").unwrap();
@@ -62,6 +63,7 @@ fn shared_engine_export(source_path: &Path, font_path: &Path, target: ExportTarg
         &glyphs,
         NonZeroU32::new(12).unwrap(),
         &budget,
+        &raster_resources,
         &cancellation,
     )
     .unwrap();

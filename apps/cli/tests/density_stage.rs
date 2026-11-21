@@ -6,7 +6,7 @@ use std::num::NonZeroU32;
 
 use ascii_convert::{
     ConversionSettings, DensityConversionError, GlyphConfig, GlyphRepertoire, GridSizing,
-    LinearRgb, build_glyph_table, convert_density_detailed,
+    LinearRgb, NormalizedRasterResources, build_glyph_table, convert_density_detailed,
 };
 use ascii_core::{
     AlphaMode, Budget, CancellationToken, ColorDescription, Error, FrameMetadata, GlyphTableId,
@@ -17,6 +17,7 @@ use asciiwall_cli::convert::monochrome_density;
 #[test]
 fn cli_density_stage_is_the_shared_engine_output() {
     let budget = Budget::new(8_000_000, 64_000_000, 16_000_000);
+    let resources = NormalizedRasterResources::new(budget.max_raster_bytes());
     let cancellation = CancellationToken::new();
     let table = build_glyph_table(
         &synthetic_font::synthetic_font(false),
@@ -41,6 +42,7 @@ fn cli_density_stage_is_the_shared_engine_output() {
         &table,
         NonZeroU32::new(2).unwrap(),
         &budget,
+        &resources,
         &cancellation,
     )
     .unwrap();
@@ -53,7 +55,8 @@ fn cli_density_stage_is_the_shared_engine_output() {
         LinearRgb::BLACK,
     )
     .unwrap();
-    let expected = convert_density_detailed(raster, &table, &settings, &budget).unwrap();
+    let expected =
+        convert_density_detailed(raster, &table, &settings, &budget, &resources).unwrap();
     assert_eq!(actual, expected);
 
     cancellation.cancel();
@@ -62,6 +65,7 @@ fn cli_density_stage_is_the_shared_engine_output() {
         &table,
         NonZeroU32::new(2).unwrap(),
         &budget,
+        &resources,
         &cancellation,
     )
     .unwrap_err();

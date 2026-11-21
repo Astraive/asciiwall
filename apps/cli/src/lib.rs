@@ -15,7 +15,9 @@ use clap::{Parser, error::ErrorKind};
 use arguments::{Cli, Color, Command, Format, Matcher};
 use diagnostic::{CliError, print_error, print_help};
 
-use ascii_convert::{ColorNormalizationError, DensityConversionError, GlyphConfig};
+use ascii_convert::{
+    ColorNormalizationError, DensityConversionError, GlyphConfig, NormalizedRasterResources,
+};
 use ascii_core::{Budget, CancellationToken, Error, UnsupportedReason};
 use ascii_media::{DecodeLimits, DecodeResources, decode_image};
 use ascii_render::{AnsiColorMode, ExportError, ExportTarget, export};
@@ -151,6 +153,8 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), CliError> {
         CliError::capability("no built-in font is available; select a local font with --font")
     })?;
     let budget = Budget::new(8_000_000, 64_000_000, 16_000_000);
+    let normalized_raster_resources =
+        NormalizedRasterResources::new(budget.max_raster_bytes());
     let geometry = GlyphConfig::new(8.0, 8, 12, 9)
         .map_err(|_| CliError::validation("configured font geometry is invalid"))?;
     let verbose = verbose && !quiet;
@@ -175,9 +179,15 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), CliError> {
     progress(verbose, "matching image density");
     let columns = std::num::NonZeroU32::new(request.columns)
         .ok_or_else(|| CliError::validation("columns must be positive"))?;
-    let converted =
-        convert::monochrome_density(decoded.view(), &glyphs, columns, &budget, cancellation)
-            .map_err(density_error)?;
+    let converted = convert::monochrome_density(
+        decoded.view(),
+        &glyphs,
+        columns,
+        &budget,
+        &normalized_raster_resources,
+        cancellation,
+    )
+    .map_err(density_error)?;
 
     progress(verbose, "serializing terminal output");
     let target = match format {

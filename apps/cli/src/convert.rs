@@ -4,13 +4,14 @@ use std::num::NonZeroU32;
 
 use ascii_convert::{
     ConversionSettings, DensityConversion, DensityConversionError, GlyphTable, GridSizing,
-    LinearRgb, convert_density_detailed,
+    LinearRgb, NormalizedRasterResources, convert_density_detailed,
 };
 use ascii_core::{Budget, CancellationToken, FrameMetadata, GlyphTableId, RasterFrameView};
 
 /// Converts a decoded raster using an already-measured glyph table and the shared density engine.
 ///
-/// The caller owns decoding, font selection/table construction, output encoding, and publication.
+/// The caller owns decoding, font selection/table construction, output encoding, and publication,
+/// and supplies the bounded raster-resource owner for normalization.
 /// This stage is deliberately monochrome: the shared density engine currently stores a fixed
 /// foreground and background in every cell, not sampled source colors.
 pub fn monochrome_density(
@@ -18,6 +19,7 @@ pub fn monochrome_density(
     glyphs: &GlyphTable,
     columns: NonZeroU32,
     budget: &Budget,
+    resources: &NormalizedRasterResources,
     cancellation: &CancellationToken,
 ) -> Result<DensityConversion, DensityConversionError> {
     let metadata = FrameMetadata::new(GlyphTableId::new(*glyphs.fingerprint()), 0, 0, 0, 0);
@@ -28,5 +30,5 @@ pub fn monochrome_density(
         LinearRgb::WHITE,
         LinearRgb::BLACK,
     )?;
-    convert_density_detailed(input, glyphs, &settings, budget)
+    convert_density_detailed(input, glyphs, &settings, budget, resources)
 }
