@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use ascii_convert::{
     Alpha, ColorNormalizationError, ColorNormalizationWarning, EncodedSrgb, InvalidColorSample,
     LinearRgb, OutputEncoding, SRGB_DECODE_BREAKPOINT, SRGB_ENCODE_BREAKPOINT,
@@ -11,6 +13,12 @@ use ascii_core::{
 
 fn budget(max_raster_bytes: u64, max_work_units: u64) -> Budget {
     Budget::new(0, max_raster_bytes, max_work_units)
+}
+
+fn unlimited_raster_resources() -> &'static ascii_convert::NormalizedRasterResources {
+    static RESOURCES: LazyLock<ascii_convert::NormalizedRasterResources> =
+        LazyLock::new(|| ascii_convert::NormalizedRasterResources::new(u64::MAX));
+    &RESOURCES
 }
 
 fn raster<'a>(
@@ -46,9 +54,14 @@ fn normalize_one_pixel(
         color,
         RasterOrientation::TopDown,
     );
-    normalize_raster(view, &budget(1024, 100), &CancellationToken::new())
-        .expect("synthetic pixel must normalize")
-        .pixels()[0]
+    normalize_raster(
+        view,
+        &budget(1024, 100),
+        &CancellationToken::new(),
+        unlimited_raster_resources(),
+    )
+    .expect("synthetic pixel must normalize")
+    .pixels()[0]
 }
 
 fn assert_close(actual: f64, expected: f64, tolerance: f64) {
@@ -297,8 +310,13 @@ fn declared_linear_input_is_not_srgb_transfer_decoded_again() {
         color,
         RasterOrientation::TopDown,
     );
-    let normalized = normalize_raster(view, &budget(1024, 100), &CancellationToken::new())
-        .expect("declared linear samples are already in linear light");
+    let normalized = normalize_raster(
+        view,
+        &budget(1024, 100),
+        &CancellationToken::new(),
+        unlimited_raster_resources(),
+    )
+    .expect("declared linear samples are already in linear light");
     assert_eq!(
         normalized.pixels()[0].straight_rgb(),
         LinearRgb::new(sample, sample, sample).unwrap()
@@ -322,8 +340,13 @@ fn metadata_policy_unknown_profile_is_assumed_srgb_with_a_material_warning() {
         color,
         RasterOrientation::TopDown,
     );
-    let normalized = normalize_raster(view, &budget(1024, 100), &CancellationToken::new())
-        .expect("unknown SDR metadata uses the documented sRGB assumption");
+    let normalized = normalize_raster(
+        view,
+        &budget(1024, 100),
+        &CancellationToken::new(),
+        unlimited_raster_resources(),
+    )
+    .expect("unknown SDR metadata uses the documented sRGB assumption");
     assert_eq!(
         normalized.warning(),
         Some(ColorNormalizationWarning::AssumedSrgbForUnknownProfile)
@@ -345,8 +368,13 @@ fn metadata_policy_pq_and_hlg_are_rejected_with_typed_hdr_failures() {
             color,
             RasterOrientation::TopDown,
         );
-        let error = normalize_raster(view, &budget(1024, 100), &CancellationToken::new())
-            .expect_err("unsupported HDR must not be silently clipped to SDR");
+        let error = normalize_raster(
+            view,
+            &budget(1024, 100),
+            &CancellationToken::new(),
+            unlimited_raster_resources(),
+        )
+        .expect_err("unsupported HDR must not be silently clipped to SDR");
         assert_eq!(
             error,
             ColorNormalizationError::UnsupportedColor(UnsupportedColorReason::HdrTransfer(
@@ -370,8 +398,13 @@ fn metadata_policy_unsupported_wide_gamut_is_a_typed_failure() {
             color,
             RasterOrientation::TopDown,
         );
-        let error = normalize_raster(view, &budget(1024, 100), &CancellationToken::new())
-            .expect_err("wide-gamut input requires color-managed conversion");
+        let error = normalize_raster(
+            view,
+            &budget(1024, 100),
+            &CancellationToken::new(),
+            unlimited_raster_resources(),
+        )
+        .expect_err("wide-gamut input requires color-managed conversion");
         assert_eq!(
             error,
             ColorNormalizationError::UnsupportedColor(UnsupportedColorReason::WideGamutPrimaries(
@@ -421,8 +454,13 @@ fn premultiplied_channels_greater_than_alpha_are_rejected() {
         ColorDescription::srgb(AlphaMode::Premultiplied),
         RasterOrientation::TopDown,
     );
-    let error = normalize_raster(view, &budget(1024, 100), &CancellationToken::new())
-        .expect_err("a premultiplied channel cannot exceed alpha");
+    let error = normalize_raster(
+        view,
+        &budget(1024, 100),
+        &CancellationToken::new(),
+        unlimited_raster_resources(),
+    )
+    .expect_err("a premultiplied channel cannot exceed alpha");
     assert_eq!(
         error,
         ColorNormalizationError::InvalidSample(
@@ -454,14 +492,24 @@ fn raster_budget_counts_input_and_normalized_output_together() {
     // The 3-byte input and 32-byte normalized pixel coexist.
     for max_bytes in [32, 34] {
         assert_eq!(
-            normalize_raster(view, &budget(max_bytes, 1), &cancellation),
+            normalize_raster(
+                view,
+                &budget(max_bytes, 1),
+                &cancellation,
+                unlimited_raster_resources(),
+            ),
             Err(ColorNormalizationError::Raster(Error::BudgetExceeded(
                 BudgetKind::RasterBytes
             )))
         );
     }
-    let normalized = normalize_raster(view, &budget(35, 1), &cancellation)
-        .expect("the exact combined raster budget must suffice");
+    let normalized = normalize_raster(
+        view,
+        &budget(35, 1),
+        &cancellation,
+        unlimited_raster_resources(),
+    )
+    .expect("the exact combined raster budget must suffice");
     assert_eq!(normalized.pixels().len(), 1);
     assert_eq!(normalized.pixels()[0].straight_rgb(), LinearRgb::BLACK);
 }
@@ -480,13 +528,23 @@ fn premultiplied_validation_pass_is_charged_to_work_budget() {
     let cancellation = CancellationToken::new();
 
     assert_eq!(
-        normalize_raster(view, &budget(1024, 1), &cancellation),
+        normalize_raster(
+            view,
+            &budget(1024, 1),
+            &cancellation,
+            unlimited_raster_resources(),
+        ),
         Err(ColorNormalizationError::Raster(Error::BudgetExceeded(
             BudgetKind::WorkUnits
         )))
     );
-    let normalized = normalize_raster(view, &budget(1024, 2), &cancellation)
-        .expect("one preflight and one normalization pass fit the work budget");
+    let normalized = normalize_raster(
+        view,
+        &budget(1024, 2),
+        &cancellation,
+        unlimited_raster_resources(),
+    )
+    .expect("one preflight and one normalization pass fit the work budget");
     assert_eq!(normalized.pixels().len(), 1);
 }
 
@@ -507,13 +565,23 @@ fn raster_budget_counts_inter_row_padding_but_not_trailing_backing() {
 
     // The required input extent is 8 + 3 = 11, plus two 32-byte output pixels.
     assert_eq!(
-        normalize_raster(view, &budget(74, 2), &cancellation),
+        normalize_raster(
+            view,
+            &budget(74, 2),
+            &cancellation,
+            unlimited_raster_resources(),
+        ),
         Err(ColorNormalizationError::Raster(Error::BudgetExceeded(
             BudgetKind::RasterBytes
         )))
     );
-    let normalized = normalize_raster(view, &budget(75, 2), &cancellation)
-        .expect("the exact extent plus output budget must suffice");
+    let normalized = normalize_raster(
+        view,
+        &budget(75, 2),
+        &cancellation,
+        unlimited_raster_resources(),
+    )
+    .expect("the exact extent plus output budget must suffice");
     assert_eq!(normalized.pixels().len(), 2);
     assert_eq!(normalized.pixels()[0].straight_rgb(), LinearRgb::BLACK);
     assert_eq!(normalized.pixels()[1].straight_rgb(), LinearRgb::WHITE);
@@ -528,7 +596,12 @@ fn raster_budget_counts_inter_row_padding_but_not_trailing_backing() {
         RasterOrientation::TopDown,
     );
     assert_eq!(
-        normalize_raster(short_backing, &budget(75, 2), &cancellation),
+        normalize_raster(
+            short_backing,
+            &budget(75, 2),
+            &cancellation,
+            unlimited_raster_resources(),
+        ),
         Err(ColorNormalizationError::Raster(Error::Malformed(
             MalformedReason::RasterBackingTooShort
         )))
@@ -549,7 +622,12 @@ fn raster_budget_rejects_overflow_in_combined_input_and_output_size() {
         RasterOrientation::TopDown,
     );
     assert_eq!(
-        normalize_raster(view, &budget(u64::MAX, u64::MAX), &CancellationToken::new()),
+        normalize_raster(
+            view,
+            &budget(u64::MAX, u64::MAX),
+            &CancellationToken::new(),
+            unlimited_raster_resources(),
+        ),
         Err(ColorNormalizationError::Raster(Error::SizeOverflow))
     );
 }
@@ -571,7 +649,12 @@ fn raster_budget_rejects_overflow_in_output_size() {
         RasterOrientation::TopDown,
     );
     assert_eq!(
-        normalize_raster(view, &budget(u64::MAX, u64::MAX), &CancellationToken::new()),
+        normalize_raster(
+            view,
+            &budget(u64::MAX, u64::MAX),
+            &CancellationToken::new(),
+            unlimited_raster_resources(),
+        ),
         Err(ColorNormalizationError::Raster(Error::SizeOverflow))
     );
 }
@@ -589,7 +672,12 @@ fn raster_orientation_stride_budgets_and_cancellation_are_checked() {
         RasterOrientation::BottomUp,
     );
     assert_eq!(
-        normalize_raster(bottom_up, &budget(1024, 100), &CancellationToken::new()),
+        normalize_raster(
+            bottom_up,
+            &budget(1024, 100),
+            &CancellationToken::new(),
+            unlimited_raster_resources(),
+        ),
         Err(ColorNormalizationError::Raster(Error::Unsupported(
             ascii_core::UnsupportedReason::Orientation
         )))
@@ -605,7 +693,12 @@ fn raster_orientation_stride_budgets_and_cancellation_are_checked() {
         RasterOrientation::TopDown,
     );
     assert_eq!(
-        normalize_raster(short_stride, &budget(1024, 100), &CancellationToken::new()),
+        normalize_raster(
+            short_stride,
+            &budget(1024, 100),
+            &CancellationToken::new(),
+            unlimited_raster_resources(),
+        ),
         Err(ColorNormalizationError::Raster(Error::Malformed(
             MalformedReason::RowStrideTooSmall
         )))
@@ -621,14 +714,24 @@ fn raster_orientation_stride_budgets_and_cancellation_are_checked() {
         RasterOrientation::TopDown,
     );
     assert_eq!(
-        normalize_raster(one_pixel, &budget(31, 100), &CancellationToken::new()),
+        normalize_raster(
+            one_pixel,
+            &budget(31, 100),
+            &CancellationToken::new(),
+            unlimited_raster_resources(),
+        ),
         Err(ColorNormalizationError::Raster(Error::BudgetExceeded(
             BudgetKind::RasterBytes
         )))
     );
 
     assert_eq!(
-        normalize_raster(one_pixel, &budget(1024, 0), &CancellationToken::new()),
+        normalize_raster(
+            one_pixel,
+            &budget(1024, 0),
+            &CancellationToken::new(),
+            unlimited_raster_resources(),
+        ),
         Err(ColorNormalizationError::Raster(Error::BudgetExceeded(
             BudgetKind::WorkUnits
         )))
@@ -647,7 +750,8 @@ fn raster_orientation_stride_budgets_and_cancellation_are_checked() {
         normalize_raster(
             overflowing_extent,
             &budget(u64::MAX, u64::MAX),
-            &CancellationToken::new()
+            &CancellationToken::new(),
+            unlimited_raster_resources(),
         ),
         Err(ColorNormalizationError::Raster(Error::SizeOverflow))
     );
@@ -655,7 +759,12 @@ fn raster_orientation_stride_budgets_and_cancellation_are_checked() {
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert_eq!(
-        normalize_raster(one_pixel, &budget(1024, 100), &cancelled),
+        normalize_raster(
+            one_pixel,
+            &budget(1024, 100),
+            &cancelled,
+            unlimited_raster_resources(),
+        ),
         Err(ColorNormalizationError::Raster(Error::Cancelled))
     );
 }
