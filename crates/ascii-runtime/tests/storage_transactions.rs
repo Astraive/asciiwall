@@ -52,25 +52,37 @@ fn linux_roots(base: &Path) -> StorageRoots {
     .expect("valid Linux roots")
 }
 
-fn validate_test_config(value: &Value) -> Result<(), &'static str> {
-    value
-        .is_object()
+fn validate_test_config(value: &TomlValue) -> Result<(), &'static str> {
+    matches!(value, TomlValue::Table(_))
         .then_some(())
-        .ok_or("configuration must be an object")
+        .ok_or("configuration must be a TOML table")
 }
 
-fn validate_theme_config(value: &Value) -> Result<(), &'static str> {
+fn validate_theme_config(value: &TomlValue) -> Result<(), &'static str> {
     validate_test_config(value)?;
     value
         .get("theme")
-        .and_then(Value::as_str)
+        .and_then(TomlValue::as_str)
         .map(|_| ())
         .ok_or("theme must be text")
 }
 
-fn config(value: Value) -> ValidatedConfig {
-    let bytes = serde_json::to_vec(&value).expect("serialize test config");
-    ValidatedConfig::from_json(&bytes, validate_test_config).expect("valid test config")
+fn toml_value(value: Value) -> TomlValue {
+    TomlValue::try_from(value).expect("convert test value to TOML")
+}
+
+fn config(value: Value) -> ParsedToml {
+    let value = toml_value(value);
+    let bytes = toml::to_string(&value).expect("serialize test TOML");
+    let config = ParsedToml::from_toml(bytes.as_bytes()).expect("parse test config");
+    validate_test_config(config.value()).expect("valid test config");
+    config
+}
+
+fn parse_config(bytes: &[u8]) -> ParsedToml {
+    let config = ParsedToml::from_toml(bytes).expect("parse TOML config");
+    validate_test_config(config.value()).expect("valid config schema");
+    config
 }
 
 fn registry(version: &str) -> InstallRegistry {

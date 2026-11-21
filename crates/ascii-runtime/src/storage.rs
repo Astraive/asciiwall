@@ -333,7 +333,7 @@ impl StorageRoots {
         ))
     }
 
-    /// Creates each storage root. Nested data classes are intentionally separate subdirectories.
+    /// Creates each app-owned storage root with owner-only Unix permissions.
     pub fn create_all(&self) -> Result<(), StorageError> {
         for path in [
             &self.config,
@@ -346,7 +346,7 @@ impl StorageRoots {
             &self.logs,
             &self.runtime,
         ] {
-            fs::create_dir_all(path)?;
+            create_directory_durable(path)?;
         }
         Ok(())
     }
@@ -861,15 +861,27 @@ fn create_sibling_temp(destination: &Path, label: &str) -> io::Result<OwnedTempF
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&candidate)?;
-    Ok(OwnedTempFile {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&candidate)?;
+    let mut temporary = OwnedTempFile {
         path: candidate,
         file: Some(file),
         cleanup: true,
-    })
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .file_mut()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(temporary)
 }
 
 fn create_directory_durable(path: &Path) -> io::Result<()> {
@@ -899,14 +911,51 @@ fn create_directory_durable(path: &Path) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    fs::create_dir_all(directory)?;
     for created in missing.iter().rev() {
+        create_storage_directory(created)?;
         let parent = created
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         sync_parent_directory(parent)?;
     }
+    if missing.is_empty() {
+        restrict_storage_directory(directory)?;
+    }
+    Ok(())
+}
+
+fn create_storage_directory(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if !fs::metadata(path)?.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotADirectory,
+                    "storage parent is not a directory",
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    restrict_storage_directory(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_storage_directory(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn restrict_storage_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -1518,7 +1567,7 @@ impl DiagnosticLog {
         }
     }
     pub fn append(&self, message: &str) -> Result<(), StorageError> {
-        fs::create_dir_all(&self.directory)?;
+        create_directory_durable(&self.directory)?;
         let _guard = self.directory_lock.lock()?;
         self.prune_rotation_files()?;
 
@@ -1547,7 +1596,19 @@ impl DiagnosticLog {
         if existing_len.saturating_add(record.len()) > self.limits.max_file_bytes {
             self.rotate(&path)?;
         }
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(&record)?;
         file.flush()?;
         Ok(())
@@ -1597,7 +1658,14 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
 fn rename_if_present_bounded(source: &Path, destination: &Path, limit: usize) -> io::Result<()> {
     match fs::metadata(source) {
         Ok(metadata) if metadata.len() > limit as u64 => remove_if_present(source),
-        Ok(_) => fs::rename(source, destination),
+        Ok(_) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(source, fs::Permissions::from_mode(0o600))?;
+            }
+            fs::rename(source, destination)
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
