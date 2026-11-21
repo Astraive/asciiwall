@@ -1674,7 +1674,8 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
         return {"kept_by_type": kept, "removed": len(removed), "removed_names": sorted(removed)}
     finally:
         if os.name == "nt":
-            directory_fd.close()
+            # Reuse Directory's exception-aware cleanup without masking prune errors.
+            directory_fd.__exit__(*sys.exc_info())
         else:
             os.close(directory_fd)
 

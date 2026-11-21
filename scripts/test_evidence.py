@@ -1483,6 +1483,8 @@ class RetentionTests(unittest.TestCase):
             replacement_path.write_bytes(replacement_bytes)
             moved_path = root / "moved-original.json"
             original_open_file = evidence_windows.Directory.open_file
+            original_close = evidence_windows.Directory.close
+            injected_close_failure = OSError("injected directory-close failure")
             attempted = False
             mutation_denied = False
             replaced = False
@@ -1502,9 +1504,14 @@ class RetentionTests(unittest.TestCase):
                         replaced = True
                 return original_open_file(directory, name, for_delete=for_delete)
 
+            def fail_close(directory):
+                original_close(directory)
+                raise injected_close_failure
+
             with patch.object(evidence_windows.Directory, "open_file", new=replace_later_candidate):
-                with self.assertRaises(evidence.EvidenceError) as raised:
-                    evidence.prune_archive(archive, keep=1)
+                with patch.object(evidence_windows.Directory, "close", new=fail_close):
+                    with self.assertRaises(evidence.EvidenceError) as raised:
+                        evidence.prune_archive(archive, keep=1)
 
             self.assertTrue(attempted)
             self.assertTrue(replaced)
@@ -1514,11 +1521,39 @@ class RetentionTests(unittest.TestCase):
                 f"archive changed during pruning of expired artifact {older_name}; "
                 f"already removed 1 expired archive artifact(s): {newer_expired_name}",
             )
+            self.assertIsInstance(raised.exception.__cause__, evidence.EvidenceError)
+            self.assertEqual(
+                str(raised.exception.__cause__),
+                f"archive changed during pruning of expired artifact {older_name}",
+            )
+            self.assertIn(
+                "Handle cleanup also failed (OSError).",
+                raised.exception.__notes__,
+            )
             self.assertFalse(newer_expired_path.exists())
             self.assertEqual(older_path.read_bytes(), replacement_bytes)
             self.assertEqual(moved_path.read_bytes(), evidence.canonical_json(older))
             self.assertEqual(retained_path.read_bytes(), retained_bytes)
             self.assertEqual(unrelated.read_bytes(), b"keep")
+
+    @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
+    def test_prune_propagates_ntfs_directory_close_error_without_primary_error(self):
+        import evidence_windows
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            original_close = evidence_windows.Directory.close
+            injected_close_failure = OSError("injected directory-close failure")
+
+            def fail_close(directory):
+                original_close(directory)
+                raise injected_close_failure
+
+            with patch.object(evidence_windows.Directory, "close", new=fail_close):
+                with self.assertRaises(OSError) as raised:
+                    evidence.prune_archive(archive, keep=1)
+
+            self.assertIs(raised.exception, injected_close_failure)
 
     @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
     def test_prune_rejects_duplicate_windows_names_before_deletion(self):
