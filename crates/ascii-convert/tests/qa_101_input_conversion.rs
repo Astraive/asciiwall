@@ -198,11 +198,7 @@ fn budget() -> Budget {
     Budget::new(8_000_000, 64_000_000, 16_000_000)
 }
 
-fn resources_for_raster(
-    width: u32,
-    height: u32,
-    budget: &Budget,
-) -> NormalizedRasterResources {
+fn resources_for_raster(width: u32, height: u32, budget: &Budget) -> NormalizedRasterResources {
     let bytes_per_pixel = u64::try_from(std::mem::size_of::<LinearPremultipliedRgba>())
         .expect("normalized pixel size fits u64");
     let output_bytes = u64::from(width)
@@ -294,8 +290,11 @@ fn ec_001_zero_and_overflow_geometry_precede_budget_and_output_allocations() {
             0,
             &[],
         );
-        let resources =
-            resources_for_raster(zero_dimension.width(), zero_dimension.height(), &zero_budget);
+        let resources = resources_for_raster(
+            zero_dimension.width(),
+            zero_dimension.height(),
+            &zero_budget,
+        );
         let (result, allocation_requests) = count_conversion_allocations(|| {
             convert_density_detailed(
                 zero_dimension,
