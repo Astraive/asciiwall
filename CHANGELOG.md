@@ -117,3 +117,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   typed error; deterministic public fault injection verifies the copy remains recoverable.
 - [COR-008] Redact extensionless relative paths beneath recognized local directories in generic
   portable-export strings while preserving ordinary slash prose; add embedded path coverage.
+- [COR-008] Add serialized atomic registry read-modify-write updates so concurrent callers preserve
+  independent package changes; retain full replacement for explicit save operations.
