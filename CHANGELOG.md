@@ -46,7 +46,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - CLI-001 prioritizes existing-output conflicts over format and charset validation and constrains CLI diagnostics to static messages, preventing request paths, hosts, and option values from being disclosed. Missing font input never selects a default; structural/source-color matching and PNG export fail closed.
 - CLI-001 validates charsets through the shared strict-cell repertoire, loads only an explicitly selected bounded font, and uses shared bounded decoder, density, and text/ANSI export providers. Static diagnostics do not disclose input paths or glyph metadata, and failed or cancelled conversions preserve an existing output.
 - CLI-001 normalizes invalid strict-cell repertoire errors to malformed configuration before font I/O while preserving typed glyph diagnostics from font measurement ([CLI-001]).
-- Map no-clobber publication races to the documented existing-output `cli.usage` conflict (exit `2`) while preserving the racing output (`[CLI-001]`).
+- Map only final no-clobber destination collisions to `cli.usage` (exit `2`); staging and artifact I/O failures remain `cli.io`, including `AlreadyExists` errors (`[CLI-001]`).
 - Check cancellation before publishing stdout artwork, and propagate success-status JSON serialization, newline-writing, and flush failures (`[CLI-001]`).
 - Clarify that `--config` settings loading is unavailable in this build and valid conversion requests using it fail with capability error `4` (`[CLI-001]`).
 - Map FNT-002 typed missing-requested-glyph and multi-cell failures to stable, glyph-safe CLI validation diagnostics, with a process-level JSON regression ([CLI-001]).

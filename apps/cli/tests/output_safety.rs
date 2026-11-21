@@ -19,9 +19,7 @@ fn successful_publication_respects_overwrite() {
         file.write_all(b"second\n")
     })
     .unwrap_err();
-    assert!(
-        matches!(error, PublishError::Io(error) if error.kind() == io::ErrorKind::AlreadyExists)
-    );
+    assert!(matches!(error, PublishError::DestinationExists));
     assert_eq!(fs::read(&destination).unwrap(), b"first\n");
 
     publish_file(&destination, true, &token, |file| {
@@ -69,9 +67,7 @@ fn concurrent_creation_cannot_be_overwritten_without_permission() {
         Ok(())
     })
     .unwrap_err();
-    assert!(
-        matches!(error, PublishError::Io(error) if error.kind() == io::ErrorKind::AlreadyExists)
-    );
+    assert!(matches!(error, PublishError::DestinationExists));
     assert_eq!(fs::read(&destination).unwrap(), b"racing output");
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }

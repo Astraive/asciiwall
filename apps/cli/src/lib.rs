@@ -370,7 +370,7 @@ fn publish_error(error: output::PublishError) -> CliError {
         output::PublishError::Cancelled => {
             CliError::cancelled("conversion was cancelled before output publication")
         }
-        output::PublishError::Io(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+        output::PublishError::DestinationExists => {
             CliError::usage("output already exists; use --overwrite to replace it")
         }
         output::PublishError::Io(error) if error.kind() == io::ErrorKind::PermissionDenied => {
@@ -465,9 +465,17 @@ mod tests {
 
     #[test]
     fn publication_existing_output_race_is_usage_conflict() {
-        let error = publish_error(crate::output::PublishError::Io(io::Error::from(
-            io::ErrorKind::AlreadyExists,
-        )));
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("output.txt");
+        let cancellation = CancellationToken::new();
+        let publication_error =
+            crate::output::publish_file(&destination, false, &cancellation, |file| {
+                file.write_all(b"our output")?;
+                std::fs::write(&destination, b"racing output")?;
+                Ok(())
+            })
+            .unwrap_err();
+        let error = publish_error(publication_error);
 
         assert_eq!(error.code, "cli.usage");
         assert_eq!(error.exit, 2);
@@ -475,6 +483,38 @@ mod tests {
             error.message,
             "output already exists; use --overwrite to replace it"
         );
+    }
+
+    #[test]
+    fn non_destination_already_exists_is_an_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("output.txt");
+        let occupied = dir.path().join("occupied.txt");
+        std::fs::write(&occupied, b"occupied").unwrap();
+        let cancellation = CancellationToken::new();
+        let publication_error =
+            crate::output::publish_file(&destination, false, &cancellation, |file| {
+                file.write_all(b"staged output")?;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&occupied)
+                    .map(|_| ())
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&publication_error, crate::output::PublishError::Io(error)
+                if error.kind() == io::ErrorKind::AlreadyExists)
+        );
+
+        let error = publish_error(publication_error);
+
+        assert_eq!(error.code, "cli.io");
+        assert_eq!(error.category, "io");
+        assert_eq!(error.exit, 8);
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"occupied");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

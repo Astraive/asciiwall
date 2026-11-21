@@ -12,6 +12,8 @@ use ascii_core::CancellationToken;
 pub enum PublishError {
     /// Cancellation was observed before publication.
     Cancelled,
+    /// The destination was created before the final no-clobber publication.
+    DestinationExists,
     /// Staging or publication failed.
     Io(io::Error),
 }
@@ -20,6 +22,7 @@ impl fmt::Display for PublishError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cancelled => f.write_str("output publication cancelled"),
+            Self::DestinationExists => f.write_str("output destination already exists"),
             Self::Io(error) => write!(f, "output publication failed: {error}"),
         }
     }
@@ -28,7 +31,7 @@ impl fmt::Display for PublishError {
 impl std::error::Error for PublishError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Cancelled => None,
+            Self::Cancelled | Self::DestinationExists => None,
             Self::Io(error) => Some(error),
         }
     }
@@ -73,11 +76,20 @@ pub fn publish_file(
         return Err(PublishError::Cancelled);
     }
     if overwrite {
-        staging.persist(destination)
+        staging
+            .persist(destination)
+            .map_err(|error| PublishError::Io(error.error))?;
     } else {
-        staging.persist_noclobber(destination)
+        staging
+            .persist_noclobber(destination)
+            .map_err(|error| {
+                if error.error.kind() == io::ErrorKind::AlreadyExists {
+                    PublishError::DestinationExists
+                } else {
+                    PublishError::Io(error.error)
+                }
+            })?;
     }
-    .map_err(|error| PublishError::Io(error.error))?;
     Ok(())
 }
 
