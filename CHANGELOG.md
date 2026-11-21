@@ -101,9 +101,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [COR-008] Fail closed when recovery compares versioned settings with a versionless last-good file.
 - [COR-008] Require settings saves to compare the observed current bytes or absence under the
   directory lock; stale writes return a typed conflict before current or last-good mutation.
-- [COR-008] Require explicit settings recovery to compare the caller's current-byte revision under
-  the directory lock; stale restores return `StaleConfiguration` without changing current settings
-  or last-good.
+- [COR-008] Acquire the destination directory lock before reading current and last-good settings,
+  holding it through revision comparison, validation, and replacement so recovery serializes with
+  competing writers; stale restores leave current settings and last-good unchanged.
 - [COR-008] Reject recursive history-key paths in last-good recovery, including nested and dotted
   names such as `cursor.history`, without changing current settings or backup bytes.
 - [COR-008] Reject duplicate package identifiers in persisted install-registry JSON during load and

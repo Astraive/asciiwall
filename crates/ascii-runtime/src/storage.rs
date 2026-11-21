@@ -799,6 +799,8 @@ impl Storage {
                 "state file has no parent directory",
             ))?;
         create_directory_durable(parent)?;
+        let directory_lock = DirectoryLock::new(parent);
+        let _guard = directory_lock.lock()?;
         let expected_current = match expected_current {
             Some(bytes) => CurrentExpectation::Bytes(bytes),
             None => CurrentExpectation::Missing,
