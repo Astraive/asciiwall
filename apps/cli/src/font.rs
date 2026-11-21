@@ -8,7 +8,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use ascii_convert::{GlyphConfig, GlyphRepertoire, GlyphTable, build_glyph_table};
-use ascii_core::{Budget, CancellationToken, Error};
+use ascii_core::{Budget, CancellationToken, Error, GlyphFailureReason, MalformedReason};
 
 /// Maximum encoded font bytes accepted by the CLI, independently of the caller's budget.
 pub const MAX_FONT_BYTES: u64 = 16 * 1024 * 1024;
@@ -128,7 +128,15 @@ pub fn load_glyph_table(
     cancellation: &CancellationToken,
 ) -> Result<GlyphTable, FontLoadError> {
     check_cancelled(cancellation)?;
-    let repertoire = GlyphRepertoire::new(charset).map_err(FontLoadError::Engine)?;
+    let repertoire = GlyphRepertoire::new(charset).map_err(|error| {
+        FontLoadError::Engine(match error {
+            Error::Glyph {
+                reason: GlyphFailureReason::UnsupportedScalar | GlyphFailureReason::DuplicateScalar,
+                ..
+            } => Error::Malformed(MalformedReason::InvalidConfiguration),
+            error => error,
+        })
+    })?;
     load_glyph_table_with_repertoire(path, &repertoire, config, budget, cancellation)
 }
 
