@@ -46,6 +46,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - [COR-009] Deterministically verify that overlapping stores from independently opened caches contend on the shared-root mutex and preserve the shared byte budget.
 
+- [COR-009] Query `FILE_CASE_SENSITIVE_INFO.Flags` through `GetFileInformationByHandleEx` when
+  pruning Windows case-variant output registrations; if the flag cannot be read, merge only
+  spellings the filesystem resolves to the same existing entry and retain uncertain registrations.
+
 - Durable publication-ledger replacement uses a same-directory overwrite rename instead of the Windows PowerShell `File.Replace` null-backup binding; a real filesystem regression runs locally and in CI.
 - Redacted complete whitespace-containing and drive-relative paths from diagnostic logs, rejected Windows-trimmed and reserved-device registry/journal path components, compared storage-root and registry-path aliases with Windows ordinal case-insensitive semantics (including final sigma), and bounded explicit restore of oversized settings files ([COR-008]).
 - Preserve existing Windows destination DACLs with ACL-preserving replacement; first creation is no-clobber so a concurrent destination is never replaced with the temporary file's inherited ACL ([COR-008]).
