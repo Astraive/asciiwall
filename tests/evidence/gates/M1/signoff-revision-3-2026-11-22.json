@@ -51,13 +51,53 @@
         "source_revision": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea"
       }
     ],
-    "interpretation": "CNV-002 color normalization is now present on main, but density conversion and CLI remain on separate unmerged branches. No branch combination is treated as an integrated M1 release candidate."
+    "interpretation": "The candidate.source_revision and its three main_tree_observations above are the explicitly historical 2026-11-16 candidate snapshot at main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; they do not describe current main. Current main is separately observed at 7552713a9c8b4515904d3e562c8b1c188a9d8676 below. Density and raster-budget changes are now on main via merged PRs #332 and #339, but no integrated M1 candidate exists because apps/cli is still absent and full gate evidence/sign-offs are missing."
+  },
+  "current_main_snapshot": {
+    "observed_on": "2026-11-22",
+    "source_revision": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+    "tree_observations": [
+      {
+        "path": "apps/cli",
+        "status": "absent"
+      },
+      {
+        "path": "crates/ascii-convert/src/density.rs",
+        "status": "present"
+      },
+      {
+        "path": "crates/ascii-convert/src/color.rs",
+        "status": "present"
+      },
+      {
+        "path": "crates/ascii-media/src/image.rs",
+        "status": "present"
+      }
+    ],
+    "merged_component_changes": [
+      {
+        "pull_request": 332,
+        "issue": 118,
+        "state": "MERGED",
+        "head_sha": "20d84094bf23008948c44c6baf14997297704ee5",
+        "merge_commit": "7bb0a7bebe39c214ce0b3e7b221c8d2152ce35bd",
+        "merged_on": "2026-11-21"
+      },
+      {
+        "pull_request": 339,
+        "state": "MERGED",
+        "head_sha": "fa18a2a145a7fc2fd1a2ba6471a7389e984e5d82",
+        "merge_commit": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+        "merged_on": "2026-11-21"
+      }
+    ],
+    "interpretation": "Density conversion is on main via merged PR #332 and raster-budget changes via merged PR #339; PR #314 is closed unmerged and issue #118 is closed. apps/cli remains absent. No integrated M1 candidate or go decision is implied because CLI is absent and full gate evidence and sign-offs remain missing."
   },
   "receipt_branch_provenance": {
     "branch": "test/qa-m1-no-go-receipt-linear",
     "base_revision_at_branch_creation": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
-    "current_main_revision_at_capture": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
-    "scope": "Receipt and branch-scoped evidence only; this branch preserves current main and does not integrate the candidate components."
+    "current_main_revision_at_capture": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+    "scope": "Receipt and branch-scoped evidence only. Branch creation was based on historical main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; current main at this revision-3 capture is 7552713a9c8b4515904d3e562c8b1c188a9d8676. This branch preserves main and does not integrate a candidate."
   },
   "entry_criteria": [
     {
@@ -68,17 +108,17 @@
     {
       "criterion": "Font descriptors exist",
       "status": "PASS",
-      "scope": "Font descriptor and glyph sources are present on the recorded main source at crates/ascii-convert/src/font.rs and crates/ascii-convert/src/glyphs.rs. The separate FNT-002 repertoire/editor/clip/export acceptance remains incomplete in open draft PR #306 and issue #120."
+      "scope": "Font descriptor and glyph sources are present on the historical candidate snapshot at crates/ascii-convert/src/font.rs and crates/ascii-convert/src/glyphs.rs. Current FNT-002 replacement PR #334 is OPEN/DRAFT at head 5b677c503c27ceb29417391504417a7076945383 on base main 7552713a9c8b4515904d3e562c8b1c188a9d8676; issue #120 is OPEN. Repertoire/editor/clip/export acceptance remains incomplete."
     },
     {
       "criterion": "Image conversion exists in the M1 candidate",
       "status": "BLOCKED",
-      "scope": "CNV-002 color normalization merged via PR #307 head 4f1ab1b227d4fa21bf28a2b7b0923727dd662ca0 into main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea. CNV-001 density remains blocked in open/draft replacement PR #314 at exact head b78920f82ff496e2ee9bd9b5ea454d906a003fa0 on main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; this supersedes closed PR #292, which had remained based on the closed #291 branch. Issue #118 remains OPEN. CNV-003 #302 is stacked on #292. The density source path is absent on current main, so there is still no integrated M1 conversion candidate."
+      "scope": "Historical candidate snapshot @539 lacked density conversion. Current main @7552713a9c8b4515904d3e562c8b1c188a9d8676 has density via merged PR #332 (head 20d84094bf23008948c44c6baf14997297704ee5, merge 7bb0a7bebe39c214ce0b3e7b221c8d2152ce35bd) and raster-budget changes via merged PR #339 (merge 7552713a9c8b4515904d3e562c8b1c188a9d8676). PR #314 closed unmerged and issue #118 is CLOSED. CNV-003 replacement PR #323 is OPEN/DRAFT at head 9fd81180c76393b353afb15d796046edd1920974 on current main, issue #130 OPEN. Despite these source changes, apps/cli is absent and full gate evidence/sign-offs are missing, so no integrated M1 candidate exists."
     },
     {
       "criterion": "Standalone CLI build exists for the M1 candidate",
       "status": "BLOCKED",
-      "scope": "The CLI branch at 0bbbf8da69aae5758b20d3ee34d38216313309d6 now has a branch-scoped monochrome density-to-TXT smoke PASS, but GitHub reports no PR for it and apps/cli is absent from current main. The branch source does not implement PNG export, structural matching, or config-registry loading; this smoke is not integrated M1 acceptance."
+      "scope": "The 0bbbf8da69aae5758b20d3ee34d38216313309d6 CLI smoke is a historical branch-scoped monochrome density-to-TXT result and does not evidence current PR #338. PR #338 is OPEN/DRAFT at head c6860756c0d42c9d42e99f6087f35fca7b3fe816, based on PR #333 head a6f16b18bfb92c5150ca06dab4c6675385f6f5c0; issue #129 is OPEN. apps/cli remains absent from current main @7552713a9c8b4515904d3e562c8b1c188a9d8676, and structural matching, PNG export, config-registry loading, and integrated M1 acceptance are not established."
     },
     {
       "criterion": "Rights-cleared small fixtures are pinned to one integrated source/settings/binary candidate",
@@ -100,7 +140,7 @@
     {
       "criterion": "Unsupported HDR behavior is explained",
       "status": "PASS",
-      "scope": "QA-102 reports a passing synthetic conversion-boundary test for an actionable unsupported HDR/wide-gamut error on its own PR head. This is component evidence only; it does not establish M1 candidate acceptance."
+      "scope": "Historical 2026-11-16 component evidence: QA-102 PR #305 reported a synthetic conversion-boundary test for an actionable unsupported HDR/wide-gamut error on its own head. This remains component evidence for that historical head only; it does not establish current QA-102/EC-010 or M1 candidate acceptance."
     },
     {
       "criterion": "Firewall-denied text and PNG conversion is recorded",
@@ -117,33 +157,47 @@
     {
       "scenario_ids": ["QA-101/EC-001", "QA-101/EC-002", "QA-101/EC-003", "QA-101/EC-005"],
       "status": "PASS",
-      "scope": "Portable consumer-boundary regressions only, reported as 4 passing tests on PR #304 head 9ad6656cb6e024f221977e025d1decd6afca88e7.",
+      "scope": "Historical 2026-11-16 component results only: 4 passing tests were reported on PR #304 head 9ad6656cb6e024f221977e025d1decd6afca88e7. PR #304 has since closed; these results do not establish current QA-101 or M1 acceptance.",
       "m1_acceptance_status": "BLOCKED",
       "evidence_url": "https://github.com/Astraive/asciiwall/pull/304"
     },
     {
       "scenario_ids": ["QA-101/EC-004"],
       "status": "NOT RUN",
-      "scope": "The QA-101 PR states there is no decoder-to-converter callsite in that stack and no EXIF fixture or decoder result is claimed.",
+      "scope": "Historical 2026-11-16 PR #304 stack stated there was no decoder-to-converter callsite and no EXIF fixture or decoder result; PR #304 has since closed. Current QA-101 is tracked by PR #335, and no EC-004 result is claimed here.",
       "evidence_url": "https://github.com/Astraive/asciiwall/pull/304"
     },
     {
       "scenario_ids": ["QA-102/EC-006", "QA-102/EC-007", "QA-102/EC-008"],
       "status": "PASS",
-      "scope": "Synthetic direct-converter coverage only, reported in QA-102 PR #305. EC-008 decoder-to-converter traversal is separately NOT RUN.",
+      "scope": "Historical 2026-11-16 synthetic direct-converter coverage only, reported in QA-102 PR #305. The PR #305 EC-010 PASS is superseded historical evidence. EC-008 decoder-to-converter traversal was separately NOT RUN; no current-head scenario acceptance is inferred.",
       "m1_acceptance_status": "BLOCKED",
       "evidence_url": "https://github.com/Astraive/asciiwall/pull/305"
     },
     {
       "scenario_ids": ["QA-102/EC-009"],
       "status": "NOT RUN",
-      "scope": "The QA-102 PR states that its stack has no restricted-worker/UI safe-error path; QA-004 #35 is a hard dependency and remains open.",
+      "scope": "Historical PR #305 stack stated it had no restricted-worker/UI safe-error path. QA-004 #35 is a hard dependency, and no QA-004 receipt is present in this revision.",
       "evidence_url": "https://github.com/Astraive/asciiwall/pull/305"
     },
     {
       "scenario_ids": ["QA-102/EC-010"],
-      "status": "PASS",
-      "scope": "Automated decoder-budget component evidence is PASS at identity-correct replacement QA-102 PR #341 current head e283576e17b87769d21982bf4b07cbc6c15b9b32; source/test changes were last modified at tested revision 1d44523e9365a98bc4d301a53d71d5552eb99dfb, with later commits 12ca2f03e4503c968beb1bc2229c2d876722cc3f and e283576e17b87769d21982bf4b07cbc6c15b9b32 docs-only. The synthetic JPEG is rejected with the raster-byte budget error before full output allocation. This is not full QA-102/EC-010 scenario acceptance or M1 PASS: QA-004 #35 receipt integration, authenticated independent scenario review, native/manual evidence, and the exact host/session/compositor/GPU/driver/permission tuple remain unavailable.",
+      "status": "BLOCKED",
+      "component_test_status": "PASS",
+      "historical_stale_pass": {
+        "pull_request": 305,
+        "head_sha": "fd7828e98db7e63057a4ba51d46739d6f201e4b7",
+        "historical_result": "PASS",
+        "current_interpretation": "SUPERSEDED_HISTORICAL"
+      },
+      "unexecuted_branch_evidence": {
+        "pull_request": 337,
+        "head_sha": "623ace74feaf70bd555398d51b4492a154fb8571",
+        "reported_basis": "Earlier evidence predates this head",
+        "execution_status": "NOT RUN",
+        "m1_pass_claimed": false
+      },
+      "scope": "Automated decoder-budget component tests PASS on current QA-102 PR #341 head e283576e17b87769d21982bf4b07cbc6c15b9b32, with source/test revision 1d44523e9365a98bc4d301a53d71d5552eb99dfb and the later docs-only commits listed here. However, no current exact-head decoder fixture-run receipt or QA-004 #35 scenario receipt has been produced, so QA-102/EC-010 scenario acceptance is BLOCKED. The old PR #305 PASS is superseded historical evidence. PR #337 head 623ace74feaf70bd555398d51b4492a154fb8571 was reported to have only earlier evidence predating that head; it is unexecuted branch evidence, not a passing M1 result. The synthetic JPEG component test is not full QA-102/EC-010 acceptance; authenticated independent scenario review, native/manual evidence, and the exact host/session/compositor/GPU/driver/permission tuple remain unavailable.",
       "m1_acceptance_status": "BLOCKED",
       "evidence_url": "https://github.com/Astraive/asciiwall/pull/341",
       "current_pr_head_sha": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
@@ -251,12 +305,13 @@
     "unaccepted_or_unassessed": [
       "No integrated M1 support scope is accepted.",
       "HDR/wide-gamut evidence is limited to synthetic conversion-boundary tests; no full candidate receipt exists.",
-      "FNT-002 preview/repertoire consumer integration remains incomplete in draft PR #306.",
-      "CLI-001 branch smoke covers only monochrome density TXT; structural matching, config-registry loading, PNG export, firewall-denied behavior, and M1 integration remain unavailable or NOT RUN."
+      "FNT-002 preview/repertoire consumer integration remains incomplete; current replacement PR #334 is OPEN/DRAFT at head 5b677c503c27ceb29417391504417a7076945383 and issue #120 is OPEN.",
+      "CLI-001's 0bbbf8da69aae5758b20d3ee34d38216313309d6 smoke is historical and does not evidence current PR #338 (OPEN/DRAFT, head c6860756c0d42c9d42e99f6087f35fca7b3fe816 based on #333 head a6f16b18bfb92c5150ca06dab4c6675385f6f5c0; issue #129 OPEN). Structural matching, config-registry loading, PNG export, firewall-denied behavior, and M1 integration remain unavailable or NOT RUN."
     ]
   },
   "observed_component_heads": [
     {
+      "observation_as_of": "2026-11-16",
       "work_item": "FNT-002",
       "issue": 120,
       "pull_request": 306,
@@ -299,9 +354,10 @@
         "findings": "no actionable P0-P3 findings",
         "evidence": "https://github.com/Astraive/asciiwall/pull/306"
       },
-      "limitations": "The current open draft adds the fractional-block correction, but exact-head CI is not reported. Independent Luna xhigh review of exact head 3b587d8187847e2e6e42c72bb5feabe4fb4f9470 found no actionable P0-P3 findings. Its recorded base is main at 08381114be95f5270d45eb51daa0039eeb5fa1a5, behind current main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; the PR remains dirty and issue #120 remains open."
+      "limitations": "Historical 2026-11-16 snapshot: PR #306 was OPEN/DRAFT at head 3b587d8187847e2e6e42c72bb5feabe4fb4f9470, with no exact-head CI reported; the recorded component tests and review apply only to their listed historical heads. PR #306 later closed unmerged. Current FNT-002 replacement PR #334 is OPEN/DRAFT at head 5b677c503c27ceb29417391504417a7076945383; issue #120 is OPEN."
     },
     {
+      "observation_as_of": "2026-11-16",
       "work_item": "CLI-001",
       "issue": 129,
       "pull_request": null,
@@ -310,9 +366,10 @@
       "source_tree_object_id": "04283b76a28afce8e6040bbf73490c8d1ea28870",
       "github_pull_request_query": "No pull request found for this branch at observation time.",
       "component_outcome": "PASS: three actual monochrome density-to-TXT conversions with the same argv produced bytewise-identical output.",
-      "limitations": "This branch is not on current main and has no PR. Source inspection confirms structural matching, config-registry loading, and PNG export are unavailable. Issue #129 acceptance and integrated M1 status remain incomplete."
+      "limitations": "Historical 2026-11-16 smoke on branch head 0bbbf8da69aae5758b20d3ee34d38216313309d6: no PR was found for that branch at that observation time. This smoke does not evidence current PR #338, which is OPEN/DRAFT at head c6860756c0d42c9d42e99f6087f35fca7b3fe816 based on PR #333 head a6f16b18bfb92c5150ca06dab4c6675385f6f5c0; issue #129 is OPEN. apps/cli remains absent from current main @7552713a9c8b4515904d3e562c8b1c188a9d8676; structural matching, config-registry loading, PNG export, and integrated M1 acceptance are not established."
     },
     {
+      "observation_as_of": "2026-11-16",
       "work_item": "CNV-002",
       "issue": 72,
       "pull_request": 307,
@@ -333,9 +390,10 @@
           "status": "PASS"
         }
       ],
-      "limitations": "The replacement PR #307 is merged into current main; issue #72 remains open pending remaining acceptance/downstream requirements. Closed PR #291 is superseded, not active."
+      "limitations": "Historical 2026-11-16 snapshot: PR #307 had merged at 4f1ab1b227d4fa21bf28a2b7b0923727dd662ca0 into then-main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; issue #72 was reported OPEN at that capture. Current main later advanced to 7552713a9c8b4515904d3e562c8b1c188a9d8676 through merged PRs #332 and #339. Closed PR #291 remains historical, not active."
     },
     {
+      "observation_as_of": "2026-11-16",
       "work_item": "CNV-001",
       "issue": 118,
       "pull_request": 314,
@@ -373,9 +431,10 @@
         "findings": "none",
         "evidence": "https://github.com/Astraive/asciiwall/pull/314"
       },
-      "limitations": "Replacement PR #314 is open/draft on current main; its exact-head CI and independent review are clean, but issue #118 remains open and ticket acceptance is incomplete. No integrated M1 candidate is claimed. Downstream PRs #302, #304, and #305 still target the old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and are stale/not synchronized to #314; their recorded tests and checks remain historical evidence for their own heads."
+      "limitations": "Historical 2026-11-16 snapshot: PR #314 was OPEN/DRAFT at head b78920f82ff496e2ee9bd9b5ea454d906a003fa0 with the recorded clean component checks/review, and issue #118 was then OPEN. PR #314 subsequently closed unmerged; issue #118 is now CLOSED. Density is present on current main @7552713a9c8b4515904d3e562c8b1c188a9d8676 via merged PR #332. Downstream PRs #302, #304, and #305 and their tests/checks are historical records for their own heads; each has since closed."
     },
     {
+      "observation_as_of": "2026-11-16",
       "work_item": "CNV-003",
       "issue": 130,
       "pull_request": 302,
@@ -402,9 +461,10 @@
           "status": "PASS"
         }
       ],
-      "limitations": "Open draft, still based on the old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and stale/not synchronized to replacement PR #314 at b78920f82ff496e2ee9bd9b5ea454d906a003fa0. The recorded tests and checks are historical for this PR head; no exact integrated M1 candidate or native/UI evidence."
+      "limitations": "Historical 2026-11-16 snapshot: PR #302 was OPEN/DRAFT at head 5564df42a11664a9892a9bf64afb64a17f1cac50, stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84. Its tests/checks are historical for that head, and PR #302 has since closed. Current CNV-003 replacement PR #323 is OPEN/DRAFT at head 9fd81180c76393b353afb15d796046edd1920974; issue #130 is OPEN. No exact integrated M1 candidate or native/UI acceptance is established."
     },
     {
+      "observation_as_of": "2026-11-16",
       "work_item": "QA-101",
       "issue": 77,
       "pull_request": 304,
@@ -431,9 +491,10 @@
           "status": "PASS"
         }
       ],
-      "limitations": "EC-004 EXIF orientation is NOT RUN; the PR is still stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and is stale/not synchronized to replacement PR #314 at b78920f82ff496e2ee9bd9b5ea454d906a003fa0. QA-004 #35 and reviewer-linked scenario receipts remain outstanding."
+      "limitations": "Historical 2026-11-16 snapshot: PR #304 was OPEN/DRAFT at head 9ad6656cb6e024f221977e025d1decd6afca88e7, stacked on the old CNV-001 branch; its tests/checks apply only to that historical head, and PR #304 has since closed. Current QA-101 replacement PR #335 is OPEN/DRAFT at head 2556847e7ed71289f43f37bada0b5166cf28436f; issue #77 is OPEN. EC-004 EXIF orientation is NOT RUN; QA-004 #35 and reviewer-linked scenario receipts remain outstanding."
     },
     {
+      "observation_as_of": "2026-11-16",
       "work_item": "QA-102",
       "issue": 78,
       "pull_request": 305,
@@ -471,9 +532,10 @@
           "P2: PR #305 EC-010 text incorrectly says no decoder path exists, despite the compressed-raster budget regression in crates/ascii-media/tests/image_decode.rs:524."
         ]
       },
-      "limitations": "EC-009 restricted-worker/UI error and EC-008 decoder-to-converter traversal are NOT RUN. EC-010 QA-102 scenario acceptance remains outstanding; an existing compressed-raster budget regression at crates/ascii-media/tests/image_decode.rs:524 is not itself QA-102 acceptance evidence. This PR remains stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84 and is stale/not synchronized to replacement PR #314 at b78920f82ff496e2ee9bd9b5ea454d906a003fa0. Its pre-restack independent review found two P2s, described above; no resolution is claimed. QA-004 #35 and reviewer-linked QA-102 scenario evidence remain outstanding; the tests and checks are historical for this PR head."
+      "limitations": "Historical 2026-11-16 snapshot: PR #305 was OPEN/DRAFT at head fd7828e98db7e63057a4ba51d46739d6f201e4b7, stacked on the old CNV-001 branch. Its reported tests/checks and pre-restack review findings apply only to that historical head; PR #305 has since closed, and its EC-010 PASS is superseded historical evidence, not current-head fixture-run or QA-004 evidence. Current QA-102 replacement PR #341 is OPEN/DRAFT at head e283576e17b87769d21982bf4b07cbc6c15b9b32; issue #78 is OPEN. QA-004 #35, authenticated independent scenario reviewer, native/manual evidence, and exact host/session/compositor/GPU/driver/permission tuple remain unavailable."
     },
     {
+      "observation_as_of": "2026-11-22",
       "work_item": "QA-102",
       "issue": 78,
       "pull_request": 341,
@@ -511,6 +573,7 @@
       "limitations": "Automated component evidence only. QA-004 #35 receipt integration, authenticated independent scenario reviewer, native/manual evidence, and exact host/session/compositor/GPU/driver/permission tuple remain unavailable; issue #78 remains open and no full QA-102 or M1 acceptance is claimed."
     },
     {
+      "observation_as_of": "2026-11-16",
       "work_item": "RND-001",
       "issue": 123,
       "pull_request": 308,
@@ -532,35 +595,97 @@
           "status": "PASS"
         }
       ],
-      "limitations": "No new offscreen GPU scenario was run for current replacement head 77dfcb4. Earlier offscreen evidence is on prior integrated head 05464596bb95d6fb9273d034cff8f4def2d1e907 only. There is no native surface-owning host/device-loss injector or native host acceptance evidence; issue #123 remains open. The PR base is recorded at 08381114be95f5270d45eb51daa0039eeb5fa1a5 while current main is 539ed2bd3493cb97ded00820f3f8bb7e9e280bea."
+      "limitations": "Historical 2026-11-16 snapshot: PR #308 was OPEN/DRAFT at head 77dfcb469f6065b699899a4530a799df856bb7b4, based on main 08381114be95f5270d45eb51daa0039eeb5fa1a5 and then-main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; it has since closed. Its earlier offscreen evidence is tied only to integrated head 05464596bb95d6fb9273d034cff8f4def2d1e907. Current RND-001 replacement PR #320 is OPEN/DRAFT at head d6b7db23678b29abe17bf39c5d9d15d55b1ee0f9; issue #123 is OPEN. No native surface-owning host/device-loss injector or native host acceptance evidence is established by this historical record."
     }
   ],
+  "current_component_statuses": {
+    "observed_on": "2026-11-22",
+    "current_main_revision": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+    "items": [
+      {
+        "work_item": "FNT-002",
+        "issue": 120,
+        "issue_state": "OPEN",
+        "pull_request": 334,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "5b677c503c27ceb29417391504417a7076945383"
+      },
+      {
+        "work_item": "CNV-003",
+        "issue": 130,
+        "issue_state": "OPEN",
+        "pull_request": 323,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "9fd81180c76393b353afb15d796046edd1920974"
+      },
+      {
+        "work_item": "QA-101",
+        "issue": 77,
+        "issue_state": "OPEN",
+        "pull_request": 335,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "2556847e7ed71289f43f37bada0b5166cf28436f"
+      },
+      {
+        "work_item": "QA-102",
+        "issue": 78,
+        "issue_state": "OPEN",
+        "pull_request": 341,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "e283576e17b87769d21982bf4b07cbc6c15b9b32"
+      },
+      {
+        "work_item": "RND-001",
+        "issue": 123,
+        "issue_state": "OPEN",
+        "pull_request": 320,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "d6b7db23678b29abe17bf39c5d9d15d55b1ee0f9"
+      },
+      {
+        "work_item": "CLI-001",
+        "issue": 129,
+        "issue_state": "OPEN",
+        "pull_request": 338,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "c6860756c0d42c9d42e99f6087f35fca7b3fe816",
+        "base_pull_request": 333,
+        "base_head_sha": "a6f16b18bfb92c5150ca06dab4c6675385f6f5c0",
+        "historical_smoke_head_sha": "0bbbf8da69aae5758b20d3ee34d38216313309d6",
+        "historical_smoke_applies": false
+      }
+    ]
+  },
   "superseded_records": [
     {
+      "observation_as_of": "2026-11-16",
       "pull_request": 291,
       "state": "CLOSED",
       "superseded_by": 307,
-      "note": "CNV-002 replacement PR #307 merged at 4f1ab1b227d4fa21bf28a2b7b0923727dd662ca0 into main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; do not list #291 as active."
+      "note": "Historical 2026-11-16 record: CNV-002 replacement PR #307 had merged at 4f1ab1b227d4fa21bf28a2b7b0923727dd662ca0 into then-main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; do not list #291 as active. Current main later advanced to 7552713a9c8b4515904d3e562c8b1c188a9d8676 through merged PRs #332 and #339."
     },
     {
+      "observation_as_of": "2026-11-16",
       "pull_request": 292,
       "state": "CLOSED",
       "superseded_by": 314,
       "head_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
       "replacement_head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
-      "note": "CNV-001 PR #292 is closed as superseded by clean replacement PR #314, based on main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea. Replacement #314 remains open/draft; issue #118 remains open."
+      "note": "Historical 2026-11-16 record: PR #292 was closed and replacement PR #314 was then OPEN/DRAFT at main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; issue #118 was then OPEN. Current state: PR #314 closed unmerged, issue #118 CLOSED, and density conversion is on main via merged PR #332 (merge 7bb0a7bebe39c214ce0b3e7b221c8d2152ce35bd) at current main 7552713a9c8b4515904d3e562c8b1c188a9d8676."
     },
     {
+      "observation_as_of": "2026-11-16",
       "pull_request": 300,
       "state": "CLOSED",
       "superseded_by": 306,
-      "note": "Do not treat PR #300 as the current FNT-002 branch; PR #306 is the current open draft replacement."
+      "note": "Historical 2026-11-16 record: PR #306 was the then-current FNT-002 open draft replacement for #300. PR #306 has since closed; current FNT-002 PR #334 is OPEN/DRAFT at head 5b677c503c27ceb29417391504417a7076945383 and issue #120 is OPEN."
     },
     {
+      "observation_as_of": "2026-11-16",
       "pull_request": 303,
       "state": "CLOSED",
       "superseded_by": 308,
-      "note": "PR #308 is the current RND-001 open draft replacement; do not list #303 as active."
+      "note": "Historical 2026-11-16 record: PR #308 was the then-current RND-001 open draft replacement for #303. PR #308 has since closed; current RND-001 PR #320 is OPEN/DRAFT at head d6b7db23678b29abe17bf39c5d9d15d55b1ee0f9 and issue #123 is OPEN."
     }
   ],
   "fixture_and_settings_hashes": {
@@ -710,7 +835,7 @@
   },
   "final_disposition": {
     "decision": "no-go",
-    "reason": "Current main includes merged CNV-002, but no integrated M1 source/binary candidate exists; mandatory exact-candidate, firewall-denied, native/manual, and P0 evidence is missing, and independent reviewer signoff remains pending.",
+    "reason": "Current main @7552713a9c8b4515904d3e562c8b1c188a9d8676 includes density via merged PR #332 and raster-budget changes via #339, but apps/cli is absent and no integrated M1 source/binary candidate exists. The current exact-head QA-102/EC-010 fixture-run receipt, QA-004 scenario receipt, mandatory firewall-denied and native/manual evidence, P0 evidence, and independent reviewer sign-offs remain missing.",
     "issue_211_remains_open": true,
     "m1_completion_claimed": false,
     "native_renderer_or_wallpaper_claimed": false
