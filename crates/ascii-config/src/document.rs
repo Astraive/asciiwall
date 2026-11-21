@@ -92,6 +92,16 @@ pub(crate) fn encode(
     revision: u64,
     overrides: &BTreeMap<SettingKey, SettingValue>,
 ) -> Result<Vec<u8>, DocumentError> {
+    encode_with_serializer(revision, overrides, |root| {
+        toml::to_string(root).map_err(|_| DocumentError::Serialization)
+    })
+}
+
+fn encode_with_serializer(
+    revision: u64,
+    overrides: &BTreeMap<SettingKey, SettingValue>,
+    serialize: impl FnOnce(&toml::Value) -> Result<String, DocumentError>,
+) -> Result<Vec<u8>, DocumentError> {
     if revision > i64::MAX as u64 {
         return Err(DocumentError::RevisionOverflow);
     }
@@ -100,6 +110,24 @@ pub(crate) fn encode(
             limit: MAX_SETTING_ENTRIES,
         });
     }
+    // Preserve scalar validation errors before applying the encoded-size bound.
+    for value in overrides.values() {
+        if matches!(value, SettingValue::Number(number) if !number.is_finite()) {
+            return Err(DocumentError::NonFiniteNumber);
+        }
+    }
+    let mut text_bytes = 0usize;
+    for value in overrides.values() {
+        if let SettingValue::Text(text) = value {
+            if text.len() > MAX_CONFIG_BYTES - text_bytes {
+                return Err(DocumentError::TooLarge {
+                    limit: MAX_CONFIG_BYTES,
+                });
+            }
+            text_bytes += text.len();
+        }
+    }
+
     let mut settings = toml::map::Map::new();
     for (key, value) in overrides {
         settings.insert(key.as_str().to_owned(), encode_scalar(value)?);
@@ -111,8 +139,7 @@ pub(crate) fn encode(
     );
     root.insert("revision".to_owned(), toml::Value::Integer(revision as i64));
     root.insert("settings".to_owned(), toml::Value::Table(settings));
-    let text =
-        toml::to_string(&toml::Value::Table(root)).map_err(|_| DocumentError::Serialization)?;
+    let text = serialize(&toml::Value::Table(root))?;
     if text.len() > MAX_CONFIG_BYTES {
         return Err(DocumentError::TooLarge {
             limit: MAX_CONFIG_BYTES,
@@ -250,10 +277,8 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
                         1
                     };
                     let content_start = index + open_count;
-                    if let Some(relative_end) =
-                        bytes[content_start..].iter().position(|b| *b == b']')
-                    {
-                        enforce_path_depth(&bytes[content_start..content_start + relative_end])?;
+                    if let Some(header_end) = table_header_terminator(bytes, content_start) {
+                        enforce_path_depth(&bytes[content_start..header_end])?;
                     }
                 }
                 if depth == MAX_NESTING_DEPTH {
@@ -302,6 +327,37 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
     }
     Ok(())
 }
+
+fn table_header_terminator(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().enumerate().skip(start) {
+        if matches!(*byte, b'\n' | b'\r') {
+            return None;
+        }
+        if let Some(quote_byte) = quote {
+            if quote_byte == b'"' {
+                if escaped {
+                    escaped = false;
+                } else if *byte == b'\\' {
+                    escaped = true;
+                } else if *byte == quote_byte {
+                    quote = None;
+                }
+            } else if *byte == quote_byte {
+                quote = None;
+            }
+        } else {
+            match *byte {
+                b'"' | b'\'' => quote = Some(*byte),
+                b']' => return Some(index),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 
 fn is_line_prefix_whitespace(bytes: &[u8], index: usize) -> bool {
     let line_start = bytes[..index]
@@ -376,9 +432,13 @@ impl std::error::Error for DocumentError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{DocumentError, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH, MAX_SETTING_ENTRIES, decode};
-    use crate::model::{SettingKey, SettingValue};
-    use std::fmt::Write as _;
+    use super::{
+        DocumentError, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH, MAX_SETTING_ENTRIES, decode,
+        encode_with_serializer,
+    };
+    use crate::model::{SettingKey, SettingType, SettingValue};
+    use std::{cell::Cell, collections::BTreeMap, fmt::Write as _};
+
 
     #[test]
     fn inline_table_dotted_key_depth_accepts_limit_and_rejects_over_limit() {
@@ -421,6 +481,64 @@ mod tests {
             Some(&SettingValue::Integer(240))
         );
     }
+
+    #[test]
+    fn oversized_schema_string_is_rejected_before_toml_serialization() {
+        let max_chars = MAX_CONFIG_BYTES + 1;
+        let schema_type = SettingType::String { max_chars };
+        let value = SettingValue::text("x".repeat(max_chars));
+        assert!(schema_type.validates(&value).is_ok());
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert(SettingKey::new("application.label").unwrap(), value);
+        let original = overrides.clone();
+        let serializer_calls = Cell::new(0);
+        let result = encode_with_serializer(0, &overrides, |_| {
+            serializer_calls.set(serializer_calls.get() + 1);
+            Ok(String::new())
+        });
+
+        assert!(matches!(
+            result,
+            Err(DocumentError::TooLarge {
+                limit: MAX_CONFIG_BYTES
+            })
+        ));
+        assert_eq!(serializer_calls.get(), 0);
+        assert_eq!(overrides, original);
+    }
+
+    #[test]
+    fn table_header_depth_counts_quoted_basic_literal_and_escaped_keys() {
+        let suffix = ".a".repeat(MAX_NESTING_DEPTH);
+        let headers = [
+            format!("[settings.\"x]\"{suffix}]"),
+            format!(r#"[settings."x\"]"{suffix}]"#),
+            format!("[settings.'x]'{suffix}]"),
+        ];
+
+        for header in headers {
+            let document = format!("schema_version = 2\nrevision = 0\n{header}\n");
+            assert!(matches!(
+                decode(document.as_bytes()),
+                Err(DocumentError::ExcessiveNesting {
+                    limit: MAX_NESTING_DEPTH
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn shallow_quoted_bracket_table_headers_reach_schema_validation() {
+        for header in [r#"["extra]"]"#, "['extra]']"] {
+            let document = format!("schema_version = 2\nrevision = 0\n{header}\n");
+            assert!(matches!(
+                decode(document.as_bytes()),
+                Err(DocumentError::UnknownRootField(field)) if field == "extra]"
+            ));
+        }
+    }
+
 
     #[test]
     fn preflight_detects_nesting_after_multiline_basic_closing_quote_run() {

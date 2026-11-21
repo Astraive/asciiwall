@@ -665,3 +665,79 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
         ))
     ));
 }
+
+#[test]
+fn quoted_table_header_depth_is_preflighted_before_parsing() {
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    let suffix = ".a".repeat(MAX_NESTING_DEPTH);
+    let deep_headers = [
+        format!("[settings.\"x]\"{suffix}]"),
+        format!(r#"[settings."x\"]"{suffix}]"#),
+        format!("[settings.'x]'{suffix}]"),
+    ];
+
+    for header in deep_headers {
+        let document = format!("schema_version = 2\nrevision = 0\n{header}\n");
+        fs::write(&path, document).unwrap();
+        assert!(matches!(
+            read_status(&path),
+            ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+                DocumentError::ExcessiveNesting {
+                    limit: MAX_NESTING_DEPTH
+                }
+            ))
+        ));
+    }
+
+    for header in [r#"["extra]"]"#, "['extra]']"] {
+        let document = format!("schema_version = 2\nrevision = 0\n{header}\n");
+        fs::write(&path, document).unwrap();
+        assert!(matches!(
+            read_status(&path),
+            ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+                DocumentError::UnknownRootField(field)
+            )) if field == "extra]"
+        ));
+    }
+}
+
+#[test]
+fn oversized_registered_string_is_rejected_without_publishing_snapshot() {
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    let max_chars = MAX_CONFIG_BYTES + 1;
+    let setting_key = key("application.label");
+    let registry = Arc::new(
+        Registry::new([descriptor(
+            "application.label",
+            SettingValue::text("default"),
+            SettingType::String { max_chars },
+            SettingScope::A,
+            None,
+            InvalidationClass::Controller,
+            SemanticValidator::None,
+        )])
+        .unwrap(),
+    );
+    let original =
+        b"schema_version = 2\nrevision = 5\n[settings]\n\"application.label\" = \"previous\"\n";
+    fs::write(&path, original).unwrap();
+    let controller = SettingsController::open(&path, registry).unwrap();
+    let before = controller.snapshot().unwrap();
+    let changes = [(
+        setting_key,
+        SettingChange::Set(SettingValue::text("x".repeat(max_chars))),
+    )];
+    let original_changes = changes.clone();
+
+    assert!(matches!(
+        controller.apply_batch(before.revision(), &changes),
+        Err(ConfigError::Document(DocumentError::TooLarge {
+            limit: MAX_CONFIG_BYTES
+        }))
+    ));
+    assert_eq!(controller.snapshot().unwrap().as_ref(), before.as_ref());
+    assert_eq!(changes, original_changes);
+    assert_eq!(fs::read(path).unwrap().as_slice(), &original[..]);
+}
