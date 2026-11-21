@@ -84,6 +84,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo check --locked --package ascii-core --no-default-features
 cargo test --locked --package ascii-core --no-default-features
+cargo test --locked --package ascii-media
 cargo tree --locked --package ascii-core --edges all
 ```
 
