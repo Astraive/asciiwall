@@ -1,0 +1,11 @@
+[package]
+name = "ascii-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+fs2 = "=0.4.3"
+toml = "=0.8.23"
