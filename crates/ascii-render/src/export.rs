@@ -570,7 +570,7 @@ mod tests {
     use ascii_convert::{GlyphConfig, GlyphRepertoire, build_glyph_table};
     use ascii_core::{AsciiCell, Budget, CancellationToken, Error};
 
-    #[path = "../tests/support/mod.rs"]
+    #[path = "../../../tests/support/mod.rs"]
     mod support;
 
     #[test]
