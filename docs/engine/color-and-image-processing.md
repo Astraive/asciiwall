@@ -16,7 +16,10 @@ Unknown source profile fields may use an sRGB assumption for SDR input, but norm
 a material `AssumedSrgbForUnknownProfile` warning. This is not HDR detection or full color
 management: explicit PQ/HLG input returns a typed unsupported-HDR failure, and explicit Display-P3
 or Rec. 2020 primaries return a typed unsupported-wide-gamut failure. There is no implicit tone map,
-wide-gamut conversion, clipping, or complete ICC-profile claim.
+wide-gamut conversion, clipping, or complete ICC-profile claim. The convenience
+`convert_density` API preserves its `Error::Unsupported(ColorDescription)` contract, but its
+display text directs callers to provide SDR sRGB input; `convert_density_detailed` retains
+the exact profile-specific normalization failure.
 
 ## Image preprocessing order
 
@@ -24,21 +27,36 @@ Decode within limits and apply display orientation once in the decoder; then int
 
 The IMG-001 `ascii-media` decoder applies display orientation once and returns top-down pixels, as described below. `ascii-convert` accepts these top-down raster inputs and never transforms orientation. The decoder rejects unsupported color metadata rather than converting profiles; `ascii-convert` then performs the linear-light normalization described above. A normalized raster is owned linear-premultiplied RGBA, and raster size, stride, input extent, output allocation size, work, and cancellation are checked before and during normalization.
 
+`ascii-convert` sizes column grids from the selected source geometry: custom-crop mode uses the
+crop's aspect rather than the full raster, while fixed-pixel surfaces retain floor division and
+right/bottom leftovers. The detailed density-conversion result carries any material warning from
+normalization (including the sRGB assumption for unknown profile fields) alongside the generated
+frame; callers must surface that warning rather than discard it. Optional retained quality patches
+are bounded by the shared raster/work budgets before allocation, and their zero-initialization is
+charged to work and checked for cancellation at bounded intervals.
+
 Premultiplied RGBA is scanned in a cancellable preflight before normalized output is allocated;
 each pixel is charged once for that validation and once for normalization. Straight and opaque
 inputs require only the normalization pass.
 
-The normalizer's raster-byte ceiling covers the checked sum of the borrowed input's minimum
-readable extent, `(height - 1) * row_stride + row_bytes`, and its requested owned normalized pixel
-storage, `width * height * size_of::<LinearPremultipliedRgba>()`. It includes padding between rows
-but excludes trailing bytes after the last pixel. The borrowed input extent is counted once beside
-the distinct output, although the normalizer does not allocate that input buffer. This is an
-operation-local ceiling check: `Budget` stores numeric ceilings only, not a shared reservation or
-process-wide usage. The returned normalized raster remains caller-owned and live after this check;
-any limit across it and other concurrently retained storage belongs to a higher-level owner.
-Unused input backing capacity and allocator overhead or over-allocation are outside this
-extent/request check. The input extent is already included in this operation's calculation and must
-not be subtracted from the budget passed to the normalizer.
+The normalizer's per-operation raster-byte ceiling covers the checked sum of the borrowed input's
+minimum readable extent, `(height - 1) * row_stride + row_bytes`, and its requested owned normalized
+pixel storage, `width * height * size_of::<LinearPremultipliedRgba>()`. It includes padding between
+rows but excludes trailing bytes after the last pixel. The borrowed input extent is counted exactly
+once beside the distinct output, even though the normalizer does not allocate the input buffer.
+`Budget` remains an allocation-free per-operation ceiling; it records no shared or process-wide
+usage.
+
+`NormalizedRasterResources` is a caller-created, clonable shared owner with a separate ceiling for
+concurrently retained normalized output. Normalization reserves the checked output bytes before
+allocation, and the returned `NormalizedRaster` holds that RAII reservation until drop; failed
+allocation, cancellation, and validation errors release it. The shared owner tracks only the
+normalized output it owns, not the borrowed input extent already owned upstream. Density conversion
+APIs take the same owner explicitly so callers can share one ceiling across concurrent operations.
+
+Unused input backing capacity and allocator overhead or over-allocation are outside these logical
+extent/request checks. The input extent is already included in the per-operation calculation and
+must not be subtracted from the `Budget` passed to the normalizer.
 
 ## Alpha
 
@@ -99,11 +117,15 @@ charged before output allocation. PNG scratch includes row/inflater and reader b
 largest non-IDAT chunk buffer; large IDAT payloads are streamed and are not counted again as
 codec scratch. Progressive JPEG scan-block work is budgeted separately from pixel work. Retained
 output remains charged until its `DecodedFrame` is dropped; its `RasterFrameView` borrows from
-that owner. Cancellation is checked whenever either codec requests compressed input through a
-128-byte buffer. JPEG marker and entropy FF-fill loops poll at 8 KiB offsets. This is bounded
-input/parser cancellation, not CPU preemption: work over buffered input or between JPEG polls may
-continue until the next check. Deterministic tests cover regular/Adam7 PNG, progressive JPEG
-refills, and cancellation inside both JPEG FF-fill loops.
+that owner. Snapshot acquisition requests at most 128 bytes per caller `Read` and checks the
+token between completed calls; cancellation cannot interrupt an underlying `Read` while it is
+blocked. Codec compressed-input reads use a 128-byte buffer, and JPEG marker/entropy FF-fill
+loops poll at 8 KiB offsets. Pixel normalization polls at each row boundary and after each
+128 pixels within a row. These checks bound work intervals but are not CPU or I/O preemption:
+codec work may continue until its next poll, and a caller's in-progress `Read` cannot be
+interrupted until that call returns. Deterministic tests cover regular/Adam7 PNG, progressive JPEG
+refills, cancellation inside both JPEG FF-fill loops, and cancellation partway through a one-row
+grayscale PNG normalization pass.
 Malformed input, cancellation, and failed budget checks release reservations without publishing
 partial frames. Codec-provided allocation limits remain defense in depth; application
 accounting is not an allocator-enforced process memory limit.
