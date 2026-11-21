@@ -717,9 +717,9 @@ impl Storage {
         Ok(())
     }
 
-    /// Explicitly restores schema-valid last-good TOML without changing the backup.
-    /// A parseable current document with a newer `schema_version` is preserved rather than
-    /// downgraded.
+    /// Explicitly restores schema-valid last-good TOML without changing the backup. A lower
+    /// versioned backup is refused, as is a comparison where only one parseable document is
+    /// versioned.
     pub fn restore_config_from_backup<E: fmt::Display>(
         &self,
         validate: impl FnOnce(&TomlValue) -> Result<(), E>,
@@ -750,20 +750,28 @@ impl Storage {
         })?;
         let value = parse_toml_value(&bytes)?;
         validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
-        if let (Some(current_version), Some(backup_version)) = (
-            current.as_ref().and_then(config_schema_version),
-            config_schema_version(&value),
-        ) && current_version > backup_version
-        {
-            let version = u32::try_from(current_version).map_err(|_| {
-                StorageError::InvalidConfiguration(format!(
-                    "current settings schema version {current_version} is newer than last-good version {backup_version}"
-                ))
-            })?;
-            return Err(StorageError::UnsupportedVersion {
-                kind: "settings configuration",
-                version,
-            });
+        let current_version = current.as_ref().and_then(config_schema_version);
+        let backup_version = config_schema_version(&value);
+        match (current.as_ref(), current_version, backup_version) {
+            (Some(_), Some(current_version), Some(backup_version))
+                if current_version > backup_version =>
+            {
+                let version = u32::try_from(current_version).map_err(|_| {
+                    StorageError::InvalidConfiguration(format!(
+                        "current settings schema version {current_version} is newer than last-good version {backup_version}"
+                    ))
+                })?;
+                return Err(StorageError::UnsupportedVersion {
+                    kind: "settings configuration",
+                    version,
+                });
+            }
+            (Some(_), Some(_), None) | (Some(_), None, Some(_)) => {
+                return Err(StorageError::InvalidConfiguration(
+                    "cannot compare versioned and versionless settings during recovery".into(),
+                ));
+            }
+            _ => {}
         }
         atomic_replace_locked(&destination, &bytes, None, None, &mut |_| Ok(()))?;
         Ok(())
