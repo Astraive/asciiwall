@@ -4,7 +4,8 @@ use ascii_convert::{
     GlyphConfig, GlyphRepertoire, build_glyph_table, is_supported_single_cell_scalar,
 };
 use ascii_core::{
-    Budget, BudgetKind, CancellationToken, Error, MalformedReason, UnsupportedReason,
+    Budget, BudgetKind, CancellationToken, Error, GlyphFailureReason, MalformedReason,
+    UnsupportedReason,
 };
 use support::synthetic_font::{
     composite_font, diagonal_font, legacy_format2_font, quadratic_font, synthetic_font,
@@ -153,14 +154,26 @@ fn invalid_and_missing_repertoires_return_typed_errors() {
     let token = CancellationToken::new();
     let generous = budget(1_000_000, 1_000_000);
 
-    for invalid in [
-        "", "A\n", "AA", "\u{202e}", "\u{0301}", "\u{fe0f}", "界", "😀",
-    ] {
-        assert_eq!(
+    assert_eq!(
+        GlyphRepertoire::new(""),
+        Err(Error::Malformed(MalformedReason::InvalidConfiguration))
+    );
+    for invalid in ["A\n", "\u{202e}", "\u{0301}", "\u{fe0f}", "界", "😀"] {
+        assert!(matches!(
             GlyphRepertoire::new(invalid),
-            Err(Error::Malformed(MalformedReason::InvalidConfiguration))
-        );
+            Err(Error::Glyph {
+                reason: GlyphFailureReason::UnsupportedScalar,
+                ..
+            })
+        ));
     }
+    assert_eq!(
+        GlyphRepertoire::new("AA"),
+        Err(Error::Glyph {
+            character: 'A',
+            reason: GlyphFailureReason::DuplicateScalar,
+        })
+    );
     for accepted in [' ', 'A', '\u{2580}', '\u{259f}', '\u{2800}', '\u{28ff}'] {
         assert!(is_supported_single_cell_scalar(accepted));
         assert_eq!(
@@ -172,7 +185,10 @@ fn invalid_and_missing_repertoires_return_typed_errors() {
     }
     assert_eq!(
         build_glyph_table(&font, &repertoire("C"), &config(), &generous, &token),
-        Err(Error::Unsupported(UnsupportedReason::GlyphUnavailable))
+        Err(Error::Glyph {
+            character: 'C',
+            reason: GlyphFailureReason::GlyphUnavailable,
+        })
     );
     assert_eq!(
         build_glyph_table(&[0, 1, 2], &repertoire("A"), &config(), &generous, &token),
@@ -285,7 +301,7 @@ fn resource_limits_and_cancellation_fail_before_publishing_a_table() {
 fn outline_raster_work_is_bounded_at_the_requested_size() {
     let token = CancellationToken::new();
     let small = GlyphConfig::new(8.0, 8, 12, 9).expect("valid small raster");
-    let large = GlyphConfig::new(128.0, 8, 12, 9).expect("valid large raster");
+    let large = GlyphConfig::new(128.0, 128, 12, 9).expect("valid large single-cell raster");
     let raster_bytes = 2_000_000;
 
     let diagonal = diagonal_font(false);
@@ -302,7 +318,7 @@ fn outline_raster_work_is_bounded_at_the_requested_size() {
     // two parser passes (one cmap record, three mappings, 256 six-callback
     // contours and two six-callback rectangles), and bitmap area + dimensions.
     let previous_work = 2 * diagonal.len()
-        + 8 * 12
+        + 128 * 12
         + parsed.chars().len().max(1)
         + 2 * (4 + 6 * (256 + 2))
         + metrics.width * metrics.height
@@ -359,7 +375,7 @@ fn outline_raster_work_is_bounded_at_the_requested_size() {
 #[test]
 fn aliases_are_charged_for_each_rasterization() {
     let font = diagonal_font(true);
-    let config = GlyphConfig::new(128.0, 8, 12, 9).expect("valid raster geometry");
+    let config = GlyphConfig::new(128.0, 128, 12, 9).expect("valid raster geometry");
     let token = CancellationToken::new();
     let limit = budget(2_000_000, 150_000);
 
@@ -482,7 +498,7 @@ fn legacy_format_two_coexists_with_unicode_cmap_and_malformed_tables_fail() {
 #[test]
 fn one_pixel_cells_have_nonzero_normalized_edge_descriptors() {
     let font = synthetic_font(false);
-    let config = GlyphConfig::new(8.0, 1, 1, 1).expect("valid one-pixel cell");
+    let config = GlyphConfig::new(1.0, 1, 1, 1).expect("valid one-pixel cell");
     let token = CancellationToken::new();
     let table = build_glyph_table(
         &font,

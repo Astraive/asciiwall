@@ -11,7 +11,7 @@ use ascii_convert::{
 };
 use ascii_core::{
     AsciiCell, AsciiFrame, Budget, BudgetKind, CancellationToken, Error, FrameMetadata,
-    GlyphTableId, GridSize, MalformedReason,
+    GlyphFailureReason, GlyphTableId, GridSize, MalformedReason,
 };
 use ascii_render::{AnsiColorMode, ExportError, ExportTarget, export};
 use support::synthetic_font::synthetic_font;
@@ -134,6 +134,50 @@ fn text_ansi_golden() {
         );
         assert_eq!(ansi.bytes(), expected.as_bytes());
     }
+}
+
+#[test]
+fn text_export_uses_the_strict_measured_cell_glyph_table() {
+    let repertoire = GlyphRepertoire::new("█").expect("block glyph is in the strict repertoire");
+    let cancellation = CancellationToken::new();
+    let normal_table = build_glyph_table(
+        &synthetic_font(),
+        &repertoire,
+        &config(),
+        &FONT_BUDGET,
+        &cancellation,
+    )
+    .expect("block glyph advance fits the normal 8px cell");
+    assert_eq!(normal_table.cell_width(), 8);
+
+    let frame = grid_frame(&normal_table, &['█'], 1, 1);
+    let output = export(
+        &frame,
+        &normal_table,
+        ExportTarget::Text,
+        &FONT_BUDGET,
+        &cancellation,
+    )
+    .expect("the validated glyph table reaches text export");
+    assert_eq!(output.bytes(), "█\n".as_bytes());
+
+    let narrow_config =
+        GlyphConfig::new(8.0, 4, 12, 9).expect("fixture geometry is valid for a 4px cell");
+    let narrow_error = build_glyph_table(
+        &synthetic_font(),
+        &repertoire,
+        &narrow_config,
+        &FONT_BUDGET,
+        &cancellation,
+    )
+    .expect_err("FNT-002 rejects the measured over-advance before table export");
+    assert_eq!(
+        narrow_error,
+        Error::Glyph {
+            character: '█',
+            reason: GlyphFailureReason::MultiCellMetrics,
+        }
+    );
 }
 
 #[test]
