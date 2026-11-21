@@ -21,7 +21,7 @@ This matrix defines **120 proposed scenarios** and expected outcomes. It is not 
 
 ### QA-102 portable regression coverage
 
-The EC-006–EC-008 PASS rows below are portable CPU/API results from the QA-102 conversion suite run on the replacement source/test revision recorded in the execution-evidence subsection; the results are limited to the named boundaries and are not a QA-004 acceptance receipt.
+The EC-006–EC-008 PASS rows below are portable CPU/API results; historical and exact-head run revisions are recorded separately in the execution-evidence subsections. These results are limited to the named boundaries and are not a QA-004 acceptance receipt.
 
 | ID | Exercised real interface | Remaining boundary |
 |---|---|---|
@@ -31,9 +31,9 @@ The EC-006–EC-008 PASS rows below are portable CPU/API results from the QA-102
 | EC-009 | **NOT RUN.** The separately named raw-raster backing validation regression verifies that the converter preserves `RasterBackingTooShort`; it is not EC-009 because it does not use malformed encoded input, a restricted worker, or a UI. | The current three-member workspace has no SEC-005 restricted media worker or UIX-001 application UI/safe-error surface. The required malformed/truncated encoded-input → worker failure → safe UI error path is unavailable; no worker/UI pass is claimed. |
 | EC-010 | **PASS (exact PR #337 head `27c8bc179436a1851a865f489d92c009e7ba2247` at the time of the rerun; tested source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8`).** `image::codec_cancellation_tests::oversized_jpeg_is_rejected_before_output_allocation` in `crates/ascii-media/src/image.rs` feeds a sub-1-KiB JPEG advertising 4096×4096 through the decoder with an injected output allocator. The test asserts `BudgetExceeded(RasterBytes)` and that the allocator was never invoked; the exact-head command passed, 1 passed, 11 filtered. | Decoder budget-guard coverage only; this is not a QA-004 evidence receipt. The generated JPEG is not separately persisted or hashed; no QA-004 archive/receipt is claimed. |
 
-#### QA-102 replacement-code execution evidence
+#### Historical QA-102 portable execution evidence
 
-The EC-006–EC-008 PASS rows above are supported by these checks on replacement source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8`:
+The following checks were run on replacement source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8`. They remain historical evidence for that revision and do not establish results for later source/test snapshots:
 
 - `cargo test --locked -p ascii-convert --test qa_102_input_conversion` — **PASS**, 6 passed.
 - `ascii-convert` package test suites — **PASS**, 80 passed across 6 suites.
@@ -41,7 +41,16 @@ The EC-006–EC-008 PASS rows above are supported by these checks on replacement
 - `cargo fmt --all -- --check` — **PASS**.
 - Strict workspace Clippy (`cargo clippy --locked --workspace --all-targets -- -D warnings`) — **PASS**.
 
-PR commits `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c` and `27c8bc179436a1851a865f489d92c009e7ba2247` were docs-only; the exact QA-102 conversion suite was not rerun at either head. Those documentation-only edits do not alter the tested source/test code.
+At that time, PR commits `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c` and `27c8bc179436a1851a865f489d92c009e7ba2247` were docs-only and the QA-102 conversion suite was not rerun at either head. This historical limitation is superseded by the exact-head run below, not by changing the results above.
+
+#### QA-102 exact-head portable execution evidence
+
+EC-006–EC-008 were exercised at exact PR #337 head and tested source/test revision `37f12f1afeefdab509f3315a47c90fc1a7e84d25`:
+
+- `cargo test --locked -p ascii-convert` — **PASS**, 85 passed across 8 suites.
+- **Host/environment:** Windows x64; isolated `CARGO_HOME` and `CARGO_TARGET_DIR`; portable CPU test run.
+
+This tested snapshot includes the updated normalization/conversion/sampling code and QA-102 tests using `NormalizedRasterResources`. The explicit owner bounds concurrently retained owned normalized-output bytes; each operation's `Budget` remains separate for input extent and per-operation limits. This evidence is limited to the portable normalization/conversion API and resource-owner boundary. It does not claim QA-004 receipt integration, restricted-worker/UI behavior, native/manual evidence, or full QA-102 acceptance; existing NOT RUN limitations remain.
 
 #### EC-010 source revision and exact-head evidence
 
