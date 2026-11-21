@@ -948,12 +948,6 @@ fn sample_collapsed_box_footprint(
 ) -> Result<f64, Error> {
     let source_rect = transform.source_rect;
     let display_rect = transform.display_rect;
-    let source_offset_x =
-        (display_sample.x - display_rect.x) * source_rect.width / display_rect.width;
-    let source_offset_y =
-        (display_sample.y - display_rect.y) * source_rect.height / display_rect.height;
-    let span_x = display_sample.width * source_rect.width / display_rect.width;
-    let span_y = display_sample.height * source_rect.height / display_rect.height;
     let sample_start_x = (display_sample.x - display_rect.x) / display_rect.width;
     let sample_start_y = (display_sample.y - display_rect.y) / display_rect.height;
     let sample_end_x = (display_sample.right() - display_rect.x) / display_rect.width;
@@ -975,52 +969,26 @@ fn sample_collapsed_box_footprint(
         .clamp(0.0, 1.0);
     let mut weighted_luminance = 0.0;
     if covered_fraction_x > 0.0 && covered_fraction_y > 0.0 {
-        let mut first_x = source_rect.x.floor().max(0.0) as u32;
-        let mut first_y = source_rect.y.floor().max(0.0) as u32;
-        let mut end_x = source_rect.right().ceil().min(f64::from(raster.width())) as u32;
-        let mut end_y = source_rect.bottom().ceil().min(f64::from(raster.height())) as u32;
-        let y_interval = if span_x == 0.0 && span_y > 0.0 {
-            collapsed_box_sample_axis_interval(
-                source_rect.y,
-                source_rect.height,
-                source_offset_y,
-                span_y,
-                raster.height(),
-            )?
-        } else {
-            None
-        };
-        if let Some(interval) = y_interval {
-            first_y = first_y.max(interval.first_pixel);
-            end_y = end_y.min(interval.end_pixel);
-        }
-        let x_interval = if span_y == 0.0 && span_x > 0.0 {
-            collapsed_box_sample_axis_interval(
-                source_rect.x,
-                source_rect.width,
-                source_offset_x,
-                span_x,
-                raster.width(),
-            )?
-        } else {
-            None
-        };
-        if let Some(interval) = x_interval {
-            first_x = first_x.max(interval.first_pixel);
-            end_x = end_x.min(interval.end_pixel);
-        }
-        for y in first_y..end_y {
-            let weight_y = normalized_pixel_overlap(
-                sample_start_y,
-                sample_end_y,
-                source_rect.y,
-                source_rect.height,
-                f64::from(y),
-            );
-            if weight_y <= 0.0 {
-                continue;
-            }
-            for x in first_x..end_x {
+        let ranges = collapsed_box_sample_candidate_ranges(
+            source_rect,
+            display_rect,
+            display_sample,
+            raster.width(),
+            raster.height(),
+        )?;
+        for_each_collapsed_box_sample_candidate(
+            ranges,
+            |y| {
+                let weight_y = normalized_pixel_overlap(
+                    sample_start_y,
+                    sample_end_y,
+                    source_rect.y,
+                    source_rect.height,
+                    f64::from(y),
+                );
+                Ok((weight_y > 0.0).then_some(weight_y))
+            },
+            |x, y, weight_y| {
                 let weight_x = normalized_pixel_overlap(
                     sample_start_x,
                     sample_end_x,
@@ -1030,21 +998,108 @@ fn sample_collapsed_box_footprint(
                 );
                 let area_weight = weight_x * weight_y;
                 if area_weight <= 0.0 {
-                    continue;
+                    return Ok(());
                 }
-                *work = work.checked_add(1).ok_or(Error::SizeOverflow)?;
-                if (*work).is_multiple_of(SAMPLER_CANCEL_INTERVAL) && cancellation.is_cancelled() {
-                    return Err(Error::Cancelled);
-                }
+                charge_sampler_work(work, || cancellation.is_cancelled())?;
                 let index = pixel_index(x, y, raster.width())?;
                 weighted_luminance +=
                     pixel_luminance(raster.pixels()[index], background) * area_weight;
-            }
-        }
+                Ok(())
+            },
+        )?;
     }
     let uncovered_fraction = (1.0 - covered_fraction_x * covered_fraction_y).max(0.0);
     Ok(weighted_luminance + background.luminance().value() * uncovered_fraction)
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BoxSampleCandidateRanges {
+    first_x: u32,
+    end_x: u32,
+    first_y: u32,
+    end_y: u32,
+}
+
+fn collapsed_box_sample_candidate_ranges(
+    source_rect: SamplingRect,
+    display_rect: SamplingRect,
+    display_sample: SamplingRect,
+    raster_width: u32,
+    raster_height: u32,
+) -> Result<BoxSampleCandidateRanges, Error> {
+    let source_offset_x =
+        (display_sample.x - display_rect.x) * source_rect.width / display_rect.width;
+    let source_offset_y =
+        (display_sample.y - display_rect.y) * source_rect.height / display_rect.height;
+    let span_x = display_sample.width * source_rect.width / display_rect.width;
+    let span_y = display_sample.height * source_rect.height / display_rect.height;
+    let mut ranges = BoxSampleCandidateRanges {
+        first_x: source_rect.x.floor().max(0.0) as u32,
+        end_x: source_rect.right().ceil().min(f64::from(raster_width)) as u32,
+        first_y: source_rect.y.floor().max(0.0) as u32,
+        end_y: source_rect.bottom().ceil().min(f64::from(raster_height)) as u32,
+    };
+    let y_interval = if span_x == 0.0 && span_y > 0.0 {
+        collapsed_box_sample_axis_interval(
+            source_rect.y,
+            source_rect.height,
+            source_offset_y,
+            span_y,
+            raster_height,
+        )?
+    } else {
+        None
+    };
+    if let Some(interval) = y_interval {
+        ranges.first_y = ranges.first_y.max(interval.first_pixel);
+        ranges.end_y = ranges.end_y.min(interval.end_pixel);
+    }
+    let x_interval = if span_y == 0.0 && span_x > 0.0 {
+        collapsed_box_sample_axis_interval(
+            source_rect.x,
+            source_rect.width,
+            source_offset_x,
+            span_x,
+            raster_width,
+        )?
+    } else {
+        None
+    };
+    if let Some(interval) = x_interval {
+        ranges.first_x = ranges.first_x.max(interval.first_pixel);
+        ranges.end_x = ranges.end_x.min(interval.end_pixel);
+    }
+    Ok(ranges)
+}
+
+#[inline]
+fn for_each_collapsed_box_sample_candidate(
+    ranges: BoxSampleCandidateRanges,
+    mut row_weight: impl FnMut(u32) -> Result<Option<f64>, Error>,
+    mut visit_pixel: impl FnMut(u32, u32, f64) -> Result<(), Error>,
+) -> Result<(), Error> {
+    for y in ranges.first_y..ranges.end_y {
+        let Some(weight_y) = row_weight(y)? else {
+            continue;
+        };
+        for x in ranges.first_x..ranges.end_x {
+            visit_pixel(x, y, weight_y)?;
+        }
+    }
+    Ok(())
+}
+
+#[inline]
+fn charge_sampler_work(
+    work: &mut u64,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<(), Error> {
+    *work = work.checked_add(1).ok_or(Error::SizeOverflow)?;
+    if (*work).is_multiple_of(SAMPLER_CANCEL_INTERVAL) && is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    Ok(())
+}
+
 fn collapsed_box_sample_axis_interval(
     source_start: f64,
     source_extent: f64,
@@ -1506,7 +1561,10 @@ fn patch_descriptors(
 #[cfg(test)]
 mod tests {
     use super::{
-        CropRect, FitMode, FitTransform, PatchDimensions, QualityPatches, zero_fill_patch_values,
+        BoxSampleCandidateRanges, CropRect, FitMode, FitTransform, PatchDimensions,
+        QualityPatches, SamplingRect, charge_sampler_work,
+        collapsed_box_sample_candidate_ranges, for_each_collapsed_box_sample_candidate,
+        normalized_pixel_overlap, zero_fill_patch_values,
     };
     use ascii_core::{CancellationToken, Error, MalformedReason};
 
@@ -1579,5 +1637,135 @@ mod tests {
             FitTransform::new(1, 4_000_000_000, maximum_exact, 1, FitMode::Contain),
             Err(Error::SizeOverflow)
         );
+    }
+    #[test]
+    fn collapsed_box_iteration_and_poll_counts_follow_each_sample_footprint() {
+        let tiny = f64::from_bits(1);
+        let vertical_transform = FitTransform::new(
+            1,
+            1024,
+            8,
+            12,
+            FitMode::CustomCrop(
+                CropRect::new(0.0, 0.0, 2.0 * tiny, 1.0).expect("vertical crop is valid"),
+            ),
+        )
+        .expect("vertical transform is valid");
+        assert_collapsed_box_candidate_counts(vertical_transform, 1, 1024, true);
+
+        let horizontal_transform = FitTransform::new(
+            1024,
+            1,
+            8,
+            12,
+            FitMode::CustomCrop(
+                CropRect::new(0.0, 0.0, 1.0, 2.0 * tiny).expect("horizontal crop is valid"),
+            ),
+        )
+        .expect("horizontal transform is valid");
+        assert_collapsed_box_candidate_counts(horizontal_transform, 1024, 1, false);
+    }
+
+    fn assert_collapsed_box_candidate_counts(
+        transform: FitTransform,
+        raster_width: u32,
+        raster_height: u32,
+        collapsed_x: bool,
+    ) {
+        const PATCH_SIDE: u32 = 64;
+        let source_rect = transform.source_rect();
+        let display_rect = transform.display_rect();
+        let mut row_candidates = 0_u64;
+        let mut pixel_candidates = 0_u64;
+        let mut work = 0_u64;
+        let mut polls = 0_u64;
+
+        for patch_y in 0..PATCH_SIDE {
+            let sample_y = display_rect.y()
+                + display_rect.height() * f64::from(patch_y) / f64::from(PATCH_SIDE);
+            let sample_bottom = display_rect.y()
+                + display_rect.height() * f64::from(patch_y + 1) / f64::from(PATCH_SIDE);
+            for patch_x in 0..PATCH_SIDE {
+                let sample_x = display_rect.x()
+                    + display_rect.width() * f64::from(patch_x) / f64::from(PATCH_SIDE);
+                let sample_right = display_rect.x()
+                    + display_rect.width() * f64::from(patch_x + 1) / f64::from(PATCH_SIDE);
+                let display_sample = SamplingRect::new(
+                    sample_x,
+                    sample_y,
+                    sample_right - sample_x,
+                    sample_bottom - sample_y,
+                )
+                .expect("patch sample is valid");
+                let ranges = collapsed_box_sample_candidate_ranges(
+                    source_rect,
+                    display_rect,
+                    display_sample,
+                    raster_width,
+                    raster_height,
+                )
+                .expect("sample candidate ranges are valid");
+                let expected_ranges = if collapsed_x {
+                    BoxSampleCandidateRanges {
+                        first_x: 0,
+                        end_x: 1,
+                        first_y: patch_y * 16,
+                        end_y: (patch_y + 1) * 16,
+                    }
+                } else {
+                    BoxSampleCandidateRanges {
+                        first_x: patch_x * 16,
+                        end_x: (patch_x + 1) * 16,
+                        first_y: 0,
+                        end_y: 1,
+                    }
+                };
+                assert_eq!(ranges, expected_ranges);
+
+                let sample_start_x =
+                    (display_sample.x() - display_rect.x()) / display_rect.width();
+                let sample_start_y =
+                    (display_sample.y() - display_rect.y()) / display_rect.height();
+                let sample_end_x = (sample_right - display_rect.x()) / display_rect.width();
+                let sample_end_y = (sample_bottom - display_rect.y()) / display_rect.height();
+                for_each_collapsed_box_sample_candidate(
+                    ranges,
+                    |y| {
+                        row_candidates += 1;
+                        let weight_y = normalized_pixel_overlap(
+                            sample_start_y,
+                            sample_end_y,
+                            source_rect.y(),
+                            source_rect.height(),
+                            f64::from(y),
+                        );
+                        Ok((weight_y > 0.0).then_some(weight_y))
+                    },
+                    |x, _y, weight_y| {
+                        pixel_candidates += 1;
+                        let weight_x = normalized_pixel_overlap(
+                            sample_start_x,
+                            sample_end_x,
+                            source_rect.x(),
+                            source_rect.width(),
+                            f64::from(x),
+                        );
+                        if weight_x * weight_y > 0.0 {
+                            charge_sampler_work(&mut work, || {
+                                polls += 1;
+                                false
+                            })?;
+                        }
+                        Ok(())
+                    },
+                )
+                .expect("sample candidate traversal succeeds");
+            }
+        }
+
+        assert_eq!(row_candidates, if collapsed_x { 65_536 } else { 4_096 });
+        assert_eq!(pixel_candidates, 65_536);
+        assert_eq!(work, 65_536);
+        assert_eq!(polls, 256);
     }
 }
