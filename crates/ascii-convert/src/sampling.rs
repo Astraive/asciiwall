@@ -1561,10 +1561,9 @@ fn patch_descriptors(
 #[cfg(test)]
 mod tests {
     use super::{
-        BoxSampleCandidateRanges, CropRect, FitMode, FitTransform, PatchDimensions,
-        QualityPatches, SamplingRect, charge_sampler_work,
-        collapsed_box_sample_candidate_ranges, for_each_collapsed_box_sample_candidate,
-        normalized_pixel_overlap, zero_fill_patch_values,
+        BoxSampleCandidateRanges, CropRect, FitMode, FitTransform, PatchDimensions, QualityPatches,
+        SamplingRect, charge_sampler_work, collapsed_box_sample_candidate_ranges,
+        for_each_collapsed_box_sample_candidate, normalized_pixel_overlap, zero_fill_patch_values,
     };
     use ascii_core::{CancellationToken, Error, MalformedReason};
 
@@ -1722,8 +1721,7 @@ mod tests {
                 };
                 assert_eq!(ranges, expected_ranges);
 
-                let sample_start_x =
-                    (display_sample.x() - display_rect.x()) / display_rect.width();
+                let sample_start_x = (display_sample.x() - display_rect.x()) / display_rect.width();
                 let sample_start_y =
                     (display_sample.y() - display_rect.y()) / display_rect.height();
                 let sample_end_x = (sample_right - display_rect.x()) / display_rect.width();
