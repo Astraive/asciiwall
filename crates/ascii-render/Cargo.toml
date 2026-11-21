@@ -1,0 +1,16 @@
+[package]
+name = "ascii-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+ascii-core = { path = "../ascii-core" }
+ascii-convert = { path = "../ascii-convert" }
+wgpu = { version = "=0.19.4", features = ["wgsl"] }
+
+[dev-dependencies]
+pollster = "=0.3.0"
+sha2 = "=0.10.9"
