@@ -570,8 +570,14 @@ mod tests {
     use ascii_convert::{GlyphConfig, GlyphRepertoire, build_glyph_table};
     use ascii_core::{AsciiCell, Budget, CancellationToken, Error};
 
-    #[path = "../../../tests/support/mod.rs"]
-    mod support;
+    mod support {
+        pub mod synthetic_font {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/synthetic_font.rs"
+            ));
+        }
+    }
 
     #[test]
     fn xterm_palette_ties_choose_the_lower_index() {
