@@ -1328,13 +1328,23 @@ fn recovery_sync_failure_preserves_current_and_last_good_bytes() {
     let current_before = fs::read(&config_path).expect("capture current settings");
     let backup_before = fs::read(&backup_path).expect("capture last-good settings");
     let sync_hook_calls = AtomicUsize::new(0);
+    let mut hook_stages = Vec::new();
     let result = storage.restore_config_from_backup_with_hook(
         Some(&current_before),
         validate_test_config,
         |stage| {
-            assert_eq!(stage, AtomicWriteStage::ParentDirectorySync);
-            sync_hook_calls.fetch_add(1, Ordering::Relaxed);
-            Err(io::Error::other("injected parent-directory sync failure"))
+            hook_stages.push(stage);
+            match stage {
+                AtomicWriteStage::ParentDirectorySync => {
+                    if sync_hook_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                        Err(io::Error::other("injected parent-directory sync failure"))
+                    } else {
+                        Ok(())
+                    }
+                }
+                AtomicWriteStage::RecoveryRollbackRename => Ok(()),
+                other => panic!("unexpected recovery hook stage: {other:?}"),
+            }
         },
     );
 
@@ -1344,6 +1354,13 @@ fn recovery_sync_failure_preserves_current_and_last_good_bytes() {
             if error.to_string() == "injected parent-directory sync failure"
     ));
     assert_eq!(sync_hook_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        hook_stages,
+        [
+            AtomicWriteStage::ParentDirectorySync,
+            AtomicWriteStage::RecoveryRollbackRename,
+        ]
+    );
     assert_eq!(
         fs::read(&config_path).expect("rolled-back current settings"),
         current_before
