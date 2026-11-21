@@ -13,6 +13,7 @@
 //! lock while waiting on decode or present. Queue and pool locks are never held simultaneously.
 
 use std::mem::size_of;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ascii_core::{
@@ -23,6 +24,23 @@ use ascii_core::{
 use crate::{
     ConcurrencyPermit, MemoryPermit, MemoryUsage, ResourceBudget, RuntimeError, lock_unpoisoned,
 };
+
+static NEXT_POOL_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
+/// Allocates a process-unique identity without wrapping and reusing an earlier value.
+fn allocate_pool_identity() -> Result<u64, RuntimeError> {
+    NEXT_POOL_IDENTITY
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |identity| {
+            if identity == 0 {
+                None
+            } else if identity == u64::MAX {
+                Some(0)
+            } else {
+                Some(identity + 1)
+            }
+        })
+        .map_err(|_| RuntimeError::SizeOverflow)
+}
 
 /// Observable state of one fixed shared-buffer slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,14 +76,17 @@ pub struct RasterDescriptorMetadata {
     pub media_timestamp_ns: u64,
 }
 
-/// Transport metadata identifying one publication in one pool generation.
+/// Transport metadata identifying one publication in one pool instance and generation.
 ///
 /// This value contains no pointers and is not itself a wire encoding. Adapters may serialize its
 /// fields, but consumers MUST validate the complete descriptor against the local pool before use.
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrameDescriptor {
     /// Fixed slot index.
     pub slot_id: u32,
+    /// Unique identity for the pool instance, never reused within this process.
+    pub pool_identity: u64,
     /// Pool/connection generation in which the slot was published.
     pub generation: u64,
     /// Pixel width.
@@ -86,7 +107,7 @@ pub struct FrameDescriptor {
     pub mapped_offset: u64,
     /// Opaque timestamp; clock semantics belong to the caller.
     pub media_timestamp_ns: u64,
-    /// Monotonic slot-publication identity preventing same-generation ABA reuse.
+    /// Monotonic slot-publication identity preventing same-generation ABA reuse within this pool.
     pub publication_id: u64,
 }
 
@@ -119,6 +140,7 @@ impl core::fmt::Debug for Slot {
 
 #[derive(Debug)]
 struct PoolInner {
+    pool_identity: u64,
     generation: u64,
     bytes_per_slot: usize,
     next_publication_id: u64,
@@ -190,9 +212,11 @@ impl BufferPool {
             lease_attached: false,
             output_permit: None,
         });
+        let pool_identity = allocate_pool_identity()?;
 
         Ok(Self {
             inner: Arc::new(Mutex::new(PoolInner {
+                pool_identity,
                 generation,
                 bytes_per_slot,
                 next_publication_id: 1,
@@ -235,6 +259,7 @@ impl BufferPool {
         cancellation: &CancellationToken,
     ) -> Result<(), RuntimeError> {
         let descriptor = FrameDescriptor {
+            pool_identity: 0,
             slot_id: 0,
             generation: 1,
             width: metadata.width,
@@ -297,9 +322,9 @@ impl BufferPool {
 
     /// Validates a published descriptor and changes its slot from `Published` to `Consumed`.
     ///
-    /// The descriptor's generation, slot identity, all mapped-region bounds, metadata, and raster
-    /// extent are checked before the lease can expose bytes. Raster validation is delegated to the
-    /// shared `ascii-core` contract.
+    /// The descriptor's pool identity, generation, slot identity, mapped-region bounds, metadata,
+    /// and raster extent are checked before the lease can expose bytes. Raster validation is
+    /// delegated to the shared `ascii-core` contract.
     pub fn consume(
         &self,
         descriptor: &FrameDescriptor,
@@ -309,6 +334,9 @@ impl BufferPool {
         let _cpu_permit = self.resource_budget.try_acquire_cpu()?;
         {
             let inner = lock_unpoisoned(&self.inner);
+            if descriptor.pool_identity != inner.pool_identity {
+                return Err(RuntimeError::InvalidDescriptor);
+            }
             if descriptor.generation != inner.generation {
                 return Err(RuntimeError::StaleGeneration);
             }
@@ -328,6 +356,9 @@ impl BufferPool {
         }
         let output_permit = self.resource_budget.try_acquire_output()?;
         let mut inner = lock_unpoisoned(&self.inner);
+        if descriptor.pool_identity != inner.pool_identity {
+            return Err(RuntimeError::InvalidDescriptor);
+        }
         if descriptor.generation != inner.generation {
             return Err(RuntimeError::StaleGeneration);
         }
@@ -359,12 +390,15 @@ impl BufferPool {
 
     /// Marks a still-published descriptor released, if it identifies that exact publication.
     ///
-    /// A descriptor from an invalidated generation is a harmless no-op. Publication identity is
-    /// checked independently of mutable metadata so a malformed copy of the correct queue entry
-    /// cannot strand its original slot. This never releases a consumed lease.
+    /// A descriptor from another pool or an invalidated generation is a harmless no-op.
+    /// Publication identity is checked independently of mutable metadata so a malformed copy of
+    /// the correct queue entry cannot strand its original slot. This never releases a consumed
+    /// lease.
     pub fn discard(&self, descriptor: &FrameDescriptor) -> Result<bool, RuntimeError> {
         let mut inner = lock_unpoisoned(&self.inner);
-        if descriptor.generation != inner.generation {
+        if descriptor.pool_identity != inner.pool_identity
+            || descriptor.generation != inner.generation
+        {
             return Ok(false);
         }
         let index = descriptor.slot_id as usize;
@@ -554,6 +588,7 @@ impl FillLease {
             .checked_add(written_len)
             .ok_or(RuntimeError::SizeOverflow)?;
         let mut descriptor = FrameDescriptor {
+            pool_identity: inner.pool_identity,
             slot_id: self.slot_id,
             generation: self.generation,
             width: metadata.width,
