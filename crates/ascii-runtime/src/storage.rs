@@ -125,7 +125,7 @@ impl fmt::Display for StorageError {
             } => {
                 write!(
                     f,
-                    "recovery parent-directory sync failed ({sync_error}); restoring prior settings also failed ({rollback_error})"
+                    "parent-directory sync failed ({sync_error}); restoring prior state also failed ({rollback_error})"
                 )?;
                 if let Some(path) = retained_recovery_copy {
                     write!(
