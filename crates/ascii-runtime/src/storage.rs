@@ -72,6 +72,8 @@ pub enum AtomicWriteStage {
     TargetReplaced,
     /// Recovery is about to sync the parent directory after installing its restored target.
     ParentDirectorySync,
+    /// Recovery is about to rename its preserved prior-state copy during rollback.
+    RecoveryRollbackRename,
 }
 
 /// Filesystem error, malformed persisted state, or rejected input.
@@ -89,6 +91,7 @@ pub enum StorageError {
     RecoveryRollbackFailed {
         sync_error: io::Error,
         rollback_error: io::Error,
+        retained_recovery_copy: Option<PathBuf>,
     },
     DocumentTooLarge,
     InvalidLogLimits,
@@ -112,10 +115,21 @@ impl fmt::Display for StorageError {
             Self::RecoveryRollbackFailed {
                 sync_error,
                 rollback_error,
-            } => write!(
-                f,
-                "recovery parent-directory sync failed ({sync_error}); restoring prior settings also failed ({rollback_error})"
-            ),
+                retained_recovery_copy,
+            } => {
+                write!(
+                    f,
+                    "recovery parent-directory sync failed ({sync_error}); restoring prior settings also failed ({rollback_error})"
+                )?;
+                if let Some(path) = retained_recovery_copy {
+                    write!(
+                        f,
+                        "; original bytes remain recoverable at {}",
+                        path.display()
+                    )?;
+                }
+                Ok(())
+            }
             Self::DocumentTooLarge => f.write_str("document exceeds size limit"),
             Self::InvalidLogLimits => f.write_str("diagnostic log bounds are invalid"),
             Self::UnsupportedVersion { kind, version } => {
@@ -810,9 +824,10 @@ impl Storage {
 
     /// Sync-hook counterpart of [`Self::restore_config_from_backup`].
     ///
-    /// The hook runs immediately before the parent-directory sync after replacement. If either the
-    /// hook or sync fails, recovery restores the original current-file bytes (or absence) before
-    /// returning the error. A failed rollback is reported as [`StorageError::RecoveryRollbackFailed`].
+    /// The hook runs before parent-directory sync and, after a sync failure, before rollback rename.
+    /// A rollback-rename failure retains the old bytes at a path exposed by
+    /// [`StorageError::RecoveryRollbackFailed`]; other rollback failures are reported without
+    /// claiming that the prior current-file state was restored.
     pub fn restore_config_from_backup_with_hook<E: fmt::Display>(
         &self,
         expected_current: Option<&[u8]>,
@@ -887,6 +902,7 @@ impl Storage {
             _ => {}
         }
         let rollback = prepare_replace_rollback(&destination)?;
+        let mut rollback_hook = || hook(AtomicWriteStage::RecoveryRollbackRename);
         let mut sync_hook = || hook(AtomicWriteStage::ParentDirectorySync);
         atomic_replace_locked(
             &destination,
@@ -896,6 +912,7 @@ impl Storage {
             None,
             &mut |_| Ok(()),
             &mut sync_hook,
+            &mut rollback_hook,
             Some(rollback),
         )?;
         Ok(())
@@ -1043,6 +1060,7 @@ fn atomic_replace(
         backup,
         hook,
         &mut || Ok(()),
+        &mut || Ok(()),
         None,
     )
 }
@@ -1056,6 +1074,7 @@ fn atomic_replace_locked(
     backup: Option<AtomicBackup<'_>>,
     hook: &mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
     before_parent_sync: &mut dyn FnMut() -> io::Result<()>,
+    before_rollback_rename: &mut dyn FnMut() -> io::Result<()>,
     rollback_on_sync_error: Option<ReplaceRollback>,
 ) -> Result<(), StorageError> {
     let parent = destination
@@ -1102,6 +1121,7 @@ fn atomic_replace_locked(
             None,
             &mut |_| Ok(()),
             &mut || Ok(()),
+            &mut || Ok(()),
             None,
         )?;
         hook(AtomicWriteStage::BackupReplaced)?;
@@ -1110,13 +1130,17 @@ fn atomic_replace_locked(
     temporary.disarm();
     if let Err(sync_error) = before_parent_sync().and_then(|()| sync_parent_directory(parent)) {
         if let Some(rollback) = rollback_on_sync_error {
-            if let Err(rollback_error) = rollback
-                .restore(destination)
-                .and_then(|()| sync_parent_directory(parent))
-            {
+            let rollback_result =
+                match rollback.restore(destination, before_rollback_rename) {
+                    Ok(()) => sync_parent_directory(parent)
+                        .map_err(|error| (error, None)),
+                    Err(error) => Err(error),
+                };
+            if let Err((rollback_error, retained_recovery_copy)) = rollback_result {
                 return Err(StorageError::RecoveryRollbackFailed {
                     sync_error,
                     rollback_error,
+                    retained_recovery_copy,
                 });
             }
         }
@@ -1132,18 +1156,25 @@ enum ReplaceRollback {
 }
 
 impl ReplaceRollback {
-    fn restore(self, destination: &Path) -> io::Result<()> {
+    fn restore(
+        self,
+        destination: &Path,
+        before_restore: &mut dyn FnMut() -> io::Result<()>,
+    ) -> Result<(), (io::Error, Option<PathBuf>)> {
         match self {
             Self::Restore(mut original) => {
                 original.close();
-                fs::rename(original.path(), destination)?;
-                original.disarm();
-                Ok(())
+                let retained_copy = original.path().to_path_buf();
+                original.cleanup = false;
+                match before_restore().and_then(|()| fs::rename(&retained_copy, destination)) {
+                    Ok(()) => Ok(()),
+                    Err(error) => Err((error, Some(retained_copy))),
+                }
             }
             Self::Remove => match fs::remove_file(destination) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error),
+                Err(error) => Err((error, None)),
             },
         }
     }
@@ -1595,6 +1626,7 @@ impl ImportJournal {
             None,
             None,
             &mut |_| Ok(()),
+            &mut || Ok(()),
             &mut || Ok(()),
             None,
         )?;
