@@ -481,6 +481,7 @@ class _NativeJsonPrefixScanner:
         self._invalid = False
         self._container = False
         self._pending_byte: int | None = None
+        self._pending_utf32_bytes = b""
         self._pending_high_surrogate = False
         self._malformed = False
 
@@ -499,7 +500,13 @@ class _NativeJsonPrefixScanner:
             return False
         probe = bytes(self._probe)
         self._probe.clear()
-        if probe.startswith(b"\xff\xfe"):
+        if probe.startswith(b"\x00\x00\xfe\xff"):
+            self._encoding = "utf-32-be"
+            probe = probe[4:]
+        elif probe.startswith(b"\xff\xfe\x00\x00"):
+            self._encoding = "utf-32-le"
+            probe = probe[4:]
+        elif probe.startswith(b"\xff\xfe"):
             self._encoding = "utf-16-le"
             probe = probe[2:]
         elif probe.startswith(b"\xfe\xff"):
@@ -508,6 +515,18 @@ class _NativeJsonPrefixScanner:
         elif probe.startswith(b"\xef\xbb\xbf"):
             self._encoding = "utf-8"
             probe = probe[3:]
+        elif (
+            len(probe) >= 4
+            and probe[0] != 0 and probe[0] < 0x80
+            and probe[1] == 0 and probe[2] == 0 and probe[3] == 0
+        ):
+            self._encoding = "utf-32-le"
+        elif (
+            len(probe) >= 4
+            and probe[0] == 0 and probe[1] == 0 and probe[2] == 0
+            and probe[3] != 0 and probe[3] < 0x80
+        ):
+            self._encoding = "utf-32-be"
         elif (
             len(probe) >= 4
             and probe[0] < 0x80 and probe[0] != 0 and probe[1] == 0
@@ -528,6 +547,10 @@ class _NativeJsonPrefixScanner:
     def _process(self, raw: bytes) -> None:
         if self._invalid or self._container or self._malformed:
             return
+        if self._encoding in ("utf-32-le", "utf-32-be"):
+            self._process_utf32(raw)
+            return
+
         if self._encoding == "utf-8":
             for byte in raw:
                 self._consume(byte)
@@ -559,6 +582,52 @@ class _NativeJsonPrefixScanner:
                 return
         if even_length < len(raw):
             self._pending_byte = raw[-1]
+
+
+    def _process_utf32(self, raw: bytes) -> None:
+        little_endian = self._encoding == "utf-32-le"
+        if self._pending_utf32_bytes:
+            needed = 4 - len(self._pending_utf32_bytes)
+            if len(raw) < needed:
+                self._pending_utf32_bytes += raw
+                return
+            unit_bytes = self._pending_utf32_bytes + raw[:needed]
+            self._pending_utf32_bytes = b""
+            self._consume_utf32_unit(
+                int.from_bytes(
+                    unit_bytes, "little" if little_endian else "big"
+                )
+            )
+            if self._invalid or self._container or self._malformed:
+                return
+            raw = raw[needed:]
+        complete_length = len(raw) & ~3
+        for index in range(0, complete_length, 4):
+            if little_endian:
+                unit = (
+                    raw[index]
+                    | (raw[index + 1] << 8)
+                    | (raw[index + 2] << 16)
+                    | (raw[index + 3] << 24)
+                )
+            else:
+                unit = (
+                    (raw[index] << 24)
+                    | (raw[index + 1] << 16)
+                    | (raw[index + 2] << 8)
+                    | raw[index + 3]
+                )
+            self._consume_utf32_unit(unit)
+            if self._invalid or self._container or self._malformed:
+                return
+        if complete_length < len(raw):
+            self._pending_utf32_bytes = raw[complete_length:]
+
+    def _consume_utf32_unit(self, unit: int) -> None:
+        if unit > 0x10FFFF or 0xD800 <= unit <= 0xDFFF:
+            self._malformed = True
+        else:
+            self._consume(unit)
 
     def _consume_utf16_unit(self, unit: int) -> None:
         if self._pending_high_surrogate:
@@ -678,7 +747,7 @@ class _NativeJsonPrefixScanner:
     def looks_like_json(self) -> bool:
         if self._encoding is None:
             self._select_encoding(final=True)
-        if self._pending_byte is not None or self._pending_high_surrogate:
+        if self._pending_byte is not None or self._pending_utf32_bytes or self._pending_high_surrogate:
             self._malformed = True
         return (
             self._container
