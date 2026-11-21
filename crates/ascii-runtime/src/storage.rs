@@ -619,6 +619,7 @@ pub struct ParsedToml {
 impl ParsedToml {
     /// Parses a bounded TOML document without imposing settings keys or application defaults.
     pub fn from_toml(bytes: &[u8]) -> Result<Self, StorageError> {
+        enforce_toml_size_limit(bytes)?;
         Self::from_owned_toml(bytes.to_vec())
     }
 
@@ -638,10 +639,16 @@ impl ParsedToml {
     }
 }
 
-fn parse_toml_value(bytes: &[u8]) -> Result<TomlValue, StorageError> {
+fn enforce_toml_size_limit(bytes: &[u8]) -> Result<(), StorageError> {
     if bytes.len() as u64 > CONFIG_MAX_BYTES {
-        return Err(StorageError::DocumentTooLarge);
+        Err(StorageError::DocumentTooLarge)
+    } else {
+        Ok(())
     }
+}
+
+fn parse_toml_value(bytes: &[u8]) -> Result<TomlValue, StorageError> {
+    enforce_toml_size_limit(bytes)?;
     let text = std::str::from_utf8(bytes)
         .map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
     toml::from_str(text).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))
