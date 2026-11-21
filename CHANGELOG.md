@@ -71,6 +71,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   absolute output destinations, resolves case-variant registrations using filesystem semantics,
   atomically publishes marked cache roots, and keeps lease acknowledgement retryable until its pin
   is released. Existing retained-byte accounting, OS file locks, and failed-write protections remain.
+- [COR-009] Persist a monotonic generated-file ID high-water mark before file creation, reconcile legacy
+  files, and fail closed on damaged or exhausted counter state to prevent filename reuse after eviction.
 - [COR-008] Redact user-qualified home paths in generic portable-export strings, including
   `=`-prefixed values, while preserving tilde text without a path; reject over-limit journal paths
   before cloning and retain the final whole-document size guard.
