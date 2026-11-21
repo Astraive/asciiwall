@@ -66,3 +66,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `buildhost` cannot survive under a generic field name.
 - [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
   explicitly labeled nonportable local backups.
+- [COR-008] Redact user-qualified home paths in generic portable-export strings and reject over-limit journal paths before cloning; retain the final whole-document size guard.
