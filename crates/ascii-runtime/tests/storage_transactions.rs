@@ -1436,6 +1436,37 @@ fn portable_export_redacts_user_qualified_home_paths_in_generic_strings() {
 }
 
 #[test]
+fn portable_export_redacts_machine_paths_after_colon_delimiters() {
+    let source = json!({
+        "first_note": "note:~alice/Documents/private.txt",
+        "second_note": "note:/home/alice/private.txt",
+        "third_note": "note:~bob\\Documents\\private.txt",
+        "benign_colon_text": "status:"
+    });
+    let portable =
+        ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
+            .expect("portable export");
+    let encoded = String::from_utf8(portable.to_json().unwrap()).unwrap();
+    for private_key in [
+        "first_note",
+        "second_note",
+        "third_note",
+    ] {
+        assert!(
+            portable.content().get(private_key).is_none(),
+            "portable export retained {private_key}"
+        );
+    }
+    for private_value in ["alice", "bob", "Documents", "private.txt", "/home/"] {
+        assert!(
+            !encoded.contains(private_value),
+            "portable export retained {private_value}"
+        );
+    }
+    assert_eq!(portable.content()["benign_colon_text"], json!("status:"));
+}
+
+#[test]
 fn portable_export_filters_bare_host_field_but_preserves_local_backup() {
     let source = json!({"host": "buildhost"});
     let portable =
