@@ -1400,8 +1400,8 @@ fn portable_export_redacts_user_qualified_home_paths_in_generic_strings() {
         );
     }
     assert_eq!(
-        portable.content(),
-        &json!({"ordinary": "ordinary note about ~visitor without a path"})
+        portable.content()["ordinary"],
+        json!("ordinary note about ~visitor without a path")
     );
 }
 
