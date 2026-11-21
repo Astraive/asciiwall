@@ -18,7 +18,7 @@ const CACHE_OWNER_FILE: &str = ".asciiwall-owner";
 const CACHE_OWNER_MARKER: &[u8] = b"AsciiWall derived cache ownership v1\n";
 const CACHE_OPERATIONS_LOCK: &str = ".operations.lock";
 const CACHE_FILE_ID_HIGH_WATER: &str = ".file-id-high-water";
-const CACHE_FILE_ID_HIGH_WATER_MARKER: &str = ".file-id-high-water-v1";
+const CACHE_FILE_ID_HIGH_WATER_BACKUP: &str = ".file-id-high-water.backup";
 
 const CACHE_INITIALIZATION_LOCK: &str = ".asciiwall-cache-v1.init.lock";
 
@@ -1118,6 +1118,7 @@ fn invalid_file_id_high_water() -> CacheError {
 }
 
 fn read_file_id_high_water(managed_dir: &Path) -> Result<u64, CacheError> {
+    recover_file_id_high_water_backup(managed_dir)?;
     let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
     let metadata = fs::symlink_metadata(&path)?;
     if !metadata.file_type().is_file() {
@@ -1160,7 +1161,7 @@ fn write_file_id_high_water(
         high_water,
         create_new,
         File::sync_all,
-        replace_destination,
+        replace_file_id_high_water,
         crate::storage::sync_parent_directory,
     )
 }
@@ -1248,10 +1249,10 @@ fn mark_file_id_high_water_initialized_with_sync(
 }
 
 // Callers hold the cache operations lock so migration and reservations serialize across instances.
-
 fn ensure_file_id_high_water(root: &Path, discovered_next_id: u64) -> Result<u64, CacheError> {
     let managed_dir = root.join(CACHE_INSTANCE_DIR);
     verify_owned_cache_dir(root, &managed_dir)?;
+    recover_file_id_high_water_backup(&managed_dir)?;
     let initialized = file_id_high_water_initialized(&managed_dir)?;
     let counter_path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
     let high_water = match fs::symlink_metadata(&counter_path) {
@@ -2404,6 +2405,79 @@ fn replace_destination(temp_path: &Path, destination: &Path) -> io::Result<()> {
     let _ = fs::remove_file(temp_path);
     Ok(())
 }
+fn replace_file_id_high_water(temp_path: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(any(unix, windows))]
+    {
+        replace_destination(temp_path, destination)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        replace_file_id_high_water_portable(temp_path, destination)
+    }
+}
+
+#[cfg(any(not(any(unix, windows)), test))]
+fn replace_file_id_high_water_portable(
+    temp_path: &Path,
+    destination: &Path,
+) -> io::Result<()> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    recover_file_id_high_water_backup(parent)?;
+
+    let backup_path = parent.join(CACHE_FILE_ID_HIGH_WATER_BACKUP);
+    match fs::rename(destination, &backup_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            fs::rename(temp_path, destination)?;
+            return crate::storage::sync_parent_directory(parent);
+        }
+        Err(error) => return Err(error),
+    }
+    if let Err(error) = crate::storage::sync_parent_directory(parent) {
+        let _ = fs::rename(&backup_path, destination);
+        return Err(error);
+    }
+
+    if let Err(error) = fs::rename(temp_path, destination) {
+        let restore_result = fs::rename(&backup_path, destination);
+        if restore_result.is_ok() {
+            let _ = crate::storage::sync_parent_directory(parent);
+        }
+        return Err(error);
+    }
+    crate::storage::sync_parent_directory(parent)?;
+    fs::remove_file(&backup_path)?;
+    crate::storage::sync_parent_directory(parent)
+}
+
+fn recover_file_id_high_water_backup(managed_dir: &Path) -> io::Result<()> {
+    let backup_path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER_BACKUP);
+    let backup_metadata = match fs::symlink_metadata(&backup_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !backup_metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "invalid derived cache file ID high-water backup",
+        ));
+    }
+
+    let counter_path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
+    match fs::symlink_metadata(&counter_path) {
+        Ok(_) => fs::remove_file(&backup_path)?,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            fs::rename(&backup_path, &counter_path)?
+        }
+        Err(error) => return Err(error),
+    }
+    crate::storage::sync_parent_directory(managed_dir)
+}
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -2514,6 +2588,35 @@ mod tests {
     }
 
     #[test]
+    fn portable_high_water_replacement_updates_existing_counter_and_recovers_backup() {
+        let managed_dir = TempManagedDirectory::new();
+        let destination = managed_dir.0.join(CACHE_FILE_ID_HIGH_WATER);
+        let temporary = managed_dir.0.join("counter-update");
+        fs::write(&destination, b"0000000000000007\n").unwrap();
+        fs::write(&temporary, b"0000000000000008\n").unwrap();
+
+        replace_file_id_high_water_portable(&temporary, &destination).unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), b"0000000000000008\n");
+        assert!(!temporary.exists());
+        assert!(!managed_dir
+            .0
+            .join(CACHE_FILE_ID_HIGH_WATER_BACKUP)
+            .exists());
+
+        let backup = managed_dir.0.join(CACHE_FILE_ID_HIGH_WATER_BACKUP);
+        fs::rename(&destination, &backup).unwrap();
+        recover_file_id_high_water_backup(&managed_dir.0).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"0000000000000008\n");
+        assert!(!backup.exists());
+
+        fs::write(&backup, b"0000000000000007\n").unwrap();
+        recover_file_id_high_water_backup(&managed_dir.0).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"0000000000000008\n");
+        assert!(!backup.exists());
+    }
+
+    #[test]
     fn high_water_counter_and_marker_sync_their_parent_after_file_sync() {
         use std::cell::RefCell;
 
@@ -2567,7 +2670,7 @@ mod tests {
                 let expected_destination = managed_dir.0.join(CACHE_FILE_ID_HIGH_WATER);
                 assert_eq!(destination, expected_destination.as_path());
                 update_events.borrow_mut().push(SyncEvent::Replace);
-                replace_destination(temporary, destination)
+                replace_file_id_high_water(temporary, destination)
             },
             |directory| {
                 assert_eq!(directory, managed_dir.0.as_path());
