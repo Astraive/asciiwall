@@ -61,6 +61,8 @@ an unmarked directory are never sufficient ownership evidence. Concurrent first 
 initialization through a root-level lock. A uniquely named sibling staging directory receives and
 syncs its owner marker before an atomic rename publishes it under the managed name, so another open
 never observes an unmarked final cache directory.
+Operations sharing a root also take a process-local per-root mutex before the OS file lock, which
+serializes threads using independently opened instances on Windows.
 
 Operations that read or change root-wide byte accounting (open, store, budget changes, trimming, and
 snapshots) scan generated files beneath the root while holding its operations lock, so independently

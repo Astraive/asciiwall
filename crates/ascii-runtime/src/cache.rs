@@ -11,7 +11,7 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Weak};
 
 const CACHE_INSTANCE_DIR: &str = ".asciiwall-cache-v1";
 const CACHE_OWNER_FILE: &str = ".asciiwall-owner";
@@ -28,6 +28,21 @@ static CACHE_FILE_ID_HIGH_WATER_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 /// Retains one shared file lock per path until every issued lease is explicitly acknowledged.
 static CACHE_LEASE_PINS: LazyLock<Mutex<HashMap<PathBuf, CacheLeasePin>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Serializes operations for independently opened cache instances in this process.
+static CACHE_ROOT_OPERATION_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn cache_root_operation_lock(root: &Path) -> Arc<Mutex<()>> {
+    let mut locks = lock_unpoisoned(&CACHE_ROOT_OPERATION_LOCKS);
+    if let Some(lock) = locks.get(root).and_then(Weak::upgrade) {
+        return lock;
+    }
+
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(root.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
 
 /// A caller-computed cryptographic digest of content or shader bytes.
 ///
@@ -452,14 +467,15 @@ struct CacheState {
 struct CacheInner {
     root: PathBuf,
     managed_dir: PathBuf,
+    root_operations_lock: Arc<Mutex<()>>,
     state: Mutex<CacheState>,
 }
 
 /// Thread-safe byte-bounded cache of generated files beneath a private root. Each instance keeps
 /// LRU identity state for entries it knows; files known only through root reconciliation remain
 /// accounted and are selected as orphaned eviction candidates by generated file ID. Operations
-/// that account for root-wide byte usage reconcile under an OS lock; instances sharing a root must
-/// use the same budget.
+/// that account for root-wide byte usage serialize with a process-local per-root mutex and an OS
+/// lock; instances sharing a root must use the same budget.
 /// Active leases keep process-wide portable OS shared file locks until explicit acknowledgement;
 /// deletion obtains an exclusive file lock and fails closed while any process holds a lease. The
 /// caller must keep the root private and stable; portable path APIs cannot defend against a hostile
@@ -482,6 +498,8 @@ impl DerivedCache {
                 "cache root is not a directory",
             )));
         }
+        let root_operations_lock = cache_root_operation_lock(&root);
+        let _root_operations_lock = lock_unpoisoned(&root_operations_lock);
         let managed_dir = create_cache_instance_dir(&root)?;
         let _operations_lock = lock_cache_directory(&root, &managed_dir)?;
         let (orphaned_files, used_bytes, next_file_id, lru_clock) = scan_orphaned_files(&root)?;
@@ -499,6 +517,7 @@ impl DerivedCache {
             inner: Arc::new(CacheInner {
                 root,
                 managed_dir,
+                root_operations_lock: Arc::clone(&root_operations_lock),
                 state: Mutex::new(state),
             }),
         })
@@ -536,6 +555,7 @@ impl DerivedCache {
     ) -> Result<StoreOutcome, CacheError> {
         let entry_bytes = u64::try_from(bytes.len()).map_err(|_| CacheError::ArithmeticOverflow)?;
         let mut state = lock_unpoisoned(&self.inner.state);
+        let _root_operations_lock = lock_unpoisoned(&self.inner.root_operations_lock);
         let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
         reconcile_cache_state(&self.inner.root, &mut state)?;
         if let Some((path, active_leases)) = state
@@ -635,6 +655,7 @@ impl DerivedCache {
     ) -> Result<CacheLease, CacheError> {
         verify_managed_root(&self.inner.root)?;
         let mut state = lock_unpoisoned(&self.inner.state);
+        let _root_operations_lock = lock_unpoisoned(&self.inner.root_operations_lock);
         let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
         let entry = state.entries.get(identity).ok_or(CacheError::NotFound)?;
         match (current_observation, entry.source_observation.as_ref()) {
@@ -692,6 +713,7 @@ impl DerivedCache {
     /// that completion acknowledgements are needed before it can be met.
     pub fn set_budget_bytes(&self, budget_bytes: u64) -> Result<(), CacheError> {
         let mut state = lock_unpoisoned(&self.inner.state);
+        let _root_operations_lock = lock_unpoisoned(&self.inner.root_operations_lock);
         let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
         reconcile_cache_state(&self.inner.root, &mut state)?;
         state.budget_bytes = budget_bytes;
@@ -701,6 +723,7 @@ impl DerivedCache {
     /// Retries eviction after an owner boundary or other external state change.
     pub fn trim_to_budget(&self) -> Result<(), CacheError> {
         let mut state = lock_unpoisoned(&self.inner.state);
+        let _root_operations_lock = lock_unpoisoned(&self.inner.root_operations_lock);
         let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
         reconcile_cache_state(&self.inner.root, &mut state)?;
         trim_to_budget(&self.inner.root, &mut state)
@@ -708,6 +731,7 @@ impl DerivedCache {
 
     pub fn snapshot(&self) -> Result<CacheSnapshot, CacheError> {
         let mut state = lock_unpoisoned(&self.inner.state);
+        let _root_operations_lock = lock_unpoisoned(&self.inner.root_operations_lock);
         let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
         reconcile_cache_state(&self.inner.root, &mut state)?;
         let active_leases = state.entries.values().try_fold(0u64, |sum, entry| {
@@ -750,6 +774,7 @@ impl CacheLease {
     /// retries trimming.
     pub fn acknowledge(&mut self) -> Result<(), CacheError> {
         let mut state = lock_unpoisoned(&self.inner.state);
+        let _root_operations_lock = lock_unpoisoned(&self.inner.root_operations_lock);
         let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
         if !self.released {
             let active_leases = state
@@ -809,10 +834,7 @@ fn release_cache_lease_pin(path: &Path) -> Result<Option<CacheLeasePin>, CacheEr
         .checked_sub(1)
         .ok_or(CacheError::InvalidLease)?;
     if remaining == 0 {
-        return pins
-            .remove(path)
-            .map(Some)
-            .ok_or(CacheError::InvalidLease);
+        return pins.remove(path).map(Some).ok_or(CacheError::InvalidLease);
     }
     pins.get_mut(path)
         .ok_or(CacheError::InvalidLease)?
