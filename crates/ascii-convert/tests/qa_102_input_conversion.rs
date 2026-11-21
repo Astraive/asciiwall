@@ -2,12 +2,13 @@
 mod support;
 
 use std::io::Cursor;
+use std::mem::size_of;
 
 use ascii_convert::{
     ColorNormalizationError, ConversionSettings, CropRect, DensityConversionError, FitMode,
-    GlyphConfig, GlyphRepertoire, GlyphTable, GridSizing, LinearRgb, PatchDimensions,
-    SamplingFilter, SamplingOptions, UnsupportedColorReason, build_glyph_table,
-    convert_density_detailed, normalize_raster,
+    GlyphConfig, GlyphRepertoire, GlyphTable, GridSizing, LinearPremultipliedRgba, LinearRgb,
+    NormalizedRasterResources, PatchDimensions, SamplingFilter, SamplingOptions,
+    UnsupportedColorReason, build_glyph_table, convert_density_detailed, normalize_raster,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, Error,
@@ -54,6 +55,15 @@ fn conversion_budget() -> Budget {
     Budget::new(1_000_000, 2_000_000, 2_000_000)
 }
 
+fn normalized_resources_for_pixels(pixel_count: u64) -> NormalizedRasterResources {
+    let bytes_per_pixel = u64::try_from(size_of::<LinearPremultipliedRgba>())
+        .expect("normalized pixel size fits u64");
+    let max_retained_bytes = pixel_count
+        .checked_mul(bytes_per_pixel)
+        .expect("fixture output size fits u64");
+    NormalizedRasterResources::new(max_retained_bytes)
+}
+
 fn gray_raster(pixels: &[u8], width: u32, height: u32, row_stride: usize) -> RasterFrameView<'_> {
     RasterFrameView::new(
         width,
@@ -96,6 +106,7 @@ fn ec_006_unsupported_hdr_and_profile_return_typed_reasons() {
         ),
     ];
     let source = [40, 96, 180];
+    let resources = normalized_resources_for_pixels(1);
 
     for (color, expected_reason, expected_message) in scenarios {
         let input = RasterFrameView::new(
@@ -107,8 +118,14 @@ fn ec_006_unsupported_hdr_and_profile_return_typed_reasons() {
             RasterOrientation::TopDown,
             &source,
         );
-        let error = convert_density_detailed(input, &table, &settings, &conversion_budget())
-            .expect_err("unsupported color metadata must fail rather than emit a wrong frame");
+        let error = convert_density_detailed(
+            input,
+            &table,
+            &settings,
+            &conversion_budget(),
+            &resources,
+        )
+        .expect_err("unsupported color metadata must fail rather than emit a wrong frame");
 
         assert_eq!(
             error,
@@ -151,16 +168,29 @@ fn ec_007_black_white_and_flat_images_map_stably_by_measured_glyph_coverage() {
         SamplingFilter::Box,
         Some(PatchDimensions::new(2, 2).expect("small quality patch is valid")),
     ));
+    let resources = normalized_resources_for_pixels(8 * 12);
     let mut black_output_slot = None;
     let mut white_output_slot = None;
 
     for sample in [0_u8, 128, 255] {
         let source = [sample; 8 * 12];
         let input = gray_raster(&source, 8, 12, 8);
-        let first = convert_density_detailed(input, &table, &settings, &conversion_budget())
-            .expect("a constant gray raster converts");
-        let repeated = convert_density_detailed(input, &table, &settings, &conversion_budget())
-            .expect("repeating the flat-raster conversion remains valid");
+        let first = convert_density_detailed(
+            input,
+            &table,
+            &settings,
+            &conversion_budget(),
+            &resources,
+        )
+        .expect("a constant gray raster converts");
+        let repeated = convert_density_detailed(
+            input,
+            &table,
+            &settings,
+            &conversion_budget(),
+            &resources,
+        )
+        .expect("repeating the flat-raster conversion remains valid");
         let first_glyph = first.frame().cells()[0].glyph();
 
         assert_eq!(first.frame().cells(), repeated.frame().cells());
@@ -226,16 +256,20 @@ fn ec_008_odd_row_stride_ignores_padding_through_density_conversion() {
     // Three gray pixels plus two poison padding bytes per row; the final row ends at its last pixel.
     let padded_odd_stride = [0, 0, 0, 0xE1, 0x7C, 255, 255, 255];
     let different_padding = [0, 0, 0, 0x7C, 0xE1, 255, 255, 255];
+    // Two compared outputs remain live while each conversion temporarily needs a third raster.
+    let resources = normalized_resources_for_pixels(3 * 3 * 2);
     let normalized = normalize_raster(
         gray_raster(&padded_odd_stride, 3, 2, 5),
         &conversion_budget(),
         &CancellationToken::new(),
+        &resources,
     )
     .expect("odd stride with the exact required extent is valid");
     let normalized_with_different_padding = normalize_raster(
         gray_raster(&different_padding, 3, 2, 5),
         &conversion_budget(),
         &CancellationToken::new(),
+        &resources,
     )
     .expect("changing padding bytes does not change the active raster");
 
@@ -272,6 +306,7 @@ fn ec_008_odd_row_stride_ignores_padding_through_density_conversion() {
         &table,
         &settings,
         &conversion_budget(),
+        &resources,
     )
     .expect("the padded raster converts");
     let converted_with_different_padding = convert_density_detailed(
@@ -279,6 +314,7 @@ fn ec_008_odd_row_stride_ignores_padding_through_density_conversion() {
         &table,
         &settings,
         &conversion_budget(),
+        &resources,
     )
     .expect("conversion ignores padding contents");
     assert_eq!(
@@ -356,9 +392,15 @@ fn ec_008_odd_width_png_decodes_into_density_conversion() {
         SamplingFilter::Nearest,
         None,
     ));
-    let converted =
-        convert_density_detailed(decoded.view(), &table, &settings, &conversion_budget())
-            .expect("decoded frame converts directly without a pixel-buffer copy");
+    let resources = normalized_resources_for_pixels(3 * 2);
+    let converted = convert_density_detailed(
+        decoded.view(),
+        &table,
+        &settings,
+        &conversion_budget(),
+        &resources,
+    )
+    .expect("decoded frame converts directly without a pixel-buffer copy");
 
     assert_eq!(
         (
@@ -399,10 +441,17 @@ fn density_conversion_rejects_short_raster_backing_with_a_typed_error() {
         GridSizing::fixed_pixel_surface(CELL_WIDTH, CELL_HEIGHT),
     );
     let truncated_pixels = [10, 20, 30];
+    let resources = normalized_resources_for_pixels(2 * 2);
     let input = gray_raster(&truncated_pixels, 2, 2, 2);
 
     assert_eq!(
-        convert_density_detailed(input, &table, &settings, &conversion_budget()),
+        convert_density_detailed(
+            input,
+            &table,
+            &settings,
+            &conversion_budget(),
+            &resources,
+        ),
         Err(DensityConversionError::ColorNormalization(
             ColorNormalizationError::Raster(Error::Malformed(
                 MalformedReason::RasterBackingTooShort
@@ -416,11 +465,14 @@ fn normalizer_rejects_raster_budgets_before_backing_validation() {
     // A decoder is not part of this crate; this synthetic view probes the actual raster preflight
     // boundary with enormous dimensions and no backing allocation.
     let input = gray_raster(&[], 4096, 4096, 4096);
+    // The owner admits the full expected output; per-operation budgets must reject before allocation.
+    let resources = normalized_resources_for_pixels(4096 * 4096);
     assert_eq!(
         normalize_raster(
             input,
             &Budget::new(u64::MAX, 1024, u64::MAX),
             &CancellationToken::new(),
+            &resources,
         ),
         Err(ColorNormalizationError::Raster(Error::BudgetExceeded(
             BudgetKind::RasterBytes
@@ -431,6 +483,7 @@ fn normalizer_rejects_raster_budgets_before_backing_validation() {
             input,
             &Budget::new(u64::MAX, 32 * 1024 * 1024, 4096),
             &CancellationToken::new(),
+            &resources,
         ),
         Err(ColorNormalizationError::Raster(Error::BudgetExceeded(
             BudgetKind::WorkUnits
