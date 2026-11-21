@@ -1233,6 +1233,47 @@ fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly()
 }
 
 #[test]
+fn recovery_sync_failure_preserves_current_and_last_good_bytes() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let known_good = config(json!({"theme": "known-good"}));
+    save_current_config(&storage, &known_good, validate_test_config)
+        .expect("save known-good settings");
+    let current = config(json!({"theme": "current"}));
+    save_current_config(&storage, &current, validate_test_config).expect("save current settings");
+
+    let config_path = storage.config_path();
+    let backup_path = storage.config_backup_path();
+    let current_before = fs::read(&config_path).expect("capture current settings");
+    let backup_before = fs::read(&backup_path).expect("capture last-good settings");
+    let sync_hook_calls = AtomicUsize::new(0);
+    let result = storage.restore_config_from_backup_with_hook(
+        Some(&current_before),
+        validate_test_config,
+        |stage| {
+            assert_eq!(stage, AtomicWriteStage::ParentDirectorySync);
+            sync_hook_calls.fetch_add(1, Ordering::Relaxed);
+            Err(io::Error::other("injected parent-directory sync failure"))
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(StorageError::Io(error))
+            if error.to_string() == "injected parent-directory sync failure"
+    ));
+    assert_eq!(sync_hook_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        fs::read(&config_path).expect("rolled-back current settings"),
+        current_before
+    );
+    assert_eq!(
+        fs::read(&backup_path).expect("unchanged last-good settings"),
+        backup_before
+    );
+}
+
+#[test]
 fn restore_config_from_backup_rejects_stale_current_revision_without_mutation() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
