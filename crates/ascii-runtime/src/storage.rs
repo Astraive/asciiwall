@@ -578,6 +578,28 @@ fn config_schema_version(value: &TomlValue) -> Option<i64> {
     value.get("schema_version")?.as_integer()
 }
 
+fn reject_history_keys(value: &TomlValue) -> Result<(), StorageError> {
+    match value {
+        TomlValue::Table(table) => {
+            for (key, nested) in table {
+                if is_history_key(key) {
+                    return Err(StorageError::InvalidConfiguration(
+                        "history settings are not allowed in local configuration".into(),
+                    ));
+                }
+                reject_history_keys(nested)?;
+            }
+        }
+        TomlValue::Array(items) => {
+            for nested in items {
+                reject_history_keys(nested)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Authoritative local state paths and atomic registry/settings operations.
 #[derive(Clone, Debug)]
 pub struct Storage {
@@ -676,10 +698,12 @@ impl Storage {
         validate: impl Fn(&TomlValue) -> Result<(), E>,
         mut hook: impl FnMut(AtomicWriteStage) -> io::Result<()>,
     ) -> Result<(), StorageError> {
+        reject_history_keys(config.value())?;
         validate(config.value())
             .map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
         let validate_existing = |bytes: &[u8]| {
             let value = parse_toml_value(bytes)?;
+            reject_history_keys(&value)?;
             validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))
         };
         let backup_path = self.config_backup_path();

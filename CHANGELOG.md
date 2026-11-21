@@ -76,6 +76,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   state without changing its bytes or `.last-good`. Provide explicit validated recovery, restrict
   app-owned directories and persisted files to owner-only Unix permissions, and redact machine-local
   paths after colon delimiters.
+- [COR-008] Reject nested cursor and window-geometry history keys in local settings before
+  saving or rotating last-good.
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
 - Size density grids from the selected custom-crop geometry, retain normalized profile warnings in detailed conversion results, and preflight and cancellably initialize bounded quality-patch storage ([CNV-001]).
 - Charge premultiplied validation and readable input extent to density-conversion work and simultaneous-memory budgets; cancel before quality-patch buffer reservations and reject sRGB8-indistinguishable foreground/background colors ([CNV-001]).
