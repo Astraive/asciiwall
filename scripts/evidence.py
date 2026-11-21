@@ -473,9 +473,21 @@ def _looks_like_json(raw: bytes) -> bool | None:
             prefix = raw.decode("utf-16").lstrip()
         except UnicodeError:
             return True
-        return prefix.startswith(("{", "[", '"')) if prefix else None
+        if not prefix:
+            return None
+        return (
+            prefix.startswith(("{", "[", '"', "true", "false", "null"))
+            or prefix[0] in "0123456789"
+            or (prefix.startswith("-") and len(prefix) > 1 and prefix[1] in "0123456789")
+        )
     prefix = raw.replace(b"\x00", b"").lstrip(b"\xef\xbb\xbf \t\r\n")
-    return prefix.startswith((b"{", b"[", b'"')) if prefix else None
+    if not prefix:
+        return None
+    return (
+        prefix.startswith((b"{", b"[", b'"', b"true", b"false", b"null"))
+        or prefix[:1] in b"0123456789"
+        or (prefix.startswith(b"-") and len(prefix) > 1 and prefix[1:2] in b"0123456789")
+    )
 
 
 class _SyntheticMarkerScanner:
