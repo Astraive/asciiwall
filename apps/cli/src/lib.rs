@@ -62,10 +62,9 @@ pub fn run_with_cancellation(
     };
 
     let json = cli.json;
-    match execute(cli, cancellation) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => report_error(&error, json, "convert"),
-    }
+    finish_execution(execute(cli, cancellation), |error| {
+        report_error(error, json, "convert")
+    })
 }
 
 fn parse_error_command(args: &[OsString]) -> &'static str {
@@ -113,7 +112,29 @@ fn report_error(error: &CliError, json: bool, command: &'static str) -> ExitCode
     }
 }
 
-fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), CliError> {
+fn finish_execution(
+    result: Result<(), ExecutionError>,
+    report_cli_error: impl FnOnce(&CliError) -> ExitCode,
+) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(ExecutionError::Cli(error)) => report_cli_error(&error),
+        Err(ExecutionError::SuccessStatus(error)) => ExitCode::from(error.exit),
+    }
+}
+
+enum ExecutionError {
+    Cli(CliError),
+    SuccessStatus(CliError),
+}
+
+impl From<CliError> for ExecutionError {
+    fn from(error: CliError) -> Self {
+        Self::Cli(error)
+    }
+}
+
+fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), ExecutionError> {
     let Cli {
         json,
         quiet,
@@ -128,25 +149,25 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), CliError> {
     if config.is_some() {
         return Err(CliError::capability(
             "configuration loading requires the shared settings registry",
-        ));
+        ).into());
     }
     if request.matcher == Matcher::Structural {
         return Err(CliError::capability(
             "structural matching is not available in this build",
-        ));
+        ).into());
     }
     if request.color == Color::Source {
         return Err(CliError::capability(
             "source-color density conversion is not available in this build",
-        ));
+        ).into());
     }
     if format == Format::Png {
         return Err(CliError::capability(
             "PNG still export requires the shared renderer's PNG export provider",
-        ));
+        ).into());
     }
     if cancellation.is_cancelled() {
-        return Err(CliError::cancelled("conversion was cancelled"));
+        return Err(CliError::cancelled("conversion was cancelled").into());
     }
 
     let font_path = request.font.as_deref().ok_or_else(|| {
@@ -195,7 +216,7 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), CliError> {
         Format::Png => {
             return Err(CliError::capability(
                 "PNG still export requires the shared renderer's PNG export provider",
-            ));
+            ).into());
         }
     };
     let exported =
@@ -218,7 +239,12 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), CliError> {
         exported.size().columns(),
         exported.size().rows(),
         exported.loss_notice(),
-    )?;
+        |status| {
+            let stdout = io::stdout();
+            write_success_status(&mut stdout.lock(), status)
+        },
+    )
+    .map_err(ExecutionError::SuccessStatus)?;
     Ok(())
 }
 
@@ -252,6 +278,7 @@ fn report_success(
     columns: u32,
     rows: u32,
     loss_notice: &str,
+    status_writer: impl FnOnce(&serde_json::Value) -> Result<(), CliError>,
 ) -> Result<(), CliError> {
     if json {
         let status = serde_json::json!({
@@ -262,7 +289,7 @@ fn report_success(
             "columns": columns,
             "rows": rows,
         });
-        write_success_status(&mut io::stdout().lock(), &status)?;
+        status_writer(&status)?;
     } else if !quiet {
         let _ = writeln!(
             io::stderr().lock(),
@@ -415,10 +442,14 @@ fn font_error(error: FontLoadError) -> CliError {
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
+    use std::process::ExitCode;
 
     use ascii_core::CancellationToken;
 
-    use super::{publish_error, publish_stdout, write_success_status};
+    use super::{
+        ExecutionError, Format, finish_execution, publish_error, publish_stdout, report_success,
+        write_success_status,
+    };
 
     struct FailOnNewline {
         bytes: Vec<u8>,
@@ -538,5 +569,29 @@ mod tests {
         assert_eq!(error.category, "io");
         assert_eq!(error.exit, 8);
         assert!(!stdout.bytes.is_empty());
+    }
+
+    #[test]
+    fn failed_success_status_does_not_attempt_a_second_json_response() {
+        let mut stdout = FailOnNewline { bytes: Vec::new() };
+        let result = report_success(true, false, false, Format::Txt, 12, 4, "", |status| {
+            write_success_status(&mut stdout, status)
+        })
+        .map_err(ExecutionError::SuccessStatus);
+        let mut error_response_attempts = 0;
+
+        let exit = finish_execution(result, |error| {
+            error_response_attempts += 1;
+            let response = serde_json::json!({"status": "error"});
+            let _ = serde_json::to_writer(&mut stdout, &response);
+            let _ = stdout.write_all(b"\n");
+            ExitCode::from(error.exit)
+        });
+
+        assert_eq!(exit, ExitCode::from(8));
+        assert_eq!(error_response_attempts, 0);
+        let response: serde_json::Value = serde_json::from_slice(&stdout.bytes).unwrap();
+        assert_eq!(response["status"], "ok");
+        assert!(!stdout.bytes.ends_with(b"\n"));
     }
 }
