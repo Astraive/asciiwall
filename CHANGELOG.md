@@ -71,8 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   absolute output destinations, resolves case-variant registrations using filesystem semantics,
   atomically publishes marked cache roots, and keeps lease acknowledgement retryable until its pin
   is released. Existing retained-byte accounting, OS file locks, and failed-write protections remain.
-- [COR-009] Persist a monotonic generated-file ID high-water mark before file creation, reconcile legacy
-  files, and fail closed on damaged or exhausted counter state to prevent filename reuse after eviction.
+- [COR-009] Persist a monotonic generated-file ID high-water mark before file creation, reconcile
+  legacy files, and fail closed on damaged initialized or exhausted counter state to prevent
+  filename reuse after eviction.
 - [COR-009] Sync the managed directory after durably creating the high-water counter and initialization
   marker on platforms that support directory sync, preserving ID evidence across eviction.
 - [COR-009] Update existing generated-file ID high-water marks via a synced sibling and
@@ -81,6 +82,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   publication; partial-write failures leave no final counter behind.
 - [COR-009] Use a synced recoverable backup swap where filesystems cannot replace an existing
   high-water counter name; transactional output publication remains no-clobber on those targets.
+- [COR-009] Recover malformed uninitialized high-water counters from live generated IDs; backup
+  recovery retains the greatest valid mark and restores it durably, while fallback output
+  publication continues to reject existing destinations.
 - [COR-009] Sync the marked-cache staging directory before publishing it and sync the root after rename
   on platforms that support directory sync; report either barrier's failure.
 - [COR-009] Sync destination directories after transactional output replacement and before registering

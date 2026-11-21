@@ -1112,10 +1112,70 @@ fn file_id_high_water_initialized(managed_dir: &Path) -> Result<bool, CacheError
 }
 
 fn invalid_file_id_high_water() -> CacheError {
-    CacheError::Io(io::Error::new(
+    CacheError::Io(invalid_file_id_high_water_data())
+}
+
+fn invalid_file_id_high_water_data() -> io::Error {
+    io::Error::new(
         ErrorKind::InvalidData,
         "invalid derived cache file ID high-water mark",
-    ))
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HighWaterFileState {
+    Missing,
+    Valid(u64),
+    Corrupt,
+}
+
+fn decode_file_id_high_water(file: &mut File) -> io::Result<u64> {
+    let mut encoded = [0u8; 17];
+    if let Err(error) = file.read_exact(&mut encoded) {
+        return if error.kind() == ErrorKind::UnexpectedEof {
+            Err(invalid_file_id_high_water_data())
+        } else {
+            Err(error)
+        };
+    }
+    let mut trailing = [0u8; 1];
+    if file.read(&mut trailing)? != 0 || encoded[16] != b'\n' {
+        return Err(invalid_file_id_high_water_data());
+    }
+
+    let mut high_water = 0u64;
+    for &byte in &encoded[..16] {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return Err(invalid_file_id_high_water_data()),
+        };
+        high_water = (high_water << 4) | u64::from(digit);
+    }
+    Ok(high_water)
+}
+
+fn high_water_file_state(path: &Path) -> io::Result<HighWaterFileState> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(HighWaterFileState::Missing);
+        }
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "high-water path is not a regular file",
+        ));
+    }
+
+    match decode_file_id_high_water(&mut File::open(path)?) {
+        Ok(high_water) => Ok(HighWaterFileState::Valid(high_water)),
+        Err(error) if error.kind() == ErrorKind::InvalidData => Ok(HighWaterFileState::Corrupt),
+        Err(error) => Err(error),
+    }
 }
 
 fn read_file_id_high_water(managed_dir: &Path) -> Result<u64, CacheError> {
@@ -1125,31 +1185,7 @@ fn read_file_id_high_water(managed_dir: &Path) -> Result<u64, CacheError> {
     if !metadata.file_type().is_file() {
         return Err(CacheError::UnsafeDerivedPath(path));
     }
-    let mut file = File::open(path)?;
-    let mut encoded = [0u8; 17];
-    if let Err(error) = file.read_exact(&mut encoded) {
-        return if error.kind() == ErrorKind::UnexpectedEof {
-            Err(invalid_file_id_high_water())
-        } else {
-            Err(CacheError::Io(error))
-        };
-    }
-    let mut trailing = [0u8; 1];
-    if file.read(&mut trailing)? != 0 || encoded[16] != b'\n' {
-        return Err(invalid_file_id_high_water());
-    }
-
-    let mut high_water = 0u64;
-    for &byte in &encoded[..16] {
-        let digit = match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => return Err(invalid_file_id_high_water()),
-        };
-        high_water = (high_water << 4) | u64::from(digit);
-    }
-    Ok(high_water)
+    decode_file_id_high_water(&mut File::open(path)?).map_err(CacheError::Io)
 }
 
 fn write_file_id_high_water(
@@ -1161,10 +1197,12 @@ fn write_file_id_high_water(
         managed_dir,
         high_water,
         create_new,
-        |file, encoded| file.write_all(encoded),
-        File::sync_all,
-        replace_file_id_high_water,
-        crate::storage::sync_parent_directory,
+        HighWaterWriteHooks {
+            write_encoded: |file: &mut File, encoded: &[u8]| file.write_all(encoded),
+            sync_file: File::sync_all,
+            replace: replace_file_id_high_water,
+            sync_parent_directory: crate::storage::sync_parent_directory,
+        },
     )
 }
 
@@ -1187,15 +1225,31 @@ fn create_file_id_high_water_temp(managed_dir: &Path) -> Result<(PathBuf, File),
     }
 }
 
-fn write_file_id_high_water_with_sync(
+struct HighWaterWriteHooks<W, S, R, D> {
+    write_encoded: W,
+    sync_file: S,
+    replace: R,
+    sync_parent_directory: D,
+}
+
+fn write_file_id_high_water_with_sync<W, S, R, D>(
     managed_dir: &Path,
     high_water: u64,
     create_new: bool,
-    write_encoded: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
-    sync_file: impl FnOnce(&File) -> io::Result<()>,
-    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
-    sync_parent_directory: impl FnOnce(&Path) -> io::Result<()>,
-) -> Result<(), CacheError> {
+    hooks: HighWaterWriteHooks<W, S, R, D>,
+) -> Result<(), CacheError>
+where
+    W: FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    S: FnOnce(&File) -> io::Result<()>,
+    R: FnOnce(&Path, &Path) -> io::Result<()>,
+    D: FnOnce(&Path) -> io::Result<()>,
+{
+    let HighWaterWriteHooks {
+        write_encoded,
+        sync_file,
+        replace,
+        sync_parent_directory,
+    } = hooks;
     let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
     let mut encoded = [b'0'; 17];
     encoded[16] = b'\n';
@@ -1251,19 +1305,51 @@ fn mark_file_id_high_water_initialized_with_sync(
     Ok(())
 }
 
+// The initialization marker is synced before a cache can allocate IDs. If an unmarked
+// high-water file is incomplete, its value is not trustworthy; reconcile live filenames
+// first, then replace only invalid counter artifacts with that discovered lower bound.
+fn discard_corrupt_initial_file_id_high_water(managed_dir: &Path) -> Result<(), CacheError> {
+    for name in [CACHE_FILE_ID_HIGH_WATER, CACHE_FILE_ID_HIGH_WATER_BACKUP] {
+        let path = managed_dir.join(name);
+        match high_water_file_state(&path)? {
+            HighWaterFileState::Missing => {}
+            HighWaterFileState::Corrupt => fs::remove_file(path)?,
+            HighWaterFileState::Valid(_) => return Err(invalid_file_id_high_water()),
+        }
+    }
+    crate::storage::sync_parent_directory(managed_dir)?;
+    Ok(())
+}
+
 // Callers hold the cache operations lock so migration and reservations serialize across instances.
 fn ensure_file_id_high_water(root: &Path, discovered_next_id: u64) -> Result<u64, CacheError> {
     let managed_dir = root.join(CACHE_INSTANCE_DIR);
     verify_owned_cache_dir(root, &managed_dir)?;
-    recover_file_id_high_water_backup(&managed_dir)?;
     let initialized = file_id_high_water_initialized(&managed_dir)?;
+    match recover_file_id_high_water_backup(&managed_dir) {
+        Ok(()) => {}
+        Err(error) if !initialized && error.kind() == ErrorKind::InvalidData => {
+            discard_corrupt_initial_file_id_high_water(&managed_dir)?;
+        }
+        Err(error) => return Err(CacheError::Io(error)),
+    }
     let counter_path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
     let high_water = match fs::symlink_metadata(&counter_path) {
         Ok(metadata) => {
             if !metadata.file_type().is_file() {
                 return Err(CacheError::UnsafeDerivedPath(counter_path));
             }
-            let stored = read_file_id_high_water(&managed_dir)?;
+            let stored = match read_file_id_high_water(&managed_dir) {
+                Ok(stored) => stored,
+                Err(CacheError::Io(error))
+                    if !initialized && error.kind() == ErrorKind::InvalidData =>
+                {
+                    discard_corrupt_initial_file_id_high_water(&managed_dir)?;
+                    write_file_id_high_water(&managed_dir, discovered_next_id, true)?;
+                    discovered_next_id
+                }
+                Err(error) => return Err(error),
+            };
             let high_water = stored.max(discovered_next_id);
             if high_water != stored {
                 write_file_id_high_water(&managed_dir, high_water, false)?;
@@ -2417,6 +2503,11 @@ fn replace_destination(temp_path: &Path, destination: &Path) -> io::Result<()> {
 
 #[cfg(not(any(unix, windows)))]
 fn replace_destination(temp_path: &Path, destination: &Path) -> io::Result<()> {
+    replace_destination_portable(temp_path, destination)
+}
+
+#[cfg(any(not(any(unix, windows)), test))]
+fn replace_destination_portable(temp_path: &Path, destination: &Path) -> io::Result<()> {
     // A hard link commits only if the destination is absent, so unsupported targets never clobber.
     fs::hard_link(temp_path, destination)?;
     let _ = fs::remove_file(temp_path);
@@ -2446,21 +2537,18 @@ fn replace_file_id_high_water_portable(temp_path: &Path, destination: &Path) -> 
     match fs::rename(destination, &backup_path) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            fs::rename(temp_path, destination)?;
+            replace_destination_portable(temp_path, destination)?;
             return crate::storage::sync_parent_directory(parent);
         }
         Err(error) => return Err(error),
     }
     if let Err(error) = crate::storage::sync_parent_directory(parent) {
-        let _ = fs::rename(&backup_path, destination);
+        let _ = restore_file_id_high_water_backup(parent, destination, &backup_path, false);
         return Err(error);
     }
 
-    if let Err(error) = fs::rename(temp_path, destination) {
-        let restore_result = fs::rename(&backup_path, destination);
-        if restore_result.is_ok() {
-            let _ = crate::storage::sync_parent_directory(parent);
-        }
+    if let Err(error) = replace_destination_portable(temp_path, destination) {
+        let _ = restore_file_id_high_water_backup(parent, destination, &backup_path, false);
         return Err(error);
     }
     crate::storage::sync_parent_directory(parent)?;
@@ -2468,29 +2556,57 @@ fn replace_file_id_high_water_portable(temp_path: &Path, destination: &Path) -> 
     crate::storage::sync_parent_directory(parent)
 }
 
+fn restore_file_id_high_water_backup(
+    managed_dir: &Path,
+    counter_path: &Path,
+    backup_path: &Path,
+    remove_counter: bool,
+) -> io::Result<()> {
+    if remove_counter {
+        fs::remove_file(counter_path)?;
+        crate::storage::sync_parent_directory(managed_dir)?;
+    }
+    fs::hard_link(backup_path, counter_path)?;
+    crate::storage::sync_parent_directory(managed_dir)?;
+    fs::remove_file(backup_path)?;
+    crate::storage::sync_parent_directory(managed_dir)
+}
+
 fn recover_file_id_high_water_backup(managed_dir: &Path) -> io::Result<()> {
     let backup_path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER_BACKUP);
-    let backup_metadata = match fs::symlink_metadata(&backup_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if !backup_metadata.file_type().is_file() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidData,
-            "invalid derived cache file ID high-water backup",
-        ));
-    }
-
     let counter_path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
-    match fs::symlink_metadata(&counter_path) {
-        Ok(_) => fs::remove_file(&backup_path)?,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            fs::rename(&backup_path, &counter_path)?
-        }
-        Err(error) => return Err(error),
+    let backup = high_water_file_state(&backup_path)?;
+    if backup == HighWaterFileState::Missing {
+        return Ok(());
     }
-    crate::storage::sync_parent_directory(managed_dir)
+    let counter = high_water_file_state(&counter_path)?;
+
+    match (counter, backup) {
+        (_, HighWaterFileState::Missing) => Ok(()),
+        (HighWaterFileState::Valid(current), HighWaterFileState::Valid(previous))
+            if current >= previous =>
+        {
+            crate::storage::sync_parent_directory(managed_dir)?;
+            fs::remove_file(&backup_path)?;
+            crate::storage::sync_parent_directory(managed_dir)
+        }
+        (HighWaterFileState::Valid(_), HighWaterFileState::Corrupt) => {
+            crate::storage::sync_parent_directory(managed_dir)?;
+            fs::remove_file(&backup_path)?;
+            crate::storage::sync_parent_directory(managed_dir)
+        }
+        (HighWaterFileState::Missing, HighWaterFileState::Valid(_)) => {
+            restore_file_id_high_water_backup(managed_dir, &counter_path, &backup_path, false)
+        }
+        (HighWaterFileState::Corrupt, HighWaterFileState::Valid(_))
+        | (HighWaterFileState::Valid(_), HighWaterFileState::Valid(_)) => {
+            restore_file_id_high_water_backup(managed_dir, &counter_path, &backup_path, true)
+        }
+        (HighWaterFileState::Missing, HighWaterFileState::Corrupt)
+        | (HighWaterFileState::Corrupt, HighWaterFileState::Corrupt) => {
+            Err(invalid_file_id_high_water_data())
+        }
+    }
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -2625,6 +2741,44 @@ mod tests {
         recover_file_id_high_water_backup(&managed_dir.0).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"0000000000000008\n");
         assert!(!backup.exists());
+
+        fs::write(&backup, b"0000000000000009\n").unwrap();
+        recover_file_id_high_water_backup(&managed_dir.0).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"0000000000000009\n");
+        assert!(!backup.exists());
+
+        fs::write(&backup, b"000000000000000a\n").unwrap();
+        fs::write(&destination, b"partial").unwrap();
+        recover_file_id_high_water_backup(&managed_dir.0).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"000000000000000a\n");
+        assert!(!backup.exists());
+
+        fs::write(&backup, b"corrupt").unwrap();
+        fs::write(&destination, b"also-corrupt").unwrap();
+        let error = recover_file_id_high_water_backup(&managed_dir.0).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(destination.exists());
+        assert!(backup.exists());
+    }
+
+    #[test]
+    fn portable_output_publication_never_clobbers_an_existing_destination() {
+        let directory = TempManagedDirectory::new();
+        let destination = directory.0.join("output.bin");
+        let temporary = directory.0.join("output-update");
+        fs::write(&destination, b"existing output").unwrap();
+        fs::write(&temporary, b"replacement output").unwrap();
+
+        let error = replace_destination_portable(&temporary, &destination).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&destination).unwrap(), b"existing output");
+        assert_eq!(fs::read(&temporary).unwrap(), b"replacement output");
+
+        fs::remove_file(&destination).unwrap();
+        replace_destination_portable(&temporary, &destination).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"replacement output");
+        assert!(!temporary.exists());
     }
 
     #[test]
@@ -2637,24 +2791,26 @@ mod tests {
             &managed_dir.0,
             7,
             true,
-            |file, encoded| {
-                events.borrow_mut().push("write");
-                file.write_all(&encoded[..5])?;
-                Err(io::Error::other(
-                    "injected partial high-water write failure",
-                ))
-            },
-            |_| {
-                events.borrow_mut().push("file sync");
-                Ok(())
-            },
-            |_, _| {
-                events.borrow_mut().push("replace");
-                Ok(())
-            },
-            |_| {
-                events.borrow_mut().push("parent sync");
-                Ok(())
+            HighWaterWriteHooks {
+                write_encoded: |file: &mut File, encoded: &[u8]| {
+                    events.borrow_mut().push("write");
+                    file.write_all(&encoded[..5])?;
+                    Err(io::Error::other(
+                        "injected partial high-water write failure",
+                    ))
+                },
+                sync_file: |_: &File| {
+                    events.borrow_mut().push("file sync");
+                    Ok(())
+                },
+                replace: |_: &Path, _: &Path| {
+                    events.borrow_mut().push("replace");
+                    Ok(())
+                },
+                sync_parent_directory: |_: &Path| {
+                    events.borrow_mut().push("parent sync");
+                    Ok(())
+                },
             },
         )
         .unwrap_err();
@@ -2682,23 +2838,25 @@ mod tests {
             &managed_dir.0,
             7,
             true,
-            |file, encoded| file.write_all(encoded),
-            |_| {
-                counter_events.borrow_mut().push(SyncEvent::File);
-                Ok(())
-            },
-            |_, _| {
-                counter_events.borrow_mut().push(SyncEvent::Replace);
-                Ok(())
-            },
-            |directory| {
-                assert_eq!(directory, managed_dir.0.as_path());
-                assert_eq!(
-                    fs::read(directory.join(CACHE_FILE_ID_HIGH_WATER))?,
-                    b"0000000000000007\n"
-                );
-                counter_events.borrow_mut().push(SyncEvent::ParentDirectory);
-                Ok(())
+            HighWaterWriteHooks {
+                write_encoded: |file: &mut File, encoded: &[u8]| file.write_all(encoded),
+                sync_file: |_: &File| {
+                    counter_events.borrow_mut().push(SyncEvent::File);
+                    Ok(())
+                },
+                replace: |_: &Path, _: &Path| {
+                    counter_events.borrow_mut().push(SyncEvent::Replace);
+                    Ok(())
+                },
+                sync_parent_directory: |directory: &Path| {
+                    assert_eq!(directory, managed_dir.0.as_path());
+                    assert_eq!(
+                        fs::read(directory.join(CACHE_FILE_ID_HIGH_WATER))?,
+                        b"0000000000000007\n"
+                    );
+                    counter_events.borrow_mut().push(SyncEvent::ParentDirectory);
+                    Ok(())
+                },
             },
         )
         .unwrap();
@@ -2712,25 +2870,27 @@ mod tests {
             &managed_dir.0,
             8,
             false,
-            |file, encoded| file.write_all(encoded),
-            |_| {
-                update_events.borrow_mut().push(SyncEvent::File);
-                Ok(())
-            },
-            |temporary, destination| {
-                let expected_destination = managed_dir.0.join(CACHE_FILE_ID_HIGH_WATER);
-                assert_eq!(destination, expected_destination.as_path());
-                update_events.borrow_mut().push(SyncEvent::Replace);
-                replace_file_id_high_water(temporary, destination)
-            },
-            |directory| {
-                assert_eq!(directory, managed_dir.0.as_path());
-                assert_eq!(
-                    fs::read(directory.join(CACHE_FILE_ID_HIGH_WATER))?,
-                    b"0000000000000008\n"
-                );
-                update_events.borrow_mut().push(SyncEvent::ParentDirectory);
-                Ok(())
+            HighWaterWriteHooks {
+                write_encoded: |file: &mut File, encoded: &[u8]| file.write_all(encoded),
+                sync_file: |_: &File| {
+                    update_events.borrow_mut().push(SyncEvent::File);
+                    Ok(())
+                },
+                replace: |temporary: &Path, destination: &Path| {
+                    let expected_destination = managed_dir.0.join(CACHE_FILE_ID_HIGH_WATER);
+                    assert_eq!(destination, expected_destination.as_path());
+                    update_events.borrow_mut().push(SyncEvent::Replace);
+                    replace_file_id_high_water(temporary, destination)
+                },
+                sync_parent_directory: |directory: &Path| {
+                    assert_eq!(directory, managed_dir.0.as_path());
+                    assert_eq!(
+                        fs::read(directory.join(CACHE_FILE_ID_HIGH_WATER))?,
+                        b"0000000000000008\n"
+                    );
+                    update_events.borrow_mut().push(SyncEvent::ParentDirectory);
+                    Ok(())
+                },
             },
         )
         .unwrap();
@@ -2750,21 +2910,23 @@ mod tests {
             &managed_dir.0,
             9,
             false,
-            |file, encoded| file.write_all(encoded),
-            |_| {
-                failed_update_events.borrow_mut().push(SyncEvent::File);
-                Ok(())
-            },
-            |temporary, _| {
-                failed_temp_path = Some(temporary.to_path_buf());
-                failed_update_events.borrow_mut().push(SyncEvent::Replace);
-                Err(io::Error::other("injected high-water replacement failure"))
-            },
-            |_| {
-                failed_update_events
-                    .borrow_mut()
-                    .push(SyncEvent::ParentDirectory);
-                Ok(())
+            HighWaterWriteHooks {
+                write_encoded: |file: &mut File, encoded: &[u8]| file.write_all(encoded),
+                sync_file: |_: &File| {
+                    failed_update_events.borrow_mut().push(SyncEvent::File);
+                    Ok(())
+                },
+                replace: |temporary: &Path, _: &Path| {
+                    failed_temp_path = Some(temporary.to_path_buf());
+                    failed_update_events.borrow_mut().push(SyncEvent::Replace);
+                    Err(io::Error::other("injected high-water replacement failure"))
+                },
+                sync_parent_directory: |_: &Path| {
+                    failed_update_events
+                        .borrow_mut()
+                        .push(SyncEvent::ParentDirectory);
+                    Ok(())
+                },
             },
         )
         .unwrap_err();
