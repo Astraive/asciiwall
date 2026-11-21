@@ -17,12 +17,12 @@ use crate::color::{
     OutputEncoding, encode_output, normalize_raster,
 };
 use crate::font::GlyphTable;
+#[cfg(test)]
+use crate::sampling::SampleCancellationPoll;
 use crate::sampling::{
     FitMode, FitTransform, QualityPatches, SamplingError, SamplingIdentity, SamplingOptions,
     preflight_sampling_source, prepare_sampling,
 };
-#[cfg(test)]
-use crate::sampling::SampleCancellationPoll;
 const CANCELLATION_CELL_INTERVAL: usize = 32;
 const CANCELLATION_GLYPH_INTERVAL: usize = 64;
 

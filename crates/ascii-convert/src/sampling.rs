@@ -354,12 +354,7 @@ impl FitTransform {
                 let display_y = centered_offset(dh, content_height)?;
                 (
                     SamplingRect::new(0.0, 0.0, sw, sh)?,
-                    SamplingRect::new(
-                        display_x,
-                        display_y,
-                        content_width,
-                        content_height,
-                    )?,
+                    SamplingRect::new(display_x, display_y, content_width, content_height)?,
                 )
             }
             FitMode::Cover => {
