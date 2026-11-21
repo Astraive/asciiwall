@@ -357,6 +357,7 @@ impl std::fmt::Display for DocumentError {
 }
 
 impl std::error::Error for DocumentError {}
+
 #[cfg(test)]
 mod tests {
     use super::{
