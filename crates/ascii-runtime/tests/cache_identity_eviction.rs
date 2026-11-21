@@ -642,6 +642,112 @@ fn store_reconciles_an_entry_evicted_by_another_cache_instance() {
 }
 
 #[test]
+fn stale_cache_entry_cannot_lease_another_identity_after_eviction_and_reopen() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    let stale_identity = identity(50);
+    let replacement_identity = identity(51);
+    first_cache.store(stale_identity.clone(), b"first").unwrap();
+    let mut stale_lease = first_cache.lease(&stale_identity).unwrap();
+    let stale_path = stale_lease.path().to_path_buf();
+    stale_lease.acknowledge().unwrap();
+
+    let evicting_cache = DerivedCache::open(&cache_root, 0).unwrap();
+    assert_eq!(evicting_cache.snapshot().unwrap().used_bytes, 0);
+    drop(evicting_cache);
+    assert!(!stale_path.exists());
+
+    let fresh_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    fresh_cache
+        .store(replacement_identity.clone(), b"replacement")
+        .unwrap();
+    let mut replacement_lease = fresh_cache.lease(&replacement_identity).unwrap();
+    assert_ne!(replacement_lease.path(), stale_path.as_path());
+    assert_eq!(
+        fs::read(replacement_lease.path()).unwrap(),
+        b"replacement"
+    );
+    replacement_lease.acknowledge().unwrap();
+
+    assert!(matches!(
+        first_cache.lease(&stale_identity),
+        Err(CacheError::NotFound)
+    ));
+}
+
+#[test]
+fn legacy_generated_files_seed_the_persistent_file_id_high_water_mark() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let legacy_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    let legacy_identity = identity(52);
+    legacy_cache.store(legacy_identity.clone(), b"legacy").unwrap();
+    let mut legacy_lease = legacy_cache.lease(&legacy_identity).unwrap();
+    let legacy_path = legacy_lease.path().to_path_buf();
+    legacy_lease.acknowledge().unwrap();
+    drop(legacy_cache);
+
+    let managed_dir = cache_root.join(".asciiwall-cache-v1");
+    fs::remove_file(managed_dir.join(".file-id-high-water")).unwrap();
+    fs::remove_file(managed_dir.join(".file-id-high-water-v1")).unwrap();
+
+    let upgraded_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    let mut restored_lease = upgraded_cache.lease(&legacy_identity).unwrap();
+    assert_eq!(fs::read(restored_lease.path()).unwrap(), b"legacy");
+    restored_lease.acknowledge().unwrap();
+
+    let replacement_identity = identity(53);
+    upgraded_cache
+        .store(replacement_identity.clone(), b"new")
+        .unwrap();
+    let mut replacement_lease = upgraded_cache.lease(&replacement_identity).unwrap();
+    assert_ne!(replacement_lease.path(), legacy_path.as_path());
+    replacement_lease.acknowledge().unwrap();
+}
+
+#[test]
+fn damaged_file_id_high_water_evidence_fails_closed() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let cache = DerivedCache::open(&cache_root, 16).unwrap();
+    cache.store(identity(54), b"existing").unwrap();
+    drop(cache);
+
+    let counter = cache_root
+        .join(".asciiwall-cache-v1")
+        .join(".file-id-high-water");
+    fs::write(&counter, b"malformed").unwrap();
+    assert!(matches!(
+        DerivedCache::open(&cache_root, 16),
+        Err(CacheError::Io(error)) if error.kind() == ErrorKind::InvalidData
+    ));
+
+    fs::remove_file(counter).unwrap();
+    assert!(matches!(
+        DerivedCache::open(&cache_root, 16),
+        Err(CacheError::Io(error)) if error.kind() == ErrorKind::InvalidData
+    ));
+}
+
+#[test]
+fn file_id_high_water_overflow_does_not_create_or_reuse_a_filename() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let cache = DerivedCache::open(&cache_root, 16).unwrap();
+    let counter = cache_root
+        .join(".asciiwall-cache-v1")
+        .join(".file-id-high-water");
+    fs::write(&counter, b"ffffffffffffffff\n").unwrap();
+
+    assert!(matches!(
+        cache.store(identity(55), b"new"),
+        Err(CacheError::ArithmeticOverflow)
+    ));
+    assert_eq!(derived_file_count(&cache_root), 0);
+}
+
+#[test]
 fn independently_opened_caches_enforce_one_shared_root_budget() {
     let temp = TempDir::new();
     let cache_root = temp.path().join("cache");

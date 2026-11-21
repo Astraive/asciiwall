@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -17,6 +17,9 @@ const CACHE_INSTANCE_DIR: &str = ".asciiwall-cache-v1";
 const CACHE_OWNER_FILE: &str = ".asciiwall-owner";
 const CACHE_OWNER_MARKER: &[u8] = b"AsciiWall derived cache ownership v1\n";
 const CACHE_OPERATIONS_LOCK: &str = ".operations.lock";
+const CACHE_FILE_ID_HIGH_WATER: &str = ".file-id-high-water";
+const CACHE_FILE_ID_HIGH_WATER_MARKER: &str = ".file-id-high-water-v1";
+
 const CACHE_INITIALIZATION_LOCK: &str = ".asciiwall-cache-v1.init.lock";
 
 static CACHE_INITIALIZATION_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -1082,6 +1085,143 @@ fn lock_cache_directory(root: &Path, managed_dir: &Path) -> Result<File, CacheEr
     Ok(file)
 }
 
+fn file_id_high_water_initialized(managed_dir: &Path) -> Result<bool, CacheError> {
+    let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER_MARKER);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            Err(CacheError::UnsafeDerivedPath(path))
+        }
+        Ok(metadata) if metadata.len() == 0 => Ok(true),
+        Ok(_) => Err(invalid_file_id_high_water()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(CacheError::Io(error)),
+    }
+}
+
+fn invalid_file_id_high_water() -> CacheError {
+    CacheError::Io(io::Error::new(
+        ErrorKind::InvalidData,
+        "invalid derived cache file ID high-water mark",
+    ))
+}
+
+fn read_file_id_high_water(managed_dir: &Path) -> Result<u64, CacheError> {
+    let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
+    let metadata = fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_file() {
+        return Err(CacheError::UnsafeDerivedPath(path));
+    }
+    let mut file = File::open(path)?;
+    let mut encoded = [0u8; 17];
+    if let Err(error) = file.read_exact(&mut encoded) {
+        return if error.kind() == ErrorKind::UnexpectedEof {
+            Err(invalid_file_id_high_water())
+        } else {
+            Err(CacheError::Io(error))
+        };
+    }
+    let mut trailing = [0u8; 1];
+    if file.read(&mut trailing)? != 0 || encoded[16] != b'\n' {
+        return Err(invalid_file_id_high_water());
+    }
+
+    let mut high_water = 0u64;
+    for &byte in &encoded[..16] {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return Err(invalid_file_id_high_water()),
+        };
+        high_water = (high_water << 4) | u64::from(digit);
+    }
+    Ok(high_water)
+}
+
+fn write_file_id_high_water(
+    managed_dir: &Path,
+    high_water: u64,
+    create_new: bool,
+) -> Result<(), CacheError> {
+    let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if create_new {
+        options.create_new(true);
+    } else {
+        options.truncate(true);
+    }
+    let mut file = options.open(path)?;
+
+    let mut encoded = [b'0'; 17];
+    encoded[16] = b'\n';
+    let mut value = high_water;
+    for digit in encoded[..16].iter_mut().rev() {
+        *digit = b"0123456789abcdef"[(value & 0x0f) as usize];
+        value >>= 4;
+    }
+    file.write_all(&encoded)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn mark_file_id_high_water_initialized(managed_dir: &Path) -> Result<(), CacheError> {
+    let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER_MARKER);
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+// Callers hold the cache operations lock so migration and reservations serialize across instances.
+
+fn ensure_file_id_high_water(root: &Path, discovered_next_id: u64) -> Result<u64, CacheError> {
+    let managed_dir = root.join(CACHE_INSTANCE_DIR);
+    verify_owned_cache_dir(root, &managed_dir)?;
+    let initialized = file_id_high_water_initialized(&managed_dir)?;
+    let counter_path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
+    let high_water = match fs::symlink_metadata(&counter_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                return Err(CacheError::UnsafeDerivedPath(counter_path));
+            }
+            let stored = read_file_id_high_water(&managed_dir)?;
+            let high_water = stored.max(discovered_next_id);
+            if high_water != stored {
+                write_file_id_high_water(&managed_dir, high_water, false)?;
+            }
+            high_water
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound && initialized => {
+            return Err(invalid_file_id_high_water());
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            write_file_id_high_water(&managed_dir, discovered_next_id, true)?;
+            discovered_next_id
+        }
+        Err(error) => return Err(CacheError::Io(error)),
+    };
+    if !initialized {
+        mark_file_id_high_water_initialized(&managed_dir)?;
+    }
+    Ok(high_water)
+}
+
+// The high-water mark is synchronized before the corresponding filename is created.
+
+fn reserve_file_id(managed_dir: &Path, state: &mut CacheState) -> Result<u64, CacheError> {
+    let id = state
+        .next_file_id
+        .max(read_file_id_high_water(managed_dir)?);
+    let next_file_id = id.checked_add(1).ok_or(CacheError::ArithmeticOverflow)?;
+    write_file_id_high_water(managed_dir, next_file_id, false)?;
+    state.next_file_id = next_file_id;
+    Ok(id)
+}
+
+
 fn create_derived_file(
     root: &Path,
     managed_dir: &Path,
@@ -1089,11 +1229,7 @@ fn create_derived_file(
 ) -> Result<(u64, PathBuf, File), CacheError> {
     verify_owned_cache_dir(root, managed_dir)?;
     loop {
-        let id = state.next_file_id;
-        state.next_file_id = state
-            .next_file_id
-            .checked_add(1)
-            .ok_or(CacheError::ArithmeticOverflow)?;
+        let id = reserve_file_id(managed_dir, state)?;
         let path = managed_dir.join(format!("derived-{id:016x}.bin"));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => {
@@ -1160,17 +1296,18 @@ fn scan_orphaned_files(root: &Path) -> Result<(Vec<OrphanedFile>, u64, u64, u64)
             };
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)?;
-            if !metadata.file_type().is_file() {
-                continue;
-            }
             next_file_id = next_file_id.max(
                 file_id
                     .checked_add(1)
                     .ok_or(CacheError::ArithmeticOverflow)?,
             );
+            if !metadata.file_type().is_file() {
+                continue;
+            }
             discovered.push((file_id, path, metadata.len()));
         }
     }
+    let next_file_id = ensure_file_id_high_water(root, next_file_id)?;
     discovered.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 
     let mut used_bytes = 0u64;
