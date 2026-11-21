@@ -20,7 +20,11 @@
 | 14 | network | Explicit optional download failed |
 | 15 | internal | Unexpected invariant failure; safe diagnostic ID supplied |
 
-No success exit for a partially written archive. For batch operations, return a nonzero aggregate code if any item failed and include each result in JSON. Define deterministic error precedence: integrity/security before general validation, then resource, permission, capability, media, graphics, I/O, controller/network, internal. Cancellation before any commit returns 10; completed outputs remain listed explicitly.
+The current `convert` command returns success `0` and emits usage `2`, validation `3`, capability `4`, permission `5`, media `6`, I/O `8`, cancelled `10`, and resource-limit `11` results. Density-mode text and ANSI conversions can complete without a desktop host. Missing font, PNG export, structural matching, source-color conversion, and settings loading remain explicit capability errors. Existing-output conflicts take precedence over format/charset checks and engine-capability errors, and remain usage `2`.
+
+Cancellation before destination commit returns `10`; decode, conversion, export, or publication failures before commit leave an existing destination unchanged. The output helper stages in the destination directory, checks cancellation before commit, and publishes with a no-clobber operation unless overwrite was explicitly requested.
+
+Successful `--json` conversion writes one schema-versioned status object on stdout and keeps progress/target-loss diagnostics on stderr. The object reports only command, format, and grid dimensions, not local paths. Error JSON also uses `schema_version: 1`, with a stable category/code and a null result.
 
 ## Structured result example
 
@@ -43,7 +47,7 @@ Error strings are human-readable and may evolve/localize. Scripts depend on `cod
 
 ## Error location and redaction
 
-Prefer manifest field paths and package-relative asset names over full local paths. Sanitize control characters and cap embedded text. Never echo arbitrary metadata as terminal escape sequences or rich HTML. Include native error codes only in optional redacted diagnostics, without process memory or source pixels.
+Prefer manifest field paths and package-relative asset names over full local paths. Sanitize control characters and cap embedded text. CLI parser failures use a generic message rather than echoing supplied option values or local paths. Never echo arbitrary metadata as terminal escape sequences or rich HTML. Include native error codes only in optional redacted diagnostics, without process memory or source pixels.
 
 ## Recovery examples
 
@@ -51,4 +55,4 @@ Missing source: Locate file, not automatic filesystem crawl. Missing window geom
 
 ## Stability
 
-The CLI schema and error taxonomy need conformance tests and a compatibility policy before release. New error codes can be added within existing categories; changing the meaning of an existing code requires a major protocol/CLI contract change. Exit-code mapping in this document is a proposed contract, not current executable behavior.
+The CLI schema and error taxonomy need conformance tests and a compatibility policy before release. New error codes can be added within existing categories; changing the meaning of an existing code requires a major protocol/CLI contract change. The exit-code mapping described above is implemented for the current `convert` command. Codes for categories that `convert` does not emit remain taxonomy/reference values; they do not describe current executable behavior.
