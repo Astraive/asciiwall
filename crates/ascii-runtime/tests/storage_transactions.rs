@@ -799,8 +799,7 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
     let first = config(json!({"theme": "dark", "grid": {"width": 80}}));
-    save_current_config(&storage, &first, validate_test_config)
-        .expect("save initial config");
+    save_current_config(&storage, &first, validate_test_config).expect("save initial config");
     let config_path = storage.config_path();
     let backup_path = storage.config_backup_path();
     let original = fs::read(&config_path).expect("initial config bytes");
@@ -830,8 +829,7 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
         "caller-owned schema validator remains authoritative"
     );
 
-    save_current_config(&storage, &second, validate_test_config)
-        .expect("replace config");
+    save_current_config(&storage, &second, validate_test_config).expect("replace config");
     assert_eq!(fs::read(&backup_path).expect("last-good backup"), original);
     assert_eq!(
         storage
@@ -981,8 +979,7 @@ fn configuration_failures_at_each_atomic_boundary_preserve_valid_recovery() {
     let config_path = storage.config_path();
     let backup_path = storage.config_backup_path();
     let seed = config(json!({"theme": "seed"}));
-    save_current_config(&storage, &seed, validate_test_config)
-        .expect("save initial config");
+    save_current_config(&storage, &seed, validate_test_config).expect("save initial config");
 
     for (index, stage) in [
         AtomicWriteStage::TemporaryCreated,
@@ -1006,7 +1003,7 @@ fn configuration_failures_at_each_atomic_boundary_preserve_valid_recovery() {
             validate_test_config,
             injected_failure(stage),
         )
-            .expect_err("injected interruption");
+        .expect_err("injected interruption");
         assert!(matches!(error, StorageError::Io(_)));
 
         let expected_current = if stage == AtomicWriteStage::TargetReplaced {
@@ -1086,10 +1083,18 @@ fn saving_config_revalidates_against_the_active_schema_before_replacement() {
 fn config_saves_reject_nested_history_keys_without_rotating_state() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
-    save_current_config(&storage, &config(json!({"theme": "previous"})), validate_test_config)
-        .expect("save previous config");
-    save_current_config(&storage, &config(json!({"theme": "current"})), validate_test_config)
-        .expect("save current config and establish last-good");
+    save_current_config(
+        &storage,
+        &config(json!({"theme": "previous"})),
+        validate_test_config,
+    )
+    .expect("save previous config");
+    save_current_config(
+        &storage,
+        &config(json!({"theme": "current"})),
+        validate_test_config,
+    )
+    .expect("save current config and establish last-good");
     let config_path = storage.config_path();
     let backup_path = storage.config_backup_path();
     let current_before = fs::read(&config_path).expect("current config bytes");
@@ -1129,7 +1134,7 @@ fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly()
         &config(json!({"theme": "current"})),
         validate_theme_config,
     )
-        .expect("save current config");
+    .expect("save current config");
     let config_path = storage.config_path();
     let backup_path = storage.config_backup_path();
     let known_good_backup = fs::read(&backup_path).expect("known-good backup exists");
@@ -1197,8 +1202,7 @@ fn newer_settings_schema_is_not_replaced_by_older_writer_or_explicit_recovery() 
         b"schema_version = 1\nrevision = 1\n[settings]\ntheme = \"known-good\"\n",
     )
     .expect("parse supported TOML");
-    save_current_config(&storage, &supported, validate_schema_v1)
-        .expect("save supported schema");
+    save_current_config(&storage, &supported, validate_schema_v1).expect("save supported schema");
     let current = ParsedToml::from_toml(
         b"schema_version = 1\nrevision = 2\n[settings]\ntheme = \"current\"\n",
     )

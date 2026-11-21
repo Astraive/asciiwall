@@ -31,8 +31,8 @@
 //! rotates within [`LogLimits`], coordinates writers targeting the same directory, and redacts home
 //! paths, media-bearing and clipped messages by default.
 
-use serde::{Deserialize, Serialize};
 use serde::de::{Error as DeError, MapAccess, Visitor};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::env;
@@ -950,9 +950,9 @@ fn atomic_replace_locked(
             let matches_expected = match expected_current {
                 CurrentExpectation::Unchecked => true,
                 CurrentExpectation::Missing => previous.is_none(),
-                CurrentExpectation::Bytes(expected) => {
-                    previous.as_deref().is_some_and(|current| current == expected)
-                }
+                CurrentExpectation::Bytes(expected) => previous
+                    .as_deref()
+                    .is_some_and(|current| current == expected),
             };
             if !matches_expected {
                 return Err(StorageError::StaleConfiguration);
