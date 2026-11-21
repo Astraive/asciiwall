@@ -111,3 +111,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [COR-008] Roll back restored settings after parent-directory sync failure, preserving pre-recovery
   current and last-good bytes; report rollback failures explicitly and cover the public recovery
   sync hook with a deterministic byte-preservation regression.
+- [COR-008] Redact generic portable-export strings containing embedded POSIX or Windows relative
+  file paths while preserving harmless prose and slash-separated text; add public export coverage.

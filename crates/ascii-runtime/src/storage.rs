@@ -1811,8 +1811,37 @@ fn is_machine_local_string(value: &str) -> bool {
                 || part.starts_with('/')
                 || part.starts_with("\\\\")
                 || part.contains('\\')
+                || looks_like_relative_local_path(part)
         }) || looks_like_network_endpoint(token)
     })
+}
+
+fn looks_like_relative_local_path(value: &str) -> bool {
+    let mut components = value.split(['/', '\\']);
+    let Some(first) = components.next() else {
+        return false;
+    };
+    let Some(mut final_component) = components.next() else {
+        return false;
+    };
+    if first.is_empty() || final_component.is_empty() {
+        return false;
+    }
+    for component in components {
+        if component.is_empty() {
+            return false;
+        }
+        final_component = component;
+    }
+    let Some((stem, extension)) = final_component.rsplit_once('.') else {
+        return false;
+    };
+    let relative_prefix = matches!(first, "." | "..");
+    (relative_prefix || first.chars().any(char::is_alphanumeric))
+        && !stem.is_empty()
+        && !extension.is_empty()
+        && extension.len() <= 10
+        && extension.chars().all(|character| character.is_ascii_alphanumeric())
 }
 
 fn trim_export_punctuation(value: &str) -> &str {
