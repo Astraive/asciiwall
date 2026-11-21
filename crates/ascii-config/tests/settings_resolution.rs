@@ -539,7 +539,9 @@ fn future_schema_is_read_only_and_corrupt_repair_keeps_library_data() {
 
 #[test]
 fn malformed_document_classes_are_rejected_before_snapshot_publication() {
-    let cases: &[(&[u8], fn(&DocumentError) -> bool)] = &[
+    type MalformedDocumentCase<'a> = (&'a [u8], fn(&DocumentError) -> bool);
+
+    let cases: &[MalformedDocumentCase<'_>] = &[
         (
             b"schema_version = 2\nrevision = 0\n[settings]\n\"grid.columns\" = 240\n\"grid.columns\" = 241\n",
             |error| matches!(error, DocumentError::DuplicateKey),
