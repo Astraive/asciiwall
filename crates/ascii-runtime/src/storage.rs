@@ -978,7 +978,6 @@ fn current_matches_revision(
     }
 }
 
-
 type ExistingValidator<'a> = (u64, &'a dyn Fn(&[u8]) -> Result<(), StorageError>);
 type AtomicBackup<'a> = (&'a Path, ExistingValidator<'a>);
 
@@ -1032,8 +1031,7 @@ fn atomic_replace_locked(
     let previous = match validate_existing {
         Some((limit, validate)) => {
             let previous = read_optional_bounded(destination, limit)?;
-            let matches_expected =
-                expected_current_matches(previous.as_deref(), expected_current);
+            let matches_expected = expected_current_matches(previous.as_deref(), expected_current);
             if !matches_expected {
                 return Err(StorageError::StaleConfiguration);
             }
