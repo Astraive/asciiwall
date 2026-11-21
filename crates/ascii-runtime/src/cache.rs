@@ -23,6 +23,7 @@ const CACHE_FILE_ID_HIGH_WATER_MARKER: &str = ".file-id-high-water-v1";
 const CACHE_INITIALIZATION_LOCK: &str = ".asciiwall-cache-v1.init.lock";
 
 static CACHE_INITIALIZATION_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static CACHE_FILE_ID_HIGH_WATER_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 /// A caller-computed cryptographic digest of content or shader bytes.
 ///
@@ -1146,8 +1147,32 @@ fn write_file_id_high_water(
         high_water,
         create_new,
         File::sync_all,
+        replace_destination,
         crate::storage::sync_parent_directory,
     )
+}
+
+fn create_file_id_high_water_temp(managed_dir: &Path) -> Result<(PathBuf, File), CacheError> {
+    loop {
+        let id = CACHE_FILE_ID_HIGH_WATER_TEMP_ID
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| CacheError::ArithmeticOverflow)?;
+        let path = managed_dir.join(format!(
+            ".{CACHE_FILE_ID_HIGH_WATER}.update-{}-{id:016x}",
+            std::process::id()
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(CacheError::Io(error)),
+        }
+    }
 }
 
 fn write_file_id_high_water_with_sync(
@@ -1155,18 +1180,10 @@ fn write_file_id_high_water_with_sync(
     high_water: u64,
     create_new: bool,
     sync_file: impl FnOnce(&File) -> io::Result<()>,
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
     sync_parent_directory: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<(), CacheError> {
     let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
-    let mut options = OpenOptions::new();
-    options.write(true);
-    if create_new {
-        options.create_new(true);
-    } else {
-        options.truncate(true);
-    }
-    let mut file = options.open(path)?;
-
     let mut encoded = [b'0'; 17];
     encoded[16] = b'\n';
     let mut value = high_water;
@@ -1174,11 +1191,32 @@ fn write_file_id_high_water_with_sync(
         *digit = b"0123456789abcdef"[(value & 0x0f) as usize];
         value >>= 4;
     }
-    file.write_all(&encoded)?;
-    sync_file(&file)?;
+
     if create_new {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(&encoded)?;
+        sync_file(&file)?;
         sync_parent_directory(managed_dir)?;
+        return Ok(());
     }
+
+    let (temp_path, mut file) = create_file_id_high_water_temp(managed_dir)?;
+    let write_result = file
+        .write_all(&encoded)
+        .and_then(|()| sync_file(&file));
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(CacheError::Io(error));
+    }
+    if let Err(error) = replace(&temp_path, &path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(CacheError::Io(error));
+    }
+    sync_parent_directory(managed_dir)?;
     Ok(())
 }
 
@@ -2356,6 +2394,7 @@ mod tests {
         #[derive(Debug, Eq, PartialEq)]
         enum SyncEvent {
             File,
+            Replace,
             ParentDirectory,
         }
 
@@ -2367,6 +2406,10 @@ mod tests {
             true,
             |_| {
                 counter_events.borrow_mut().push(SyncEvent::File);
+                Ok(())
+            },
+            |_, _| {
+                counter_events.borrow_mut().push(SyncEvent::Replace);
                 Ok(())
             },
             |directory| {
@@ -2385,7 +2428,7 @@ mod tests {
             vec![SyncEvent::File, SyncEvent::ParentDirectory]
         );
 
-        let update_events = RefCell::new(Vec::with_capacity(1));
+        let update_events = RefCell::new(Vec::with_capacity(3));
         write_file_id_high_water_with_sync(
             &managed_dir.0,
             8,
@@ -2394,13 +2437,63 @@ mod tests {
                 update_events.borrow_mut().push(SyncEvent::File);
                 Ok(())
             },
-            |_| {
+            |temporary, destination| {
+                let expected_destination = managed_dir.0.join(CACHE_FILE_ID_HIGH_WATER);
+                assert_eq!(destination, expected_destination.as_path());
+                update_events.borrow_mut().push(SyncEvent::Replace);
+                replace_destination(temporary, destination)
+            },
+            |directory| {
+                assert_eq!(directory, managed_dir.0.as_path());
+                assert_eq!(
+                    fs::read(directory.join(CACHE_FILE_ID_HIGH_WATER))?,
+                    b"0000000000000008\n"
+                );
                 update_events.borrow_mut().push(SyncEvent::ParentDirectory);
                 Ok(())
             },
         )
         .unwrap();
-        assert_eq!(update_events.into_inner(), vec![SyncEvent::File]);
+        assert_eq!(
+            update_events.into_inner(),
+            vec![
+                SyncEvent::File,
+                SyncEvent::Replace,
+                SyncEvent::ParentDirectory
+            ]
+        );
+        assert_eq!(read_file_id_high_water(&managed_dir.0).unwrap(), 8);
+
+        let failed_update_events = RefCell::new(Vec::with_capacity(2));
+        let mut failed_temp_path = None;
+        let error = write_file_id_high_water_with_sync(
+            &managed_dir.0,
+            9,
+            false,
+            |_| {
+                failed_update_events.borrow_mut().push(SyncEvent::File);
+                Ok(())
+            },
+            |temporary, _| {
+                failed_temp_path = Some(temporary.to_path_buf());
+                failed_update_events.borrow_mut().push(SyncEvent::Replace);
+                Err(io::Error::other("injected high-water replacement failure"))
+            },
+            |_| {
+                failed_update_events
+                    .borrow_mut()
+                    .push(SyncEvent::ParentDirectory);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, CacheError::Io(_)));
+        assert_eq!(
+            failed_update_events.into_inner(),
+            vec![SyncEvent::File, SyncEvent::Replace]
+        );
+        assert_eq!(read_file_id_high_water(&managed_dir.0).unwrap(), 8);
+        assert!(!failed_temp_path.expect("the staged path is captured").exists());
 
         let marker_events = RefCell::new(Vec::with_capacity(2));
         mark_file_id_high_water_initialized_with_sync(
