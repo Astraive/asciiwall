@@ -410,21 +410,27 @@ fn require_absolute(path: &Path) -> Result<(), StorageError> {
         ))
     }
 }
-/// Resolves aliases without creating paths, canonicalizing the longest existing prefix first.
-fn normalized_path_identity(path: &Path) -> PathBuf {
+
+/// Resolves aliases without creating paths, retaining filesystem spelling for I/O.
+fn normalized_path_for_io(path: &Path) -> PathBuf {
     let mut ancestor = path;
     loop {
-        if let Ok(mut identity) = fs::canonicalize(ancestor)
+        if let Ok(mut resolved) = fs::canonicalize(ancestor)
             && let Ok(suffix) = path.strip_prefix(ancestor)
         {
-            append_normalized_components(&mut identity, suffix);
-            return normalize_path_identity_case(identity);
+            append_normalized_components(&mut resolved, suffix);
+            return resolved;
         }
         match ancestor.parent() {
             Some(parent) if parent != ancestor => ancestor = parent,
-            _ => return normalize_path_identity_case(normalize_path(path)),
+            _ => return normalize_path(path),
         }
     }
+}
+
+/// Resolves aliases and case for identity comparisons without creating paths.
+fn normalized_path_identity(path: &Path) -> PathBuf {
+    normalize_path_identity_case(normalized_path_for_io(path))
 }
 
 #[cfg(windows)]
@@ -822,10 +828,12 @@ impl Storage {
             expected_current,
             Some((REGISTRY_MAX_BYTES, &validate_existing)),
             None,
-            &mut stage_hook,
-            &mut sync_hook,
-            &mut rollback_hook,
-            Some(rollback),
+            AtomicReplaceHooks {
+                stage: &mut stage_hook,
+                before_parent_sync: &mut sync_hook,
+                before_rollback_rename: &mut rollback_hook,
+                rollback_on_sync_error: Some(rollback),
+            },
         )?;
         Ok(())
     }
@@ -914,7 +922,7 @@ impl Storage {
         &self,
         expected_current: Option<&[u8]>,
         validate: impl FnOnce(&TomlValue) -> Result<(), E>,
-        mut hook: impl FnMut(AtomicWriteStage) -> io::Result<()>,
+        hook: impl FnMut(AtomicWriteStage) -> io::Result<()>,
     ) -> Result<(), StorageError> {
         let destination = self.config_path();
         let parent = destination
@@ -993,10 +1001,12 @@ impl Storage {
             expected_current,
             None,
             None,
-            &mut |_| Ok(()),
-            &mut sync_hook,
-            &mut rollback_hook,
-            Some(rollback),
+            AtomicReplaceHooks {
+                stage: &mut |_| Ok(()),
+                before_parent_sync: &mut sync_hook,
+                before_rollback_rename: &mut rollback_hook,
+                rollback_on_sync_error: Some(rollback),
+            },
         )?;
         Ok(())
     }
@@ -1119,6 +1129,13 @@ enum CurrentExpectation<'a> {
     Bytes(&'a [u8]),
 }
 
+struct AtomicReplaceHooks<'a> {
+    stage: &'a mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
+    before_parent_sync: &'a mut dyn FnMut() -> io::Result<()>,
+    before_rollback_rename: &'a mut dyn FnMut() -> io::Result<()>,
+    rollback_on_sync_error: Option<ReplaceRollback>,
+}
+
 fn atomic_replace(
     destination: &Path,
     bytes: &[u8],
@@ -1141,10 +1158,12 @@ fn atomic_replace(
         expected_current,
         validate_existing,
         backup,
-        hook,
-        &mut || Ok(()),
-        &mut || Ok(()),
-        None,
+        AtomicReplaceHooks {
+            stage: hook,
+            before_parent_sync: &mut || Ok(()),
+            before_rollback_rename: &mut || Ok(()),
+            rollback_on_sync_error: None,
+        },
     )
 }
 
@@ -1155,11 +1174,14 @@ fn atomic_replace_locked(
     expected_current: CurrentExpectation<'_>,
     validate_existing: Option<ExistingValidator<'_>>,
     backup: Option<AtomicBackup<'_>>,
-    hook: &mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
-    before_parent_sync: &mut dyn FnMut() -> io::Result<()>,
-    before_rollback_rename: &mut dyn FnMut() -> io::Result<()>,
-    rollback_on_sync_error: Option<ReplaceRollback>,
+    hooks: AtomicReplaceHooks<'_>,
 ) -> Result<(), StorageError> {
+    let AtomicReplaceHooks {
+        stage,
+        before_parent_sync,
+        before_rollback_rename,
+        rollback_on_sync_error,
+    } = hooks;
     let parent = destination
         .parent()
         .ok_or(StorageError::InvalidDirectories(
@@ -1188,12 +1210,12 @@ fn atomic_replace_locked(
         read_guarded_state(backup_path, limit, validate)?;
     }
     let mut temporary = create_sibling_temp(destination, "state")?;
-    hook(AtomicWriteStage::TemporaryCreated)?;
+    stage(AtomicWriteStage::TemporaryCreated)?;
     temporary.file_mut().write_all(bytes)?;
     temporary.file_mut().flush()?;
     temporary.file_mut().sync_all()?;
     temporary.close();
-    hook(AtomicWriteStage::TemporarySynced)?;
+    stage(AtomicWriteStage::TemporarySynced)?;
 
     if let (Some((backup_path, _)), Some(old_bytes)) = (backup, previous.as_deref()) {
         atomic_replace_locked(
@@ -1202,12 +1224,14 @@ fn atomic_replace_locked(
             CurrentExpectation::Unchecked,
             None,
             None,
-            &mut |_| Ok(()),
-            &mut || Ok(()),
-            &mut || Ok(()),
-            None,
+            AtomicReplaceHooks {
+                stage: &mut |_| Ok(()),
+                before_parent_sync: &mut || Ok(()),
+                before_rollback_rename: &mut || Ok(()),
+                rollback_on_sync_error: None,
+            },
         )?;
-        hook(AtomicWriteStage::BackupReplaced)?;
+        stage(AtomicWriteStage::BackupReplaced)?;
     }
     fs::rename(temporary.path(), destination)?;
     temporary.disarm();
@@ -1227,7 +1251,7 @@ fn atomic_replace_locked(
         }
         return Err(sync_error.into());
     }
-    hook(AtomicWriteStage::TargetReplaced)?;
+    stage(AtomicWriteStage::TargetReplaced)?;
     Ok(())
 }
 
@@ -1479,16 +1503,17 @@ struct DirectoryLock {
 
 impl DirectoryLock {
     fn new(directory: &Path) -> Self {
-        let directory = normalized_path_identity(directory);
+        let directory = normalized_path_for_io(directory);
+        let identity = normalize_path_identity_case(directory.clone());
         let mut registry = DIRECTORY_LOCKS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         registry.retain(|_, lock| lock.strong_count() != 0);
-        let local = match registry.get(&directory).and_then(Weak::upgrade) {
+        let local = match registry.get(&identity).and_then(Weak::upgrade) {
             Some(local) => local,
             None => {
                 let local = Arc::new(Mutex::new(()));
-                registry.insert(directory.clone(), Arc::downgrade(&local));
+                registry.insert(identity, Arc::downgrade(&local));
                 local
             }
         };
@@ -1504,12 +1529,23 @@ impl DirectoryLock {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Keep a stable hidden file so separate processes serialize the same directory operations.
-        let lock_file = OpenOptions::new()
+        let mut options = OpenOptions::new();
+        options
             .read(true)
             .write(true)
             .create(true)
-            .truncate(false)
-            .open(&self.lock_path)?;
+            .truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let lock_file = options.open(&self.lock_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            lock_file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         lock_file.lock()?;
         Ok(DirectoryLockGuard {
             _file: lock_file,
@@ -1727,10 +1763,12 @@ impl ImportJournal {
             CurrentExpectation::Unchecked,
             None,
             None,
-            &mut |_| Ok(()),
-            &mut || Ok(()),
-            &mut || Ok(()),
-            None,
+            AtomicReplaceHooks {
+                stage: &mut |_| Ok(()),
+                before_parent_sync: &mut || Ok(()),
+                before_rollback_rename: &mut || Ok(()),
+                rollback_on_sync_error: None,
+            },
         )?;
         Ok(())
     }
@@ -1762,7 +1800,9 @@ impl PortableExport {
             ExportMode::NonportableLocalBackup => "nonportable-local-backup",
         };
         let mut budget = ExportBudget::new();
-        let content = filter_export(value, mode, &mut budget, 0)?.unwrap_or(Value::Null);
+        let mut key_path = String::new();
+        let content = filter_export(value, mode, &mut budget, 0, &mut key_path)?
+            .unwrap_or(Value::Null);
         Ok(Self {
             schema_version: 1,
             mode: label,
@@ -1850,6 +1890,7 @@ fn filter_export(
     mode: ExportMode,
     budget: &mut ExportBudget,
     depth: usize,
+    key_path: &mut String,
 ) -> Result<Option<Value>, StorageError> {
     budget.visit_node(depth)?;
     match value {
@@ -1860,11 +1901,17 @@ fn filter_export(
                 if key.len() > PORTABLE_EXPORT_MAX_KEY_BYTES {
                     return Err(StorageError::DocumentTooLarge);
                 }
-                if is_history_key(key) || (mode == ExportMode::Portable && is_nonportable_key(key))
+                let key_path_length = key_path.len();
+                append_normalized_key(key_path, key);
+                if is_normalized_history_key(key_path)
+                    || (mode == ExportMode::Portable && is_nonportable_key(key))
                 {
+                    key_path.truncate(key_path_length);
                     continue;
                 }
-                if let Some(nested) = filter_export(nested, mode, budget, depth + 1)? {
+                let nested = filter_export(nested, mode, budget, depth + 1, key_path)?;
+                key_path.truncate(key_path_length);
+                if let Some(nested) = nested {
                     budget.account_key(key.len(), depth)?;
                     filtered.insert(key.clone(), nested);
                 }
@@ -1874,7 +1921,7 @@ fn filter_export(
         Value::Array(items) => {
             let mut filtered = Vec::new();
             for item in items {
-                if let Some(item) = filter_export(item, mode, budget, depth + 1)? {
+                if let Some(item) = filter_export(item, mode, budget, depth + 1, key_path)? {
                     filtered.push(item);
                 }
             }
@@ -1897,15 +1944,18 @@ fn filter_export(
     }
 }
 
-fn normalize_key(key: &str) -> String {
-    key.chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+fn append_normalized_key(path: &mut String, key: &str) {
+    path.extend(
+        key.chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase),
+    );
 }
 
-fn is_history_key(key: &str) -> bool {
-    is_normalized_history_key(&normalize_key(key))
+fn normalize_key(key: &str) -> String {
+    let mut normalized = String::with_capacity(key.len());
+    append_normalized_key(&mut normalized, key);
+    normalized
 }
 
 fn is_normalized_history_key(key: &str) -> bool {

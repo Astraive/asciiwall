@@ -61,6 +61,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [COR-008] Inject failures at every config/registry atomic-write hook boundary and verify recovery
   yields only complete valid state, cleans owned temporaries, and permits subsequent writes; race
   retained concurrent log records through rotation without loss or corruption.
+- [COR-008] Filter nested cursor/window-history keys from both export modes; preserve
+  case-preserving canonical paths for directory-lock I/O and enforce owner-only Unix lock files.
 - [COR-008] Preserve retained settings-recovery copies across retry attempts by creating
   collision-safe sibling snapshots; verify bytes survive recovery retries after rollback failure.
 - [COR-008] Redact extensionless Unicode names and dotfiles beneath recognized local roots in
