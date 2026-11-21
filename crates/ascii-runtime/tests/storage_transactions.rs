@@ -2330,6 +2330,8 @@ fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
         "embedded_posix": "clip selected from Documents/private.mov before import",
         "embedded_windows": "clip selected from Videos\\private.mp4 before import",
         "embedded_extensionless": "clip selected from Documents/private before import",
+        "embedded_unicode_extensionless": "clip selected from Documents/秘密 before import",
+        "embedded_dotfile": "credential file: Documents/.credentials",
         "harmless_slash_prose": "Choose input/output; the ratio is 3/4.",
         "harmless_filename_prose": "The terms private.mov and Documents are examples."
     });
@@ -2340,6 +2342,8 @@ fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
         "embedded_posix",
         "embedded_windows",
         "embedded_extensionless",
+        "embedded_unicode_extensionless",
+        "embedded_dotfile",
     ] {
         assert!(
             portable.content().get(private_key).is_none(),
