@@ -12,6 +12,8 @@
 //! [`Storage::save_registry`] operate on the single versioned install registry. Settings use
 //! `settings.toml`: [`ParsedToml::from_toml`] validates bounded TOML syntax only, while
 //! [`Storage::load_config`] and [`Storage::save_config`] invoke the caller-owned schema validator.
+//! Settings saves require the exact current bytes previously observed by the caller (`None` for
+//! absence); stale snapshots fail under the directory lock before temporary or backup mutation.
 //! Ordinary settings saves reject invalid or unsupported current settings before touching either the
 //! destination or `settings.toml.last-good`; registry saves likewise reject invalid or unsupported
 //! current registries before replacement. [`Storage::restore_config_from_backup`] is the explicit
@@ -80,6 +82,7 @@ pub enum StorageError {
     InvalidJournal(&'static str),
     InvalidConfiguration(String),
     InvalidStoredState(&'static str),
+    StaleConfiguration,
     DocumentTooLarge,
     InvalidLogLimits,
     UnsupportedVersion { kind: &'static str, version: u32 },
@@ -99,6 +102,7 @@ impl fmt::Display for StorageError {
             Self::InvalidJournal(reason) => write!(f, "import journal is invalid: {reason}"),
             Self::InvalidConfiguration(_) => f.write_str("configuration is invalid"),
             Self::InvalidStoredState(_) => f.write_str("stored state is invalid"),
+            Self::StaleConfiguration => f.write_str("configuration changed since it was read"),
             Self::DocumentTooLarge => f.write_str("document exceeds size limit"),
             Self::InvalidLogLimits => f.write_str("diagnostic log bounds are invalid"),
             Self::UnsupportedVersion { kind, version } => {
@@ -658,6 +662,7 @@ impl Storage {
         atomic_replace(
             &self.registry_path(),
             &bytes,
+            CurrentExpectation::Unchecked,
             Some((REGISTRY_MAX_BYTES, &validate_existing)),
             None,
             &mut hook,
@@ -680,20 +685,25 @@ impl Storage {
         Ok(Some(config))
     }
 
-    /// Writes TOML and updates last-good only after both schemas accept the new and current documents.
+    /// Writes TOML only if `expected_current` still matches the exact current bytes (or absence)
+    /// observed by the caller. A mismatch returns [`StorageError::StaleConfiguration`] before any
+    /// temporary or `.last-good` mutation.
     pub fn save_config<E: fmt::Display>(
         &self,
+        expected_current: Option<&[u8]>,
         config: &ParsedToml,
         validate: impl Fn(&TomlValue) -> Result<(), E>,
     ) -> Result<(), StorageError> {
-        self.save_config_with_hook(config, validate, |_| Ok(()))
+        self.save_config_with_hook(expected_current, config, validate, |_| Ok(()))
     }
 
     /// TOML counterpart of [`Self::save_config`] with injectable interruption boundaries.
+    /// `expected_current` is compared under the destination directory lock before any write.
     /// Returning an error from `hook` simulates failure at that boundary; failed writes remove their
     /// owned temporary sibling, and the destination is complete on either side of the atomic rename.
     pub fn save_config_with_hook<E: fmt::Display>(
         &self,
+        expected_current: Option<&[u8]>,
         config: &ParsedToml,
         validate: impl Fn(&TomlValue) -> Result<(), E>,
         mut hook: impl FnMut(AtomicWriteStage) -> io::Result<()>,
@@ -706,10 +716,15 @@ impl Storage {
             reject_history_keys(&value)?;
             validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))
         };
+        let expected_current = match expected_current {
+            Some(bytes) => CurrentExpectation::Bytes(bytes),
+            None => CurrentExpectation::Missing,
+        };
         let backup_path = self.config_backup_path();
         atomic_replace(
             &self.config_path(),
             config.as_bytes(),
+            expected_current,
             Some((CONFIG_MAX_BYTES, &validate_existing)),
             Some((&backup_path, (CONFIG_MAX_BYTES, &validate_existing))),
             &mut hook,
@@ -773,7 +788,14 @@ impl Storage {
             }
             _ => {}
         }
-        atomic_replace_locked(&destination, &bytes, None, None, &mut |_| Ok(()))?;
+        atomic_replace_locked(
+            &destination,
+            &bytes,
+            CurrentExpectation::Unchecked,
+            None,
+            None,
+            &mut |_| Ok(()),
+        )?;
         Ok(())
     }
 }
@@ -839,9 +861,17 @@ fn read_optional_bounded(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, Sto
 type ExistingValidator<'a> = (u64, &'a dyn Fn(&[u8]) -> Result<(), StorageError>);
 type AtomicBackup<'a> = (&'a Path, ExistingValidator<'a>);
 
+#[derive(Clone, Copy)]
+enum CurrentExpectation<'a> {
+    Unchecked,
+    Missing,
+    Bytes(&'a [u8]),
+}
+
 fn atomic_replace(
     destination: &Path,
     bytes: &[u8],
+    expected_current: CurrentExpectation<'_>,
     validate_existing: Option<ExistingValidator<'_>>,
     backup: Option<AtomicBackup<'_>>,
     hook: &mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
@@ -854,13 +884,21 @@ fn atomic_replace(
     create_directory_durable(parent)?;
     let directory_lock = DirectoryLock::new(parent);
     let _guard = directory_lock.lock()?;
-    atomic_replace_locked(destination, bytes, validate_existing, backup, hook)
+    atomic_replace_locked(
+        destination,
+        bytes,
+        expected_current,
+        validate_existing,
+        backup,
+        hook,
+    )
 }
 
 /// Atomically replaces state while the caller holds the destination directory lock.
 fn atomic_replace_locked(
     destination: &Path,
     bytes: &[u8],
+    expected_current: CurrentExpectation<'_>,
     validate_existing: Option<ExistingValidator<'_>>,
     backup: Option<AtomicBackup<'_>>,
     hook: &mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
@@ -871,8 +909,29 @@ fn atomic_replace_locked(
             "state file has no parent directory",
         ))?;
     let previous = match validate_existing {
-        Some((limit, validate)) => read_guarded_state(destination, limit, validate)?,
-        None => None,
+        Some((limit, validate)) => {
+            let previous = read_optional_bounded(destination, limit)?;
+            let matches_expected = match expected_current {
+                CurrentExpectation::Unchecked => true,
+                CurrentExpectation::Missing => previous.is_none(),
+                CurrentExpectation::Bytes(expected) => {
+                    previous.as_deref().is_some_and(|current| current == expected)
+                }
+            };
+            if !matches_expected {
+                return Err(StorageError::StaleConfiguration);
+            }
+            if let Some(bytes) = previous.as_deref() {
+                validate(bytes)?;
+            }
+            previous
+        }
+        None if matches!(expected_current, CurrentExpectation::Unchecked) => None,
+        None => {
+            return Err(StorageError::InvalidStoredState(
+                "compare-and-swap requires destination validation",
+            ));
+        }
     };
     if let Some((backup_path, (limit, validate))) = backup {
         read_guarded_state(backup_path, limit, validate)?;
@@ -886,7 +945,14 @@ fn atomic_replace_locked(
     hook(AtomicWriteStage::TemporarySynced)?;
 
     if let (Some((backup_path, _)), Some(old_bytes)) = (backup, previous.as_deref()) {
-        atomic_replace_locked(backup_path, old_bytes, None, None, &mut |_| Ok(()))?;
+        atomic_replace_locked(
+            backup_path,
+            old_bytes,
+            CurrentExpectation::Unchecked,
+            None,
+            None,
+            &mut |_| Ok(()),
+        )?;
         hook(AtomicWriteStage::BackupReplaced)?;
     }
     fs::rename(temporary.path(), destination)?;
@@ -1316,6 +1382,7 @@ impl ImportJournal {
         atomic_replace_locked(
             path,
             &json_bytes_bounded(record, JOURNAL_MAX_BYTES)?,
+            CurrentExpectation::Unchecked,
             None,
             None,
             &mut |_| Ok(()),
