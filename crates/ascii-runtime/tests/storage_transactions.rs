@@ -86,6 +86,34 @@ fn parse_config(bytes: &[u8]) -> ParsedToml {
     config
 }
 
+fn save_current_config<E: std::fmt::Display>(
+    storage: &Storage,
+    config: &ParsedToml,
+    validate: impl Fn(&TomlValue) -> Result<(), E>,
+) -> Result<(), StorageError> {
+    let expected_current = storage.load_config(&validate)?;
+    storage.save_config(
+        expected_current.as_ref().map(ParsedToml::as_bytes),
+        config,
+        validate,
+    )
+}
+
+fn save_current_config_with_hook<E: std::fmt::Display>(
+    storage: &Storage,
+    config: &ParsedToml,
+    validate: impl Fn(&TomlValue) -> Result<(), E>,
+    hook: impl FnMut(AtomicWriteStage) -> io::Result<()>,
+) -> Result<(), StorageError> {
+    let expected_current = storage.load_config(&validate)?;
+    storage.save_config_with_hook(
+        expected_current.as_ref().map(ParsedToml::as_bytes),
+        config,
+        validate,
+        hook,
+    )
+}
+
 fn registry(version: &str) -> InstallRegistry {
     let digest = "a".repeat(64);
     InstallRegistry {
@@ -271,24 +299,23 @@ fn storage_roots_and_persisted_files_are_owner_only() {
     }
 
     let first_config = config(json!({"theme": "private"}));
-    storage
-        .save_config_with_hook(&first_config, validate_test_config, |stage| {
-            if stage == AtomicWriteStage::TemporaryCreated {
-                let paths = fs::read_dir(&roots.config)?
-                    .map(|entry| entry.map(|entry| entry.path()))
-                    .collect::<io::Result<Vec<_>>>()?;
-                let temporary = paths
-                    .into_iter()
-                    .find(|path| {
-                        path.file_name()
-                            .is_some_and(|name| name.to_string_lossy().ends_with(".state.tmp"))
-                    })
-                    .ok_or_else(|| io::Error::other("atomic temporary was not created"))?;
-                assert_eq!(fs::metadata(temporary)?.permissions().mode() & 0o777, 0o600);
-            }
-            Ok(())
-        })
-        .expect("write private config");
+    save_current_config_with_hook(&storage, &first_config, validate_test_config, |stage| {
+        if stage == AtomicWriteStage::TemporaryCreated {
+            let paths = fs::read_dir(&roots.config)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<io::Result<Vec<_>>>()?;
+            let temporary = paths
+                .into_iter()
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().ends_with(".state.tmp"))
+                })
+                .ok_or_else(|| io::Error::other("atomic temporary was not created"))?;
+            assert_eq!(fs::metadata(temporary)?.permissions().mode() & 0o777, 0o600);
+        }
+        Ok(())
+    })
+    .expect("write private config");
     assert_eq!(
         fs::metadata(storage.config_path())
             .expect("config metadata")
@@ -299,12 +326,12 @@ fn storage_roots_and_persisted_files_are_owner_only() {
     );
     fs::set_permissions(storage.config_path(), fs::Permissions::from_mode(0o644))
         .expect("make old config broadly readable for replacement regression");
-    storage
-        .save_config(
-            &config(json!({"theme": "replacement"})),
-            validate_test_config,
-        )
-        .expect("replace config without broadening permissions");
+    save_current_config(
+        &storage,
+        &config(json!({"theme": "replacement"})),
+        validate_test_config,
+    )
+    .expect("replace config without broadening permissions");
     assert_eq!(
         fs::metadata(storage.config_path())
             .expect("replacement config metadata")
@@ -506,16 +533,15 @@ fn windows_filesystem_atomic_save_recovery_smoke() {
     let storage = Storage::new(roots);
 
     let first = config(json!({"theme": "windows-first"}));
-    storage
-        .save_config(&first, validate_test_config)
+    save_current_config(&storage, &first, validate_test_config)
         .expect("write config on native Windows filesystem");
     let second = config(json!({"theme": "windows-second"}));
-    storage
-        .save_config(&second, validate_test_config)
+    save_current_config(&storage, &second, validate_test_config)
         .expect("replace config and establish Windows last-good backup");
     let replacement = config(json!({"theme": "windows-replacement"}));
     assert!(matches!(
-        storage.save_config_with_hook(
+        save_current_config_with_hook(
+            &storage,
             &replacement,
             validate_test_config,
             injected_failure(AtomicWriteStage::TargetReplaced)
@@ -535,8 +561,7 @@ fn windows_filesystem_atomic_save_recovery_smoke() {
         second.value()
     );
     let subsequent = config(json!({"theme": "windows-subsequent"}));
-    storage
-        .save_config(&subsequent, validate_test_config)
+    save_current_config(&storage, &subsequent, validate_test_config)
         .expect("subsequent Windows config write succeeds");
     assert_eq!(
         storage
@@ -723,8 +748,7 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
     let first = config(json!({"theme": "dark", "grid": {"width": 80}}));
-    storage
-        .save_config(&first, validate_test_config)
+    save_current_config(&storage, &first, validate_test_config)
         .expect("save initial config");
     let config_path = storage.config_path();
     let backup_path = storage.config_backup_path();
@@ -732,13 +756,13 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
 
     let second = config(json!({"theme": "light", "grid": {"width": 100}}));
     assert!(
-        storage
-            .save_config_with_hook(
-                &second,
-                validate_test_config,
-                injected_failure(AtomicWriteStage::TemporarySynced)
-            )
-            .is_err()
+        save_current_config_with_hook(
+            &storage,
+            &second,
+            validate_test_config,
+            injected_failure(AtomicWriteStage::TemporarySynced)
+        )
+        .is_err()
     );
     assert_eq!(
         fs::read(&config_path).expect("previous state survives"),
@@ -755,8 +779,7 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
         "caller-owned schema validator remains authoritative"
     );
 
-    storage
-        .save_config(&second, validate_test_config)
+    save_current_config(&storage, &second, validate_test_config)
         .expect("replace config");
     assert_eq!(fs::read(&backup_path).expect("last-good backup"), original);
     assert_eq!(
@@ -771,13 +794,13 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
     let previous_second = fs::read(&config_path).expect("second config bytes");
     let third = config(json!({"theme": "system"}));
     assert!(
-        storage
-            .save_config_with_hook(
-                &third,
-                validate_test_config,
-                injected_failure(AtomicWriteStage::TargetReplaced)
-            )
-            .is_err()
+        save_current_config_with_hook(
+            &storage,
+            &third,
+            validate_test_config,
+            injected_failure(AtomicWriteStage::TargetReplaced)
+        )
+        .is_err()
     );
     assert_eq!(
         fs::read(&config_path).expect("new state survives post-replacement interruption"),
@@ -790,14 +813,124 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
 }
 
 #[test]
+fn concurrent_config_writers_reject_stale_snapshots_before_mutation() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let config_path = storage.config_path();
+    let backup_path = storage.config_backup_path();
+    let initial = config(json!({"theme": "initial"}));
+    storage
+        .save_config(None, &initial, validate_test_config)
+        .expect("save config from an observed-absent state");
+    let initial_bytes = fs::read(&config_path).expect("initial config bytes");
+
+    let stale_absence_write = config(json!({"theme": "stale-absence"}));
+    assert!(matches!(
+        storage.save_config(None, &stale_absence_write, validate_test_config),
+        Err(StorageError::StaleConfiguration)
+    ));
+    assert_eq!(
+        fs::read(&config_path).expect("stale absent-state write leaves current"),
+        initial_bytes
+    );
+    assert!(
+        !backup_path.exists(),
+        "stale absent-state write does not create a backup"
+    );
+
+    let baseline = config(json!({"theme": "baseline"}));
+    storage
+        .save_config(Some(initial.as_bytes()), &baseline, validate_test_config)
+        .expect("save against the observed current bytes");
+    let expected_current = storage
+        .load_config(validate_test_config)
+        .expect("load current snapshot")
+        .expect("current config exists");
+    let current_before = fs::read(&config_path).expect("current bytes before competing writes");
+    let backup_before = fs::read(&backup_path).expect("backup bytes before competing writes");
+    let candidate_a = config(json!({"theme": "writer-a"}));
+    let candidate_b = config(json!({"theme": "writer-b"}));
+    let candidate_a_bytes = candidate_a.as_bytes().to_vec();
+    let candidate_b_bytes = candidate_b.as_bytes().to_vec();
+    let expected_a = expected_current.as_bytes().to_vec();
+    let expected_b = expected_current.as_bytes().to_vec();
+    let start = Arc::new(Barrier::new(3));
+    let hook_calls_a = Arc::new(AtomicUsize::new(0));
+    let hook_calls_b = Arc::new(AtomicUsize::new(0));
+
+    let writer_a = {
+        let storage = storage.clone();
+        let start = Arc::clone(&start);
+        let hook_calls = Arc::clone(&hook_calls_a);
+        std::thread::spawn(move || {
+            start.wait();
+            storage.save_config_with_hook(
+                Some(expected_a.as_slice()),
+                &candidate_a,
+                validate_test_config,
+                move |_| {
+                    hook_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+        })
+    };
+    let writer_b = {
+        let storage = storage.clone();
+        let start = Arc::clone(&start);
+        let hook_calls = Arc::clone(&hook_calls_b);
+        std::thread::spawn(move || {
+            start.wait();
+            storage.save_config_with_hook(
+                Some(expected_b.as_slice()),
+                &candidate_b,
+                validate_test_config,
+                move |_| {
+                    hook_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+        })
+    };
+    start.wait();
+    let result_a = writer_a.join().expect("join writer A");
+    let result_b = writer_b.join().expect("join writer B");
+
+    match (result_a, result_b) {
+        (Ok(()), Err(StorageError::StaleConfiguration)) => {
+            assert_eq!(hook_calls_b.load(Ordering::SeqCst), 0);
+            assert!(hook_calls_a.load(Ordering::SeqCst) > 0);
+        }
+        (Err(StorageError::StaleConfiguration), Ok(())) => {
+            assert_eq!(hook_calls_a.load(Ordering::SeqCst), 0);
+            assert!(hook_calls_b.load(Ordering::SeqCst) > 0);
+        }
+        (result_a, result_b) => panic!(
+            "expected one write and one typed stale conflict, got {result_a:?} and {result_b:?}"
+        ),
+    }
+
+    let current_after = fs::read(&config_path).expect("current bytes after competing writes");
+    assert!(
+        current_after == candidate_a_bytes || current_after == candidate_b_bytes,
+        "exactly one writer installs its candidate"
+    );
+    assert_eq!(
+        fs::read(&backup_path).expect("backup bytes after competing writes"),
+        current_before,
+        "the stale writer does not replace the winner's last-good backup"
+    );
+    assert_eq!(backup_before, initial_bytes);
+}
+
+#[test]
 fn configuration_failures_at_each_atomic_boundary_preserve_valid_recovery() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
     let config_path = storage.config_path();
     let backup_path = storage.config_backup_path();
     let seed = config(json!({"theme": "seed"}));
-    storage
-        .save_config(&seed, validate_test_config)
+    save_current_config(&storage, &seed, validate_test_config)
         .expect("save initial config");
 
     for (index, stage) in [
@@ -810,15 +943,18 @@ fn configuration_failures_at_each_atomic_boundary_preserve_valid_recovery() {
     .enumerate()
     {
         let baseline = config(json!({"theme": format!("baseline-{index}")}));
-        storage
-            .save_config(&baseline, validate_test_config)
+        save_current_config(&storage, &baseline, validate_test_config)
             .expect("establish valid current and backup before injected failure");
         let baseline_bytes = fs::read(&config_path).expect("baseline current bytes");
         let previous_backup_bytes = fs::read(&backup_path).expect("previous last-good bytes");
         let candidate = config(json!({"theme": format!("candidate-{index}")}));
 
-        let error = storage
-            .save_config_with_hook(&candidate, validate_test_config, injected_failure(stage))
+        let error = save_current_config_with_hook(
+            &storage,
+            &candidate,
+            validate_test_config,
+            injected_failure(stage),
+        )
             .expect_err("injected interruption");
         assert!(matches!(error, StorageError::Io(_)));
 
@@ -859,8 +995,7 @@ fn configuration_failures_at_each_atomic_boundary_preserve_valid_recovery() {
         );
 
         let subsequent = config(json!({"theme": format!("subsequent-{index}")}));
-        storage
-            .save_config(&subsequent, validate_test_config)
+        save_current_config(&storage, &subsequent, validate_test_config)
             .expect("valid config write succeeds after injected failure");
         assert_eq!(
             storage
@@ -881,14 +1016,13 @@ fn saving_config_revalidates_against_the_active_schema_before_replacement() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
     let original = config(json!({"theme": "dark"}));
-    storage
-        .save_config(&original, validate_theme_config)
+    save_current_config(&storage, &original, validate_theme_config)
         .expect("save initial schema-valid config");
     let original_bytes = fs::read(storage.config_path()).expect("read initial config");
     let validated_by_weaker_schema = config(json!({"theme": 42}));
 
     assert!(matches!(
-        storage.save_config(&validated_by_weaker_schema, validate_theme_config),
+        save_current_config(&storage, &validated_by_weaker_schema, validate_theme_config),
         Err(StorageError::InvalidConfiguration(_))
     ));
     assert_eq!(
@@ -901,11 +1035,9 @@ fn saving_config_revalidates_against_the_active_schema_before_replacement() {
 fn config_saves_reject_nested_history_keys_without_rotating_state() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
-    storage
-        .save_config(&config(json!({"theme": "previous"})), validate_test_config)
+    save_current_config(&storage, &config(json!({"theme": "previous"})), validate_test_config)
         .expect("save previous config");
-    storage
-        .save_config(&config(json!({"theme": "current"})), validate_test_config)
+    save_current_config(&storage, &config(json!({"theme": "current"})), validate_test_config)
         .expect("save current config and establish last-good");
     let config_path = storage.config_path();
     let backup_path = storage.config_backup_path();
@@ -918,7 +1050,7 @@ fn config_saves_reject_nested_history_keys_without_rotating_state() {
     ] {
         let forbidden = ParsedToml::from_toml(bytes).expect("parse nested history config");
         assert!(matches!(
-            storage.save_config(&forbidden, validate_test_config),
+            save_current_config(&storage, &forbidden, validate_test_config),
             Err(StorageError::InvalidConfiguration(_))
         ));
         assert_eq!(
@@ -937,13 +1069,15 @@ fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly()
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
     let known_good = config(json!({"theme": "known-good"}));
-    storage
-        .save_config(&known_good, validate_theme_config)
+    save_current_config(&storage, &known_good, validate_theme_config)
         .expect("save known-good config");
     let known_good_bytes = fs::read(storage.config_path()).expect("read known-good config");
 
-    storage
-        .save_config(&config(json!({"theme": "current"})), validate_theme_config)
+    save_current_config(
+        &storage,
+        &config(json!({"theme": "current"})),
+        validate_theme_config,
+    )
         .expect("save current config");
     let config_path = storage.config_path();
     let backup_path = storage.config_backup_path();
@@ -955,9 +1089,10 @@ fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly()
     let replacement = config(json!({"theme": "replacement"}));
     assert!(matches!(
         storage.save_config_with_hook(
+            Some(malformed),
             &replacement,
             validate_theme_config,
-            injected_failure(AtomicWriteStage::TargetReplaced)
+            injected_failure(AtomicWriteStage::TargetReplaced),
         ),
         Err(StorageError::InvalidConfiguration(_))
     ));
@@ -973,7 +1108,7 @@ fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly()
     let invalid_schema = b"theme = 42\n";
     fs::write(&config_path, invalid_schema).expect("write schema-invalid TOML");
     assert!(matches!(
-        storage.save_config(&replacement, validate_theme_config),
+        storage.save_config(Some(invalid_schema), &replacement, validate_theme_config),
         Err(StorageError::InvalidConfiguration(_))
     ));
     assert_eq!(
@@ -1011,15 +1146,13 @@ fn newer_settings_schema_is_not_replaced_by_older_writer_or_explicit_recovery() 
         b"schema_version = 1\nrevision = 1\n[settings]\ntheme = \"known-good\"\n",
     )
     .expect("parse supported TOML");
-    storage
-        .save_config(&supported, validate_schema_v1)
+    save_current_config(&storage, &supported, validate_schema_v1)
         .expect("save supported schema");
     let current = ParsedToml::from_toml(
         b"schema_version = 1\nrevision = 2\n[settings]\ntheme = \"current\"\n",
     )
     .expect("parse current TOML");
-    storage
-        .save_config(&current, validate_schema_v1)
+    save_current_config(&storage, &current, validate_schema_v1)
         .expect("save current supported schema");
     let backup_path = storage.config_backup_path();
     let known_good_backup = fs::read(&backup_path).expect("read supported last-good");
@@ -1027,7 +1160,7 @@ fn newer_settings_schema_is_not_replaced_by_older_writer_or_explicit_recovery() 
     let newer = b"schema_version = 2\nrevision = 3\n[settings]\ntheme = \"newer\"\n";
     fs::write(storage.config_path(), newer).expect("write newer schema");
     assert!(matches!(
-        storage.save_config(&supported, validate_schema_v1),
+        storage.save_config(Some(newer), &supported, validate_schema_v1),
         Err(StorageError::InvalidConfiguration(_))
     ));
     assert_eq!(
@@ -1255,8 +1388,7 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
     ));
 
     let original_config = config(json!({"theme": "dark"}));
-    storage
-        .save_config(&original_config, validate_test_config)
+    save_current_config(&storage, &original_config, validate_test_config)
         .expect("save valid config");
     let config_path = storage.config_path();
     let prefix = b"payload = \"";
@@ -1268,8 +1400,7 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
         ParsedToml::from_toml(&compact_config).expect("exact-limit TOML is accepted");
     let boundary_temp = TempDir::new();
     let boundary_storage = Storage::new(linux_roots(boundary_temp.path()));
-    boundary_storage
-        .save_config(&exact_limit_config, validate_test_config)
+    save_current_config(&boundary_storage, &exact_limit_config, validate_test_config)
         .expect("save config at the inclusive size limit");
     assert_eq!(
         fs::read(boundary_storage.config_path()).expect("read exact-limit config"),
@@ -1282,8 +1413,7 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
         Err(StorageError::DocumentTooLarge)
     ));
     let recovery_config = config(json!({"theme": "recovery"}));
-    storage
-        .save_config(&recovery_config, validate_test_config)
+    save_current_config(&storage, &recovery_config, validate_test_config)
         .expect("establish a last-good config before oversized-current recovery");
     let backup_path = storage.config_backup_path();
     let known_good_backup = fs::read(&backup_path).expect("retain last-good backup");
@@ -1294,7 +1424,11 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
     ));
     let replacement = config(json!({"theme": "recovered"}));
     assert!(matches!(
-        storage.save_config(&replacement, validate_test_config),
+        storage.save_config(
+            Some(oversized_current.as_slice()),
+            &replacement,
+            validate_test_config,
+        ),
         Err(StorageError::DocumentTooLarge)
     ));
     assert_eq!(
