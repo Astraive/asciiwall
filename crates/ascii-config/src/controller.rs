@@ -86,7 +86,7 @@ impl SettingsController {
         let (status, snapshot, disk_bytes) = match store.read_main() {
             Ok(None) => (ControllerStatus::Ready, defaults, None),
             Ok(Some(bytes)) => {
-                let snapshot = match decode_and_validate(&registry, &bytes) {
+                match decode_and_validate(&registry, &bytes) {
                     Ok(document) if document.schema_version > CURRENT_SCHEMA_VERSION => {
                         let snapshot =
                             build_snapshot(&registry, document.revision, BTreeMap::new())?;
@@ -141,7 +141,6 @@ impl SettingsController {
                         )
                     }
                 };
-                snapshot
             }
             Err(StoreError::TooLarge { limit, .. }) => (
                 ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::TooLarge {
@@ -239,7 +238,7 @@ impl SettingsController {
     pub fn repair(&self, expected_revision: u64) -> Result<Arc<SettingsSnapshot>, ConfigError> {
         let mut state = self.lock()?;
         if !matches!(&state.status, ControllerStatus::RepairRequired(_)) {
-            return ensure_writable(&state.status).and_then(|()| Err(ConfigError::NotRepairable));
+            return ensure_writable(&state.status).and(Err(ConfigError::NotRepairable));
         }
         ensure_expected(expected_revision, state.snapshot.revision)?;
         ensure_disk_matches_for_repair(&mut state)?;

@@ -564,7 +564,7 @@ fn malformed_document_classes_are_rejected_before_snapshot_publication() {
         let controller = SettingsController::open(&path, registry()).unwrap();
         assert!(matches!(
             controller.status().unwrap(),
-            ControllerStatus::RepairRequired(ConfigError::Document(error)) if expected(error)
+            ControllerStatus::RepairRequired(ConfigError::Document(error)) if expected(&error)
         ));
         assert_eq!(controller.snapshot().unwrap().revision(), 0);
     }
