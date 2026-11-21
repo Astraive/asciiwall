@@ -340,10 +340,14 @@ fn storage_roots_and_persisted_files_are_owner_only() {
         .begin("private-test", "org.example.sample", "imports/private-test")
         .expect("write private journal");
     assert_eq!(
-        fs::metadata(roots.staging.join("import-journal/import-private-test.json"))
-            .expect("journal metadata")
-            .permissions()
-            .mode()
+        fs::metadata(
+            roots
+                .staging
+                .join("import-journal/import-private-test.json")
+        )
+        .expect("journal metadata")
+        .permissions()
+        .mode()
             & 0o777,
         0o600
     );
