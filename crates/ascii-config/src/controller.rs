@@ -336,7 +336,7 @@ fn decode_and_validate(
         error,
     })?;
     resolve_overrides(registry, &document.overrides).map_err(|error| OpenDocumentError {
-        error: error.into(),
+        error,
         can_repair: true,
         revision: Some(document.revision),
     })?;
