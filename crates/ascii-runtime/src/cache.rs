@@ -1141,6 +1141,20 @@ fn write_file_id_high_water(
     high_water: u64,
     create_new: bool,
 ) -> Result<(), CacheError> {
+    write_file_id_high_water_with_sync(
+        managed_dir,
+        high_water,
+        create_new,
+        crate::storage::sync_parent_directory,
+    )
+}
+
+fn write_file_id_high_water_with_sync(
+    managed_dir: &Path,
+    high_water: u64,
+    create_new: bool,
+    sync_parent_directory: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), CacheError> {
     let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
     let mut options = OpenOptions::new();
     options.write(true);
@@ -1160,15 +1174,30 @@ fn write_file_id_high_water(
     }
     file.write_all(&encoded)?;
     file.sync_all()?;
+    if create_new {
+        sync_parent_directory(managed_dir)?;
+    }
     Ok(())
 }
 
 fn mark_file_id_high_water_initialized(managed_dir: &Path) -> Result<(), CacheError> {
+    mark_file_id_high_water_initialized_with_sync(
+        managed_dir,
+        crate::storage::sync_parent_directory,
+    )
+}
+
+fn mark_file_id_high_water_initialized_with_sync(
+    managed_dir: &Path,
+    sync_parent_directory: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), CacheError> {
     let path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER_MARKER);
     let file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.sync_all()?;
+    sync_parent_directory(managed_dir)?;
     Ok(())
 }
+
 
 // Callers hold the cache operations lock so migration and reservations serialize across instances.
 
@@ -2293,6 +2322,69 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TempManagedDirectory(std::path::PathBuf);
+
+    impl TempManagedDirectory {
+        fn new() -> Self {
+            loop {
+                let id = CACHE_INITIALIZATION_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "asciiwall-cache-sync-{}-{id}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("create test cache directory: {error}"),
+                }
+            }
+        }
+    }
+
+    impl Drop for TempManagedDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn high_water_counter_and_marker_sync_their_parent_after_file_sync() {
+        let managed_dir = TempManagedDirectory::new();
+        let mut counter_synced = false;
+        write_file_id_high_water_with_sync(&managed_dir.0, 7, true, |directory| {
+            assert_eq!(directory, managed_dir.0.as_path());
+            assert_eq!(
+                fs::read(directory.join(CACHE_FILE_ID_HIGH_WATER))?,
+                b"0000000000000007\n"
+            );
+            counter_synced = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(counter_synced);
+
+        let mut update_synced = false;
+        write_file_id_high_water_with_sync(&managed_dir.0, 8, false, |_| {
+            update_synced = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!update_synced);
+
+        let mut marker_synced = false;
+        mark_file_id_high_water_initialized_with_sync(&managed_dir.0, |directory| {
+            assert_eq!(directory, managed_dir.0.as_path());
+            assert_eq!(
+                fs::symlink_metadata(directory.join(CACHE_FILE_ID_HIGH_WATER_MARKER))?.len(),
+                0
+            );
+            marker_synced = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(marker_synced);
+    }
 
     struct DiskFullAfterPrefix {
         remaining_bytes: usize,
