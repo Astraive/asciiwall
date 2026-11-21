@@ -1274,6 +1274,65 @@ fn recovery_sync_failure_preserves_current_and_last_good_bytes() {
 }
 
 #[test]
+fn recovery_rollback_rename_failure_retains_and_reports_original_bytes() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let known_good = config(json!({"theme": "known-good"}));
+    save_current_config(&storage, &known_good, validate_test_config)
+        .expect("save known-good settings");
+    let current = config(json!({"theme": "current"}));
+    save_current_config(&storage, &current, validate_test_config).expect("save current settings");
+
+    let config_path = storage.config_path();
+    let backup_path = storage.config_backup_path();
+    let current_before = fs::read(&config_path).expect("capture current settings");
+    let backup_before = fs::read(&backup_path).expect("capture last-good settings");
+    let result = storage.restore_config_from_backup_with_hook(
+        Some(&current_before),
+        validate_test_config,
+        |stage| match stage {
+            AtomicWriteStage::ParentDirectorySync => {
+                Err(io::Error::other("injected parent-directory sync failure"))
+            }
+            AtomicWriteStage::RecoveryRollbackRename => {
+                Err(io::Error::other("injected recovery rollback rename failure"))
+            }
+            other => panic!("unexpected recovery hook stage: {other:?}"),
+        },
+    );
+
+    let retained_copy = match result {
+        Err(StorageError::RecoveryRollbackFailed {
+            sync_error,
+            rollback_error,
+            retained_recovery_copy: Some(path),
+        }) => {
+            assert_eq!(
+                sync_error.to_string(),
+                "injected parent-directory sync failure"
+            );
+            assert_eq!(
+                rollback_error.to_string(),
+                "injected recovery rollback rename failure"
+            );
+            path
+        }
+        other => panic!("expected typed recovery rollback failure, got {other:?}"),
+    };
+    assert_eq!(
+        fs::read(&retained_copy).expect("retained recovery copy"),
+        current_before
+    );
+    let current_after = fs::read(&config_path).expect("current remains the restored candidate");
+    assert_eq!(current_after, backup_before);
+    assert_ne!(current_after, current_before);
+    assert_eq!(
+        fs::read(&backup_path).expect("last-good backup remains unchanged"),
+        backup_before
+    );
+}
+
+#[test]
 fn restore_config_from_backup_rejects_stale_current_revision_without_mutation() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
