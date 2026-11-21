@@ -2407,6 +2407,7 @@ mod codec_cancellation_tests {
                 }
                 check_cancel(&cancellation)
             },
+            zeroed_bytes,
         );
 
         assert!(matches!(result, Err(Error::Cancelled)));
