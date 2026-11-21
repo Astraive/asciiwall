@@ -347,7 +347,10 @@ class EvidenceRecordTests(unittest.TestCase):
                 }],
             }
             manifest_path.write_bytes(evidence.canonical_json(manifest))
-            with self.assertRaisesRegex(evidence.EvidenceError, "synthetic artifacts cannot support a native-manual pass"):
+            with self.assertRaisesRegex(
+                evidence.EvidenceError,
+                "native evidence JSON exceeds the 1 MiB inspection limit",
+            ):
                 evidence.finalize_record(record)
 
     def test_native_manual_manifest_rejects_prefixed_oversized_utf16_synthetic_report(self):
@@ -1690,11 +1693,16 @@ class RetentionTests(unittest.TestCase):
                     replaced = True
                 return errors
 
+            expected_error = (
+                f"archive changed before pruning of candidate {retained_name}"
+                if os.name == "nt"
+                else f"archive changed during pruning of retained artifact {retained_name}"
+            )
+
             with patch.object(evidence, "validate_record", side_effect=replace_after_scan_validation):
-                with self.assertRaisesRegex(
-                    evidence.EvidenceError, "archive changed during pruning of retained artifact"
-                ):
+                with self.assertRaises(evidence.EvidenceError) as raised:
                     evidence.prune_archive(archive, keep=1)
+            self.assertEqual(str(raised.exception), expected_error)
 
             self.assertTrue(replaced)
             self.assertEqual(retained_path.read_bytes(), replacement_bytes)

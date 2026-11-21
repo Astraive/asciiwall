@@ -1001,8 +1001,6 @@ def _hash_native_stream(
         digest.update(chunk)
         json_prefix.update(chunk)
         synthetic_marker_scanner.update(chunk)
-        if synthetic_marker_scanner.found:
-            raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
         remaining = MAX_JSON_BYTES + 1 - len(prefix)
         if remaining > 0:
             prefix.extend(chunk[:remaining])
@@ -1010,10 +1008,12 @@ def _hash_native_stream(
         raise EvidenceError("native evidence artifact changed while being read")
     if not size:
         raise EvidenceError("native evidence artifact must not be empty")
-    if size > MAX_JSON_BYTES:
-        if json_prefix.looks_like_json():
-            raise EvidenceError("native evidence JSON exceeds the 1 MiB inspection limit")
-    else:
+    # Oversized JSON keeps its size-limit error; markers still reject non-JSON evidence.
+    if size > MAX_JSON_BYTES and json_prefix.looks_like_json():
+        raise EvidenceError("native evidence JSON exceeds the 1 MiB inspection limit")
+    if synthetic_marker_scanner.found:
+        raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
+    if size <= MAX_JSON_BYTES:
         try:
             content = json.loads(bytes(prefix), object_pairs_hook=unique_object, parse_constant=reject_constant)
         except (ValueError, UnicodeError, RecursionError) as exc:
