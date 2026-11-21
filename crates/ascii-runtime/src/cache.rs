@@ -1160,6 +1160,7 @@ fn write_file_id_high_water(
         managed_dir,
         high_water,
         create_new,
+        |file, encoded| file.write_all(encoded),
         File::sync_all,
         replace_file_id_high_water,
         crate::storage::sync_parent_directory,
@@ -1189,6 +1190,7 @@ fn write_file_id_high_water_with_sync(
     managed_dir: &Path,
     high_water: u64,
     create_new: bool,
+    write_encoded: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
     sync_file: impl FnOnce(&File) -> io::Result<()>,
     replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
     sync_parent_directory: impl FnOnce(&Path) -> io::Result<()>,
@@ -1202,24 +1204,24 @@ fn write_file_id_high_water_with_sync(
         value >>= 4;
     }
 
-    if create_new {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        file.write_all(&encoded)?;
-        sync_file(&file)?;
-        sync_parent_directory(managed_dir)?;
-        return Ok(());
-    }
-
     let (temp_path, mut file) = create_file_id_high_water_temp(managed_dir)?;
-    let write_result = file.write_all(&encoded).and_then(|()| sync_file(&file));
+    let write_result = write_encoded(&mut file, &encoded).and_then(|()| sync_file(&file));
     drop(file);
     if let Err(error) = write_result {
         let _ = fs::remove_file(&temp_path);
         return Err(CacheError::Io(error));
     }
+
+    if create_new {
+        if let Err(error) = fs::hard_link(&temp_path, &path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(CacheError::Io(error));
+        }
+        let _ = fs::remove_file(&temp_path);
+        sync_parent_directory(managed_dir)?;
+        return Ok(());
+    }
+
     if let Err(error) = replace(&temp_path, &path) {
         let _ = fs::remove_file(&temp_path);
         return Err(CacheError::Io(error));
@@ -2617,6 +2619,48 @@ mod tests {
     }
 
     #[test]
+    fn failed_initial_high_water_partial_write_does_not_publish_counter() {
+        use std::cell::RefCell;
+
+        let managed_dir = TempManagedDirectory::new();
+        let events = RefCell::new(Vec::with_capacity(4));
+        let error = write_file_id_high_water_with_sync(
+            &managed_dir.0,
+            7,
+            true,
+            |file, encoded| {
+                events.borrow_mut().push("write");
+                file.write_all(&encoded[..5])?;
+                Err(io::Error::other("injected partial high-water write failure"))
+            },
+            |_| {
+                events.borrow_mut().push("file sync");
+                Ok(())
+            },
+            |_, _| {
+                events.borrow_mut().push("replace");
+                Ok(())
+            },
+            |_| {
+                events.borrow_mut().push("parent sync");
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CacheError::Io(_)));
+        assert_eq!(events.into_inner(), vec!["write"]);
+        assert!(
+            !managed_dir
+                .0
+                .join(CACHE_FILE_ID_HIGH_WATER)
+                .exists()
+        );
+        assert!(fs::read_dir(&managed_dir.0).unwrap().next().is_none());
+    }
+
+
+    #[test]
     fn high_water_counter_and_marker_sync_their_parent_after_file_sync() {
         use std::cell::RefCell;
 
@@ -2633,6 +2677,7 @@ mod tests {
             &managed_dir.0,
             7,
             true,
+            |file, encoded| file.write_all(encoded),
             |_| {
                 counter_events.borrow_mut().push(SyncEvent::File);
                 Ok(())
@@ -2662,6 +2707,7 @@ mod tests {
             &managed_dir.0,
             8,
             false,
+            |file, encoded| file.write_all(encoded),
             |_| {
                 update_events.borrow_mut().push(SyncEvent::File);
                 Ok(())
@@ -2699,6 +2745,7 @@ mod tests {
             &managed_dir.0,
             9,
             false,
+            |file, encoded| file.write_all(encoded),
             |_| {
                 failed_update_events.borrow_mut().push(SyncEvent::File);
                 Ok(())
