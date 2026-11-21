@@ -1,6 +1,6 @@
 # System architecture overview
 
-> **Design baseline:** This document summarizes the proposed architecture across [system overview](architecture/system-overview.md), [crate boundaries](architecture/crate-boundaries.md), [repository structure](architecture/repository-structure.md), [ADR 0001–0004](decisions/0001-native-rust-engine.md), and [stack decisions](tech-stack/stack-decisions.md). No Rust workspace, executable, or native host integration has been built yet.
+> **Design baseline:** This document summarizes the proposed architecture across [system overview](architecture/system-overview.md), [crate boundaries](architecture/crate-boundaries.md), [repository structure](architecture/repository-structure.md), [ADR 0001–0004](decisions/0001-native-rust-engine.md), and [stack decisions](tech-stack/stack-decisions.md). A portable Rust workspace and standalone CLI now exist; the desktop application and native host integration remain unimplemented.
 
 ## Two-repository and offline-core separation
 
