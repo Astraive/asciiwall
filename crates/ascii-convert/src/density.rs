@@ -13,8 +13,8 @@ use ascii_core::{
 };
 
 use crate::color::{
-    ColorNormalizationError, ColorNormalizationWarning, LinearRgb, OutputEncoding, encode_output,
-    normalize_raster,
+    ColorNormalizationError, ColorNormalizationWarning, LinearRgb, NormalizedRasterResources,
+    OutputEncoding, encode_output, normalize_raster,
 };
 use crate::font::GlyphTable;
 use crate::sampling::{
@@ -377,13 +377,16 @@ impl DensityConversion {
 ///
 /// Use [`convert_density_detailed`] when the caller also needs the exact sampling transform,
 /// retained quality patches, a normalization warning, or a more specific color-normalization failure.
+/// Pass a shared [`NormalizedRasterResources`] owner to cap normalized output retained by concurrent
+/// conversions; the per-operation [`Budget`] remains a separate ceiling.
 pub fn convert_density(
     input: RasterFrameView<'_>,
     glyphs: &GlyphTable,
     settings: &ConversionSettings<'_>,
     budget: &Budget,
+    resources: &NormalizedRasterResources,
 ) -> Result<AsciiFrame, Error> {
-    convert_density_detailed(input, glyphs, settings, budget)
+    convert_density_detailed(input, glyphs, settings, budget, resources)
         .map(DensityConversion::into_frame)
         .map_err(DensityConversionError::into_core)
 }
@@ -395,14 +398,18 @@ pub fn convert_density(
 /// alpha over the configured background, and matches the result to measured glyph mean coverage.
 /// Exact coverage-distance ties use font glyph index, Unicode scalar, then table position.
 ///
-/// Grid, work, normalized-raster, and optional whole-grid patch budgets are checked before their
-/// corresponding allocations. Fixed-surface pixels not covered by the floor-sized grid remain
-/// explicit right/bottom leftovers and are not part of the returned display transform.
+/// `budget` caps per-operation peak bytes and work; its raster-byte ceiling counts the borrowed input
+/// extent plus normalized output once. `resources` separately caps normalized output retained by
+/// concurrent operations, with each reservation released when its temporary normalized raster drops.
+/// Optional whole-grid patch storage is checked before allocation. Fixed-surface pixels not covered
+/// by the floor-sized grid remain explicit right/bottom leftovers and are not part of the returned
+/// display transform.
 pub fn convert_density_detailed(
     input: RasterFrameView<'_>,
     glyphs: &GlyphTable,
     settings: &ConversionSettings<'_>,
     budget: &Budget,
+    resources: &NormalizedRasterResources,
 ) -> Result<DensityConversion, DensityConversionError> {
     let settings = *settings;
     if settings.cancellation.is_cancelled() {
@@ -459,7 +466,7 @@ pub fn convert_density_detailed(
         budget,
     )?;
 
-    let normalized = normalize_raster(input, budget, settings.cancellation)?;
+    let normalized = normalize_raster(input, budget, settings.cancellation, resources)?;
     let normalization_warning = normalized.warning();
     let mut patches =
         sampling.allocate_patches(grid_budget.cell_count_usize(), settings.cancellation)?;
