@@ -1731,6 +1731,12 @@ pub struct OutputRegistry {
     state: Arc<Mutex<OutputRegistryState>>,
 }
 
+struct OutputTransactionHooks<S, R, D> {
+    sync_file: S,
+    replace: R,
+    sync_parent_directory: D,
+}
+
 impl OutputRegistry {
     pub fn registered_path(&self, identity: &CacheIdentity) -> Option<PathBuf> {
         lock_unpoisoned(&self.state)
@@ -1767,25 +1773,33 @@ impl OutputRegistry {
             destination.as_ref(),
             reservation,
             writer,
-            File::sync_all,
-            replace_destination,
-            crate::storage::sync_parent_directory,
+            OutputTransactionHooks {
+                sync_file: File::sync_all,
+                replace: replace_destination,
+                sync_parent_directory: crate::storage::sync_parent_directory,
+            },
         )
     }
 
-    fn write_transactional_with_sync<F>(
+    fn write_transactional_with_sync<F, S, R, D>(
         &self,
         identity: CacheIdentity,
         destination: &Path,
         reservation: &DiskReservation,
         writer: F,
-        sync_file: impl FnOnce(&File) -> io::Result<()>,
-        replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
-        sync_parent_directory: impl FnOnce(&Path) -> io::Result<()>,
+        hooks: OutputTransactionHooks<S, R, D>,
     ) -> Result<PathBuf, OutputWriteError>
     where
         F: FnOnce(&mut dyn Write) -> io::Result<()>,
+        S: FnOnce(&File) -> io::Result<()>,
+        R: FnOnce(&Path, &Path) -> io::Result<()>,
+        D: FnOnce(&Path) -> io::Result<()>,
     {
+        let OutputTransactionHooks {
+            sync_file,
+            replace,
+            sync_parent_directory,
+        } = hooks;
         let mut registry = lock_unpoisoned(&self.state);
         let destination = absolute_output_destination(destination).map_err(|error| {
             OutputWriteError::new(OutputFailureKind::TemporaryCreate, None, Some(error))
@@ -2659,7 +2673,6 @@ mod tests {
         assert!(fs::read_dir(&managed_dir.0).unwrap().next().is_none());
     }
 
-
     #[test]
     fn high_water_counter_and_marker_sync_their_parent_after_file_sync() {
         use std::cell::RefCell;
@@ -2862,21 +2875,23 @@ mod tests {
                 &destination,
                 &reservation,
                 |output| output.write_all(b"committed"),
-                |_| {
-                    commit_events.borrow_mut().push(CommitEvent::FileSync);
-                    Ok(())
-                },
-                |temporary, destination| {
-                    commit_events.borrow_mut().push(CommitEvent::Replace);
-                    replace_destination(temporary, destination)
-                },
-                |parent| {
-                    assert_eq!(parent, output_dir.as_path());
-                    assert_eq!(fs::read(&destination)?, b"committed");
-                    commit_events
-                        .borrow_mut()
-                        .push(CommitEvent::ParentDirectorySync);
-                    Ok(())
+                OutputTransactionHooks {
+                    sync_file: |_| {
+                        commit_events.borrow_mut().push(CommitEvent::FileSync);
+                        Ok(())
+                    },
+                    replace: |temporary, destination| {
+                        commit_events.borrow_mut().push(CommitEvent::Replace);
+                        replace_destination(temporary, destination)
+                    },
+                    sync_parent_directory: |parent| {
+                        assert_eq!(parent, output_dir.as_path());
+                        assert_eq!(fs::read(&destination)?, b"committed");
+                        commit_events
+                            .borrow_mut()
+                            .push(CommitEvent::ParentDirectorySync);
+                        Ok(())
+                    },
                 },
             )
             .unwrap();
@@ -2901,23 +2916,25 @@ mod tests {
                 &failed_destination,
                 &reservation,
                 |output| output.write_all(b"not registered"),
-                |_| {
-                    failed_events.borrow_mut().push(CommitEvent::FileSync);
-                    Ok(())
-                },
-                |temporary, destination| {
-                    failed_events.borrow_mut().push(CommitEvent::Replace);
-                    replace_destination(temporary, destination)
-                },
-                |parent| {
-                    assert_eq!(parent, output_dir.as_path());
-                    assert_eq!(fs::read(&failed_destination)?, b"not registered");
-                    failed_events
-                        .borrow_mut()
-                        .push(CommitEvent::ParentDirectorySync);
-                    Err(io::Error::other(
-                        "injected output parent-directory sync failure",
-                    ))
+                OutputTransactionHooks {
+                    sync_file: |_| {
+                        failed_events.borrow_mut().push(CommitEvent::FileSync);
+                        Ok(())
+                    },
+                    replace: |temporary, destination| {
+                        failed_events.borrow_mut().push(CommitEvent::Replace);
+                        replace_destination(temporary, destination)
+                    },
+                    sync_parent_directory: |parent| {
+                        assert_eq!(parent, output_dir.as_path());
+                        assert_eq!(fs::read(&failed_destination)?, b"not registered");
+                        failed_events
+                            .borrow_mut()
+                            .push(CommitEvent::ParentDirectorySync);
+                        Err(io::Error::other(
+                            "injected output parent-directory sync failure",
+                        ))
+                    },
                 },
             )
             .unwrap_err();
