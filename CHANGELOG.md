@@ -99,3 +99,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [COR-008] Reject nested cursor and window-geometry history keys in local settings before
   saving or rotating last-good.
 - [COR-008] Fail closed when recovery compares versioned settings with a versionless last-good file.
+- [COR-008] Require settings saves to compare the observed current bytes or absence under the
+  directory lock; stale writes return a typed conflict before current or last-good mutation.
