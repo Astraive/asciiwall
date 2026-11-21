@@ -78,7 +78,9 @@ The replacement branch `test/qa-101-input-boundaries-linear-r2` was validated at
 - The focused run printed the same deterministic synthetic-font and EC-001–003/005 fixture SHA-256 values recorded in the initial execution record above.
 - EC-004 remains not run because no decoder-to-converter callsite exists. QA-004 #35 remains a hard dependency. Independent exact-head re-review and reviewer-linked scenario receipts are pending; no QA-101 acceptance or native result is claimed.
 
-### Rebuilt QA-101 execution record (2026-11-20)
+### Historical QA-101 execution record on superseded base (2026-11-20)
+
+This record describes tests run on the superseded b78920f-based revision only. It is not verification of the current replacement based on `7bb0a7bebe39c214ce0b3e7b221c8d2152ce35bd`; replacement-head tests, CI, and review are pending.
 
 Only the two QA-101 commits from PR #317 were replayed onto exact CNV-001 PR #314 base head `b78920f82ff496e2ee9bd9b5ea454d906a003fa0`; no old-base CNV-001 commits were replayed. The scenario source was tested at commit `5a45755a19810361ded3e6716edbca005e72fcda` (source tree SHA-1 `e254448f45484f158d79d2f5b184cf21179cddf2`).
 
