@@ -168,12 +168,20 @@ proptest! {
 
         let result = decode(document.as_bytes());
         if depth > MAX_NESTING_DEPTH {
-            prop_assert!(matches!(
-                result,
-                Err(DocumentError::ExcessiveNesting { limit: MAX_NESTING_DEPTH }),
-            ));
+            prop_assert!(
+                matches!(
+                    result,
+                    Err(DocumentError::ExcessiveNesting {
+                        limit: MAX_NESTING_DEPTH
+                    })
+                ),
+                "nesting beyond the configured bound must be rejected"
+            );
         } else {
-            prop_assert!(matches!(result, Err(DocumentError::UnsupportedStructure)));
+            prop_assert!(
+                matches!(result, Err(DocumentError::UnsupportedStructure)),
+                "bounded nesting must reach scalar validation"
+            );
         }
     }
 
@@ -229,11 +237,15 @@ proptest! {
                 SettingChange::Set(SettingValue::Boolean(true)),
             )],
         );
-        prop_assert!(matches!(
-            result,
-            Err(ConfigError::ReadOnlyFutureSchema { schema_version: observed })
-                if observed == version,
-        ));
+        prop_assert!(
+            matches!(
+                result,
+                Err(ConfigError::ReadOnlyFutureSchema {
+                    schema_version: observed
+                }) if observed == version
+            ),
+            "writes to future schemas must be refused"
+        );
         prop_assert_eq!(fs::read(&path).unwrap(), original);
     }
 
@@ -254,16 +266,21 @@ proptest! {
             &candidate,
             BackupMode::ReplaceWithPrevious,
         );
-        prop_assert!(matches!(
-            result,
-            Err(StoreError::Io {
-                operation: StoreOperation::WriteTemporary,
-                kind: std::io::ErrorKind::StorageFull,
-                ..
-            }),
-        ));
-        prop_assert_eq!(fs::read(&path).unwrap(), previous);
-        prop_assert_eq!(fs::read(&backup).unwrap(), previous);
+        prop_assert!(
+            matches!(
+                result,
+                Err(StoreError::Io {
+                    operation: StoreOperation::WriteTemporary,
+                    kind: std::io::ErrorKind::StorageFull,
+                    ..
+                })
+            ),
+            "injected disk loss must fail the write"
+        );
+        let main_bytes = fs::read(&path).unwrap();
+        let backup_bytes = fs::read(&backup).unwrap();
+        prop_assert_eq!(main_bytes.as_slice(), previous.as_slice());
+        prop_assert_eq!(backup_bytes.as_slice(), previous.as_slice());
     }
 
     #[test]
@@ -308,11 +325,16 @@ proptest! {
         ];
 
         let result = controller.apply_batch(expected, &changes);
-        prop_assert!(matches!(
-            result,
-            Err(ConfigError::Conflict { expected: found_expected, current: found_current })
-                if found_expected == expected && found_current == current,
-        ));
+        prop_assert!(
+            matches!(
+                result,
+                Err(ConfigError::Conflict {
+                    expected: found_expected,
+                    current: found_current
+                }) if found_expected == expected && found_current == current
+            ),
+            "stale revisions must refuse the entire batch"
+        );
         prop_assert_eq!(controller.snapshot().unwrap().revision(), current);
         prop_assert_eq!(fs::read(&path).unwrap(), original);
     }
@@ -337,7 +359,9 @@ proptest! {
             ),
             Err(StoreError::Injected(PersistStage::MainDirectorySync)),
         ));
-        prop_assert_eq!(fs::read(&path).unwrap(), previous);
-        prop_assert_eq!(fs::read(&backup).unwrap(), previous);
+        let main_bytes = fs::read(&path).unwrap();
+        let backup_bytes = fs::read(&backup).unwrap();
+        prop_assert_eq!(main_bytes.as_slice(), previous.as_slice());
+        prop_assert_eq!(backup_bytes.as_slice(), previous.as_slice());
     }
 }
