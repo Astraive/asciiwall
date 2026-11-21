@@ -429,3 +429,31 @@ fn future_documents_exceeding_limits_remain_read_only_and_unchanged() {
         assert_eq!(fs::read(path).unwrap(), original);
     }
 }
+
+#[test]
+fn controller_revision_overflow_preserves_snapshot_and_persisted_bytes() {
+    let directory = TestDirectory::new();
+    let path = directory.0.join("settings.toml");
+    let original = format!(
+        "schema_version = {CURRENT_SCHEMA_VERSION}\nrevision = {}\n",
+        i64::MAX
+    );
+    fs::write(&path, original.as_bytes()).unwrap();
+    let controller = SettingsController::open(&path, property_registry()).unwrap();
+    let before = controller.snapshot().unwrap();
+    assert_eq!(before.revision(), i64::MAX as u64);
+
+    let result = controller.apply_batch(
+        before.revision(),
+        &[(
+            SettingKey::new("application.enabled").unwrap(),
+            SettingChange::Set(SettingValue::Boolean(true)),
+        )],
+    );
+    assert!(matches!(result, Err(ConfigError::RevisionOverflow)));
+    assert_eq!(controller.snapshot().unwrap(), before);
+    assert_eq!(
+        fs::read(path).unwrap().as_slice(),
+        original.as_bytes()
+    );
+}
