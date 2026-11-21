@@ -53,3 +53,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Account for local f64 coordinate precision when checking mapped crop edges, while rejecting extents that are collapsed beyond a conservative fraction of their size (`[CNV-001]`).
 - Normalize box-sampling overlap per axis before combining weights, allowing valid subnormal footprints without requiring representable absolute 2D area (`[CNV-001]`).
 - Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
+- Import `ascii-render`'s synthetic-font test fixture from `CARGO_MANIFEST_DIR` so rustfmt resolves it consistently across platforms ([VID-010]).
