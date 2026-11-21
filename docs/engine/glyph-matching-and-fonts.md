@@ -28,7 +28,7 @@ Version one enforces that repertoire at construction: C0/C1 controls, bidi forma
 
 ### FNT-002 verification evidence
 
-- Focused command: `cargo test --locked -p ascii-convert --test repertoire` — 9 tests passed, including all 256 Braille dot patterns at 8×12 and 10×15, complete preset font availability, block alignment/coverage, strict rejections, preview-mask identity, and missing/invisible states.
+- Focused command: `cargo test --locked -p ascii-convert --test repertoire` — 10 tests passed, including all 256 Braille dot patterns at 8×12 and 10×15, complete preset font availability, block alignment/coverage, strict rejections, preview-mask identity, and missing/invisible states.
 - Workspace command: `cargo test --locked --workspace --all-targets` — 156 tests passed across 11 suites in `ascii-core`, `ascii-convert`, and `ascii-media`.
 - Quality commands: `cargo fmt --all -- --check` and `cargo clippy --locked --workspace --all-targets -- -D warnings` — passed.
 - Executable smoke: temporary offline path-dependent binary ran `cargo run --locked --offline` and asserted actual `A` preview-mask equality, blank space preservation, and `C` unavailable status. Output: `preview smoke passed: A=Available coverage=Some(0.21764706), space=Available, C=Unavailable`.
