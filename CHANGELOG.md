@@ -77,6 +77,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   marker on platforms that support directory sync, preserving ID evidence across eviction.
 - [COR-009] Update existing generated-file ID high-water marks via a synced sibling and atomic replacement,
   so write or replacement failures leave the prior counter intact.
+- [COR-009] Sync the marked-cache staging directory before publishing it and sync the root after rename
+  on platforms that support directory sync; report either barrier's failure.
 - [COR-008] Redact user-qualified home paths in generic portable-export strings, including
   `=`-prefixed values, while preserving tilde text without a path; reject over-limit journal paths
   before cloning and retain the final whole-document size guard.
