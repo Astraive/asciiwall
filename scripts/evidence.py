@@ -1567,6 +1567,7 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                 "archive must be accessible on local fixed NTFS without reparse points"
             ) from exc
         raise EvidenceError("archive must be an existing non-symlink directory") from exc
+    operation_error: BaseException | None = None
     try:
         patterns = (
             ("evidence", ARCHIVE_RECORD_RE),
@@ -1672,10 +1673,18 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                 ) from exc
             raise
         return {"kept_by_type": kept, "removed": len(removed), "removed_names": sorted(removed)}
+    except BaseException as exc:
+        operation_error = exc
+        raise
     finally:
         if os.name == "nt":
-            # Reuse Directory's exception-aware cleanup without masking prune errors.
-            directory_fd.__exit__(*sys.exc_info())
+            # Reuse Directory's exception-aware cleanup with only this operation's error.
+            if operation_error is None:
+                directory_fd.__exit__(None, None, None)
+            else:
+                directory_fd.__exit__(
+                    type(operation_error), operation_error, operation_error.__traceback__
+                )
         else:
             os.close(directory_fd)
 

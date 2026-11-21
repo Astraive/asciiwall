@@ -1556,6 +1556,28 @@ class RetentionTests(unittest.TestCase):
             self.assertIs(raised.exception, injected_close_failure)
 
     @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
+    def test_prune_propagates_ntfs_directory_close_error_during_caller_exception(self):
+        import evidence_windows
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            original_close = evidence_windows.Directory.close
+            injected_close_failure = OSError("injected directory-close failure")
+
+            def fail_close(directory):
+                original_close(directory)
+                raise injected_close_failure
+
+            try:
+                raise RuntimeError("caller exception")
+            except RuntimeError:
+                with patch.object(evidence_windows.Directory, "close", new=fail_close):
+                    with self.assertRaises(OSError) as raised:
+                        evidence.prune_archive(archive, keep=1)
+
+            self.assertIs(raised.exception, injected_close_failure)
+
+    @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
     def test_prune_rejects_duplicate_windows_names_before_deletion(self):
         import evidence_windows
 
