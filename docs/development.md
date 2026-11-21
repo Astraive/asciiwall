@@ -1,6 +1,6 @@
 # Development workflow and local tooling
 
-> **Current repository state:** Today's `asciiwall` repository contains project governance files, `.github/` configuration/templates, `.githooks/`, documentation, and Python/PowerShell tooling. **There is no Rust `Cargo.toml`, application binary, or buildable installer yet.** Do not interpret future `cargo` or `asciiwall` CLI examples as currently runnable commands.
+> **Current repository state:** `asciiwall` contains project governance, `.github/` configuration/templates, `.githooks/`, documentation, Python/PowerShell tooling, and a committed Rust workspace with `ascii-core`, `ascii-convert`, and `ascii-media` members (resolver 3, edition 2024, Rust 1.100.0). `ascii-core` is dependency-free and `no_std`; the conversion and image-decoding crates have their own tested boundaries. There is no application binary, CLI, or buildable installer, and no video, native-host, catalog, or profiling workspace member/feature subset. The workspace commands below are runnable; future `asciiwall` CLI examples are not.
 
 ## Current repository tooling and prerequisites
 
@@ -62,14 +62,35 @@ Repository hooks live under `.githooks/` (`pre-commit`, `commit-msg`, and `.gith
 - `.githooks/commit-msg` invokes `scripts/check-conventions.py --message-file` to enforce subject format and forbid `Co-authored-by` trailers case-insensitively.
 - **Contributor identity rule:** The maintainer identity `Neeraj Sathish Kumar <neerajcodz@gmail.com>` applies **only** to this initial infrastructure setup operation. Future contributors must use their own standard Git author/committer identity (`user.name` / `user.email`); repository hooks never force or rewrite contributor identities, and no `Co-authored-by` trailers are permitted by project convention.
 
-## Future Rust workspace workflows
+## Rust workspace and feature boundaries
 
-Once `PRJ-001` establishes the Cargo workspace and crates described in [architecture](architecture.md), implementation follows the test-first loop in [contributor workflow](delivery/contributor-workflow.md) and [build environment and toolchain](tech-stack/build-environment-and-toolchain.md):
+The workspace now has separate `ascii-core`, `ascii-convert`, and `ascii-media` package boundaries. Portability CI checks the dependency-free core on Windows, Linux, and macOS; the workspace's Rust formatting and Clippy gates also cover all members. This is not a complete feature matrix:
 
-1. Write a failing contract test for the target work unit (`E01`–`E12`, `D01`–`D12`, `P01`–`P08`, `H01`–`H08`) and verify the intended failure.
-2. Implement the minimal complete behavior inside the owning crate without leaking platform `cfg` branches into `ascii-core` or duplicating conversion/validation logic.
-3. Run scoped `cargo fmt`, `cargo clippy`, and `cargo test` commands for the touched feature subset (avoiding invalid cross-platform `--all-features` assumptions) plus manual native host verification where desktop integration is affected.
-4. Keep an emergency Stop path (`CLI` / relaunch) reachable without depending on a system tray when testing debug desktop hosts.
+| Subset | Current interface and blocker |
+|---|---|
+| Core-only | Implemented by dependency-free `ascii-core`; checks frame, borrowed-raster, budget, cancellation, and typed-error contracts. |
+| Image | Implemented in `ascii-media`: `ReadSeek`, `DecodeLimits`, owned `DecodedFrame`, and PNG/JPEG decoding with committed regression tests against core raster/budget contracts. This is a package boundary, not an optional Cargo feature or image-specific CI matrix. |
+| Video | No video decoder exists. VID-001 owns a restricted `VideoDecoder::next_frame` interface over approved local inputs and owned image frames, and depends on IMG-001. |
+| Native host | No host adapter or native surface interface exists. WPH-001 owns versioned capabilities/events and generation-bound `SurfaceLease`; it depends on WND-001 and requires evidence for each actual host tuple. |
+| Catalog | No catalog or local-library package exists in this workspace. Static catalog schema/fixtures belong to `asciiwall-library` CAT-001 (dependent on LIB-001 and engine PKG-001); the app-side local index belongs to LIBAPP-001 (dependent on PKG-008). |
+| Profiling | No metrics API or benchmark report exists. PERF-001 owns versioned stage metrics and deterministic synthetic report tests; host/GPU measurements require the corresponding implemented adapters and instrumentation. |
+
+The core-only and image-decoding package boundaries are implemented, but PRJ-001 remains incomplete: video, native-host, catalog, and profiling interfaces and their exercised subsets are absent, as is app/CLI composition. Do not add empty crates or inert Cargo features to fill those gaps. In particular, `--all-features` is not a substitute for independent portable and native-target gates.
+
+The current CI Rust gates (also used for local verification) are:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo check --locked --package ascii-core --no-default-features
+cargo test --locked --package ascii-core --no-default-features
+cargo test --locked --package ascii-media
+cargo tree --locked --package ascii-core --edges all
+```
+
+For additional Rust implementation, follow the test-first loop in [contributor workflow](delivery/contributor-workflow.md) and [build environment and toolchain](tech-stack/build-environment-and-toolchain.md): write and run the contract test, implement inside the owning crate, and run only the applicable feature/target gates. Do not leak platform `cfg` branches into `ascii-core` or duplicate engine algorithms. Native integration still requires a named real host environment; a portable compile is not native-host evidence.
+
+Keep an emergency Stop path (`CLI` / relaunch) reachable without depending on a system tray when testing future debug desktop hosts.
 
 ## Contributor safety and workflow rules
 
