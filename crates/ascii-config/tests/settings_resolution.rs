@@ -519,9 +519,9 @@ fn future_schema_and_unclassifiable_documents_are_read_only() {
     let repair = SettingsController::open(&corrupt_path, registry()).unwrap();
     assert!(matches!(
         repair.status().unwrap(),
-        ControllerStatus::ReadOnlyUnclassifiableDocument(
-            ConfigError::Document(DocumentError::InvalidUtf8)
-        )
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+            DocumentError::InvalidUtf8
+        ))
     ));
     assert!(matches!(
         repair.repair(0),
@@ -546,8 +546,7 @@ fn future_schema_and_unclassifiable_documents_are_read_only() {
 fn explicit_repair_remains_available_for_known_current_schema_data() {
     let directory = TestDirectory::new();
     let path = directory.config();
-    let original =
-        b"schema_version = 2\nrevision = 17\n[settings]\n\"grid.columns\" = 0\n";
+    let original = b"schema_version = 2\nrevision = 17\n[settings]\n\"grid.columns\" = 0\n";
     fs::write(&path, original).unwrap();
     let controller = SettingsController::open(&path, registry()).unwrap();
 
@@ -611,9 +610,9 @@ fn malformed_document_classes_are_rejected_before_snapshot_publication() {
     fs::write(&path, invalid_utf8).unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::ReadOnlyUnclassifiableDocument(
-            ConfigError::Document(DocumentError::InvalidUtf8)
-        )
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+            DocumentError::InvalidUtf8
+        ))
     ));
 }
 
@@ -629,9 +628,9 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
     fs::write(&path, nested).unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::ReadOnlyUnclassifiableDocument(
-            ConfigError::Document(DocumentError::ExcessiveNesting { .. })
-        )
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+            DocumentError::ExcessiveNesting { .. }
+        ))
     ));
 
     fs::write(
@@ -641,9 +640,7 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
     .unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::ReadOnlyUnclassifiableDocument(
-            ConfigError::UnknownSetting(_)
-        )
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::UnknownSetting(_))
     ));
 
     let session_controller =
@@ -663,8 +660,8 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
     fs::write(&path, oversized).unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::ReadOnlyUnclassifiableDocument(
-            ConfigError::Document(DocumentError::TooLarge { .. })
-        )
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+            DocumentError::TooLarge { .. }
+        ))
     ));
 }
