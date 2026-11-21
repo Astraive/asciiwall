@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, the `ascii-convert` glyph-table implementation, and PNG/JPEG image decoding. **No application binary or published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace contains portable `ascii-core` and bounded `ascii-runtime` contracts, plus the `ascii-convert` glyph-table implementation and `ascii-media` PNG/JPEG image decoding. **No application binary or published release tag exists yet.**
 
 ### Added
 
@@ -24,8 +24,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
+- Bounded `ascii-runtime` handoff queues, buffer leases, completion acknowledgements, and shared concurrency/memory budgets ([COR-005](docs/architecture/resource-ownership-and-shutdown.md)).
 
 ### Changed
+
+- Hardened portable handoff ownership: live completion tokens own a strong pool handle without slot-to-pool self-pinning; unacknowledged slots stay quarantined while any pool handle remains and until generation invalidation, while dropping the last handle releases pool memory and output permits. Dropped leases reclaim only after acknowledgement; one-slot freshness replacement validates before eviction; Stop now takes priority over repeated revocation; existing transition charges transfer without double counting. CPU handoff, slot writes, raster validation, and pixel callbacks now hold shared work permits, while active output leases retain output permits until acknowledgement, generation invalidation, or pool destruction. Focused regressions also race concurrent lease drop with completion acknowledgement and sustain concurrent revocation traffic while Stop is pending. Native OS/GPU transport remains unimplemented and is not claimed.
+
+- Recorded the COR-005 integration blocker: this workspace has no application, decoder, scene-transition manager, or transport-owner interface to wire decode/transition permits or validate native lifecycle behavior; production consumers and native transport/device evidence remain prerequisites, so issue `#73` stays open.
 
 - Repaired relative Markdown navigation across existing original root documentation entrypoints (`c321475`, committed after PR `#1` and prior to `[PRJ-004]`).
 - Updated Project 4 registries and audit semantics for layout-specific grouping (`BOARD_LAYOUT` `verticalGroupByFields` columns / `groupByFields` swimlanes; 17 `TABLE_LAYOUT` views with one `group_by`, UI-only `slice_by`, and two ordered sorts). Configured and saved all table views in the authenticated Orca browser, reloaded all 18 views, verified native axes/sorts against GraphQL, and recorded UI slice reads plus screenshots under external `../.issues/reports/project-view-ui-verification.json`.
@@ -43,6 +48,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Poll cancellation inside JPEG marker/entropy fill-byte runs and stop charging the owned PNG snapshot again as codec scratch; bound PNG scratch by row/inflater buffers and the largest non-IDAT chunk buffer, with large ancillary and IDAT regressions (`[IMG-001]`).
 - Preflight premultiplied raster channels before allocating normalized output, charge the cancellable validation pass to work budgets, and test cancellation within that pass ([CNV-002]).
 - Made `NormalizedRaster` intentionally non-`Clone` to prevent unbudgeted pixel-buffer copies, and clarified that `ascii-media` decoding is outside this PR's scope ([CNV-002]).
+- Collect COR-005 output permits under the buffer-pool lock, fallibly reserve for only live permits outside it, then release after unlocking; document the non-nested pool/budget lock order.
+- Keep the active old-scene COR-005 memory permit borrowed while a transition is staged; abort releases only the candidate charge, while completion releases the old charge once and deactivates the original permit.
+- Linearize urgent Stop/revocation publication against the final ordinary FIFO dequeue with an atomic dequeue-commit bit; a pending urgent event wins the commit race (`[COR-005]`).
+- Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
+- Reject a queued-frame replacement cancelled during its buffer copy before publication, with public `submit_frame` regression coverage (`[COR-005]`).
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
 - Size density grids from the selected custom-crop geometry, retain normalized profile warnings in detailed conversion results, and preflight and cancellably initialize bounded quality-patch storage ([CNV-001]).
 - Charge premultiplied validation and readable input extent to density-conversion work and simultaneous-memory budgets; cancel before quality-patch buffer reservations and reject sRGB8-indistinguishable foreground/background colors ([CNV-001]).

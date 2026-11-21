@@ -1,0 +1,664 @@
+//! Independently bounded control and frame queues plus a portable handoff coordinator.
+//!
+//! Frame traffic can evict the oldest queued frame to preserve freshness, but every evicted
+//! descriptor is explicitly discarded from the pool. Stop and permission revocation use a
+//! two-bit atomic urgent mailbox, independent from both frame capacity and ordinary control queue
+//! capacity; duplicate urgent events coalesce. Ordinary control messages remain FIFO and bounded.
+//!
+//! Queue locks are released before pool operations. The handoff coordinator's operation lock is
+//! outermost and serializes publish, receive, and generation invalidation; it is never held while
+//! invoking user code. Urgent publication and the final ordinary dequeue share an atomic commit
+//! point, described at [`ControlQueue::try_recv`]. See the crate-level lock and callback contract.
+
+use std::collections::VecDeque;
+use std::mem::size_of;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+use ascii_core::{Budget, CancellationToken, Error as CoreError};
+
+use crate::lock_unpoisoned;
+use crate::{
+    BufferPool, FrameDescriptor, FrameLease, MemoryPermit, MemoryUsage, PermitKind,
+    RasterDescriptorMetadata, ResourceBudget, RuntimeError,
+};
+
+const URGENT_STOP: u8 = 0b01;
+const URGENT_REVOKE: u8 = 0b10;
+const ORDINARY_DEQUEUE_COMMITTED: u8 = 0b100;
+const URGENT_MASK: u8 = URGENT_STOP | URGENT_REVOKE;
+
+/// Control messages that are independent from the frame-data queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlEvent {
+    /// Stop the owning assignment or host. This uses the urgent mailbox.
+    Stop,
+    /// Immediately revoke the relevant permission/work generation. This uses the urgent mailbox.
+    RevokePermissions,
+    /// Ordinary bounded FIFO state update.
+    AssignmentChanged { generation: u64 },
+    /// Ordinary bounded FIFO state update.
+    Refresh,
+}
+
+#[derive(Debug)]
+struct QueueInner<T> {
+    items: VecDeque<T>,
+    capacity: usize,
+    _memory_permit: MemoryPermit,
+}
+
+/// Fixed-capacity frame descriptor queue.
+///
+/// `push_latest` retains the newest frame and returns an evicted descriptor to its caller. A caller
+/// that owns the corresponding buffer pool MUST discard/reclaim that descriptor rather than merely
+/// dropping it.
+#[derive(Debug)]
+pub struct FrameQueue {
+    inner: Mutex<QueueInner<FrameDescriptor>>,
+}
+
+impl FrameQueue {
+    /// Creates a frame queue with a fixed nonzero capacity charged to the shared memory budget.
+    pub fn new(resource_budget: &ResourceBudget, capacity: usize) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            inner: Mutex::new(new_queue_inner(resource_budget, capacity)?),
+        })
+    }
+
+    /// Returns the fixed queue capacity.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        lock_unpoisoned(&self.inner).capacity
+    }
+
+    /// Returns the current number of queued descriptors.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        lock_unpoisoned(&self.inner).items.len()
+    }
+
+    /// Returns whether the queue is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Attempts to append one descriptor without evicting queued frames.
+    pub fn try_send(&self, descriptor: FrameDescriptor) -> Result<(), FrameDescriptor> {
+        let mut inner = lock_unpoisoned(&self.inner);
+        if inner.items.len() == inner.capacity {
+            return Err(descriptor);
+        }
+        inner.items.push_back(descriptor);
+        Ok(())
+    }
+
+    /// Enqueues the newest frame, evicting and returning the oldest descriptor if full.
+    pub fn push_latest(&self, descriptor: FrameDescriptor) -> Option<FrameDescriptor> {
+        let mut inner = lock_unpoisoned(&self.inner);
+        let evicted = if inner.items.len() == inner.capacity {
+            inner.items.pop_front()
+        } else {
+            None
+        };
+        inner.items.push_back(descriptor);
+        evicted
+    }
+
+    /// Removes the oldest queued descriptor without touching its buffer slot.
+    pub fn try_recv(&self) -> Option<FrameDescriptor> {
+        lock_unpoisoned(&self.inner).items.pop_front()
+    }
+
+    fn restore_front(&self, descriptor: FrameDescriptor) {
+        let mut inner = lock_unpoisoned(&self.inner);
+        debug_assert!(inner.items.len() < inner.capacity);
+        inner.items.push_front(descriptor);
+    }
+}
+
+/// Bounded FIFO ordinary controls plus reserved, coalescing Stop/revocation signals.
+///
+/// The urgent events occupy two fixed mailbox bits; a third atomic bit commits the final ordinary
+/// dequeue against concurrent urgent publication. Urgent events therefore remain independent of
+/// ordinary queue capacity, including when that queue is full.
+#[derive(Debug)]
+pub struct ControlQueue {
+    ordinary: Mutex<QueueInner<ControlEvent>>,
+    urgent: AtomicU8,
+}
+
+impl ControlQueue {
+    /// Creates a bounded ordinary control queue charged to the shared budget. Stop/revocation
+    /// remain available even at capacity.
+    pub fn new(resource_budget: &ResourceBudget, capacity: usize) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            ordinary: Mutex::new(new_queue_inner(resource_budget, capacity)?),
+            urgent: AtomicU8::new(0),
+        })
+    }
+
+    /// Returns the ordinary FIFO capacity (urgent flags have fixed capacity two).
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        lock_unpoisoned(&self.ordinary).capacity
+    }
+
+    /// Returns the number of ordinary queued messages; urgent events are not included.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        lock_unpoisoned(&self.ordinary).items.len()
+    }
+
+    /// Returns whether no ordinary messages or urgent Stop/revocation events are pending.
+    ///
+    /// Unlike [`Self::len`], this includes the urgent mailbox, so it can be false when `len()`
+    /// is zero.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        let ordinary = lock_unpoisoned(&self.ordinary);
+        ordinary.items.is_empty() && self.urgent.load(Ordering::Acquire) == 0
+    }
+
+    /// Queues an event without blocking. Stop and revocation bypass the ordinary bounded FIFO.
+    pub fn try_send(&self, event: ControlEvent) -> Result<(), RuntimeError> {
+        match event {
+            ControlEvent::Stop => {
+                self.urgent.fetch_or(URGENT_STOP, Ordering::Release);
+                Ok(())
+            }
+            ControlEvent::RevokePermissions => {
+                self.urgent.fetch_or(URGENT_REVOKE, Ordering::Release);
+                Ok(())
+            }
+            ordinary => {
+                let mut queue = lock_unpoisoned(&self.ordinary);
+                if queue.items.len() == queue.capacity {
+                    return Err(RuntimeError::QueueFull);
+                }
+                queue.items.push_back(ordinary);
+                Ok(())
+            }
+        }
+    }
+
+    /// Receives urgent Stop first, then revocation, then ordinary FIFO controls.
+    pub fn try_recv(&self) -> Option<ControlEvent> {
+        self.try_recv_with_before_dequeue_commit(|| {})
+    }
+
+    fn try_recv_with_before_dequeue_commit<F>(
+        &self,
+        before_dequeue_commit: F,
+    ) -> Option<ControlEvent>
+    where
+        F: FnOnce(),
+    {
+        if let Some(event) = self.take_urgent() {
+            return Some(event);
+        }
+        self.try_recv_after_urgent_check(before_dequeue_commit)
+    }
+
+    fn try_recv_after_urgent_check<F>(&self, before_dequeue_commit: F) -> Option<ControlEvent>
+    where
+        F: FnOnce(),
+    {
+        let mut ordinary = lock_unpoisoned(&self.ordinary);
+        let mut state = self.urgent.load(Ordering::Acquire);
+        if state & URGENT_MASK != 0 {
+            if let Some(event) = self.take_urgent() {
+                return Some(event);
+            }
+            state = self.urgent.load(Ordering::Acquire);
+        }
+        if ordinary.items.is_empty() {
+            return None;
+        }
+
+        before_dequeue_commit();
+        loop {
+            if state & URGENT_MASK != 0 {
+                if let Some(event) = self.take_urgent() {
+                    return Some(event);
+                }
+                state = self.urgent.load(Ordering::Acquire);
+                continue;
+            }
+
+            match self.urgent.compare_exchange(
+                state,
+                state | ORDINARY_DEQUEUE_COMMITTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    // This CAS is the ordinary dequeue's linearization point: urgent publication
+                    // either changes `state` first and wins, or follows this committed dequeue.
+                    let event = ordinary.items.pop_front();
+                    self.urgent
+                        .fetch_and(!ORDINARY_DEQUEUE_COMMITTED, Ordering::AcqRel);
+                    return event;
+                }
+                Err(actual) => state = actual,
+            }
+        }
+    }
+
+    fn take_urgent(&self) -> Option<ControlEvent> {
+        loop {
+            let pending = self.urgent.load(Ordering::Acquire);
+            let (bit, event) = if pending & URGENT_STOP != 0 {
+                (URGENT_STOP, ControlEvent::Stop)
+            } else if pending & URGENT_REVOKE != 0 {
+                (URGENT_REVOKE, ControlEvent::RevokePermissions)
+            } else {
+                return None;
+            };
+            if self
+                .urgent
+                .compare_exchange_weak(pending, pending & !bit, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(event);
+            }
+        }
+    }
+}
+
+/// Coordinated latest-frame handoff with separate urgent control and fixed buffer slots.
+///
+/// The coordinator publishes a valid replacement before discarding older queued frames whenever
+/// a free slot exists. If all slots are occupied by queued frames, it validates the replacement
+/// before reclaiming the oldest queued frame to make room; consumed slots retain output permits
+/// until acknowledgement, generation invalidation, or pool destruction, without the slot pinning
+/// the pool.
+#[derive(Debug)]
+pub struct BoundedHandoff {
+    operation: Mutex<()>,
+    resource_budget: ResourceBudget,
+    pool: BufferPool,
+    frames: FrameQueue,
+    controls: ControlQueue,
+    #[cfg(test)]
+    cancel_after_copy: Mutex<bool>,
+}
+
+impl BoundedHandoff {
+    /// Creates fixed slot, frame-queue, and ordinary-control capacities using a shared budget.
+    pub fn new(
+        resource_budget: &ResourceBudget,
+        generation: u64,
+        slot_count: usize,
+        bytes_per_slot: usize,
+        frame_queue_capacity: usize,
+        control_queue_capacity: usize,
+    ) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            operation: Mutex::new(()),
+            resource_budget: resource_budget.clone(),
+            pool: BufferPool::new(resource_budget, generation, slot_count, bytes_per_slot)?,
+            frames: FrameQueue::new(resource_budget, frame_queue_capacity)?,
+            controls: ControlQueue::new(resource_budget, control_queue_capacity)?,
+            #[cfg(test)]
+            cancel_after_copy: Mutex::new(false),
+        })
+    }
+
+    /// Returns the control queue. It is independent from frame operations and can receive urgent
+    /// signals even when frame traffic is saturated.
+    #[must_use]
+    pub const fn controls(&self) -> &ControlQueue {
+        &self.controls
+    }
+
+    /// Returns the current frame queue length.
+    #[must_use]
+    pub fn queued_frames(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Returns the current pool generation.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.pool.generation()
+    }
+
+    /// Returns one slot's state for bounded diagnostics/tests.
+    pub fn slot_state(&self, slot_id: u32) -> Result<crate::SlotState, RuntimeError> {
+        self.pool.slot_state(slot_id)
+    }
+    #[cfg(test)]
+    fn cancel_during_next_copy(&self) {
+        *lock_unpoisoned(&self.cancel_after_copy) = true;
+    }
+
+    #[cfg(test)]
+    fn apply_test_copy_cancellation(&self, cancellation: &CancellationToken) {
+        if std::mem::take(&mut *lock_unpoisoned(&self.cancel_after_copy)) {
+            cancellation.cancel();
+        }
+    }
+
+    /// Publishes the newest valid frame before releasing older queued frames.
+    pub fn submit_frame(
+        &self,
+        metadata: RasterDescriptorMetadata,
+        pixels: &[u8],
+        budget: &Budget,
+        cancellation: &CancellationToken,
+    ) -> Result<FrameDescriptor, RuntimeError> {
+        self.submit_frame_before_publish(metadata, pixels, budget, cancellation, || {})
+    }
+
+    fn submit_frame_before_publish<F>(
+        &self,
+        metadata: RasterDescriptorMetadata,
+        pixels: &[u8],
+        budget: &Budget,
+        cancellation: &CancellationToken,
+        before_publish: F,
+    ) -> Result<FrameDescriptor, RuntimeError>
+    where
+        F: FnOnce(),
+    {
+        let _operation = lock_unpoisoned(&self.operation);
+        let _cpu_permit = self.resource_budget.try_acquire_cpu()?;
+        if pixels.len() > self.pool.bytes_per_slot() {
+            return Err(RuntimeError::MappingBounds);
+        }
+        if cancellation.is_cancelled() {
+            return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
+        }
+        self.pool
+            .validate_frame_input(metadata, pixels, budget, cancellation)?;
+        self.pool.reclaim_released();
+        let fill = match self.pool.begin_fill() {
+            Ok(mut fill) => {
+                fill.write_with_cpu_permit(pixels)?;
+                #[cfg(test)]
+                self.apply_test_copy_cancellation(cancellation);
+                before_publish();
+                if cancellation.is_cancelled() {
+                    return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
+                }
+                fill
+            }
+            Err(RuntimeError::NoFreeSlots) => {
+                before_publish();
+                if cancellation.is_cancelled() {
+                    return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
+                }
+                loop {
+                    let Some(stale) = self.frames.try_recv() else {
+                        return Err(RuntimeError::NoFreeSlots);
+                    };
+                    if self.pool.discard(&stale)? {
+                        self.pool.reclaim_released();
+                    }
+                    match self.pool.begin_fill() {
+                        Ok(mut fill) => {
+                            fill.write_with_cpu_permit(pixels)?;
+                            #[cfg(test)]
+                            self.apply_test_copy_cancellation(cancellation);
+                            if cancellation.is_cancelled() {
+                                return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
+                            }
+                            break fill;
+                        }
+                        Err(RuntimeError::NoFreeSlots) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        let descriptor = fill.publish_prevalidated(metadata)?;
+        while let Some(stale) = self.frames.try_recv() {
+            let _ = self.pool.discard(&stale)?;
+        }
+        self.pool.reclaim_released();
+        if let Some(evicted) = self.frames.push_latest(descriptor) {
+            let _ = self.pool.discard(&evicted)?;
+            self.pool.reclaim_released();
+        }
+        Ok(descriptor)
+    }
+
+    /// Receives the next valid current-generation frame, releasing stale queued descriptors.
+    pub fn receive_frame(
+        &self,
+        budget: &Budget,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<FrameLease>, RuntimeError> {
+        let _operation = lock_unpoisoned(&self.operation);
+        while let Some(descriptor) = self.frames.try_recv() {
+            match self.pool.consume(&descriptor, budget, cancellation) {
+                Ok(lease) => return Ok(Some(lease)),
+                Err(RuntimeError::StaleGeneration) => {
+                    let _ = self.pool.discard(&descriptor)?;
+                    self.pool.reclaim_released();
+                }
+                Err(error) if is_retryable_receive_error(error) => {
+                    self.frames.restore_front(descriptor);
+                    return Err(error);
+                }
+                Err(error) => {
+                    let _ = self.pool.discard(&descriptor)?;
+                    self.pool.reclaim_released();
+                    return Err(error);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Invalidates the old mapping generation and drops all queued descriptors from it.
+    ///
+    /// The caller must first make the old transport mapping unavailable, as documented on
+    /// [`BufferPool::invalidate_generation`].
+    pub fn invalidate_generation(&self, new_generation: u64) -> Result<usize, RuntimeError> {
+        let _operation = lock_unpoisoned(&self.operation);
+        let invalidated = self.pool.invalidate_generation(new_generation)?;
+        while self.frames.try_recv().is_some() {}
+        Ok(invalidated)
+    }
+}
+
+fn new_queue_inner<T>(
+    resource_budget: &ResourceBudget,
+    capacity: usize,
+) -> Result<QueueInner<T>, RuntimeError> {
+    if capacity == 0 {
+        return Err(RuntimeError::InvalidCapacity);
+    }
+    let charged_len = capacity
+        .checked_mul(size_of::<T>())
+        .filter(|len| *len <= isize::MAX as usize)
+        .ok_or(RuntimeError::SizeOverflow)?;
+    let charged_bytes = u64::try_from(charged_len).map_err(|_| RuntimeError::SizeOverflow)?;
+    let memory_permit = resource_budget.try_reserve_memory(MemoryUsage::new(charged_bytes, 0))?;
+
+    let mut items = VecDeque::new();
+    items
+        .try_reserve_exact(capacity)
+        .map_err(|_| RuntimeError::AllocationFailed)?;
+    Ok(QueueInner {
+        items,
+        capacity,
+        _memory_permit: memory_permit,
+    })
+}
+
+fn is_retryable_receive_error(error: RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::CoreValidation(
+            ascii_core::Error::Cancelled
+                | ascii_core::Error::BudgetExceeded(_)
+                | ascii_core::Error::TemporarilyUnavailable
+        ) | RuntimeError::ConcurrencyLimit(PermitKind::Cpu | PermitKind::Output)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BoundedHandoff, ControlEvent, ControlQueue};
+    use crate::{
+        PermitKind, RasterDescriptorMetadata, ResourceBudget, ResourceLimits, RuntimeError,
+        SlotState,
+    };
+    use ascii_core::{
+        AlphaMode, Budget, CancellationToken, ColorDescription, PixelFormat, RasterOrientation,
+    };
+
+    fn budget() -> Budget {
+        Budget::new(1 << 20, 1 << 20, 1 << 20)
+    }
+
+    fn resource_budget() -> ResourceBudget {
+        ResourceBudget::new(ResourceLimits::new(1, 1, 1, u64::MAX, u64::MAX))
+    }
+
+    fn metadata(timestamp: u64) -> RasterDescriptorMetadata {
+        RasterDescriptorMetadata {
+            width: 1,
+            height: 1,
+            row_stride: 3,
+            format: PixelFormat::rgb8(),
+            color: ColorDescription::srgb(AlphaMode::Opaque),
+            orientation: RasterOrientation::TopDown,
+            media_timestamp_ns: timestamp,
+        }
+    }
+
+    #[test]
+    fn cancelled_replacement_keeps_the_previous_queued_frame() {
+        let resource_budget = resource_budget();
+        let handoff = BoundedHandoff::new(&resource_budget, 1, 2, 3, 1, 1).unwrap();
+        let limits = budget();
+        let first = handoff
+            .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
+            .unwrap();
+        let cancellation = CancellationToken::new();
+
+        let error = handoff
+            .submit_frame_before_publish(metadata(2), &[4, 5, 6], &limits, &cancellation, || {
+                cancellation.cancel()
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RuntimeError::CoreValidation(ascii_core::Error::Cancelled)
+        );
+        assert_eq!(handoff.queued_frames(), 1);
+        assert_eq!(
+            handoff.slot_state(first.slot_id).unwrap(),
+            SlotState::Published
+        );
+        let mut lease = handoff
+            .receive_frame(&limits, &CancellationToken::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.descriptor().media_timestamp_ns, 1);
+        lease.completion_token().unwrap().acknowledge();
+        lease.release().unwrap();
+    }
+
+    #[test]
+    fn cancelled_one_slot_replacement_keeps_the_previous_queued_frame() {
+        let resource_budget = resource_budget();
+        let handoff = BoundedHandoff::new(&resource_budget, 1, 1, 3, 1, 1).unwrap();
+        let limits = budget();
+        handoff
+            .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
+            .unwrap();
+        let cancellation = CancellationToken::new();
+
+        assert_eq!(
+            handoff.submit_frame_before_publish(
+                metadata(2),
+                &[4, 5, 6],
+                &limits,
+                &cancellation,
+                || cancellation.cancel(),
+            ),
+            Err(RuntimeError::CoreValidation(ascii_core::Error::Cancelled))
+        );
+        assert_eq!(handoff.queued_frames(), 1);
+        assert_eq!(handoff.slot_state(0).unwrap(), SlotState::Published);
+        let mut lease = handoff
+            .receive_frame(&limits, &CancellationToken::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.descriptor().media_timestamp_ns, 1);
+        lease.completion_token().unwrap().acknowledge();
+        lease.release().unwrap();
+    }
+
+    #[test]
+    fn cancellation_during_one_slot_replacement_copy_is_not_published() {
+        let resource_budget = resource_budget();
+        let handoff = BoundedHandoff::new(&resource_budget, 1, 1, 3, 1, 1).unwrap();
+        let limits = budget();
+        handoff
+            .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        handoff.cancel_during_next_copy();
+
+        assert_eq!(
+            handoff.submit_frame(metadata(2), &[4, 5, 6], &limits, &cancellation),
+            Err(RuntimeError::CoreValidation(ascii_core::Error::Cancelled))
+        );
+        assert!(cancellation.is_cancelled());
+        assert_eq!(handoff.queued_frames(), 0);
+        assert_eq!(handoff.slot_state(0).unwrap(), SlotState::Free);
+        assert!(
+            handoff
+                .receive_frame(&limits, &CancellationToken::new())
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn pending_stop_before_fifo_commit_wins_the_dequeue_race() {
+        let resource_budget = resource_budget();
+        let controls = ControlQueue::new(&resource_budget, 1).unwrap();
+        controls.try_send(ControlEvent::Refresh).unwrap();
+
+        assert_eq!(
+            controls.try_recv_with_before_dequeue_commit(|| {
+                controls.try_send(ControlEvent::Stop).unwrap();
+            }),
+            Some(ControlEvent::Stop)
+        );
+        assert_eq!(controls.try_recv(), Some(ControlEvent::Refresh));
+    }
+
+    #[test]
+    fn cpu_submission_permit_is_shared_and_nonblocking() {
+        let resource_budget = ResourceBudget::new(ResourceLimits::new(1, 1, 1, u64::MAX, u64::MAX));
+        let handoff = BoundedHandoff::new(&resource_budget, 1, 1, 3, 1, 1).unwrap();
+        let limits = budget();
+
+        handoff
+            .submit_frame_before_publish(
+                metadata(1),
+                &[1, 2, 3],
+                &limits,
+                &CancellationToken::new(),
+                || {
+                    assert_eq!(
+                        resource_budget.try_acquire_cpu().unwrap_err(),
+                        RuntimeError::ConcurrencyLimit(PermitKind::Cpu)
+                    );
+                },
+            )
+            .unwrap();
+
+        assert_eq!(resource_budget.snapshot().cpu_jobs, 0);
+    }
+}

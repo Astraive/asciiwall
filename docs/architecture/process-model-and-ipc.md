@@ -20,6 +20,8 @@ The session ID is issued by the authenticated handshake and is not proof of iden
 
 Frame descriptors carry slot id, generation, dimensions, stride, format, byte length, media timestamp, and ownership state. The receiver validates multiplication/offset bounds against the mapped region. A producer cannot reuse a slot until release is acknowledged. A crash invalidates the connection generation and all outstanding descriptors.
 
+The current `ascii-runtime` implementation is only an in-process `Vec`-backed model. It does not implement OS shared memory, named pipes, producer-disconnect recovery, or native/GPU completion evidence; platform adapters remain required before these process-boundary contracts can be claimed as implemented.
+
 ## Reliability
 
 Commands are acknowledged with accepted/rejected status and a request id. Long operations produce progress and an explicit final result. Applying the same idempotency key twice must not install two copies or create two wallpaper hosts. A newly launched CLI cannot make a stale controller process appear current merely because an old socket file exists.
