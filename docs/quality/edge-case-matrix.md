@@ -21,7 +21,7 @@ This matrix defines **120 proposed scenarios** and expected outcomes. It is not 
 
 ### QA-102 portable regression coverage
 
-The portable CPU conversion regressions ran against synthetic rights-cleared inputs; actual scenario outcomes and host evidence are recorded below. A pass here is limited to the named API boundary and is not a QA-004 acceptance receipt.
+The EC-006–EC-008 PASS rows below are portable CPU/API results from the QA-102 conversion suite run on the replacement source/test revision recorded in the execution-evidence subsection; the results are limited to the named boundaries and are not a QA-004 acceptance receipt.
 
 | ID | Exercised real interface | Remaining boundary |
 |---|---|---|
@@ -29,11 +29,23 @@ The portable CPU conversion regressions ran against synthetic rights-cleared inp
 | EC-007 | **PASS (portable density conversion).** All-black, all-white, and flat mid-gray Gray8 inputs convert repeatably with exact repeated cells; black selects blank space, white selects ink glyph `A`, descriptors/samples remain finite, gradients are zero, and endpoint luminance is exactly 0/1. | This covers the CPU conversion path only, not native preview/rendering. |
 | EC-008 | **PASS (padded-raster converter and decoder-to-converter smoke).** The exact-minimum 3×2 Gray8 view with stride 5 ignores poison padding and converts black/white rows deterministically; a separate odd-width 3×2 synthetic PNG was decoded with `ascii-media::decode_image`, borrowed via `DecodedFrame::view()`, and passed directly to `convert_density_detailed` (decoded RGB stride 9; output 3×2). | Portable CPU/API boundaries only: the decoder returns tightly packed output, so padding behavior is covered by the direct raster test, not decoder-added padding. Device-specific stride remains untested. |
 | EC-009 | **NOT RUN.** The separately named raw-raster backing validation regression verifies that the converter preserves `RasterBackingTooShort`; it is not EC-009 because it does not use malformed encoded input, a restricted worker, or a UI. | The current three-member workspace has no SEC-005 restricted media worker or UIX-001 application UI/safe-error surface. The required malformed/truncated encoded-input → worker failure → safe UI error path is unavailable; no worker/UI pass is claimed. |
-| EC-010 | **PASS (tested source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8`; also passed on PR #337 head `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c` at the time of the run).** `image::codec_cancellation_tests::oversized_jpeg_is_rejected_before_output_allocation` in `crates/ascii-media/src/image.rs` feeds a sub-1-KiB JPEG advertising 4096×4096 through the decoder with an injected output allocator. The test asserts `BudgetExceeded(RasterBytes)` and that the allocator was never invoked; the exact command passed with 1 passed, 11 filtered. | Decoder budget-guard coverage only; this is not a QA-004 evidence receipt. The generated JPEG is not separately persisted or hashed; no QA-004 archive/receipt is claimed. |
+| EC-010 | **PASS (exact PR #337 head `27c8bc179436a1851a865f489d92c009e7ba2247` at the time of the rerun; tested source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8`).** `image::codec_cancellation_tests::oversized_jpeg_is_rejected_before_output_allocation` in `crates/ascii-media/src/image.rs` feeds a sub-1-KiB JPEG advertising 4096×4096 through the decoder with an injected output allocator. The test asserts `BudgetExceeded(RasterBytes)` and that the allocator was never invoked; the exact-head command passed, 1 passed, 11 filtered. | Decoder budget-guard coverage only; this is not a QA-004 evidence receipt. The generated JPEG is not separately persisted or hashed; no QA-004 archive/receipt is claimed. |
 
-#### EC-010 source and PR-head verification
+#### QA-102 replacement-code execution evidence
 
-The original run below was on historical predecessor head `dd699e480f31c77e50f51f5831c81f5e240febaa`; `44688a862052f2e597ba7a61df80f3928d33158c` and `0e447854ec0e986e45678fdbfa31c889da2e5d41` were docs-only, with `0e447854ec0e986e45678fdbfa31c889da2e5d41` serving as prior-head evidence. The tested source/test revision is `fb8ddb206df60a7083083e46754c32fe14f3ddd8`; its source and test code is identical to PR #337 head `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c` at the time the test was run. Later documentation-only edits do not alter that tested source/test code.
+The EC-006–EC-008 PASS rows above are supported by these checks on replacement source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8`:
+
+- `cargo test --locked -p ascii-convert --test qa_102_input_conversion` — **PASS**, 6 passed.
+- `ascii-convert` package test suites — **PASS**, 80 passed across 6 suites.
+- `ascii-media --lib` — **PASS**, 12 passed; `image_decode` — **PASS**, 20 passed.
+- `cargo fmt --all -- --check` — **PASS**.
+- Strict workspace Clippy (`cargo clippy --locked --workspace --all-targets -- -D warnings`) — **PASS**.
+
+PR commits `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c` and `27c8bc179436a1851a865f489d92c009e7ba2247` were docs-only; the exact QA-102 conversion suite was not rerun at either head. Those documentation-only edits do not alter the tested source/test code.
+
+#### EC-010 source revision and exact-head evidence
+
+The original run below was on historical predecessor head `dd699e480f31c77e50f51f5831c81f5e240febaa`; `44688a862052f2e597ba7a61df80f3928d33158c` and `0e447854ec0e986e45678fdbfa31c889da2e5d41` were docs-only, with `0e447854ec0e986e45678fdbfa31c889da2e5d41` serving as prior-head evidence. EC-010 was verified on tested source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8` and rerun on exact PR #337 head `27c8bc179436a1851a865f489d92c009e7ba2247`. PR commits `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c` and `27c8bc179436a1851a865f489d92c009e7ba2247` were docs-only; later documentation-only edits do not alter the tested source/test code.
 
 - `cargo test --locked -p ascii-media --lib oversized_jpeg_is_rejected_before_output_allocation -- --nocapture` — **PASS**, 1 passed, 11 filtered. The runner reports `image::codec_cancellation_tests::oversized_jpeg_is_rejected_before_output_allocation`.
 
@@ -41,10 +53,14 @@ The same exact command was run on prior PR head `0e447854ec0e986e45678fdbfa31c88
 
 - `cargo test --locked -p ascii-media --lib oversized_jpeg_is_rejected_before_output_allocation -- --nocapture` — **PASS**, 1 passed.
 
-The exact command below was run on tested source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8` and also on PR #337 head `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c` at that time:
+The exact command below was run on tested source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8` and on PR #337 head `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c` at that time:
 
 - `cargo test --locked -p ascii-media --lib oversized_jpeg_is_rejected_before_output_allocation -- --nocapture` — **PASS**, 1 passed, 11 filtered, on `fb8ddb206df60a7083083e46754c32fe14f3ddd8`.
 - `cargo test --locked -p ascii-media --lib oversized_jpeg_is_rejected_before_output_allocation -- --nocapture` — **PASS**, 1 passed, 11 filtered, on PR #337 head `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c`.
+
+The same command was rerun on exact PR #337 head `27c8bc179436a1851a865f489d92c009e7ba2247`:
+
+- `cargo test --locked -p ascii-media --lib oversized_jpeg_is_rejected_before_output_allocation -- --nocapture` — **PASS**, 1 passed, 11 filtered.
 
 This confirms decoder budget-guard coverage only; it is not a QA-004 receipt and does not establish EC-009, native/manual, worker/UI, or full QA-102 acceptance. QA-004 #35 remains a hard dependency; no archived QA-004 receipt or full QA-102 acceptance is claimed.
 
