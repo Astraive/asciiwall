@@ -1380,6 +1380,9 @@ fn is_machine_local_string(value: &str) -> bool {
         let bytes = token.as_bytes();
         token.starts_with("~/")
             || looks_like_user_home_path(token)
+            || token
+                .split_once('=')
+                .is_some_and(|(_, value)| looks_like_user_home_path(value))
             || token.starts_with('/')
             || token.starts_with("\\\\")
             || token.contains('\\')
