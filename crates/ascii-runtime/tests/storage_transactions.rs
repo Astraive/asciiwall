@@ -744,6 +744,57 @@ fn registry_write_rejects_newer_and_invalid_current_bytes() {
 }
 
 #[test]
+fn duplicate_registry_package_keys_are_rejected_on_load_and_save() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let path = storage.registry_path();
+    let first_entry = registry("1.0.0")
+        .packages
+        .into_iter()
+        .next()
+        .expect("first package entry")
+        .1;
+    let second_entry = registry("2.0.0")
+        .packages
+        .into_iter()
+        .next()
+        .expect("second package entry")
+        .1;
+    let package_id = serde_json::to_string("org.example.sample").expect("serialize package id");
+    let first_entry = serde_json::to_string(&first_entry).expect("serialize first package");
+    let second_entry = serde_json::to_string(&second_entry).expect("serialize second package");
+    let mut duplicate = String::from(r#"{"schema_version":1,"packages":{"#);
+    duplicate.push_str(&package_id);
+    duplicate.push(':');
+    duplicate.push_str(&first_entry);
+    duplicate.push(',');
+    duplicate.push_str(&package_id);
+    duplicate.push(':');
+    duplicate.push_str(&second_entry);
+    duplicate.push_str("}}");
+    let duplicate = duplicate.into_bytes();
+
+    fs::write(&path, &duplicate).expect("write duplicate-key registry");
+    assert!(matches!(
+        storage.load_registry(),
+        Err(StorageError::Json(_))
+    ));
+    assert_eq!(
+        fs::read(&path).expect("rejected load preserves exact registry bytes"),
+        duplicate
+    );
+
+    assert!(matches!(
+        storage.save_registry(&registry("3.0.0")),
+        Err(StorageError::Json(_))
+    ));
+    assert_eq!(
+        fs::read(&path).expect("rejected save preserves exact registry bytes"),
+        duplicate
+    );
+}
+
+#[test]
 fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
