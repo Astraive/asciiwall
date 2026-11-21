@@ -88,6 +88,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   names such as `cursor.history`, without changing current settings or backup bytes.
 - [COR-008] Reject duplicate package identifiers in persisted install-registry JSON during load and
   save validation, preserving the original bytes on either rejection.
+- [COR-008] Roll back restored settings after parent-directory sync failure, preserving pre-recovery
+  current and last-good bytes; report rollback failures explicitly and cover the public recovery
+  sync hook with a deterministic byte-preservation regression.
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
 - Size density grids from the selected custom-crop geometry, retain normalized profile warnings in detailed conversion results, and preflight and cancellably initialize bounded quality-patch storage ([CNV-001]).
 - Charge premultiplied validation and readable input extent to density-conversion work and simultaneous-memory budgets; cancel before quality-patch buffer reservations and reject sRGB8-indistinguishable foreground/background colors ([CNV-001]).
