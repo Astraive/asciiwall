@@ -2205,6 +2205,35 @@ fn portable_export_redacts_machine_paths_after_colon_delimiters() {
 }
 
 #[test]
+fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
+    use ascii_runtime::storage::PortableExport;
+
+    let source = json!({
+        "embedded_posix": "clip selected from Documents/private.mov before import",
+        "embedded_windows": "clip selected from Videos\\private.mp4 before import",
+        "harmless_slash_prose": "Choose input/output; the ratio is 3/4.",
+        "harmless_filename_prose": "The terms private.mov and Documents are examples."
+    });
+    let portable =
+        PortableExport::from_value(&source, ExportMode::Portable).expect("portable export");
+
+    for private_key in ["embedded_posix", "embedded_windows"] {
+        assert!(
+            portable.content().get(private_key).is_none(),
+            "portable export retained {private_key}"
+        );
+    }
+    assert_eq!(
+        portable.content()["harmless_slash_prose"],
+        json!("Choose input/output; the ratio is 3/4.")
+    );
+    assert_eq!(
+        portable.content()["harmless_filename_prose"],
+        json!("The terms private.mov and Documents are examples.")
+    );
+}
+
+#[test]
 fn portable_export_filters_bare_host_field_but_preserves_local_backup() {
     let source = json!({"host": "buildhost"});
     let portable =
