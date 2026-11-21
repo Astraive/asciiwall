@@ -365,6 +365,55 @@ fn fractional_block_masks_match_cell_relative_eighths() {
 }
 
 #[test]
+fn quadrant_block_masks_match_their_distinct_occupied_quadrants() {
+    let font = complete_repertoire_font(None);
+    let repertoire =
+        GlyphRepertoire::from_preset(GlyphRepertoirePreset::BlockElements).expect("block preset");
+    let table = build_glyph_table(
+        &font,
+        &repertoire,
+        &config(),
+        &budget(),
+        &CancellationToken::new(),
+    )
+    .expect("all block glyphs are present in the synthetic font");
+    let width = table.cell_width() as usize;
+    let height = table.cell_height() as usize;
+    assert_eq!((width, height), (8, 12));
+
+    let upper_left_three = record(&table, '\u{259b}').mask();
+    let lower_right_three = record(&table, '\u{259f}').mask();
+    assert_ne!(
+        upper_left_three, lower_right_three,
+        "U+259B and U+259F must not share a quadrant mask",
+    );
+
+    // Probe inside each quadrant so shared edges do not count as occupied fill.
+    let quadrant_interiors = [
+        (1, 3, 3, 5),  // upper-left
+        (5, 7, 3, 5),  // upper-right
+        (1, 3, 7, 10), // lower-left
+        (5, 7, 7, 10), // lower-right
+    ];
+    for (character, expected_quadrants) in [
+        ('\u{259b}', [true, true, true, false]),
+        ('\u{259f}', [false, true, true, true]),
+    ] {
+        let mask = record(&table, character).mask();
+        for (quadrant, (x_start, x_end, y_start, y_end)) in
+            quadrant_interiors.into_iter().enumerate()
+        {
+            assert_eq!(
+                region_has_ink(mask, width, height, x_start, x_end, y_start, y_end),
+                expected_quadrants[quadrant],
+                "U+{:04X} has incorrect quadrant {quadrant}",
+                character as u32,
+            );
+        }
+    }
+}
+
+#[test]
 fn every_braille_dot_pattern_rasterizes_at_two_sizes_with_correct_orientation() {
     assert_braille_pattern_masks(config());
     assert_braille_pattern_masks(
