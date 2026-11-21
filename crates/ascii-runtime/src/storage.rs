@@ -34,6 +34,7 @@
 use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
@@ -109,6 +110,7 @@ impl fmt::Display for StorageError {
                 write!(f, "storage directories are invalid: {reason}")
             }
             Self::InvalidRegistry(reason) => write!(f, "install registry is invalid: {reason}"),
+            Self::InvalidJournal(reason) => write!(f, "import journal is invalid: {reason}"),
             Self::InvalidConfiguration(_) => f.write_str("configuration is invalid"),
             Self::InvalidStoredState(_) => f.write_str("stored state is invalid"),
             Self::StaleConfiguration => f.write_str("configuration changed since it was read"),
@@ -955,8 +957,10 @@ impl Storage {
             _ => {}
         }
         let rollback = prepare_replace_rollback(&destination)?;
-        let mut rollback_hook = || hook(AtomicWriteStage::RecoveryRollbackRename);
-        let mut sync_hook = || hook(AtomicWriteStage::ParentDirectorySync);
+        let hook = RefCell::new(hook);
+        let mut rollback_hook =
+            || (hook.borrow_mut())(AtomicWriteStage::RecoveryRollbackRename);
+        let mut sync_hook = || (hook.borrow_mut())(AtomicWriteStage::ParentDirectorySync);
         atomic_replace_locked(
             &destination,
             &bytes,
