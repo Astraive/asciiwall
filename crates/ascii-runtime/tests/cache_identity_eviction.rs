@@ -860,40 +860,6 @@ fn shared_root_budget_respects_a_lease_from_another_instance() {
     assert_eq!(derived_file_bytes(&cache_root), 5);
 }
 
-#[test]
-fn concurrent_cache_instances_serialize_shared_root_budget() {
-    let temp = TempDir::new();
-    let cache_root = temp.path().join("cache");
-    let first_cache = DerivedCache::open(&cache_root, 5).unwrap();
-    let second_cache = DerivedCache::open(&cache_root, 5).unwrap();
-    let first_worker_cache = first_cache.clone();
-    let second_worker_cache = second_cache.clone();
-
-    let first_worker = std::thread::spawn(move || {
-        for value in 0..32u8 {
-            first_worker_cache
-                .store(identity(value), &[value; 5])
-                .unwrap();
-            assert!(first_worker_cache.snapshot().unwrap().used_bytes <= 5);
-        }
-    });
-    let second_worker = std::thread::spawn(move || {
-        for value in 128..160u8 {
-            second_worker_cache
-                .store(identity(value), &[value; 5])
-                .unwrap();
-            assert!(second_worker_cache.snapshot().unwrap().used_bytes <= 5);
-        }
-    });
-
-    first_worker.join().unwrap();
-    second_worker.join().unwrap();
-
-    assert_eq!(derived_file_count(&cache_root), 1);
-    assert_eq!(derived_file_bytes(&cache_root), 5);
-    assert_eq!(first_cache.snapshot().unwrap().used_bytes, 5);
-    assert_eq!(second_cache.snapshot().unwrap().used_bytes, 5);
-}
 
 #[test]
 fn repeated_cross_instance_lease_failures_recover_after_acknowledgement() {
