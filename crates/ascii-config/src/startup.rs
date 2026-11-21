@@ -119,8 +119,7 @@ impl RestoreFailureState {
 
     fn reset_expired_window(&mut self, now_unix_millis: u64, policy: RestorePolicy) {
         let expired = self.window_started_unix_millis.is_none_or(|start| {
-            now_unix_millis < start
-                || now_unix_millis.saturating_sub(start) >= policy.window_millis
+            now_unix_millis < start || now_unix_millis.saturating_sub(start) >= policy.window_millis
         });
         if expired {
             self.window_started_unix_millis = Some(now_unix_millis);
@@ -150,13 +149,19 @@ mod tests {
         let first = state.validate_before_restore(true, 10_000, policy, "last-wallpaper", |_| {
             Err::<(), _>("missing source")
         });
-        assert_eq!(first, Err(RestoreGateError::ValidationFailed("missing source")));
+        assert_eq!(
+            first,
+            Err(RestoreGateError::ValidationFailed("missing source"))
+        );
         assert_eq!(state.failures(), 1);
 
         let second = state.validate_before_restore(true, 11_000, policy, "last-wallpaper", |_| {
             Err::<(), _>("invalid source")
         });
-        assert_eq!(second, Err(RestoreGateError::ValidationFailed("invalid source")));
+        assert_eq!(
+            second,
+            Err(RestoreGateError::ValidationFailed("invalid source"))
+        );
         assert_eq!(state.failures(), 2);
 
         let validations = AtomicUsize::new(0);

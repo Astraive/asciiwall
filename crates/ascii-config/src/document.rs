@@ -55,9 +55,9 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<DecodedDocument, DocumentError> {
         .and_then(|value| value.as_integer())
         .and_then(|value| u64::try_from(value).ok())
         .ok_or(DocumentError::InvalidField("revision"))?;
-    let settings = root.remove("settings").unwrap_or_else(|| {
-        toml::Value::Table(toml::map::Map::new())
-    });
+    let settings = root
+        .remove("settings")
+        .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
     if !root.is_empty() {
         return Err(DocumentError::UnknownRootField(
             root.keys().next().cloned().unwrap_or_default(),
@@ -74,7 +74,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<DecodedDocument, DocumentError> {
 
     let mut overrides = BTreeMap::new();
     for (raw_key, raw_value) in settings {
-        let key = SettingKey::new(&raw_key).map_err(|_| DocumentError::InvalidKey(raw_key.clone()))?;
+        let key =
+            SettingKey::new(&raw_key).map_err(|_| DocumentError::InvalidKey(raw_key.clone()))?;
         let value = decode_scalar(raw_value)?;
         overrides.insert(key, value);
     }
@@ -108,8 +109,8 @@ pub(crate) fn encode(
     );
     root.insert("revision".to_owned(), toml::Value::Integer(revision as i64));
     root.insert("settings".to_owned(), toml::Value::Table(settings));
-    let text = toml::to_string(&toml::Value::Table(root))
-        .map_err(|_| DocumentError::Serialization)?;
+    let text =
+        toml::to_string(&toml::Value::Table(root)).map_err(|_| DocumentError::Serialization)?;
     if text.len() > MAX_CONFIG_BYTES {
         return Err(DocumentError::TooLarge {
             limit: MAX_CONFIG_BYTES,
@@ -221,9 +222,15 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
             b'\'' => quote = Some(Quote::Literal),
             b'[' | b'{' => {
                 if byte == b'[' && depth == 0 && is_line_prefix_whitespace(bytes, index) {
-                    let open_count = if bytes.get(index + 1) == Some(&b'[') { 2 } else { 1 };
+                    let open_count = if bytes.get(index + 1) == Some(&b'[') {
+                        2
+                    } else {
+                        1
+                    };
                     let content_start = index + open_count;
-                    if let Some(relative_end) = bytes[content_start..].iter().position(|b| *b == b']') {
+                    if let Some(relative_end) =
+                        bytes[content_start..].iter().position(|b| *b == b']')
+                    {
                         enforce_path_depth(&bytes[content_start..content_start + relative_end])?;
                     }
                 }

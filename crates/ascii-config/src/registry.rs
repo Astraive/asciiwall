@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::model::{
-    SemanticValidator, SettingDescriptor, SettingKey, SettingType,
-};
-use crate::resolve::{resolve_settings, Constraints, ResolveError, SettingLayers};
+use crate::model::{SemanticValidator, SettingDescriptor, SettingKey, SettingType};
+use crate::resolve::{Constraints, ResolveError, SettingLayers, resolve_settings};
 
 /// Immutable authoritative index of setting descriptors.
 #[derive(Clone, Debug, Default)]
@@ -13,7 +11,9 @@ pub struct Registry {
 
 impl Registry {
     /// Builds a registry and checks key uniqueness and semantic-hook references.
-    pub fn new(descriptors: impl IntoIterator<Item = SettingDescriptor>) -> Result<Self, RegistryError> {
+    pub fn new(
+        descriptors: impl IntoIterator<Item = SettingDescriptor>,
+    ) -> Result<Self, RegistryError> {
         let mut by_key = BTreeMap::new();
         for descriptor in descriptors {
             let key = descriptor.key.clone();
@@ -31,15 +31,17 @@ impl Registry {
                         ));
                     }
                 }
-                SemanticValidator::LessThan(other)
-                | SemanticValidator::GreaterThan(other) => {
+                SemanticValidator::LessThan(other) | SemanticValidator::GreaterThan(other) => {
                     let Some(other_descriptor) = by_key.get(other) else {
                         return Err(RegistryError::MissingSemanticKey(
                             descriptor.key.clone(),
                             other.clone(),
                         ));
                     };
-                    if !descriptor.value_type.same_numeric_kind(&other_descriptor.value_type) {
+                    if !descriptor
+                        .value_type
+                        .same_numeric_kind(&other_descriptor.value_type)
+                    {
                         return Err(RegistryError::IncompatibleSemanticHook(
                             descriptor.key.clone(),
                         ));
@@ -47,9 +49,15 @@ impl Registry {
                 }
             }
         }
-        let registry = Self { descriptors: by_key };
-        resolve_settings(&registry, &SettingLayers::default(), &Constraints::default())
-            .map_err(RegistryError::InvalidDefaults)?;
+        let registry = Self {
+            descriptors: by_key,
+        };
+        resolve_settings(
+            &registry,
+            &SettingLayers::default(),
+            &Constraints::default(),
+        )
+        .map_err(RegistryError::InvalidDefaults)?;
         Ok(registry)
     }
 

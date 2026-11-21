@@ -6,8 +6,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use fs2::FileExt;
 use crate::document::MAX_CONFIG_BYTES;
+use fs2::FileExt;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -307,8 +307,7 @@ impl ConfigStore for FileStore {
         let (previous, oversized) = match self.read_path(&self.path) {
             Ok(value) => (value, false),
             Err(StoreError::TooLarge { .. })
-                if backup_mode == BackupMode::PreserveLastGood
-                    && expected_current.is_none() =>
+                if backup_mode == BackupMode::PreserveLastGood && expected_current.is_none() =>
             {
                 (None, true)
             }
@@ -325,7 +324,8 @@ impl ConfigStore for FileStore {
             let archive = self.unique_corrupt_path();
             fs::rename(&self.path, &archive)
                 .map_err(|error| StoreError::io(StoreOperation::ArchiveCorrupt, error))?;
-            return match self.atomic_write(&self.path.clone(), contents, PersistStage::MainReplace) {
+            return match self.atomic_write(&self.path.clone(), contents, PersistStage::MainReplace)
+            {
                 Ok(()) => Ok(()),
                 Err(failure) => {
                     if let Err(rollback) = self.restore_previous(None, Some(&archive)) {
@@ -344,11 +344,9 @@ impl ConfigStore for FileStore {
             BackupMode::ReplaceWithPrevious => {
                 if let Some(previous_bytes) = previous.as_deref() {
                     let backup = self.backup_path();
-                    if let Err(failure) = self.atomic_write(
-                        &backup,
-                        previous_bytes,
-                        PersistStage::BackupReplace,
-                    ) {
+                    if let Err(failure) =
+                        self.atomic_write(&backup, previous_bytes, PersistStage::BackupReplace)
+                    {
                         return Err(failure.error);
                     }
                 }
@@ -356,11 +354,9 @@ impl ConfigStore for FileStore {
             BackupMode::PreserveLastGood => {
                 if let Some(previous_bytes) = previous.as_deref() {
                     let archive = self.unique_corrupt_path();
-                    if let Err(failure) = self.atomic_write(
-                        &archive,
-                        previous_bytes,
-                        PersistStage::ArchiveReplace,
-                    ) {
+                    if let Err(failure) =
+                        self.atomic_write(&archive, previous_bytes, PersistStage::ArchiveReplace)
+                    {
                         return Err(failure.error);
                     }
                 }
@@ -469,10 +465,18 @@ pub enum StoreError {
         kind: std::io::ErrorKind,
         message: String,
     },
-    TooLarge { limit: usize, actual: u64 },
-    Stale { current: Option<Vec<u8>> },
+    TooLarge {
+        limit: usize,
+        actual: u64,
+    },
+    Stale {
+        current: Option<Vec<u8>>,
+    },
     TemporaryNameExhausted,
-    CommitIndeterminate { cause: String, rollback: String },
+    CommitIndeterminate {
+        cause: String,
+        rollback: String,
+    },
     Injected(PersistStage),
 }
 
@@ -659,13 +663,15 @@ mod tests {
 
             let mut store = FileStore::new(&path);
             store.inject_failure(stage);
-            assert!(store
-                .commit(
-                    Some(b"last-valid-main"),
-                    b"candidate-settings",
-                    BackupMode::ReplaceWithPrevious,
-                )
-                .is_err());
+            assert!(
+                store
+                    .commit(
+                        Some(b"last-valid-main"),
+                        b"candidate-settings",
+                        BackupMode::ReplaceWithPrevious,
+                    )
+                    .is_err()
+            );
             assert_eq!(fs::read(&path).unwrap(), b"last-valid-main");
         }
     }
@@ -714,13 +720,15 @@ mod tests {
 
             let mut store = FileStore::new(&path);
             store.inject_failure(stage);
-            assert!(store
-                .commit(
-                    Some(b"corrupt-main"),
-                    b"safe-default-settings",
-                    BackupMode::PreserveLastGood,
-                )
-                .is_err());
+            assert!(
+                store
+                    .commit(
+                        Some(b"corrupt-main"),
+                        b"safe-default-settings",
+                        BackupMode::PreserveLastGood,
+                    )
+                    .is_err()
+            );
             assert_eq!(fs::read(&path).unwrap(), b"corrupt-main");
             assert_eq!(fs::read(&backup).unwrap(), b"last-good-backup");
         }

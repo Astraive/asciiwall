@@ -272,7 +272,9 @@ pub(crate) fn source_may_set(source: SettingSource, scope: SettingScope) -> bool
         SettingSource::Package | SettingSource::Preset => scope == SettingScope::P,
         SettingSource::Assignment => matches!(scope, SettingScope::P | SettingScope::O),
         SettingSource::Application => scope == SettingScope::A,
-        SettingSource::Session => matches!(scope, SettingScope::P | SettingScope::O | SettingScope::S),
+        SettingSource::Session => {
+            matches!(scope, SettingScope::P | SettingScope::O | SettingScope::S)
+        }
     }
 }
 

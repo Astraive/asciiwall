@@ -5,14 +5,12 @@ use std::{
 };
 
 use crate::{
-    document::{
-        decode, encode, CURRENT_SCHEMA_VERSION, DecodedDocument, DocumentError,
-    },
+    document::{CURRENT_SCHEMA_VERSION, DecodedDocument, DocumentError, decode, encode},
     error::ConfigError,
-    migrate::{migrate, MigrationError},
+    migrate::{MigrationError, migrate},
     model::{SettingKey, SettingScope, SettingValue},
     registry::Registry,
-    resolve::{resolve_settings, Constraints, EffectiveSettings, SettingLayers, SettingSource},
+    resolve::{Constraints, EffectiveSettings, SettingLayers, SettingSource, resolve_settings},
     store::{BackupMode, ConfigStore, FileStore, StoreError},
 };
 
@@ -76,10 +74,7 @@ struct ControllerState {
 impl SettingsController {
     /// Opens canonical TOML settings at the path selected by the platform-aware
     /// application path provider. This crate does not guess OS config paths.
-    pub fn open(
-        path: impl AsRef<Path>,
-        registry: Arc<Registry>,
-    ) -> Result<Self, ConfigError> {
+    pub fn open(path: impl AsRef<Path>, registry: Arc<Registry>) -> Result<Self, ConfigError> {
         Self::open_with_store(registry, Box::new(FileStore::new(path)))
     }
 
@@ -93,7 +88,8 @@ impl SettingsController {
             Ok(Some(bytes)) => {
                 let snapshot = match decode_and_validate(&registry, &bytes) {
                     Ok(document) if document.schema_version > CURRENT_SCHEMA_VERSION => {
-                        let snapshot = build_snapshot(&registry, document.revision, BTreeMap::new())?;
+                        let snapshot =
+                            build_snapshot(&registry, document.revision, BTreeMap::new())?;
                         (
                             ControllerStatus::ReadOnlyFutureSchema {
                                 schema_version: document.schema_version,
@@ -148,9 +144,9 @@ impl SettingsController {
                 snapshot
             }
             Err(StoreError::TooLarge { limit, .. }) => (
-                ControllerStatus::RepairRequired(ConfigError::Document(
-                    DocumentError::TooLarge { limit },
-                )),
+                ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::TooLarge {
+                    limit,
+                })),
                 defaults,
                 None,
             ),
@@ -208,12 +204,13 @@ impl SettingsController {
             }
             match change {
                 SettingChange::Set(value) => {
-                    descriptor.value_type.validates(value).map_err(|violation| {
-                        ConfigError::InvalidPersistentValue {
+                    descriptor
+                        .value_type
+                        .validates(value)
+                        .map_err(|violation| ConfigError::InvalidPersistentValue {
                             key: key.clone(),
                             violation,
-                        }
-                    })?;
+                        })?;
                     overrides.insert(key.clone(), value.clone());
                 }
                 SettingChange::Reset => {
@@ -358,7 +355,11 @@ fn resolve_overrides(
         };
         layers.set(source, key.clone(), value.clone());
     }
-    Ok(resolve_settings(registry, &layers, &Constraints::default())?)
+    Ok(resolve_settings(
+        registry,
+        &layers,
+        &Constraints::default(),
+    )?)
 }
 
 fn validate_overrides(
@@ -451,11 +452,12 @@ fn commit_state(
     bytes: &[u8],
     backup_mode: BackupMode,
 ) -> Result<(), ConfigError> {
-    match state.store.commit(state.disk_bytes.as_deref(), bytes, backup_mode) {
+    match state
+        .store
+        .commit(state.disk_bytes.as_deref(), bytes, backup_mode)
+    {
         Ok(()) => Ok(()),
-        Err(StoreError::Stale { current }) => {
-            Err(external_change(state, current.as_deref()))
-        }
+        Err(StoreError::Stale { current }) => Err(external_change(state, current.as_deref())),
         Err(StoreError::TooLarge { .. }) => Err(ConfigError::ExternalModification {
             current: state.snapshot.revision,
         }),
@@ -560,7 +562,9 @@ mod persistence_tests {
         );
         assert!(matches!(
             result,
-            Err(ConfigError::Storage(StoreError::Injected(PersistStage::MainReplace)))
+            Err(ConfigError::Storage(StoreError::Injected(
+                PersistStage::MainReplace
+            )))
         ));
         assert_eq!(controller.snapshot().unwrap().revision(), 0);
         assert_eq!(fs::read(path).unwrap(), original);
@@ -570,7 +574,8 @@ mod persistence_tests {
     fn failed_migration_keeps_pre_migration_bytes_usable() {
         let directory = TestDirectory::new();
         let path = directory.0.join("settings.toml");
-        let original = b"schema_version = 1\nrevision = 3\n[settings]\n\"application.enabled\" = true\n";
+        let original =
+            b"schema_version = 1\nrevision = 3\n[settings]\n\"application.enabled\" = true\n";
         fs::write(&path, original).unwrap();
         let mut store = FileStore::new(path.clone());
         store.inject_failure(PersistStage::BackupReplace);
@@ -578,7 +583,9 @@ mod persistence_tests {
         let result = SettingsController::open_for_test(registry(), Box::new(store));
         assert!(matches!(
             result,
-            Err(ConfigError::Storage(StoreError::Injected(PersistStage::BackupReplace)))
+            Err(ConfigError::Storage(StoreError::Injected(
+                PersistStage::BackupReplace
+            )))
         ));
         assert_eq!(fs::read(path).unwrap(), original);
     }

@@ -161,7 +161,10 @@ impl SettingType {
                 }
             }
             (Self::Enum { values }, SettingValue::Text(value)) => {
-                if values.iter().any(|candidate| candidate.as_ref() == value.as_ref()) {
+                if values
+                    .iter()
+                    .any(|candidate| candidate.as_ref() == value.as_ref())
+                {
                     Ok(())
                 } else {
                     Err(TypeViolation::NotAllowed)
@@ -170,7 +173,6 @@ impl SettingType {
             _ => Err(TypeViolation::WrongType),
         }
     }
-
 
     pub(crate) fn same_numeric_kind(&self, other: &Self) -> bool {
         matches!(
@@ -278,7 +280,10 @@ impl SettingDescriptor {
             .validates(&default)
             .map_err(DescriptorError::InvalidDefault)?;
         let capability = capability.map(Arc::from);
-        if capability.as_ref().is_some_and(|value: &Arc<str>| value.is_empty()) {
+        if capability
+            .as_ref()
+            .is_some_and(|value: &Arc<str>| value.is_empty())
+        {
             return Err(DescriptorError::EmptyCapability);
         }
         Ok(Self {

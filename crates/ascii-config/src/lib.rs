@@ -18,25 +18,19 @@ mod resolve;
 mod startup;
 mod store;
 
-pub use controller::{
-    ControllerStatus, SettingChange, SettingsController, SettingsSnapshot,
-};
+pub use controller::{ControllerStatus, SettingChange, SettingsController, SettingsSnapshot};
 pub use document::{
-    CURRENT_SCHEMA_VERSION, DocumentError, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH,
-    MAX_SETTING_ENTRIES,
+    CURRENT_SCHEMA_VERSION, DocumentError, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH, MAX_SETTING_ENTRIES,
 };
 pub use error::ConfigError;
 pub use model::{
-    DescriptorError, InvalidationClass, KeyError, SemanticValidator, SettingDescriptor,
-    SettingKey, SettingPhase, SettingScope, SettingType, SettingValue, TypeViolation,
-    ValueError, ValueKind,
+    DescriptorError, InvalidationClass, KeyError, SemanticValidator, SettingDescriptor, SettingKey,
+    SettingPhase, SettingScope, SettingType, SettingValue, TypeViolation, ValueError, ValueKind,
 };
 pub use registry::{Registry, RegistryError};
 pub use resolve::{
-    resolve_settings, ConstraintReason, Constraints, EffectiveConstraint, EffectiveSettings,
-    ResolveError, ResolvedValue, SettingLayers, SettingSource,
+    ConstraintReason, Constraints, EffectiveConstraint, EffectiveSettings, ResolveError,
+    ResolvedValue, SettingLayers, SettingSource, resolve_settings,
 };
-pub use startup::{
-    RestoreFailureState, RestoreGateError, RestorePolicy, RestorePolicyError,
-};
+pub use startup::{RestoreFailureState, RestoreGateError, RestorePolicy, RestorePolicyError};
 pub use store::{PersistStage, StoreError, StoreOperation};

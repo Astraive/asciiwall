@@ -13,9 +13,16 @@ pub enum ConfigError {
     Document(DocumentError),
     Registry(RegistryError),
     Resolution(ResolveError),
-    Conflict { expected: u64, current: u64 },
-    ExternalModification { current: u64 },
-    ReadOnlyFutureSchema { schema_version: i64 },
+    Conflict {
+        expected: u64,
+        current: u64,
+    },
+    ExternalModification {
+        current: u64,
+    },
+    ReadOnlyFutureSchema {
+        schema_version: i64,
+    },
     RepairRequired,
     NotRepairable,
     NoBackup,

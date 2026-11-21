@@ -1,16 +1,19 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Barrier, atomic::{AtomicU64, Ordering}},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
 };
 
 use ascii_config::{
-    resolve_settings, ConfigError, ConstraintReason, Constraints, ControllerStatus,
-    DocumentError, EffectiveConstraint, InvalidationClass, Registry, ResolveError,
-    SemanticValidator, SettingChange, SettingDescriptor, SettingKey, SettingLayers,
-    SettingPhase, SettingScope, SettingSource, SettingType, SettingValue,
-    SettingsController, TypeViolation, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH,
+    ConfigError, ConstraintReason, Constraints, ControllerStatus, DocumentError,
+    EffectiveConstraint, InvalidationClass, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH, Registry,
+    ResolveError, SemanticValidator, SettingChange, SettingDescriptor, SettingKey, SettingLayers,
+    SettingPhase, SettingScope, SettingSource, SettingType, SettingValue, SettingsController,
+    TypeViolation, resolve_settings,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -20,10 +23,8 @@ struct TestDirectory(PathBuf);
 impl TestDirectory {
     fn new() -> Self {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "ascii-config-{}-{sequence}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ascii-config-{}-{sequence}", std::process::id()));
         fs::create_dir_all(&path).expect("create isolated test directory");
         Self(path)
     }
@@ -93,7 +94,10 @@ fn registry() -> Arc<Registry> {
             descriptor(
                 "conversion.brightness",
                 number(0.0),
-                SettingType::Number { min: -1.0, max: 1.0 },
+                SettingType::Number {
+                    min: -1.0,
+                    max: 1.0,
+                },
                 SettingScope::P,
                 None,
                 InvalidationClass::Conversion,
@@ -129,7 +133,10 @@ fn registry() -> Arc<Registry> {
             descriptor(
                 "visibility.resume-threshold",
                 number(0.9),
-                SettingType::Number { min: 0.0, max: 0.99 },
+                SettingType::Number {
+                    min: 0.0,
+                    max: 0.99,
+                },
                 SettingScope::A,
                 Some("window-rectangles"),
                 InvalidationClass::Runtime,
@@ -159,7 +166,9 @@ fn read_status(path: &Path) -> ControllerStatus {
 #[test]
 fn registry_metadata_and_range_endpoints_are_exact() {
     let registry = registry();
-    let columns = registry.get_str("grid.columns").expect("columns descriptor");
+    let columns = registry
+        .get_str("grid.columns")
+        .expect("columns descriptor");
     assert_eq!(columns.scope(), SettingScope::P);
     assert_eq!(columns.phase(), SettingPhase::V1);
     assert_eq!(columns.invalidation(), InvalidationClass::Conversion);
@@ -293,7 +302,10 @@ fn synthetic_migration_preserves_defaults_absence_and_backup() {
     let controller = SettingsController::open(&path, registry()).expect("migrate fixture");
     let migrated = controller.snapshot().expect("migrated snapshot");
     assert_eq!(migrated.revision(), 5);
-    assert_eq!(fs::read(path.with_file_name("settings.toml.bak")).unwrap(), OLD);
+    assert_eq!(
+        fs::read(path.with_file_name("settings.toml.bak")).unwrap(),
+        OLD
+    );
     let golden_path = directory.0.join("golden.toml");
     fs::write(&golden_path, GOLDEN).unwrap();
     let golden = SettingsController::open(&golden_path, registry())
@@ -309,9 +321,11 @@ fn synthetic_migration_preserves_defaults_absence_and_backup() {
             .requested(),
         &SettingValue::Boolean(false)
     );
-    assert!(!migrated
-        .overrides()
-        .contains_key(&key("privacy.pointer-observation")));
+    assert!(
+        !migrated
+            .overrides()
+            .contains_key(&key("privacy.pointer-observation"))
+    );
 }
 
 #[test]
@@ -364,8 +378,14 @@ fn batch_validation_is_atomic_and_stale_revision_returns_current_revision() {
     let path = directory.config();
     let controller = SettingsController::open(&path, registry()).unwrap();
     let invalid_batch = [
-        (key("grid.columns"), SettingChange::Set(SettingValue::Integer(300))),
-        (key("playback.fps"), SettingChange::Set(SettingValue::Integer(0))),
+        (
+            key("grid.columns"),
+            SettingChange::Set(SettingValue::Integer(300)),
+        ),
+        (
+            key("playback.fps"),
+            SettingChange::Set(SettingValue::Integer(0)),
+        ),
     ];
     assert!(matches!(
         controller.apply_batch(0, &invalid_batch),
@@ -389,7 +409,10 @@ fn batch_validation_is_atomic_and_stale_revision_returns_current_revision() {
             0,
             &[(key("conversion.gamma"), SettingChange::Set(number(1.5)))],
         ),
-        Err(ConfigError::Conflict { expected: 0, current: 1 })
+        Err(ConfigError::Conflict {
+            expected: 0,
+            current: 1
+        })
     ));
     assert_eq!(controller.snapshot().unwrap().revision(), 1);
 }
@@ -498,7 +521,10 @@ fn future_schema_is_read_only_and_corrupt_repair_keeps_library_data() {
         ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::InvalidUtf8))
     ));
     repair.repair(0).unwrap();
-    assert_eq!(fs::read(library_file).unwrap(), b"immutable user library data");
+    assert_eq!(
+        fs::read(library_file).unwrap(),
+        b"immutable user library data"
+    );
     let corrupt_archive_exists = fs::read_dir(&directory.0)
         .unwrap()
         .filter_map(Result::ok)
@@ -581,15 +607,15 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
         ControllerStatus::RepairRequired(ConfigError::UnknownSetting(_))
     ));
 
-    let session_controller = SettingsController::open(
-        directory.0.join("session.toml"),
-        registry(),
-    )
-    .unwrap();
+    let session_controller =
+        SettingsController::open(directory.0.join("session.toml"), registry()).unwrap();
     assert!(matches!(
         session_controller.apply_batch(
             0,
-            &[(key("diagnostics.overlay"), SettingChange::Set(SettingValue::Boolean(true)))],
+            &[(
+                key("diagnostics.overlay"),
+                SettingChange::Set(SettingValue::Boolean(true))
+            )],
         ),
         Err(ConfigError::SessionSettingCannotPersist(_))
     ));
@@ -598,8 +624,6 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
     fs::write(&path, oversized).unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::RepairRequired(ConfigError::Document(
-            DocumentError::TooLarge { .. }
-        ))
+        ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::TooLarge { .. }))
     ));
 }
