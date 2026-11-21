@@ -46,11 +46,14 @@ interrupted write. Sync the containing directory after replacement and sync each
 directory entry before reporting a first write as durable on platforms that support directory sync.
 Ordinary saves never overwrite invalid, unsupported, or oversized current settings and do not rotate
 them into `.last-good`. Explicit recovery can restore a schema-valid `.last-good` to current settings;
-it leaves the backup in place for another recovery attempt. Hook-injected failures cover temporary
-creation, temporary sync, backup replacement, and destination replacement; tests check complete valid
-current and last-good documents, owned-temporary cleanup, rejection without byte changes, explicit
-recovery, and subsequent successful saves at each boundary. App-owned storage directories are mode
-`0700`; persisted state and diagnostic log files, including rotated logs, are mode `0600` on Unix.
+it leaves the backup in place. Recovery refuses a lower integer schema version and fails closed when
+exactly one parseable current or backup document declares an integer version. Hook-injected failures
+cover temporary creation, temporary sync, backup replacement, and destination replacement; tests
+check complete valid current and last-good documents, owned-temporary cleanup, rejection without byte
+changes, explicit recovery, and subsequent successful saves at each boundary. App-owned storage
+directories are mode `0700`; persisted state and diagnostic log files, including rotated logs, are
+`0600` on Unix.
+
 Import-journal begin and state transitions serialize callers sharing a journal directory, accepting
 only staged→verified/abandoned and verified→committed/abandoned transitions. Recovery classifies
 interrupted work without silently changing journal state. Importers own the transitions and commit
