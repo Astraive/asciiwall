@@ -1033,6 +1033,12 @@ impl ImportJournal {
                 "staging path must be normalized and relative",
             ));
         }
+        // A serialized path includes its UTF-8 bytes, so longer inputs cannot fit the journal.
+        // Reject them before cloning; the bounded writer still checks the complete record.
+        if staging_path.len() > usize::try_from(JOURNAL_MAX_BYTES).unwrap_or(usize::MAX) {
+            return Err(StorageError::DocumentTooLarge);
+        }
+
         let path = self.record_path(transaction_id)?;
         create_directory_durable(&self.staging_root)?;
         let _guard = self.directory_lock.lock()?;
@@ -1373,6 +1379,7 @@ fn is_machine_local_string(value: &str) -> bool {
         });
         let bytes = token.as_bytes();
         token.starts_with("~/")
+            || looks_like_user_home_path(token)
             || token.starts_with('/')
             || token.starts_with("\\\\")
             || token.contains('\\')
@@ -1384,6 +1391,21 @@ fn is_machine_local_string(value: &str) -> bool {
                 && matches!(bytes[2], b'/' | b'\\'))
             || looks_like_network_endpoint(token)
     })
+}
+
+fn looks_like_user_home_path(token: &str) -> bool {
+    let Some((username, _)) = token
+        .strip_prefix('~')
+        .and_then(|path| path.split_once(['/', '\\']))
+    else {
+        return false;
+    };
+
+    !username.is_empty()
+        && username.chars().any(char::is_alphanumeric)
+        && username
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '.' | '_' | '-'))
 }
 
 fn contains_file_uri(value: &str) -> bool {

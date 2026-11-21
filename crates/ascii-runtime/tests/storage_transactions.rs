@@ -1,7 +1,7 @@
 use ascii_runtime::storage::{
     AtomicWriteStage, DiagnosticLog, DirectoryInputs, ExportMode, ImportJournal, InstallEntry,
-    InstallRegistry, JournalState, LogLimits, RecoveryAction, Storage, StorageError, StorageRoots,
-    ValidatedConfig, validate_application_id,
+    InstallRegistry, JournalRecord, JournalState, LogLimits, RecoveryAction, Storage, StorageError,
+    StorageRoots, ValidatedConfig, validate_application_id,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -973,16 +973,45 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
 
     let staging_root = temp.path().join("journal-staging");
     let journal = ImportJournal::new(staging_root.clone());
-    journal
-        .begin("preserved", "org.example.package", "imports/preserved")
-        .expect("save valid journal");
     let oversized_path = "x".repeat(JOURNAL_MAX_BYTES + 1);
     assert!(matches!(
         journal.begin("too-large", "org.example.package", &oversized_path),
         Err(StorageError::DocumentTooLarge)
     ));
+    let journal_directory = staging_root.join("import-journal");
+    assert!(
+        !journal_directory.exists(),
+        "oversized input created the journal directory"
+    );
+    let boundary_record_size_without_path = serde_json::to_vec_pretty(&JournalRecord {
+        schema_version: 1,
+        transaction_id: "boundary".to_owned(),
+        package_id: "org.example.package".to_owned(),
+        staging_path: String::new(),
+        state: JournalState::Staged,
+    })
+    .expect("serialize empty-path journal record")
+    .len()
+        + 1;
+    let boundary_path = "x".repeat(JOURNAL_MAX_BYTES - boundary_record_size_without_path);
+    journal
+        .begin("boundary", "org.example.package", &boundary_path)
+        .expect("a journal serialized exactly at its byte limit is valid");
+    assert_eq!(
+        usize::try_from(
+            fs::metadata(journal_directory.join("import-boundary.json"))
+                .expect("read boundary journal metadata")
+                .len()
+        )
+        .expect("journal size fits usize"),
+        JOURNAL_MAX_BYTES
+    );
+
+    journal
+        .begin("preserved", "org.example.package", "imports/preserved")
+        .expect("save valid journal");
     assert!(journal.load("preserved").unwrap().is_some());
-    let oversized_journal_path = staging_root.join("import-journal/import-too-large.json");
+    let oversized_journal_path = journal_directory.join("import-too-large.json");
     assert!(!oversized_journal_path.exists());
     fs::write(&oversized_journal_path, vec![b' '; JOURNAL_MAX_BYTES + 1])
         .expect("write oversized journal");
@@ -1347,6 +1376,33 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
             "local backup retained forbidden history {private_history}"
         );
     }
+}
+
+#[test]
+fn portable_export_redacts_user_qualified_home_paths_in_generic_strings() {
+    use ascii_runtime::storage::PortableExport;
+
+    let source = json!({
+        "note": "~alice/Documents/private.mov",
+        "nested": {
+            "note": "~bob\\Documents\\private.mp4"
+        },
+        "ordinary": "ordinary note about ~visitor without a path"
+    });
+    let portable =
+        PortableExport::from_value(&source, ExportMode::Portable).expect("portable export");
+    let encoded = String::from_utf8(portable.to_json().unwrap()).unwrap();
+
+    for private_value in ["alice", "private.mov", "bob", "private.mp4"] {
+        assert!(
+            !encoded.contains(private_value),
+            "portable export retained {private_value}"
+        );
+    }
+    assert_eq!(
+        portable.content()["ordinary"],
+        json!("ordinary note about ~visitor without a path")
+    );
 }
 
 #[test]
