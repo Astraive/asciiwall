@@ -21,7 +21,7 @@ use crate::font::GlyphTable;
 use crate::sampling::SampleCancellationPoll;
 use crate::sampling::{
     FitMode, FitTransform, QualityPatches, SamplingError, SamplingIdentity, SamplingOptions,
-    preflight_sampling_source, prepare_sampling,
+    SamplingSource, prepare_sampling,
 };
 const CANCELLATION_CELL_INTERVAL: usize = 32;
 const CANCELLATION_GLYPH_INTERVAL: usize = 64;
@@ -449,11 +449,11 @@ fn convert_density_detailed_impl(
         (settings.sizing, settings.sampling.fit()),
         (GridSizing::Columns(_), FitMode::CustomCrop(_))
     );
-    let preflight_bytes_per_pixel = if crop_derived_sizing {
+    let validated_source = if crop_derived_sizing {
         if input.width() == 0 || input.height() == 0 {
             return Err(Error::Malformed(MalformedReason::EmptyDimensions).into());
         }
-        Some(preflight_sampling_source(&input)?)
+        Some(SamplingSource::new(input)?)
     } else {
         None
     };
@@ -471,13 +471,12 @@ fn convert_density_detailed_impl(
         .checked_mul(glyph_count_u64)
         .ok_or(Error::SizeOverflow)?;
     let frame_validation_work = grid_budget.work_units();
-    let bytes_per_pixel = match preflight_bytes_per_pixel {
-        Some(bytes_per_pixel) => bytes_per_pixel,
-        None => preflight_sampling_source(&input)?,
+    let source = match validated_source {
+        Some(source) => source,
+        None => SamplingSource::new(input)?,
     };
     let sampling = prepare_sampling(
-        &input,
-        bytes_per_pixel,
+        source,
         size,
         glyphs.cell_width(),
         glyphs.cell_height(),

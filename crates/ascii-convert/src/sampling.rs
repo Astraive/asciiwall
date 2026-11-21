@@ -1249,10 +1249,50 @@ impl From<ColorNormalizationError> for SamplingError {
     }
 }
 
+/// A raster source whose sampling metadata has already passed validation.
+pub(crate) struct SamplingSource<'a> {
+    view: RasterFrameView<'a>,
+    bytes_per_pixel: usize,
+}
+
+impl<'a> SamplingSource<'a> {
+    pub(crate) fn new(view: RasterFrameView<'a>) -> Result<Self, SamplingError> {
+        if view.orientation() != ascii_core::RasterOrientation::TopDown {
+            return Err(Error::Unsupported(ascii_core::UnsupportedReason::Orientation).into());
+        }
+
+        let bytes_per_pixel = match (
+            view.format().channels(),
+            view.format().sample_depth_bits(),
+        ) {
+            (ascii_core::PixelChannels::Gray, 8) => 1usize,
+            (ascii_core::PixelChannels::Rgb, 8) => 3,
+            (ascii_core::PixelChannels::Rgba, 8) => 4,
+            (
+                ascii_core::PixelChannels::Gray
+                | ascii_core::PixelChannels::Rgb
+                | ascii_core::PixelChannels::Rgba,
+                _,
+            ) => {
+                return Err(Error::Unsupported(ascii_core::UnsupportedReason::SampleDepth).into());
+            }
+            (ascii_core::PixelChannels::Other(_), _) => {
+                return Err(Error::Unsupported(ascii_core::UnsupportedReason::PixelFormat).into());
+            }
+        };
+        resolve_raster_metadata(view.format().channels(), view.color())?;
+
+        Ok(Self {
+            view,
+            bytes_per_pixel,
+        })
+    }
+}
+
 /// Preflights allocation, retained storage, and a conservative pixel-overlap work bound.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_sampling(
-    source: &RasterFrameView<'_>,
+    source: SamplingSource<'_>,
     grid: GridSize,
     cell_width: u32,
     cell_height: u32,
@@ -1261,30 +1301,8 @@ pub(crate) fn prepare_sampling(
     frame_validation_work: u64,
     budget: &Budget,
 ) -> Result<SamplingPlan, SamplingError> {
-    if source.orientation() != ascii_core::RasterOrientation::TopDown {
-        return Err(Error::Unsupported(ascii_core::UnsupportedReason::Orientation).into());
-    }
-
-    let bytes_per_pixel = match (
-        source.format().channels(),
-        source.format().sample_depth_bits(),
-    ) {
-        (ascii_core::PixelChannels::Gray, 8) => 1usize,
-        (ascii_core::PixelChannels::Rgb, 8) => 3,
-        (ascii_core::PixelChannels::Rgba, 8) => 4,
-        (
-            ascii_core::PixelChannels::Gray
-            | ascii_core::PixelChannels::Rgb
-            | ascii_core::PixelChannels::Rgba,
-            _,
-        ) => {
-            return Err(Error::Unsupported(ascii_core::UnsupportedReason::SampleDepth).into());
-        }
-        (ascii_core::PixelChannels::Other(_), _) => {
-            return Err(Error::Unsupported(ascii_core::UnsupportedReason::PixelFormat).into());
-        }
-    };
-    resolve_raster_metadata(source.format().channels(), source.color())?;
+    let bytes_per_pixel = source.bytes_per_pixel;
+    let source = &source.view;
     let source_width = source.width();
     let source_height = source.height();
     let display_width = u64::from(grid.columns())
