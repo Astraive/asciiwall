@@ -1056,6 +1056,42 @@ fn newer_settings_schema_is_not_replaced_by_older_writer_or_explicit_recovery() 
 }
 
 #[test]
+fn restore_rejects_versioned_versionless_comparisons() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+
+    for (current, backup) in [
+        (
+            b"schema_version = 2\ntheme = \"newer\"\n".as_slice(),
+            b"theme = \"versionless backup\"\n".as_slice(),
+        ),
+        (
+            b"theme = \"versionless current\"\n".as_slice(),
+            b"schema_version = 1\ntheme = \"versioned backup\"\n".as_slice(),
+        ),
+    ] {
+        fs::write(storage.config_path(), current).expect("write current settings");
+        fs::write(storage.config_backup_path(), backup).expect("write last-good settings");
+        let current_before = fs::read(storage.config_path()).expect("current settings bytes");
+        let backup_before =
+            fs::read(storage.config_backup_path()).expect("last-good settings bytes");
+
+        assert!(matches!(
+            storage.restore_config_from_backup(validate_test_config),
+            Err(StorageError::InvalidConfiguration(_))
+        ));
+        assert_eq!(
+            fs::read(storage.config_path()).expect("refused restore preserves current"),
+            current_before
+        );
+        assert_eq!(
+            fs::read(storage.config_backup_path()).expect("refused restore preserves backup"),
+            backup_before
+        );
+    }
+}
+
+#[test]
 fn importer_journal_persists_all_states_and_classifies_restart_recovery() {
     let temp = TempDir::new();
     let roots = linux_roots(temp.path());
