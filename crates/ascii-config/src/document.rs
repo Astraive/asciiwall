@@ -265,7 +265,9 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
             }
             b'=' => {
                 assignments += 1;
-                if assignments > MAX_SETTING_ENTRIES + 2 {
+                // The settings assignment itself is an extra envelope entry
+                // for inline tables; decode() enforces the exact settings count.
+                if assignments > MAX_SETTING_ENTRIES + 3 {
                     return Err(DocumentError::TooManyEntries {
                         limit: MAX_SETTING_ENTRIES,
                     });
@@ -412,6 +414,38 @@ mod tests {
             writeln!(&mut text, "\"setting.key{index:04}\" = {index}").unwrap();
         }
         text.into_bytes()
+    }
+
+    fn inline_document_with_entries(count: usize) -> Vec<u8> {
+        let mut text = String::from("schema_version = 2\nrevision = 0\nsettings = { ");
+        for index in 0..count {
+            let separator = if index == 0 { "" } else { ", " };
+            write!(&mut text, "{separator}\"setting.key{index:04}\" = {index}").unwrap();
+        }
+        text.push_str(" }\n");
+        text.into_bytes()
+    }
+
+    #[test]
+    fn decode_accepts_exact_inline_setting_entry_limit() {
+        let document = inline_document_with_entries(MAX_SETTING_ENTRIES);
+        assert!(document.len() <= MAX_CONFIG_BYTES);
+
+        let decoded = decode(&document).unwrap();
+        assert_eq!(decoded.overrides.len(), MAX_SETTING_ENTRIES);
+    }
+
+    #[test]
+    fn decode_rejects_one_more_than_inline_setting_entry_limit() {
+        let document = inline_document_with_entries(MAX_SETTING_ENTRIES + 1);
+        assert!(document.len() <= MAX_CONFIG_BYTES);
+
+        assert!(matches!(
+            decode(&document),
+            Err(DocumentError::TooManyEntries {
+                limit: MAX_SETTING_ENTRIES
+            })
+        ));
     }
 
     #[test]
