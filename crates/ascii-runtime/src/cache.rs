@@ -555,7 +555,17 @@ impl DerivedCache {
     ) -> Result<StoreOutcome, CacheError> {
         let entry_bytes = u64::try_from(bytes.len()).map_err(|_| CacheError::ArithmeticOverflow)?;
         let mut state = lock_unpoisoned(&self.inner.state);
+        #[cfg(test)]
+        notify_root_operation_test_hook(
+            RootOperationTestPoint::BeforeAcquire,
+            &self.inner.root_operations_lock,
+        );
         let _root_operations_lock = lock_unpoisoned(&self.inner.root_operations_lock);
+        #[cfg(test)]
+        notify_root_operation_test_hook(
+            RootOperationTestPoint::Acquired,
+            &self.inner.root_operations_lock,
+        );
         let _operations_lock = lock_cache_directory(&self.inner.root, &self.inner.managed_dir)?;
         reconcile_cache_state(&self.inner.root, &mut state)?;
         if let Some((path, active_leases)) = state
@@ -2671,6 +2681,41 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootOperationTestPoint {
+    BeforeAcquire,
+    Acquired,
+}
+
+#[cfg(test)]
+type RootOperationTestHook = Box<dyn FnMut(RootOperationTestPoint, &Mutex<()>) + Send>;
+
+#[cfg(test)]
+thread_local! {
+    static ROOT_OPERATION_TEST_HOOK: std::cell::RefCell<Option<RootOperationTestHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_root_operation_test_hook(
+    hook: impl FnMut(RootOperationTestPoint, &Mutex<()>) + Send + 'static,
+) {
+    ROOT_OPERATION_TEST_HOOK.with(|slot| {
+        assert!(slot.borrow_mut().replace(Box::new(hook)).is_none());
+    });
+}
+
+#[cfg(test)]
+fn notify_root_operation_test_hook(point: RootOperationTestPoint, lock: &Mutex<()>) {
+    ROOT_OPERATION_TEST_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(point, lock);
+        }
+    });
+}
+
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3259,4 +3304,98 @@ mod tests {
         assert_eq!(budget.snapshot().reserved_bytes, 8);
         assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 0);
     }
+    fn cache_test_identity(source: u8) -> CacheIdentity {
+        CacheIdentity::Conversion(ConversionKey {
+            source: SourceContent::Digest(ContentDigest([source; 32])),
+            decode_version: "decode-v1".into(),
+            orientation_version: "orientation-v1".into(),
+            color_version: "color-v1".into(),
+            algorithm_version: "algorithm-v1".into(),
+            font_digest: ContentDigest([0; 32]),
+            font_raster_settings: FontRasterSettings::default(),
+            glyphs: Vec::new(),
+            grid: GridSize {
+                columns: 1,
+                rows: 1,
+            },
+            fit_crop: FitCrop {
+                mode: FitMode::Fit,
+                crop: None,
+            },
+            sampling_identity_digest: ContentDigest([1; 32]),
+            sampling_filter: "nearest".into(),
+            cell_geometry: CellGeometry {
+                cell_width_milli_px: 1_000,
+                cell_height_milli_px: 1_000,
+            },
+            patch_dimensions: None,
+            palette: Vec::new(),
+            settings_digest: ContentDigest([source; 32]),
+        })
+    }
+
+    #[test]
+    fn independently_opened_caches_observe_overlapping_store_contention() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let directory = TempManagedDirectory::new();
+        let cache_root = directory.0.join("cache");
+        let first_cache = DerivedCache::open(&cache_root, 5).unwrap();
+        let second_cache = DerivedCache::open(&cache_root, 5).unwrap();
+        let first_worker_cache = first_cache.clone();
+        let second_worker_cache = second_cache.clone();
+        let (first_holds_lock_tx, first_holds_lock_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let (second_contended_tx, second_contended_rx) = mpsc::channel();
+        let timeout = Duration::from_secs(30);
+
+        std::thread::scope(|scope| {
+            let first_worker = scope.spawn(move || {
+                set_root_operation_test_hook(move |point, _| {
+                    if point == RootOperationTestPoint::Acquired {
+                        let _ = first_holds_lock_tx.send(());
+                        let _ = release_first_rx.recv();
+                    }
+                });
+                first_worker_cache
+                    .store(cache_test_identity(1), b"first")
+                    .unwrap()
+            });
+
+            if let Err(error) = first_holds_lock_rx.recv_timeout(timeout) {
+                let _ = release_first_tx.send(());
+                let _ = first_worker.join();
+                panic!("first store did not hold the root mutex: {error}");
+            }
+
+            let second_worker = scope.spawn(move || {
+                set_root_operation_test_hook(move |point, root_lock| {
+                    if point == RootOperationTestPoint::BeforeAcquire {
+                        let contended = matches!(
+                            root_lock.try_lock(),
+                            Err(std::sync::TryLockError::WouldBlock)
+                        );
+                        let _ = second_contended_tx.send(contended);
+                    }
+                });
+                second_worker_cache
+                    .store(cache_test_identity(2), b"other")
+                    .unwrap()
+            });
+
+            let second_saw_contention = second_contended_rx.recv_timeout(timeout);
+            let _ = release_first_tx.send(());
+            assert_eq!(first_worker.join().unwrap(), StoreOutcome::Inserted);
+            assert_eq!(second_worker.join().unwrap(), StoreOutcome::Inserted);
+            assert!(
+                second_saw_contention.expect("second store reached the root lock"),
+                "second store did not observe the first store holding the shared root mutex"
+            );
+        });
+
+        assert_eq!(first_cache.snapshot().unwrap().used_bytes, 5);
+        assert_eq!(second_cache.snapshot().unwrap().used_bytes, 5);
+    }
+
 }
