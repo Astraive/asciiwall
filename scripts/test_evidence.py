@@ -1651,6 +1651,79 @@ class RetentionTests(unittest.TestCase):
             self.assertIsInstance(cleanup_error.__cause__, OSError)
             self.assertEqual(artifact_path.read_bytes(), artifact_bytes)
 
+    @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
+    def test_prune_fails_closed_when_native_evidence_handle_close_fails(self):
+        import evidence_windows
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            archive = directory / "archive"
+            archive.mkdir()
+            artifact = directory / "native.bin"
+            artifact_bytes = b"native manual evidence"
+            artifact.write_bytes(artifact_bytes)
+            manifest_path = directory / "native-evidence.json"
+            old = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id="NATIVE-CLOSE-001",
+                ec_ids=[],
+                date="2026-11-12",
+                evidence_path=manifest_path.relative_to(ROOT).as_posix(),
+            )
+            manifest = {
+                "schema_version": 1,
+                "artifact_type": "native-manual-evidence",
+                "execution": "manual",
+                "procedure_id": old["procedure_id"],
+                "reviewer": old["reviewer"],
+                "date": old["date"],
+                "status": "pass",
+                "artifacts": [{
+                    "path": artifact.relative_to(ROOT).as_posix(),
+                    "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+                }],
+            }
+            manifest_path.write_bytes(evidence.canonical_json(manifest))
+            old = evidence.finalize_record(old)
+            recent = evidence.finalize_record(base_record(date="2026-11-14"))
+            old_path = archive / f"qa-evidence-{old['record_id']}.json"
+            recent_path = archive / f"qa-evidence-{recent['record_id']}.json"
+            old_bytes = evidence.canonical_json(old)
+            recent_bytes = evidence.canonical_json(recent)
+            old_path.write_bytes(old_bytes)
+            recent_path.write_bytes(recent_bytes)
+            original_open_file = evidence_windows.Directory.open_file
+            original_close = evidence_windows._close
+            artifact_handles: set[int] = set()
+            close_failed = False
+
+            def track_artifact_handle(directory_handle, name, *, for_delete=False):
+                opened = original_open_file(directory_handle, name, for_delete=for_delete)
+                if name == artifact.name:
+                    artifact_handles.add(opened._handle)
+                return opened
+
+            def close_artifact_then_fail(handle):
+                nonlocal close_failed
+                original_close(handle)
+                if handle in artifact_handles and not close_failed:
+                    close_failed = True
+                    raise OSError("injected referenced-evidence close failure")
+
+            with patch.object(evidence_windows.Directory, "open_file", new=track_artifact_handle):
+                with patch.object(evidence_windows, "_close", side_effect=close_artifact_then_fail):
+                    with self.assertRaisesRegex(
+                        evidence.EvidenceError,
+                        "cannot close a native evidence artifact handle during archive scan",
+                    ) as raised:
+                        evidence.prune_archive(archive, keep=1)
+
+            self.assertTrue(close_failed)
+            self.assertIsInstance(raised.exception.__cause__, evidence_windows.FileCloseError)
+            self.assertEqual(old_path.read_bytes(), old_bytes)
+            self.assertEqual(recent_path.read_bytes(), recent_bytes)
+
     @unittest.skipUnless(
         os.name == "posix" and _supports_safe_directory_access(),
         "disappearance injection requires POSIX directory-relative access",

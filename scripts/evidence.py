@@ -950,6 +950,8 @@ def _hash_native_artifact(relative_path: str, limit: int) -> tuple[str, int]:
                         raise EvidenceError("native evidence artifact changed while being read")
                     return identity, size
         except OSError as exc:
+            if isinstance(exc, evidence_windows.FileCloseError):
+                raise
             raise EvidenceError(
                 "native evidence artifact is inaccessible or unsafe; "
                 "Windows requires local fixed NTFS without reparse points"
@@ -1036,6 +1038,8 @@ def _validate_native_pass_artifact(record: dict[str, Any]) -> None:
             os.close(directory_fd)
     except OSError as exc:
         if os.name == "nt":
+            if isinstance(exc, evidence_windows.FileCloseError):
+                raise
             raise EvidenceError(
                 "native-manual pass requires accessible evidence on local fixed NTFS without reparse points"
             ) from exc
@@ -1665,11 +1669,18 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                     break
                 identity = match.group(1)
                 if kind == "evidence":
-                    accepted = (
-                        isinstance(content, dict)
-                        and content.get("record_id") == identity
-                        and not validate_record(content)
-                    )
+                    try:
+                        accepted = (
+                            isinstance(content, dict)
+                            and content.get("record_id") == identity
+                            and not validate_record(content)
+                        )
+                    except OSError as exc:
+                        if os.name == "nt" and isinstance(exc, evidence_windows.FileCloseError):
+                            raise EvidenceError(
+                                "cannot close a native evidence artifact handle during archive scan"
+                            ) from exc
+                        raise
                     sort_date = content.get("date", "") if accepted else ""
                 else:
                     accepted = (

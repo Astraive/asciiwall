@@ -57,6 +57,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Detect Unicode-escaped synthetic marker keys in oversized UTF-16LE/BE native artifacts after non-JSON prefixes and across 64 KiB stream boundaries ([QA-004]).
 - Recheck expired-entry snapshots before reporting incomplete POSIX pruning so same-name replacements are preserved and reported as changed; portable bounded retention cannot be guaranteed against hostile concurrent writers without atomic compare-and-unlink ([QA-004]).
 - Surface Windows archive file-handle close failures during pruning even alongside scan, type, or read errors; preserve the primary failure in the cause chain instead of silently skipping the candidate ([QA-004]).
+- Propagate Windows native manifest/artifact handle-close failures through record validation and abort pruning instead of skipping candidates ([QA-004]).
 - Preserve completed Windows archive deletions and the primary partial-prune error if directory cleanup also fails, keeping cleanup failures secondary and observable ([QA-004]).
 - Surface Windows archive directory-close failures after a successful prune, even inside an unrelated active exception; preserve prune errors as primary when cleanup fails ([QA-004]).
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
