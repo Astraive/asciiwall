@@ -2184,8 +2184,6 @@ mod codec_cancellation_tests {
     }
 
     fn small_jpeg_advertising(width: u16, height: u16) -> Vec<u8> {
-        use image::ImageEncoder;
-
         let mut bytes = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100)
             .encode(&[255, 0, 0, 0, 255, 0], 2, 1, image::ColorType::Rgb8.into())
