@@ -439,7 +439,7 @@ class EvidenceRecordTests(unittest.TestCase):
                     ):
                         evidence.finalize_record(record)
 
-    def test_native_json_prefix_scanner_handles_utf32_token_chunk_split(self):
+    def test_native_json_prefix_scanner_handles_utf32_code_unit_split_at_64k_stream_boundary(self):
         encodings = (
             ("utf-32-le", b"\xff\xfe\x00\x00"),
             ("utf-32-be", b"\x00\x00\xfe\xff"),
@@ -447,13 +447,147 @@ class EvidenceRecordTests(unittest.TestCase):
         for encoding, bom in encodings:
             with self.subTest(encoding=encoding):
                 leading_space_count = (65_532 - len(bom)) // 4
+                trailing_space_count = evidence.MAX_JSON_BYTES // 4 + 1
                 payload = bom + (
-                    " " * leading_space_count + "true"
+                    " " * leading_space_count
+                    + "true"
+                    + " " * trailing_space_count
                 ).encode(encoding)
-                scanner = evidence._NativeJsonPrefixScanner()
-                scanner.update(payload[:65_536])
-                scanner.update(payload[65_536:])
-                self.assertTrue(scanner.looks_like_json())
+                code_unit = "t".encode(encoding)
+                self.assertEqual(payload[65_532:65_536], code_unit)
+                self.assertGreater(len(payload), evidence.MAX_JSON_BYTES)
+
+                position = 0
+                requested_sizes = []
+                first_chunk = b""
+                second_chunk = b""
+
+                def read(size):
+                    nonlocal position, first_chunk, second_chunk
+                    requested_sizes.append(size)
+                    # A short read makes the first 64 KiB request end inside this unit.
+                    count = size - 1 if position == 0 else size
+                    chunk = payload[position:position + count]
+                    position += len(chunk)
+                    if not first_chunk:
+                        first_chunk = chunk
+                    elif not second_chunk:
+                        second_chunk = chunk
+                    return chunk
+
+                with self.assertRaisesRegex(
+                    evidence.EvidenceError,
+                    "native evidence JSON exceeds the 1 MiB inspection limit",
+                ):
+                    evidence._hash_native_stream(
+                        read, evidence.MAX_NATIVE_ARTIFACT_BYTES
+                    )
+
+                self.assertEqual(requested_sizes[0], 65_536)
+                self.assertEqual(len(first_chunk), 65_535)
+                self.assertEqual(first_chunk[-3:], code_unit[:3])
+                self.assertEqual(second_chunk[:1], code_unit[3:])
+
+
+    def test_native_manual_manifest_rejects_oversized_bomless_utf32_synthetic_json(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            manifest_path = directory / "native-evidence.json"
+            manifest_relative = manifest_path.relative_to(ROOT).as_posix()
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id="NATIVE-UTF32-NOBOM-001",
+                ec_ids=[],
+                evidence_path=manifest_relative,
+            )
+            encodings = ("utf-32-le", "utf-32-be")
+            report_json = json.dumps(
+                evidence.fake_control("timestamp-fault"),
+                separators=(",", ":"),
+            )
+            trailing_space_count = evidence.MAX_JSON_BYTES // 4 + 1
+            for encoding in encodings:
+                with self.subTest(encoding=encoding):
+                    artifact = directory / f"oversized-{encoding}-synthetic.bin"
+                    payload = (
+                        report_json + " " * trailing_space_count
+                    ).encode(encoding)
+                    self.assertGreater(len(payload), evidence.MAX_JSON_BYTES)
+                    self.assertEqual(
+                        json.loads(payload.decode(encoding)),
+                        json.loads(report_json),
+                    )
+                    artifact.write_bytes(payload)
+                    artifact_relative = artifact.relative_to(ROOT).as_posix()
+                    manifest = {
+                        "schema_version": 1,
+                        "artifact_type": "native-manual-evidence",
+                        "execution": "manual",
+                        "procedure_id": record["procedure_id"],
+                        "reviewer": record["reviewer"],
+                        "date": record["date"],
+                        "status": "pass",
+                        "artifacts": [{
+                            "path": artifact_relative,
+                            "sha256": hashlib.sha256(payload).hexdigest(),
+                        }],
+                    }
+                    manifest_path.write_bytes(evidence.canonical_json(manifest))
+                    with self.assertRaisesRegex(
+                        evidence.EvidenceError,
+                        "native evidence JSON exceeds the 1 MiB inspection limit",
+                    ):
+                        evidence.finalize_record(record)
+
+
+    def test_native_manual_manifest_rejects_oversized_utf32_invalid_scalars(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            manifest_path = directory / "native-evidence.json"
+            manifest_relative = manifest_path.relative_to(ROOT).as_posix()
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id="NATIVE-UTF32-INVALID-001",
+                ec_ids=[],
+                evidence_path=manifest_relative,
+            )
+            invalid_scalars = (
+                ("utf-32-le", b"\xff\xfe\x00\x00", "little", "surrogate", 0xD800),
+                ("utf-32-be", b"\x00\x00\xfe\xff", "big", "above-range", 0x110000),
+            )
+            trailing_space_count = evidence.MAX_JSON_BYTES // 4 + 1
+            for encoding, bom, byteorder, name, scalar in invalid_scalars:
+                with self.subTest(encoding=encoding, scalar=name):
+                    artifact = directory / f"oversized-{encoding}-{name}.bin"
+                    payload = (
+                        bom
+                        + scalar.to_bytes(4, byteorder)
+                        + (" " * trailing_space_count).encode(encoding)
+                    )
+                    self.assertGreater(len(payload), evidence.MAX_JSON_BYTES)
+                    artifact.write_bytes(payload)
+                    artifact_relative = artifact.relative_to(ROOT).as_posix()
+                    manifest = {
+                        "schema_version": 1,
+                        "artifact_type": "native-manual-evidence",
+                        "execution": "manual",
+                        "procedure_id": record["procedure_id"],
+                        "reviewer": record["reviewer"],
+                        "date": record["date"],
+                        "status": "pass",
+                        "artifacts": [{
+                            "path": artifact_relative,
+                            "sha256": hashlib.sha256(payload).hexdigest(),
+                        }],
+                    }
+                    manifest_path.write_bytes(evidence.canonical_json(manifest))
+                    with self.assertRaisesRegex(
+                        evidence.EvidenceError,
+                        "native evidence JSON exceeds the 1 MiB inspection limit",
+                    ):
+                        evidence.finalize_record(record)
 
 
     def test_native_manual_manifest_classifies_oversized_numeric_streams(self):
