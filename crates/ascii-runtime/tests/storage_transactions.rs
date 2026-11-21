@@ -2270,13 +2270,14 @@ fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
     let source = json!({
         "embedded_posix": "clip selected from Documents/private.mov before import",
         "embedded_windows": "clip selected from Videos\\private.mp4 before import",
+        "embedded_extensionless": "clip selected from Documents/private before import",
         "harmless_slash_prose": "Choose input/output; the ratio is 3/4.",
         "harmless_filename_prose": "The terms private.mov and Documents are examples."
     });
     let portable =
         PortableExport::from_value(&source, ExportMode::Portable).expect("portable export");
 
-    for private_key in ["embedded_posix", "embedded_windows"] {
+    for private_key in ["embedded_posix", "embedded_windows", "embedded_extensionless"] {
         assert!(
             portable.content().get(private_key).is_none(),
             "portable export retained {private_key}"
