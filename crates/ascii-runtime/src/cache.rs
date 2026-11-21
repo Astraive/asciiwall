@@ -19,6 +19,7 @@ const CACHE_OWNER_MARKER: &[u8] = b"AsciiWall derived cache ownership v1\n";
 const CACHE_OPERATIONS_LOCK: &str = ".operations.lock";
 const CACHE_FILE_ID_HIGH_WATER: &str = ".file-id-high-water";
 const CACHE_FILE_ID_HIGH_WATER_BACKUP: &str = ".file-id-high-water.backup";
+const CACHE_FILE_ID_HIGH_WATER_MARKER: &str = ".file-id-high-water-v1";
 
 const CACHE_INITIALIZATION_LOCK: &str = ".asciiwall-cache-v1.init.lock";
 
@@ -2876,15 +2877,15 @@ mod tests {
                 &reservation,
                 |output| output.write_all(b"committed"),
                 OutputTransactionHooks {
-                    sync_file: |_| {
+                    sync_file: |_: &File| {
                         commit_events.borrow_mut().push(CommitEvent::FileSync);
                         Ok(())
                     },
-                    replace: |temporary, destination| {
+                    replace: |temporary: &Path, destination: &Path| {
                         commit_events.borrow_mut().push(CommitEvent::Replace);
                         replace_destination(temporary, destination)
                     },
-                    sync_parent_directory: |parent| {
+                    sync_parent_directory: |parent: &Path| {
                         assert_eq!(parent, output_dir.as_path());
                         assert_eq!(fs::read(&destination)?, b"committed");
                         commit_events
@@ -2917,15 +2918,15 @@ mod tests {
                 &reservation,
                 |output| output.write_all(b"not registered"),
                 OutputTransactionHooks {
-                    sync_file: |_| {
+                    sync_file: |_: &File| {
                         failed_events.borrow_mut().push(CommitEvent::FileSync);
                         Ok(())
                     },
-                    replace: |temporary, destination| {
+                    replace: |temporary: &Path, destination: &Path| {
                         failed_events.borrow_mut().push(CommitEvent::Replace);
                         replace_destination(temporary, destination)
                     },
-                    sync_parent_directory: |parent| {
+                    sync_parent_directory: |parent: &Path| {
                         assert_eq!(parent, output_dir.as_path());
                         assert_eq!(fs::read(&failed_destination)?, b"not registered");
                         failed_events
