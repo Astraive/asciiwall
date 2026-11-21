@@ -1654,3 +1654,45 @@ fn failed_output_retry_preserves_previous_registration() {
     assert_eq!(registry.registered_path(&key), Some(committed.clone()));
     assert_eq!(fs::read(committed).unwrap(), b"previous");
 }
+
+#[test]
+fn reopening_repairs_uninitialized_high_water_without_reusing_live_ids() {
+    let counter_cases: [(&str, &[u8]); 3] = [
+        ("partial", b"000000000000000"),
+        ("empty", b""),
+        ("corrupt", b"not-a-counter\n"),
+    ];
+
+    for (case_name, counter_contents) in counter_cases {
+        let temp = TempDir::new();
+        let cache_root = temp.path().join("cache");
+        drop(DerivedCache::open(&cache_root, 64).expect("create owned cache directory"));
+        let managed_dir = fs::read_dir(&cache_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .expect("find cache-managed directory");
+        let live_id = 0x2a_u64;
+        let live_path = managed_dir.join(format!("derived-{live_id:016x}.bin"));
+        fs::write(&live_path, b"live generated file").unwrap();
+        fs::remove_file(managed_dir.join(".file-id-high-water-v1")).unwrap();
+        fs::write(managed_dir.join(".file-id-high-water"), counter_contents).unwrap();
+
+        let cache = DerivedCache::open(&cache_root, 64)
+            .unwrap_or_else(|error| panic!("{case_name} high-water recovery failed: {error}"));
+        let key = identity(200);
+        cache.store(key.clone(), b"new generated file").unwrap();
+        let lease = cache.lease(&key).unwrap();
+        let generated_id = live_id + 1;
+
+        let expected_path =
+            fs::canonicalize(managed_dir.join(format!("derived-{generated_id:016x}.bin"))).unwrap();
+        assert_eq!(lease.path(), expected_path.as_path());
+        assert_eq!(fs::read(&live_path).unwrap(), b"live generated file");
+        assert_eq!(fs::read(lease.path()).unwrap(), b"new generated file");
+        assert_eq!(
+            fs::read(managed_dir.join(".file-id-high-water")).unwrap(),
+            format!("{:016x}\n", generated_id + 1).as_bytes()
+        );
+    }
+}
