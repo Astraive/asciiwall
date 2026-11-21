@@ -11,6 +11,141 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 
+#[cfg(windows)]
+mod windows_case_sensitivity {
+    use std::ffi::c_void;
+    use std::fs::File;
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use std::path::Path;
+
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    const FILE_SHARE_READ: u32 = 0x0001;
+    const FILE_SHARE_WRITE: u32 = 0x0002;
+    const FILE_SHARE_DELETE: u32 = 0x0004;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_CASE_SENSITIVE_INFO_CLASS: i32 = 23;
+    const FILE_CS_FLAG_CASE_SENSITIVE_DIR: u32 = 0x0000_0001;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileCaseSensitiveInfo {
+        flags: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateFileW(
+            file_name: *const u16,
+            desired_access: u32,
+            share_mode: u32,
+            security_attributes: *const c_void,
+            creation_disposition: u32,
+            flags_and_attributes: u32,
+            template_file: *mut c_void,
+        ) -> *mut c_void;
+        fn GetFileInformationByHandleEx(
+            file: *mut c_void,
+            file_information_class: i32,
+            file_information: *mut c_void,
+            buffer_size: u32,
+        ) -> i32;
+        fn SetFileInformationByHandle(
+            file: *mut c_void,
+            file_information_class: i32,
+            file_information: *mut c_void,
+            buffer_size: u32,
+        ) -> i32;
+    }
+
+    pub fn set_and_read(path: &Path, case_sensitive: bool) -> io::Result<bool> {
+        let path_wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: the path is NUL-terminated UTF-16; arguments request an existing directory
+        // handle with the read/write-attributes rights required by the two information calls.
+        let handle = unsafe {
+            CreateFileW(
+                path_wide.as_ptr(),
+                FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == (-1isize as *mut c_void) {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: CreateFileW returned a valid owned handle; File closes it on drop.
+        let directory = unsafe { File::from_raw_handle(handle) };
+        let mut information = FileCaseSensitiveInfo {
+            flags: if case_sensitive {
+                FILE_CS_FLAG_CASE_SENSITIVE_DIR
+            } else {
+                0
+            },
+        };
+        // SAFETY: the handle has FILE_WRITE_ATTRIBUTES and information is the documented
+        // FILE_CASE_SENSITIVE_INFO structure with the matching size.
+        let success = unsafe {
+            SetFileInformationByHandle(
+                directory.as_raw_handle(),
+                FILE_CASE_SENSITIVE_INFO_CLASS,
+                &mut information as *mut FileCaseSensitiveInfo as *mut c_void,
+                std::mem::size_of::<FileCaseSensitiveInfo>() as u32,
+            )
+        };
+        if success == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut information = FileCaseSensitiveInfo::default();
+        // SAFETY: the handle has FILE_READ_ATTRIBUTES and information is a writable,
+        // correctly sized FILE_CASE_SENSITIVE_INFO structure.
+        let success = unsafe {
+            GetFileInformationByHandleEx(
+                directory.as_raw_handle(),
+                FILE_CASE_SENSITIVE_INFO_CLASS,
+                &mut information as *mut FileCaseSensitiveInfo as *mut c_void,
+                std::mem::size_of::<FileCaseSensitiveInfo>() as u32,
+            )
+        };
+        if success == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(information.flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0)
+    }
+
+    pub fn is_unsupported(error: &io::Error) -> bool {
+        matches!(error.raw_os_error(), Some(1 | 50 | 87 | 120))
+    }
+}
+
+#[cfg(windows)]
+fn configure_windows_case_mode(directory: &Path, case_sensitive: bool) -> bool {
+    match windows_case_sensitivity::set_and_read(directory, case_sensitive) {
+        Ok(actual) => {
+            assert_eq!(actual, case_sensitive, "verify the actual directory flag");
+            true
+        }
+        Err(error) if windows_case_sensitivity::is_unsupported(&error) => {
+            eprintln!(
+                "skipping case-mode regression: OS/filesystem reports the flag unsupported \
+                 (Windows error {:?}: {error})",
+                error.raw_os_error()
+            );
+            false
+        }
+        Err(error) => panic!("configure Windows directory case mode: {error}"),
+    }
+}
+
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 static CWD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1532,10 +1667,17 @@ fn stage_path_substitution_before_commit_is_detected() {
 
 #[cfg(windows)]
 #[test]
-fn case_variant_replacement_after_deletion_clears_stale_windows_registration() {
+fn case_sensitive_windows_directory_keeps_case_variant_outputs_distinct() {
     let temp = TempDir::new();
-    let upper_destination = temp.path().join("Output.bin");
-    let lower_destination = temp.path().join("output.bin");
+    let directory = temp.path().join("case-sensitive");
+    fs::create_dir(&directory).unwrap();
+    if !configure_windows_case_mode(&directory, true) {
+        return;
+    }
+    let upper_destination = directory.join("Output.bin");
+    let lower_destination = directory.join("output.bin");
+    assert!(!lower_destination.exists());
+
     let registry = OutputRegistry::default();
     let budget = DiskBudget::new(1_024, 0);
     let reservation = budget
@@ -1552,19 +1694,68 @@ fn case_variant_replacement_after_deletion_clears_stale_windows_registration() {
             first_identity.clone(),
             &upper_destination,
             &reservation,
+            |output| output.write_all(b"upper"),
+        )
+        .unwrap();
+    registry
+        .write_transactional(
+            second_identity.clone(),
+            &lower_destination,
+            &reservation,
+            |output| output.write_all(b"lower"),
+        )
+        .unwrap();
+
+    assert_eq!(fs::read(&upper_destination).unwrap(), b"upper");
+    assert_eq!(fs::read(&lower_destination).unwrap(), b"lower");
+    assert_eq!(
+        registry.registered_path(&first_identity),
+        Some(upper_destination)
+    );
+    assert_eq!(
+        registry.registered_path(&second_identity),
+        Some(lower_destination)
+    );
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+}
+
+#[cfg(windows)]
+#[test]
+fn ordinary_windows_directory_keeps_case_variants_case_insensitive() {
+    let temp = TempDir::new();
+    let directory = temp.path().join("case-insensitive");
+    fs::create_dir(&directory).unwrap();
+    if !configure_windows_case_mode(&directory, false) {
+        return;
+    }
+    let upper_destination = directory.join("Output.bin");
+    let lower_destination = directory.join("output.bin");
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 32,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let first_identity = identity(31);
+    let second_identity = identity(32);
+
+    registry
+        .write_transactional(
+            first_identity.clone(),
+            &upper_destination,
+            &reservation,
             |output| output.write_all(b"first"),
         )
         .unwrap();
-    if !lower_destination.exists() {
-        eprintln!("skipping case-alias assertion: this Windows directory is case-sensitive");
-        return;
-    }
+    assert!(lower_destination.exists());
     assert_eq!(
-        registry.registered_path(&first_identity),
-        Some(upper_destination.clone())
+        fs::canonicalize(&upper_destination).unwrap(),
+        fs::canonicalize(&lower_destination).unwrap()
     );
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
     fs::remove_file(&upper_destination).unwrap();
-    assert!(!upper_destination.exists());
     assert!(!lower_destination.exists());
 
     registry
@@ -1581,7 +1772,8 @@ fn case_variant_replacement_after_deletion_clears_stale_windows_registration() {
         registry.registered_path(&second_identity),
         Some(lower_destination)
     );
-    assert_eq!(fs::read(upper_destination).unwrap(), b"second");
+    assert_eq!(fs::read(&upper_destination).unwrap(), b"second");
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
 }
 
 #[cfg(unix)]

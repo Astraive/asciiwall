@@ -124,9 +124,12 @@ provided its parent is not concurrently modified by an untrusted actor. Replacin
 destination invalidates any identity for the same canonical path or, where supported, the same
 filesystem file identity. Unix case-variant names are compared by resolving existing paths through
 the actual filesystem, so case-insensitive volumes clear stale registrations while case-sensitive
-volumes retain distinct names; Windows uses the directory's case-sensitivity setting. Disk-full and
-quota failures are classified without claiming that a particular filesystem or quota limit was
-exercised.
+volumes retain distinct names. Windows queries `FILE_CASE_SENSITIVE_INFO.Flags` from the containing
+directory: sensitive directories retain distinct names, while ordinary directories compare names
+with ordinal case-insensitive semantics. If the flag cannot be read (including unsupported APIs or
+filesystems and access denied), only spellings the filesystem resolves to the same existing entry
+are merged; otherwise registrations remain distinct. Disk-full and quota failures are classified
+without claiming that a particular filesystem or quota limit was exercised.
 
 ## Privacy
 

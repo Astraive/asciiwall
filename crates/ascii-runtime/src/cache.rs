@@ -2325,8 +2325,6 @@ fn same_output_destination(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
-    use std::os::windows::fs::MetadataExt;
-
     let (Some(left_parent), Some(right_parent)) = (left.parent(), right.parent()) else {
         return false;
     };
@@ -2336,15 +2334,102 @@ fn same_output_destination(left: &Path, right: &Path) -> bool {
     let (Some(left_name), Some(right_name)) = (left.file_name(), right.file_name()) else {
         return false;
     };
-    const FILE_ATTRIBUTE_CASE_SENSITIVE_DIR: u32 = 0x1000_0000;
-    let Ok(parent_metadata) = fs::metadata(left_parent) else {
-        return false;
+    let case_sensitive = match windows_directory_case_sensitive(left_parent) {
+        Ok(case_sensitive) => case_sensitive,
+        Err(_) => {
+            // Unknown is not evidence that aliases are safe to merge. Only match spellings that
+            // the filesystem itself resolves to the same existing entry.
+            return match (fs::canonicalize(left), fs::canonicalize(right)) {
+                (Ok(left), Ok(right)) => left == right,
+                _ => false,
+            };
+        }
     };
-    if parent_metadata.file_attributes() & FILE_ATTRIBUTE_CASE_SENSITIVE_DIR != 0 {
+    if case_sensitive {
         left_name == right_name
     } else {
         windows_filename_eq_ordinal_ignore_case(left_name, right_name)
     }
+}
+
+#[cfg(windows)]
+fn windows_directory_case_sensitive(directory: &Path) -> io::Result<bool> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_SHARE_READ: u32 = 0x0001;
+    const FILE_SHARE_WRITE: u32 = 0x0002;
+    const FILE_SHARE_DELETE: u32 = 0x0004;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_CASE_SENSITIVE_INFO_CLASS: i32 = 23;
+    const FILE_CS_FLAG_CASE_SENSITIVE_DIR: u32 = 0x0000_0001;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileCaseSensitiveInfo {
+        flags: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateFileW(
+            file_name: *const u16,
+            desired_access: u32,
+            share_mode: u32,
+            security_attributes: *const c_void,
+            creation_disposition: u32,
+            flags_and_attributes: u32,
+            template_file: *mut c_void,
+        ) -> *mut c_void;
+        fn GetFileInformationByHandleEx(
+            file: *mut c_void,
+            file_information_class: i32,
+            file_information: *mut c_void,
+            buffer_size: u32,
+        ) -> i32;
+    }
+
+    let directory_wide: Vec<u16> = directory
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: the path is NUL-terminated UTF-16 and the remaining arguments are valid
+    // CreateFileW constants/null pointers for opening an existing directory.
+    let handle = unsafe {
+        CreateFileW(
+            directory_wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == (-1isize as *mut c_void) {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: CreateFileW returned a valid owned handle; File closes it on drop.
+    let directory_file = unsafe { File::from_raw_handle(handle) };
+    let mut information = FileCaseSensitiveInfo::default();
+    // SAFETY: the handle is open for FILE_READ_ATTRIBUTES and information points to a
+    // correctly sized FILE_CASE_SENSITIVE_INFO buffer.
+    let success = unsafe {
+        GetFileInformationByHandleEx(
+            directory_file.as_raw_handle(),
+            FILE_CASE_SENSITIVE_INFO_CLASS,
+            &mut information as *mut FileCaseSensitiveInfo as *mut c_void,
+            std::mem::size_of::<FileCaseSensitiveInfo>() as u32,
+        )
+    };
+    if success == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(information.flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0)
 }
 
 #[cfg(windows)]
