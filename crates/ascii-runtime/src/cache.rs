@@ -2435,10 +2435,7 @@ fn replace_file_id_high_water(temp_path: &Path, destination: &Path) -> io::Resul
 }
 
 #[cfg(any(not(any(unix, windows)), test))]
-fn replace_file_id_high_water_portable(
-    temp_path: &Path,
-    destination: &Path,
-) -> io::Result<()> {
+fn replace_file_id_high_water_portable(temp_path: &Path, destination: &Path) -> io::Result<()> {
     let parent = destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -2616,10 +2613,7 @@ mod tests {
 
         assert_eq!(fs::read(&destination).unwrap(), b"0000000000000008\n");
         assert!(!temporary.exists());
-        assert!(!managed_dir
-            .0
-            .join(CACHE_FILE_ID_HIGH_WATER_BACKUP)
-            .exists());
+        assert!(!managed_dir.0.join(CACHE_FILE_ID_HIGH_WATER_BACKUP).exists());
 
         let backup = managed_dir.0.join(CACHE_FILE_ID_HIGH_WATER_BACKUP);
         fs::rename(&destination, &backup).unwrap();
@@ -2646,7 +2640,9 @@ mod tests {
             |file, encoded| {
                 events.borrow_mut().push("write");
                 file.write_all(&encoded[..5])?;
-                Err(io::Error::other("injected partial high-water write failure"))
+                Err(io::Error::other(
+                    "injected partial high-water write failure",
+                ))
             },
             |_| {
                 events.borrow_mut().push("file sync");
@@ -2665,12 +2661,7 @@ mod tests {
 
         assert!(matches!(error, CacheError::Io(_)));
         assert_eq!(events.into_inner(), vec!["write"]);
-        assert!(
-            !managed_dir
-                .0
-                .join(CACHE_FILE_ID_HIGH_WATER)
-                .exists()
-        );
+        assert!(!managed_dir.0.join(CACHE_FILE_ID_HIGH_WATER).exists());
         assert!(fs::read_dir(&managed_dir.0).unwrap().next().is_none());
     }
 
