@@ -1176,11 +1176,7 @@ fn create_file_id_high_water_temp(managed_dir: &Path) -> Result<(PathBuf, File),
             ".{CACHE_FILE_ID_HIGH_WATER}.update-{}-{id:016x}",
             std::process::id()
         ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(CacheError::Io(error)),
@@ -1217,9 +1213,7 @@ fn write_file_id_high_water_with_sync(
     }
 
     let (temp_path, mut file) = create_file_id_high_water_temp(managed_dir)?;
-    let write_result = file
-        .write_all(&encoded)
-        .and_then(|()| sync_file(&file));
+    let write_result = file.write_all(&encoded).and_then(|()| sync_file(&file));
     drop(file);
     if let Err(error) = write_result {
         let _ = fs::remove_file(&temp_path);
@@ -2625,7 +2619,11 @@ mod tests {
             vec![SyncEvent::File, SyncEvent::Replace]
         );
         assert_eq!(read_file_id_high_water(&managed_dir.0).unwrap(), 8);
-        assert!(!failed_temp_path.expect("the staged path is captured").exists());
+        assert!(
+            !failed_temp_path
+                .expect("the staged path is captured")
+                .exists()
+        );
 
         let marker_events = RefCell::new(Vec::with_capacity(2));
         mark_file_id_high_water_initialized_with_sync(
