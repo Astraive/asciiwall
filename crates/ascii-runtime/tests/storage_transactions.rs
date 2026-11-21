@@ -793,6 +793,40 @@ fn registry_update_parent_sync_failure_restores_exact_prior_state() {
 }
 
 #[test]
+fn registry_update_rollback_failure_reports_prior_state_wording() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    storage
+        .save_registry(&registry("1.0.0"))
+        .expect("save initial registry");
+
+    let error = storage
+        .update_registry_with_hook(
+            |current| *current = registry("2.0.0"),
+            |stage| match stage {
+                AtomicWriteStage::ParentDirectorySync => {
+                    Err(io::Error::other("injected sync failure"))
+                }
+                AtomicWriteStage::RecoveryRollbackRename => {
+                    Err(io::Error::other("injected rollback failure"))
+                }
+                _ => Ok(()),
+            },
+        )
+        .expect_err("registry rollback failure should be reported");
+    assert!(matches!(
+        &error,
+        StorageError::RecoveryRollbackFailed {
+            retained_recovery_copy: Some(_),
+            ..
+        }
+    ));
+    let display = error.to_string();
+    assert!(display.contains("parent-directory sync failed (injected sync failure)"));
+    assert!(display.contains("restoring prior state also failed (injected rollback failure)"));
+}
+
+#[test]
 fn registry_write_rejects_newer_and_invalid_current_bytes() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
