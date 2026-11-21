@@ -1103,6 +1103,8 @@ fn config_saves_reject_nested_history_keys_without_rotating_state() {
     for bytes in [
         b"[ui]\ncursor_history = [\"recent\"]\n".as_slice(),
         b"[ui]\nwindow = { geometry = { window_geometry_history = [\"recent\"] } }\n",
+        b"cursor.history = [\"recent\"]\n",
+        b"[[profiles]]\ncursor.history = [\"recent\"]\n",
     ] {
         let forbidden = ParsedToml::from_toml(bytes).expect("parse nested history config");
         assert!(matches!(
@@ -1115,6 +1117,43 @@ fn config_saves_reject_nested_history_keys_without_rotating_state() {
         );
         assert_eq!(
             fs::read(&backup_path).expect("last-good remains unchanged"),
+            backup_before
+        );
+    }
+}
+
+#[test]
+fn config_backup_recovery_rejects_history_paths_without_mutating_state() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let previous = config(json!({"theme": "previous"}));
+    save_current_config(&storage, &previous, validate_theme_config).expect("save previous config");
+    let current = config(json!({"theme": "current"}));
+    save_current_config(&storage, &current, validate_theme_config)
+        .expect("save current config and establish last-good");
+    let config_path = storage.config_path();
+    let backup_path = storage.config_backup_path();
+    let current_before = fs::read(&config_path).expect("capture current config");
+
+    for backup in [
+        b"theme = \"backup\"\ncursor_history = [\"recent\"]\n".as_slice(),
+        b"theme = \"backup\"\n[ui]\ncursor_history = [\"recent\"]\n",
+        b"theme = \"backup\"\ncursor.history = [\"recent\"]\n",
+        b"theme = \"backup\"\n[ui]\ncursor.history = [\"recent\"]\n",
+        b"theme = \"backup\"\n[[profiles]]\ncursor.history = [\"recent\"]\n",
+    ] {
+        fs::write(&backup_path, backup).expect("write forbidden last-good settings");
+        let backup_before = fs::read(&backup_path).expect("capture forbidden last-good");
+        assert!(matches!(
+            storage.restore_config_from_backup(Some(&current_before), validate_theme_config),
+            Err(StorageError::InvalidConfiguration(_))
+        ));
+        assert_eq!(
+            fs::read(&config_path).expect("rejected recovery preserves current config"),
+            current_before
+        );
+        assert_eq!(
+            fs::read(&backup_path).expect("rejected recovery preserves last-good"),
             backup_before
         );
     }
