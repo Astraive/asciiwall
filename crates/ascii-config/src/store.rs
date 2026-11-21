@@ -33,7 +33,7 @@ pub(crate) struct FileStore {
     #[cfg(test)]
     fail_at: Option<PersistStage>,
     #[cfg(test)]
-    fail_disk_full: bool,
+    fail_disk_full_after_temp_writes: Option<usize>,
 }
 
 impl FileStore {
@@ -43,7 +43,7 @@ impl FileStore {
             #[cfg(test)]
             fail_at: None,
             #[cfg(test)]
-            fail_disk_full: false,
+            fail_disk_full_after_temp_writes: None,
         }
     }
 
@@ -115,15 +115,21 @@ impl FileStore {
             return Err(StoreError::Injected(stage));
         }
         #[cfg(test)]
-        if self.fail_disk_full && stage == PersistStage::TempWrite {
-            self.fail_disk_full = false;
-            return Err(StoreError::io(
-                StoreOperation::WriteTemporary,
-                std::io::Error::new(
-                    std::io::ErrorKind::StorageFull,
-                    "injected disk-full failure",
-                ),
-            ));
+        match (stage, self.fail_disk_full_after_temp_writes) {
+            (PersistStage::TempWrite, Some(0)) => {
+                self.fail_disk_full_after_temp_writes = None;
+                return Err(StoreError::io(
+                    StoreOperation::WriteTemporary,
+                    std::io::Error::new(
+                        std::io::ErrorKind::StorageFull,
+                        "injected disk-full failure",
+                    ),
+                ));
+            }
+            (PersistStage::TempWrite, Some(writes_before_failure)) => {
+                self.fail_disk_full_after_temp_writes = Some(writes_before_failure - 1);
+            }
+            _ => {}
         }
         #[cfg(not(test))]
         let _ = stage;
@@ -283,8 +289,8 @@ impl FileStore {
         self.fail_at = Some(stage);
     }
     #[cfg(test)]
-    pub(crate) fn inject_disk_full(&mut self) {
-        self.fail_disk_full = true;
+    pub(crate) fn inject_disk_full_after_temp_writes(&mut self, writes: usize) {
+        self.fail_disk_full_after_temp_writes = Some(writes);
     }
 }
 
@@ -742,7 +748,7 @@ mod tests {
         fs::write(&backup, b"prior-backup").unwrap();
 
         let mut store = FileStore::new(&path);
-        store.inject_disk_full();
+        store.inject_disk_full_after_temp_writes(1);
         assert!(matches!(
             store.commit(
                 Some(b"last-valid-main"),
