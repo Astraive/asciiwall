@@ -2,11 +2,13 @@
 mod support;
 
 use std::mem::size_of;
+use std::sync::LazyLock;
 
 use ascii_convert::{
     ConversionSettings, CropRect, FitMode, FitTransform, GlyphConfig, GlyphRepertoire, GlyphTable,
-    LinearPremultipliedRgba, LinearRgb, PatchDescriptors, PatchDimensions, QualityPatches,
-    SamplingFilter, SamplingOptions, build_glyph_table, convert_density_detailed,
+    LinearPremultipliedRgba, LinearRgb, NormalizedRasterResources, PatchDescriptors,
+    PatchDimensions, QualityPatches, SamplingFilter, SamplingOptions, build_glyph_table,
+    convert_density_detailed,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, Error,
@@ -34,6 +36,12 @@ fn build_table() -> GlyphTable {
 
 fn budget() -> Budget {
     Budget::new(8_000_000, 64_000_000, 16_000_000)
+}
+
+fn unlimited_raster_resources() -> &'static NormalizedRasterResources {
+    static RESOURCES: LazyLock<NormalizedRasterResources> =
+        LazyLock::new(|| NormalizedRasterResources::new(u64::MAX));
+    &RESOURCES
 }
 
 fn linear_gray_raster(
@@ -320,6 +328,7 @@ fn detailed_conversion_returns_sampling_transform_for_its_floor_sized_surface() 
             SamplingOptions::new(fit, SamplingFilter::Box, None),
         ),
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("fixed surface converts");
 
@@ -352,6 +361,7 @@ fn contain_letterboxes_reject_pointer_mapping_and_integrate_as_background() {
         &table,
         &settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("letterboxed surface converts");
 
@@ -406,6 +416,7 @@ fn box_area_patches_conserve_fractional_crop_coverage_and_ignore_stride_padding(
         &table,
         &direct_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("whole-cell box integration succeeds");
     let direct_patch = direct
@@ -420,6 +431,7 @@ fn box_area_patches_conserve_fractional_crop_coverage_and_ignore_stride_padding(
         &table,
         &coarse_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("fractional area integration succeeds");
     let coarse_patch = coarse
@@ -447,6 +459,7 @@ fn box_area_patches_conserve_fractional_crop_coverage_and_ignore_stride_padding(
         &table,
         &fine_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("fractional subcell integration succeeds");
     let fine_patch = fine
@@ -463,6 +476,7 @@ fn box_area_patches_conserve_fractional_crop_coverage_and_ignore_stride_padding(
         &table,
         &coarse_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("padded-stride raster converts");
     let padded_patch = padded
@@ -494,6 +508,7 @@ fn extreme_valid_crop_does_not_underflow_box_footprint_area() {
         &table,
         &settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("area integration over a valid tiny crop succeeds");
     assert_eq!(conversion.frame().size(), GridSize::new(1, 1));
@@ -533,6 +548,7 @@ fn collapsed_inverse_mapped_boundaries_preserve_64_wide_box_patches() {
         &table,
         &tiny_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("subnormal crop converts across collapsed patch boundaries");
     assert_eq!(tiny_conversion.frame().size(), GridSize::new(1, 1));
@@ -574,6 +590,7 @@ fn collapsed_inverse_mapped_boundaries_preserve_64_wide_box_patches() {
         &table,
         &shifted_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("subpixel crop crossing a source boundary converts");
     assert_eq!(shifted_conversion.frame().size(), GridSize::new(1, 1));
@@ -633,6 +650,7 @@ fn collapsed_box_patch_sampling_uses_each_orthogonal_footprint() {
         &table,
         &settings,
         &limits,
+        unlimited_raster_resources(),
     )
     .expect("collapsed Box sampling stays within the footprint work bound");
 
@@ -684,6 +702,7 @@ fn collapsed_box_patch_sampling_uses_each_orthogonal_footprint() {
         &table,
         &horizontal_settings,
         &limits,
+        unlimited_raster_resources(),
     )
     .expect("collapsed Box sampling stays within the horizontal footprint bound");
     let horizontal_transform = horizontal_conversion.transform();
@@ -736,6 +755,7 @@ fn sampling_identity_changes_with_filter_patch_size_and_resolved_geometry() {
             &table,
             &one_cell_settings(&table, &cancellation, fit, filter, Some(patch)),
             &budget(),
+            unlimited_raster_resources(),
         )
         .expect("sampling configuration converts")
         .sampling_identity()
@@ -812,7 +832,13 @@ fn patch_size_and_aggregate_budgets_fail_at_exact_thresholds_before_allocation()
 
     let below_work = Budget::new(1_000_000, u64::MAX, exact_work - 1);
     assert_eq!(
-        convert_density_detailed(input(), &table, &settings, &below_work),
+        convert_density_detailed(
+            input(),
+            &table,
+            &settings,
+            &below_work,
+            unlimited_raster_resources(),
+        ),
         Err(ascii_convert::DensityConversionError::Core(
             Error::BudgetExceeded(BudgetKind::WorkUnits)
         ))
@@ -827,14 +853,28 @@ fn patch_size_and_aggregate_budgets_fail_at_exact_thresholds_before_allocation()
     let exact_raster_bytes = readable_input + normalized_raster + patch_storage;
     let below_raster = Budget::new(1_000_000, exact_raster_bytes - 1, exact_work);
     assert_eq!(
-        convert_density_detailed(input(), &table, &settings, &below_raster),
+        convert_density_detailed(
+            input(),
+            &table,
+            &settings,
+            &below_raster,
+            unlimited_raster_resources(),
+        ),
         Err(ascii_convert::DensityConversionError::Core(
             Error::BudgetExceeded(BudgetKind::RasterBytes)
         ))
     );
 
     let exact = Budget::new(1_000_000, exact_raster_bytes, exact_work);
-    assert!(convert_density_detailed(input(), &table, &settings, &exact).is_ok());
+    assert!(
+        convert_density_detailed(
+            input(),
+            &table,
+            &settings,
+            &exact,
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -857,6 +897,7 @@ fn cancelled_quality_conversion_returns_no_partial_result() {
             &table,
             &settings,
             &budget(),
+            unlimited_raster_resources(),
         ),
         Err(ascii_convert::DensityConversionError::Core(
             Error::Cancelled
@@ -883,6 +924,7 @@ fn quality_conversion_recovers_after_cancelled_attempt() {
             &table,
             &cancelled_settings,
             &budget(),
+            unlimited_raster_resources(),
         ),
         Err(ascii_convert::DensityConversionError::Core(
             Error::Cancelled
@@ -903,6 +945,7 @@ fn quality_conversion_recovers_after_cancelled_attempt() {
             &table,
             &recovery_settings,
             &budget(),
+            unlimited_raster_resources(),
         )
         .is_ok()
     );
@@ -951,6 +994,7 @@ fn box_and_nearest_filters_compare_area_coverage_on_synthetic_patterns() {
                 &table,
                 &settings,
                 &budget(),
+                unlimited_raster_resources(),
             )
             .expect("synthetic filter-comparison fixture converts")
         };
@@ -1060,4 +1104,32 @@ fn box_and_nearest_filters_compare_area_coverage_on_synthetic_patterns() {
             );
         }
     }
+}
+
+#[test]
+fn contain_rejects_extreme_unrepresentable_centering_through_public_api() {
+    let maximum_exact_f64_integer = 1_u64 << 53;
+
+    assert_eq!(
+        FitTransform::new(1, 1, maximum_exact_f64_integer, 1, FitMode::Contain),
+        Err(Error::SizeOverflow)
+    );
+    // A wider rectangle can pass the extent tolerance while its margins still skew.
+    assert_eq!(
+        FitTransform::new(5, 1, maximum_exact_f64_integer, 1, FitMode::Contain),
+        Err(Error::SizeOverflow)
+    );
+}
+
+#[test]
+fn contain_keeps_ordinary_letterbox_margins_equal() {
+    let transform = FitTransform::new(1, 1, 100, 1, FitMode::Contain)
+        .expect("ordinary centered geometry is representable");
+    let display_rect = transform.display_rect();
+    let left_margin = display_rect.x();
+    let right_margin = 100.0 - (display_rect.x() + display_rect.width());
+
+    assert_eq!(display_rect.width(), 1.0);
+    assert_eq!(left_margin, 49.5);
+    assert_eq!(right_margin, 49.5);
 }

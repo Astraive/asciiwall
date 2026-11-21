@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 mod support;
 
+use std::sync::LazyLock;
+
 use ascii_convert::{
     ColorNormalizationError, ColorNormalizationWarning, ConversionSettings, CropRect,
     DensityConversionError, FitMode, FitTransform, GlyphConfig, GlyphRepertoire, GlyphTable,
@@ -16,6 +18,12 @@ use support::synthetic_font::synthetic_font;
 
 const CELL_WIDTH: u32 = 8;
 const CELL_HEIGHT: u32 = 12;
+
+fn unlimited_raster_resources() -> &'static ascii_convert::NormalizedRasterResources {
+    static RESOURCES: LazyLock<ascii_convert::NormalizedRasterResources> =
+        LazyLock::new(|| ascii_convert::NormalizedRasterResources::new(u64::MAX));
+    &RESOURCES
+}
 
 fn build_table() -> GlyphTable {
     build_glyph_table(
@@ -164,8 +172,14 @@ fn custom_crop_column_sizing_uses_selected_source_geometry() {
         RasterOrientation::TopDown,
         &source,
     );
-    let converted = convert_density_detailed(raster, &table, &conversion_settings, &budget())
-        .expect("custom-crop conversion succeeds with an explicit profile warning");
+    let converted = convert_density_detailed(
+        raster,
+        &table,
+        &conversion_settings,
+        &budget(),
+        unlimited_raster_resources(),
+    )
+    .expect("custom-crop conversion succeeds with an explicit profile warning");
 
     assert_eq!(converted.frame().size(), GridSize::new(4, 4));
     assert_eq!(converted.transform().source_rect().width(), 8.0);
@@ -202,6 +216,7 @@ fn custom_crop_row_limit_is_checked_after_half_up_rounding() {
             &table,
             &conversion_settings,
             &budget(),
+            unlimited_raster_resources(),
         )
     };
 
@@ -211,6 +226,74 @@ fn custom_crop_row_limit_is_checked_after_half_up_rounding() {
     ));
     assert_eq!(
         convert_for_requested_rows(f64::from(u32::MAX) + 0.75),
+        Err(DensityConversionError::Core(Error::SizeOverflow))
+    );
+}
+
+#[test]
+fn unsupported_hdr_precedes_minimum_positive_crop_sizing() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::columns(1),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::CustomCrop(
+            CropRect::new(0.0, 0.0, f64::MIN_POSITIVE, 1.0).expect("crop is valid"),
+        ),
+        SamplingFilter::Box,
+        None,
+    ));
+    let pixels = [128_u8];
+    let hdr = RasterFrameView::new(
+        1,
+        1,
+        1,
+        PixelFormat::gray8(),
+        ColorDescription::new(
+            ascii_core::ColorPrimaries::Srgb,
+            TransferFunction::Pq,
+            AlphaMode::Opaque,
+        ),
+        RasterOrientation::TopDown,
+        &pixels,
+    );
+    let valid_profile = RasterFrameView::new(
+        1,
+        1,
+        1,
+        PixelFormat::gray8(),
+        ColorDescription::srgb(AlphaMode::Opaque),
+        RasterOrientation::TopDown,
+        &pixels,
+    );
+
+    assert_eq!(
+        convert_density_detailed(
+            hdr,
+            &table,
+            &conversion_settings,
+            &budget(),
+            unlimited_raster_resources(),
+        ),
+        Err(DensityConversionError::ColorNormalization(
+            ColorNormalizationError::UnsupportedColor(UnsupportedColorReason::HdrTransfer(
+                TransferFunction::Pq
+            ))
+        ))
+    );
+    assert_eq!(
+        convert_density_detailed(
+            valid_profile,
+            &table,
+            &conversion_settings,
+            &budget(),
+            unlimited_raster_resources(),
+        ),
         Err(DensityConversionError::Core(Error::SizeOverflow))
     );
 }
@@ -248,6 +331,7 @@ fn endpoints_and_both_luminance_polarities_match_space_and_ink() {
             LinearRgb::BLACK,
         ),
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("black sample converts");
     let light_ink = convert_density_detailed(
@@ -261,6 +345,7 @@ fn endpoints_and_both_luminance_polarities_match_space_and_ink() {
             LinearRgb::BLACK,
         ),
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("white sample converts");
     assert_eq!(dark_space.frame().cells()[0].glyph(), slot(&table, ' '));
@@ -282,6 +367,7 @@ fn endpoints_and_both_luminance_polarities_match_space_and_ink() {
             LinearRgb::WHITE,
         ),
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("dark-on-light sample converts");
     let reversed_white = convert_density_detailed(
@@ -295,6 +381,7 @@ fn endpoints_and_both_luminance_polarities_match_space_and_ink() {
             LinearRgb::WHITE,
         ),
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("light background sample converts");
     assert_eq!(reversed_black.frame().cells()[0].glyph(), slot(&table, 'A'));
@@ -322,10 +409,22 @@ fn equal_coverage_ties_use_font_index_and_repeat_deterministically() {
         LinearRgb::BLACK,
     );
 
-    let first = convert_density_detailed(raster(&source, 1, 1, 1), &table, &settings, &budget())
-        .expect("first conversion succeeds");
-    let second = convert_density_detailed(raster(&source, 1, 1, 1), &table, &settings, &budget())
-        .expect("repeat conversion succeeds");
+    let first = convert_density_detailed(
+        raster(&source, 1, 1, 1),
+        &table,
+        &settings,
+        &budget(),
+        unlimited_raster_resources(),
+    )
+    .expect("first conversion succeeds");
+    let second = convert_density_detailed(
+        raster(&source, 1, 1, 1),
+        &table,
+        &settings,
+        &budget(),
+        unlimited_raster_resources(),
+    )
+    .expect("repeat conversion succeeds");
 
     assert_eq!(
         table.glyphs()[slot(&table, 'A') as usize].mean_coverage(),
@@ -360,6 +459,7 @@ fn box_sampling_converts_subnormal_crop_with_normalized_weights() {
         &table,
         &conversion_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("box sampling converts a valid subnormal crop");
     let luminance = converted
@@ -404,6 +504,7 @@ fn box_quality_patch_subdivision_preserves_narrow_crop_at_large_origin() {
             &table,
             &conversion_settings,
             &budget(),
+            unlimited_raster_resources(),
         )
         .expect("box quality-patch conversion preserves each subinterval");
         let patch = converted
@@ -452,6 +553,7 @@ fn box_quality_patch_subdivision_preserves_fractional_source_origin() {
         &table,
         &conversion_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("box quality-patch conversion preserves positive subintervals");
     let patch = converted
@@ -495,6 +597,7 @@ fn box_quality_patch_subdivision_integrates_fractional_pixel_edges() {
         &table,
         &conversion_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("box quality patches integrate across source pixel edges");
     let patch = converted
@@ -533,6 +636,7 @@ fn box_sampling_integrates_cell_footprint_and_never_reads_stride_padding() {
         &table,
         &area_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("fractional-area conversion succeeds");
     let patch = mixed_result
@@ -549,6 +653,7 @@ fn box_sampling_integrates_cell_footprint_and_never_reads_stride_padding() {
         &table,
         &conversion_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("padded rows normalize successfully");
     let packed_result = convert_density_detailed(
@@ -556,6 +661,7 @@ fn box_sampling_integrates_cell_footprint_and_never_reads_stride_padding() {
         &table,
         &conversion_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("packed rows normalize successfully");
     assert_eq!(padded_result.frame().cells(), packed_result.frame().cells());
@@ -592,6 +698,7 @@ fn circle_density_tracks_cell_aspect_end_to_end() {
         &table,
         &conversion_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("circular raster converts using glyph-cell aspect");
 
@@ -641,8 +748,14 @@ fn transparent_edge_pixel_composites_over_configured_nonblack_background() {
         Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
     ));
 
-    let converted = convert_density_detailed(input, &table, &conversion_settings, &budget())
-        .expect("alpha edge converts over configured background");
+    let converted = convert_density_detailed(
+        input,
+        &table,
+        &conversion_settings,
+        &budget(),
+        unlimited_raster_resources(),
+    )
+    .expect("alpha edge converts over configured background");
     let patch = converted
         .patches()
         .expect("quality mode retains its sampled luminance")
@@ -683,6 +796,7 @@ fn nearest_sampling_returns_pixel_at_inverse_mapped_cell_center() {
         &table,
         &conversion_settings,
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("nearest-sampled two-tone raster converts");
     let patch = converted
@@ -711,6 +825,7 @@ fn source_metadata_is_propagated_exactly_and_mismatched_identity_is_rejected() {
             LinearRgb::BLACK,
         ),
         &budget(),
+        unlimited_raster_resources(),
     )
     .expect("matching glyph identity converts");
     assert_eq!(frame.metadata(), expected_metadata);
@@ -729,7 +844,13 @@ fn source_metadata_is_propagated_exactly_and_mismatched_identity_is_rejected() {
     )
     .expect("the mismatch is detected against the actual table during conversion");
     assert_eq!(
-        convert_density_detailed(raster(&source, 1, 1, 1), &table, &mismatched, &budget()),
+        convert_density_detailed(
+            raster(&source, 1, 1, 1),
+            &table,
+            &mismatched,
+            &budget(),
+            unlimited_raster_resources(),
+        ),
         Err(DensityConversionError::Core(Error::Malformed(
             MalformedReason::GlyphTableMismatch
         )))
@@ -762,6 +883,7 @@ fn pre_cancelled_no_patch_conversion_precedes_frame_budget() {
             &table,
             &conversion_settings,
             &insufficient_frame_budget,
+            unlimited_raster_resources(),
         ),
         Err(DensityConversionError::Core(Error::Cancelled))
     );
@@ -791,13 +913,25 @@ fn orientation_precedes_unsupported_sample_depth_through_both_apis() {
             &[],
         );
         assert_eq!(
-            convert_density_detailed(bottom_up, &table, &conversion_settings, &budget()),
+            convert_density_detailed(
+                bottom_up,
+                &table,
+                &conversion_settings,
+                &budget(),
+                unlimited_raster_resources(),
+            ),
             Err(DensityConversionError::Core(Error::Unsupported(
                 ascii_core::UnsupportedReason::Orientation
             )))
         );
         assert_eq!(
-            convert_density(bottom_up, &table, &conversion_settings, &budget()),
+            convert_density(
+                bottom_up,
+                &table,
+                &conversion_settings,
+                &budget(),
+                unlimited_raster_resources(),
+            ),
             Err(Error::Unsupported(
                 ascii_core::UnsupportedReason::Orientation
             ))
@@ -813,13 +947,25 @@ fn orientation_precedes_unsupported_sample_depth_through_both_apis() {
             &[],
         );
         assert_eq!(
-            convert_density_detailed(top_down, &table, &conversion_settings, &budget()),
+            convert_density_detailed(
+                top_down,
+                &table,
+                &conversion_settings,
+                &budget(),
+                unlimited_raster_resources(),
+            ),
             Err(DensityConversionError::Core(Error::Unsupported(
                 ascii_core::UnsupportedReason::SampleDepth
             )))
         );
         assert_eq!(
-            convert_density(top_down, &table, &conversion_settings, &budget()),
+            convert_density(
+                top_down,
+                &table,
+                &conversion_settings,
+                &budget(),
+                unlimited_raster_resources(),
+            ),
             Err(Error::Unsupported(
                 ascii_core::UnsupportedReason::SampleDepth
             ))
@@ -855,7 +1001,8 @@ fn output_budgets_fail_before_publishing_a_frame() {
             unsupported_format,
             &table,
             &conversion_settings,
-            &no_frame_budget
+            &no_frame_budget,
+            unlimited_raster_resources(),
         ),
         Err(DensityConversionError::Core(Error::BudgetExceeded(
             BudgetKind::FrameBytes
@@ -869,6 +1016,7 @@ fn output_budgets_fail_before_publishing_a_frame() {
             &table,
             &conversion_settings,
             &insufficient_work,
+            unlimited_raster_resources(),
         ),
         Err(DensityConversionError::Core(Error::BudgetExceeded(
             BudgetKind::WorkUnits
@@ -900,6 +1048,7 @@ fn patch_zero_initialization_is_charged_to_the_work_budget() {
             &table,
             &conversion_settings,
             &budget_excluding_initialization,
+            unlimited_raster_resources(),
         ),
         Err(DensityConversionError::Core(Error::BudgetExceeded(
             BudgetKind::WorkUnits
@@ -937,18 +1086,39 @@ fn premultiplied_validation_pass_is_charged_to_the_work_budget() {
     let exact_work = Budget::new(8_000_000, 64_000_000, 6);
 
     assert_eq!(
-        convert_density_detailed(opaque, &table, &conversion_settings, &below_exact_work),
+        convert_density_detailed(
+            opaque,
+            &table,
+            &conversion_settings,
+            &below_exact_work,
+            unlimited_raster_resources(),
+        ),
         Err(DensityConversionError::Core(Error::BudgetExceeded(
             BudgetKind::WorkUnits
         )))
     );
     assert_eq!(
-        convert_density_detailed(premultiplied, &table, &conversion_settings, &exact_work),
+        convert_density_detailed(
+            premultiplied,
+            &table,
+            &conversion_settings,
+            &exact_work,
+            unlimited_raster_resources(),
+        ),
         Err(DensityConversionError::Core(Error::BudgetExceeded(
             BudgetKind::WorkUnits
         )))
     );
-    assert!(convert_density_detailed(opaque, &table, &conversion_settings, &exact_work).is_ok());
+    assert!(
+        convert_density_detailed(
+            opaque,
+            &table,
+            &conversion_settings,
+            &exact_work,
+            unlimited_raster_resources(),
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -978,14 +1148,24 @@ fn patch_memory_budget_includes_readable_input_extent_but_not_trailing_padding()
             padded,
             &table,
             &conversion_settings,
-            &normalized_and_patch_only
+            &normalized_and_patch_only,
+            unlimited_raster_resources(),
         ),
         Err(DensityConversionError::Core(Error::BudgetExceeded(
             BudgetKind::RasterBytes
         )))
     );
     let exact_extent = Budget::new(8_000_000, 201, 16_000_000);
-    assert!(convert_density_detailed(padded, &table, &conversion_settings, &exact_extent).is_ok());
+    assert!(
+        convert_density_detailed(
+            padded,
+            &table,
+            &conversion_settings,
+            &exact_extent,
+            unlimited_raster_resources(),
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -1016,6 +1196,7 @@ fn unsupported_pixel_channels_precede_size_overflow() {
             &table,
             &conversion_settings,
             &sufficient_budget,
+            unlimited_raster_resources(),
         ),
         Err(DensityConversionError::Core(Error::Unsupported(
             ascii_core::UnsupportedReason::PixelFormat
@@ -1046,7 +1227,13 @@ fn unsupported_sample_depth_precedes_short_stride() {
             &[],
         );
         assert_eq!(
-            convert_density_detailed(unsupported_depth, &table, &conversion_settings, &budget(),),
+            convert_density_detailed(
+                unsupported_depth,
+                &table,
+                &conversion_settings,
+                &budget(),
+                unlimited_raster_resources(),
+            ),
             Err(DensityConversionError::Core(Error::Unsupported(
                 ascii_core::UnsupportedReason::SampleDepth
             )))
@@ -1132,6 +1319,7 @@ fn unsupported_alpha_and_profiles_precede_sampling_work_and_stride_through_both_
                 &table,
                 &conversion_settings,
                 &insufficient_sampling_budget,
+                unlimited_raster_resources(),
             ),
             Err(detailed_error)
         );
@@ -1140,6 +1328,7 @@ fn unsupported_alpha_and_profiles_precede_sampling_work_and_stride_through_both_
             &table,
             &conversion_settings,
             &insufficient_sampling_budget,
+            unlimited_raster_resources(),
         )
         .expect_err("unsupported profile must not produce a frame");
         assert_eq!(error, core_error);
@@ -1178,7 +1367,13 @@ fn shared_normalizer_failures_keep_their_typed_color_reason() {
     );
 
     assert_eq!(
-        convert_density_detailed(hdr, &table, &conversion_settings, &budget()),
+        convert_density_detailed(
+            hdr,
+            &table,
+            &conversion_settings,
+            &budget(),
+            unlimited_raster_resources(),
+        ),
         Err(DensityConversionError::ColorNormalization(
             ColorNormalizationError::UnsupportedColor(UnsupportedColorReason::HdrTransfer(
                 TransferFunction::Pq
@@ -1199,7 +1394,13 @@ fn shared_normalizer_failures_keep_their_typed_color_reason() {
         &[128],
     );
     assert_eq!(
-        convert_density(hdr_core, &table, &conversion_settings, &budget()),
+        convert_density(
+            hdr_core,
+            &table,
+            &conversion_settings,
+            &budget(),
+            unlimited_raster_resources(),
+        ),
         Err(Error::Unsupported(
             ascii_core::UnsupportedReason::ColorDescription
         ))
@@ -1230,8 +1431,14 @@ fn conversion_preserves_unknown_profile_warning() {
         RasterOrientation::TopDown,
         &[128],
     );
-    let result = convert_density_detailed(raster, &table, &conversion_settings, &budget())
-        .expect("unknown profile is converted with an explicit warning");
+    let result = convert_density_detailed(
+        raster,
+        &table,
+        &conversion_settings,
+        &budget(),
+        unlimited_raster_resources(),
+    )
+    .expect("unknown profile is converted with an explicit warning");
 
     assert_eq!(
         result.normalization_warning(),

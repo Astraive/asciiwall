@@ -13,15 +13,14 @@ use ascii_core::{
 };
 
 use crate::color::{
-    ColorNormalizationError, ColorNormalizationWarning, LinearRgb, OutputEncoding, encode_output,
-    normalize_raster,
+    ColorNormalizationError, ColorNormalizationWarning, LinearRgb, NormalizedRasterResources,
+    OutputEncoding, encode_output, normalize_raster,
 };
 use crate::font::GlyphTable;
 use crate::sampling::{
     FitMode, FitTransform, QualityPatches, SamplingError, SamplingIdentity, SamplingOptions,
-    prepare_sampling,
+    preflight_sampling_source, prepare_sampling,
 };
-
 #[cfg(test)]
 use crate::sampling::SampleCancellationPoll;
 const CANCELLATION_CELL_INTERVAL: usize = 32;
@@ -380,13 +379,16 @@ impl DensityConversion {
 ///
 /// Use [`convert_density_detailed`] when the caller also needs the exact sampling transform,
 /// retained quality patches, a normalization warning, or a more specific color-normalization failure.
+/// Pass a shared [`NormalizedRasterResources`] owner to cap normalized output retained by concurrent
+/// conversions; the per-operation [`Budget`] remains a separate ceiling.
 pub fn convert_density(
     input: RasterFrameView<'_>,
     glyphs: &GlyphTable,
     settings: &ConversionSettings<'_>,
     budget: &Budget,
+    resources: &NormalizedRasterResources,
 ) -> Result<AsciiFrame, Error> {
-    convert_density_detailed(input, glyphs, settings, budget)
+    convert_density_detailed(input, glyphs, settings, budget, resources)
         .map(DensityConversion::into_frame)
         .map_err(DensityConversionError::into_core)
 }
@@ -398,20 +400,25 @@ pub fn convert_density(
 /// alpha over the configured background, and matches the result to measured glyph mean coverage.
 /// Exact coverage-distance ties use font glyph index, Unicode scalar, then table position.
 ///
-/// Grid, work, normalized-raster, and optional whole-grid patch budgets are checked before their
-/// corresponding allocations. Fixed-surface pixels not covered by the floor-sized grid remain
-/// explicit right/bottom leftovers and are not part of the returned display transform.
+/// `budget` caps per-operation peak bytes and work; its raster-byte ceiling counts the borrowed input
+/// extent plus normalized output once. `resources` separately caps normalized output retained by
+/// concurrent operations, with each reservation released when its temporary normalized raster drops.
+/// Optional whole-grid patch storage is checked before allocation. Fixed-surface pixels not covered
+/// by the floor-sized grid remain explicit right/bottom leftovers and are not part of the returned
+/// display transform.
 pub fn convert_density_detailed(
     input: RasterFrameView<'_>,
     glyphs: &GlyphTable,
     settings: &ConversionSettings<'_>,
     budget: &Budget,
+    resources: &NormalizedRasterResources,
 ) -> Result<DensityConversion, DensityConversionError> {
     convert_density_detailed_impl(
         input,
         glyphs,
         settings,
         budget,
+        resources,
         #[cfg(test)]
         None,
     )
@@ -422,6 +429,7 @@ fn convert_density_detailed_impl(
     glyphs: &GlyphTable,
     settings: &ConversionSettings<'_>,
     budget: &Budget,
+    resources: &NormalizedRasterResources,
     #[cfg(test)] sample_cancel_poll: Option<&SampleCancellationPoll<'_>>,
 ) -> Result<DensityConversion, DensityConversionError> {
     let settings = *settings;
@@ -437,6 +445,18 @@ fn convert_density_detailed_impl(
         return Err(Error::Malformed(MalformedReason::InvalidConfiguration).into());
     }
     let glyph_count = u32::try_from(glyph_records.len()).map_err(|_| Error::SizeOverflow)?;
+    let crop_derived_sizing = matches!(
+        (settings.sizing, settings.sampling.fit()),
+        (GridSizing::Columns(_), FitMode::CustomCrop(_))
+    );
+    let preflight_bytes_per_pixel = if crop_derived_sizing {
+        if input.width() == 0 || input.height() == 0 {
+            return Err(Error::Malformed(MalformedReason::EmptyDimensions).into());
+        }
+        Some(preflight_sampling_source(&input)?)
+    } else {
+        None
+    };
     let size = settings.sizing.resolve_for_sampling(
         input.width(),
         input.height(),
@@ -451,8 +471,13 @@ fn convert_density_detailed_impl(
         .checked_mul(glyph_count_u64)
         .ok_or(Error::SizeOverflow)?;
     let frame_validation_work = grid_budget.work_units();
+    let bytes_per_pixel = match preflight_bytes_per_pixel {
+        Some(bytes_per_pixel) => bytes_per_pixel,
+        None => preflight_sampling_source(&input)?,
+    };
     let sampling = prepare_sampling(
         &input,
+        bytes_per_pixel,
         size,
         glyphs.cell_width(),
         glyphs.cell_height(),
@@ -462,7 +487,7 @@ fn convert_density_detailed_impl(
         budget,
     )?;
 
-    let normalized = normalize_raster(input, budget, settings.cancellation)?;
+    let normalized = normalize_raster(input, budget, settings.cancellation, resources)?;
     let normalization_warning = normalized.warning();
     let mut patches =
         sampling.allocate_patches(grid_budget.cell_count_usize(), settings.cancellation)?;
@@ -702,12 +727,14 @@ mod tests {
                 false
             }
         };
+        let resources = super::NormalizedRasterResources::new(u64::MAX);
 
         let result = convert_density_detailed_impl(
             raster,
             &table,
             &settings,
             &Budget::new(64_000_000, 128_000_000, u64::MAX),
+            &resources,
             Some(&sample_cancel_poll),
         );
 
