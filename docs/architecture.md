@@ -54,7 +54,7 @@ Once `PRJ-001` establishes the workspace, crates are introduced only when exerci
 | Platform adapters | `crates/ascii-platform` | Capability discovery, `SurfaceLease`, Windows/macOS/X11/Wayland adapters & bounded feeds | Package parsing, conversion logic |
 | Package contracts | `crates/ascii-package` | Draft v1 manifest/scene schemas, ZIP bomb/traversal validation, staged atomic import/export | Shell execution, permission grants |
 | Local library | `crates/ascii-library` | Immutable import receipts, search index, optional signed static catalog client | Core rendering, telemetry, background downloads |
-| Typed settings | `crates/ascii-config` | 172-key registry, layered precedence (`P`/`A`/`O`/`S`), TOML persistence, reversible migrations | Policy bypasses, host detection |
+| Typed settings | `crates/ascii-config` | Reusable typed descriptors and P/A/O/S authority, requested/effective resolution, canonical TOML persistence, revisioned controller, bounded reversible migrations; domain descriptors land with CFG-004..016 | Policy bypasses, host detection |
 | Local IPC | `crates/ascii-ipc` | Versioned envelopes, peer authentication, validated buffer handoff | Unvalidated peer file paths |
 | Control UI | `crates/ascii-ui` | `egui` navigation, live preview, requested/effective inspector, undo/Apply flows | Duplicate conversion/matching implementations |
 | Executables & bridges | `apps/{desktop,host,media-worker,cli}`, `integrations/{plasma,gnome}`, `xtask` | Process composition, CLI (`ascii-cli`), shell companions, repo automation | Re-implementing core library invariants |
