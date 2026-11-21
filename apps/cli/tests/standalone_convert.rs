@@ -515,6 +515,43 @@ fn explicit_font_failures_block_conversion_without_disclosure_or_overwrite() {
 }
 
 #[test]
+fn missing_selected_font_glyph_returns_stable_validation_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let font_path = dir.path().join("private font.ttf");
+    let output_path = dir.path().join("artwork.txt");
+    fs::write(&font_path, synthetic_font::synthetic_font(false)).unwrap();
+
+    let output = run([
+        OsStr::new("--json"),
+        OsStr::new("convert"),
+        OsStr::new("unopened input.png"),
+        OsStr::new("--font"),
+        font_path.as_os_str(),
+        OsStr::new("--charset"),
+        OsStr::new("C"),
+        OsStr::new("--format"),
+        OsStr::new("txt"),
+        OsStr::new("--output"),
+        output_path.as_os_str(),
+    ]);
+
+    assert_eq!(status(&output), 3);
+    assert!(output.stderr.is_empty());
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["schema_version"], 1);
+    assert_eq!(body["command"], "convert");
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"]["code"], "cli.validation");
+    assert_eq!(body["error"]["category"], "validation");
+    assert_eq!(
+        body["error"]["message"],
+        "selected font lacks a requested glyph"
+    );
+    assert_eq!(body["error"]["retryable"], false);
+    assert!(!output_path.exists());
+}
+
+#[test]
 fn unsafe_glyphs_and_terminal_sequences_cannot_escape_diagnostics() {
     let output = run([
         "convert",
