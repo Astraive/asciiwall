@@ -72,9 +72,9 @@ pub enum AtomicWriteStage {
     BackupReplaced,
     /// The new destination has been atomically installed and its parent synced where supported.
     TargetReplaced,
-    /// Recovery is about to sync the parent directory after installing its restored target.
+    /// The parent directory is about to be synced after installing the new destination.
     ParentDirectorySync,
-    /// Recovery is about to rename its preserved prior-state copy during rollback.
+    /// A preserved prior-state copy is about to be renamed into place during rollback.
     RecoveryRollbackRename,
 }
 
@@ -763,6 +763,17 @@ impl Storage {
         &self,
         update: impl FnOnce(&mut InstallRegistry),
     ) -> Result<(), StorageError> {
+        self.update_registry_with_hook(update, |_| Ok(()))
+    }
+
+    /// Hook-enabled counterpart of [`Self::update_registry`].
+    ///
+    /// A parent-directory-sync failure restores the previous registry bytes when rollback succeeds.
+    pub fn update_registry_with_hook(
+        &self,
+        update: impl FnOnce(&mut InstallRegistry),
+        hook: impl FnMut(AtomicWriteStage) -> io::Result<()>,
+    ) -> Result<(), StorageError> {
         let destination = self.registry_path();
         let parent = destination
             .parent()
@@ -793,16 +804,21 @@ impl Storage {
             Some(bytes) => CurrentExpectation::Bytes(bytes),
             None => CurrentExpectation::Missing,
         };
+        let rollback = prepare_replace_rollback(&destination)?;
+        let hook = RefCell::new(hook);
+        let mut stage_hook = |stage| (hook.borrow_mut())(stage);
+        let mut sync_hook = || (hook.borrow_mut())(AtomicWriteStage::ParentDirectorySync);
+        let mut rollback_hook = || (hook.borrow_mut())(AtomicWriteStage::RecoveryRollbackRename);
         atomic_replace_locked(
             &destination,
             &bytes,
             expected_current,
             Some((REGISTRY_MAX_BYTES, &validate_existing)),
             None,
-            &mut |_| Ok(()),
-            &mut || Ok(()),
-            &mut || Ok(()),
-            None,
+            &mut stage_hook,
+            &mut sync_hook,
+            &mut rollback_hook,
+            Some(rollback),
         )?;
         Ok(())
     }
