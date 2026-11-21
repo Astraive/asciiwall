@@ -102,7 +102,7 @@ Raster validation supports top-down 8-bit Gray/RGB/RGBA with sRGB primaries and 
 
 **Consumes and owns:** E01 E02; defines validated ConversionSettings and linear-light preprocessing.
 
-**Produces:** `convert_density(input: RasterFrameView<'_>, glyphs: &GlyphTable, settings: &ConversionSettings, budget: &Budget) -> Result<AsciiFrame, Error>`
+**Produces:** `convert_density(input: RasterFrameView<'_>, glyphs: &GlyphTable, settings: &ConversionSettings, budget: &Budget, resources: &NormalizedRasterResources) -> Result<AsciiFrame, Error>`
 
 **Dependencies:** E01 E02.
 

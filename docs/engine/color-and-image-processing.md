@@ -39,17 +39,24 @@ Premultiplied RGBA is scanned in a cancellable preflight before normalized outpu
 each pixel is charged once for that validation and once for normalization. Straight and opaque
 inputs require only the normalization pass.
 
-The normalizer's raster-byte ceiling covers the checked sum of the borrowed input's minimum
-readable extent, `(height - 1) * row_stride + row_bytes`, and its requested owned normalized pixel
-storage, `width * height * size_of::<LinearPremultipliedRgba>()`. It includes padding between rows
-but excludes trailing bytes after the last pixel. The borrowed input extent is counted once beside
-the distinct output, although the normalizer does not allocate that input buffer. This is an
-operation-local ceiling check: `Budget` stores numeric ceilings only, not a shared reservation or
-process-wide usage. The returned normalized raster remains caller-owned and live after this check;
-any limit across it and other concurrently retained storage belongs to a higher-level owner.
-Unused input backing capacity and allocator overhead or over-allocation are outside this
-extent/request check. The input extent is already included in this operation's calculation and must
-not be subtracted from the budget passed to the normalizer.
+The normalizer's per-operation raster-byte ceiling covers the checked sum of the borrowed input's
+minimum readable extent, `(height - 1) * row_stride + row_bytes`, and its requested owned normalized
+pixel storage, `width * height * size_of::<LinearPremultipliedRgba>()`. It includes padding between
+rows but excludes trailing bytes after the last pixel. The borrowed input extent is counted exactly
+once beside the distinct output, even though the normalizer does not allocate the input buffer.
+`Budget` remains an allocation-free per-operation ceiling; it records no shared or process-wide
+usage.
+
+`NormalizedRasterResources` is a caller-created, clonable shared owner with a separate ceiling for
+concurrently retained normalized output. Normalization reserves the checked output bytes before
+allocation, and the returned `NormalizedRaster` holds that RAII reservation until drop; failed
+allocation, cancellation, and validation errors release it. The shared owner tracks only the
+normalized output it owns, not the borrowed input extent already owned upstream. Density conversion
+APIs take the same owner explicitly so callers can share one ceiling across concurrent operations.
+
+Unused input backing capacity and allocator overhead or over-allocation are outside these logical
+extent/request checks. The input extent is already included in the per-operation calculation and
+must not be subtracted from the `Budget` passed to the normalizer.
 
 ## Alpha
 
