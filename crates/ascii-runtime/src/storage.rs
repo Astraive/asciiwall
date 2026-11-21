@@ -9,12 +9,15 @@
 //!
 //! Construct [`DirectoryInputs`] explicitly (or use [`DirectoryInputs::current`]), resolve
 //! [`StorageRoots`], and pass them to [`Storage`]. [`Storage::load_registry`] and
-//! [`Storage::save_registry`] operate on the single versioned install registry. Config callers own
-//! schema validation: [`ValidatedConfig::from_json`] and [`Storage::load_config`] require the caller's
-//! validator; [`Storage::save_config`] uses the same validator to decide whether the current file can
-//! replace `settings.json.last-good`. Invalid, unparseable, or oversized current files never
-//! overwrite that backup. The `*_with_hook` variants expose [`AtomicWriteStage`] boundaries for
-//! deterministic interruption injection; failed in-process writes remove their owned temporary.
+//! [`Storage::save_registry`] operate on the single versioned install registry. Settings use
+//! `settings.toml`: [`ParsedToml::from_toml`] validates bounded TOML syntax only, while
+//! [`Storage::load_config`] and [`Storage::save_config`] invoke the caller-owned schema validator.
+//! Ordinary settings saves reject invalid or unsupported current settings before touching either the
+//! destination or `settings.toml.last-good`; registry saves likewise reject invalid or unsupported
+//! current registries before replacement. [`Storage::restore_config_from_backup`] is the explicit
+//! settings recovery path and never replaces the last-good file. The `*_with_hook` variants expose
+//! [`AtomicWriteStage`] boundaries for deterministic interruption injection; failed in-process
+//! writes remove their owned temporary.
 //!
 //! [`ImportJournal`] accepts only staged→verified/abandoned and verified→committed/abandoned
 //! transitions, serialized across callers sharing its journal directory. [`ImportJournal::recover`]
@@ -28,6 +31,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use toml::Value as TomlValue;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
@@ -532,58 +536,45 @@ fn is_safe_relative_path(value: &str) -> bool {
         })
 }
 
-/// Configuration JSON that has passed the caller's schema/business validator.
+/// Bounded TOML syntax tree; this type does not imply that application settings passed schema validation.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ValidatedConfig {
-    value: Value,
+pub struct ParsedToml {
+    value: TomlValue,
+    bytes: Vec<u8>,
 }
 
-impl ValidatedConfig {
-    /// Parses JSON, rejects persisted cursor/window histories, then invokes the owning schema validator.
-    pub fn from_json<E: fmt::Display>(
-        bytes: &[u8],
-        validate: impl FnOnce(&Value) -> Result<(), E>,
-    ) -> Result<Self, StorageError> {
-        if bytes.len() as u64 > CONFIG_MAX_BYTES {
-            return Err(StorageError::InvalidConfiguration(
-                "configuration exceeds size limit".into(),
-            ));
-        }
-        let value: Value = serde_json::from_slice(bytes)?;
-        validate_config_safety(&value)?;
-        validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
-        Ok(Self { value })
+impl ParsedToml {
+    /// Parses a bounded TOML document without imposing settings keys or application defaults.
+    pub fn from_toml(bytes: &[u8]) -> Result<Self, StorageError> {
+        Self::from_owned_toml(bytes.to_vec())
     }
 
-    /// Returns the validated JSON value without transferring ownership.
-    pub fn value(&self) -> &Value {
+    fn from_owned_toml(bytes: Vec<u8>) -> Result<Self, StorageError> {
+        let value = parse_toml_value(&bytes)?;
+        Ok(Self { value, bytes })
+    }
+
+    /// Returns the TOML syntax tree; callers still own application-schema validation.
+    pub fn value(&self) -> &TomlValue {
         &self.value
     }
-}
 
-fn validate_config_safety(value: &Value) -> Result<(), StorageError> {
-    match value {
-        Value::Object(object) => {
-            for (key, nested) in object {
-                if is_history_key(key) {
-                    return Err(StorageError::InvalidConfiguration(
-                        "cursor and window geometry histories must not be persisted".into(),
-                    ));
-                }
-                validate_config_safety(nested)?;
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                validate_config_safety(item)?;
-            }
-        }
-        _ => {}
+    /// Returns the original bounded TOML bytes without reserialization.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
     }
-    Ok(())
 }
 
-/// Authoritative local state paths and atomic JSON/configuration operations.
+fn parse_toml_value(bytes: &[u8]) -> Result<TomlValue, StorageError> {
+    if bytes.len() as u64 > CONFIG_MAX_BYTES {
+        return Err(StorageError::DocumentTooLarge);
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
+    toml::from_str(text).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))
+}
+
+/// Authoritative local state paths and atomic registry/settings operations.
 #[derive(Clone, Debug)]
 pub struct Storage {
     roots: StorageRoots,
@@ -603,11 +594,11 @@ impl Storage {
     }
 
     pub fn config_path(&self) -> PathBuf {
-        self.roots.config.join("settings.json")
+        self.roots.config.join("settings.toml")
     }
 
     pub fn config_backup_path(&self) -> PathBuf {
-        self.roots.config.join("settings.json.last-good")
+        self.roots.config.join("settings.toml.last-good")
     }
 
     /// Reads the sole authoritative registry. A missing file means a new empty installation.
@@ -621,7 +612,7 @@ impl Storage {
         Ok(registry)
     }
 
-    /// Atomically replaces the versioned registry; there is no second authority or backup registry.
+    /// Atomically replaces the registry only after existing bytes pass version and integrity checks.
     pub fn save_registry(&self, registry: &InstallRegistry) -> Result<(), StorageError> {
         self.save_registry_with_hook(registry, |_| Ok(()))
     }
@@ -634,52 +625,91 @@ impl Storage {
     ) -> Result<(), StorageError> {
         registry.validate()?;
         let bytes = json_bytes_bounded(registry, REGISTRY_MAX_BYTES)?;
-        atomic_replace(&self.registry_path(), &bytes, None, &mut hook)?;
+        let validate_existing = |current: &[u8]| {
+            let current: InstallRegistry = serde_json::from_slice(current)?;
+            current.validate()
+        };
+        atomic_replace(
+            &self.registry_path(),
+            &bytes,
+            Some((REGISTRY_MAX_BYTES, &validate_existing)),
+            None,
+            &mut hook,
+        )?;
         Ok(())
     }
 
-    /// Loads and validates configuration with the caller-owned schema validator.
+    /// Parses settings TOML and applies the caller-owned schema validator.
     pub fn load_config<E: fmt::Display>(
         &self,
-        validate: impl FnOnce(&Value) -> Result<(), E>,
-    ) -> Result<Option<ValidatedConfig>, StorageError> {
+        validate: impl FnOnce(&TomlValue) -> Result<(), E>,
+    ) -> Result<Option<ParsedToml>, StorageError> {
         let bytes = match read_optional_bounded(&self.config_path(), CONFIG_MAX_BYTES)? {
             Some(bytes) => bytes,
             None => return Ok(None),
         };
-        ValidatedConfig::from_json(&bytes, validate).map(Some)
+        let config = ParsedToml::from_owned_toml(bytes)?;
+        validate(config.value())
+            .map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
+        Ok(Some(config))
     }
 
-    /// Writes a configuration and backs up the previous file only when the caller's
-    /// schema validator accepts both the new and previous documents.
+    /// Writes TOML and updates last-good only after both schemas accept the new and current documents.
     pub fn save_config<E: fmt::Display>(
         &self,
-        config: &ValidatedConfig,
-        validate: impl Fn(&Value) -> Result<(), E>,
+        config: &ParsedToml,
+        validate: impl Fn(&TomlValue) -> Result<(), E>,
     ) -> Result<(), StorageError> {
         self.save_config_with_hook(config, validate, |_| Ok(()))
     }
 
-    /// Configuration counterpart of [`Self::save_config`] with injectable interruption boundaries.
+    /// TOML counterpart of [`Self::save_config`] with injectable interruption boundaries.
     /// Returning an error from `hook` simulates failure at that boundary; failed writes remove their
     /// owned temporary sibling, and the destination is complete on either side of the atomic rename.
     pub fn save_config_with_hook<E: fmt::Display>(
         &self,
-        config: &ValidatedConfig,
-        validate: impl Fn(&Value) -> Result<(), E>,
+        config: &ParsedToml,
+        validate: impl Fn(&TomlValue) -> Result<(), E>,
         mut hook: impl FnMut(AtomicWriteStage) -> io::Result<()>,
     ) -> Result<(), StorageError> {
-        validate(&config.value)
+        validate(config.value())
             .map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
-        let bytes = json_bytes_bounded(&config.value, CONFIG_MAX_BYTES)?;
+        let validate_existing = |bytes: &[u8]| {
+            let value = parse_toml_value(bytes)?;
+            validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))
+        };
         let backup_path = self.config_backup_path();
-        let validate_backup = |value: &Value| validate(value).is_ok();
         atomic_replace(
             &self.config_path(),
-            &bytes,
-            Some((&backup_path, &validate_backup)),
+            config.as_bytes(),
+            Some((CONFIG_MAX_BYTES, &validate_existing)),
+            Some((&backup_path, (CONFIG_MAX_BYTES, &validate_existing))),
             &mut hook,
         )?;
+        Ok(())
+    }
+
+    /// Explicitly restores the schema-valid last-good TOML without changing the backup.
+    pub fn restore_config_from_backup<E: fmt::Display>(
+        &self,
+        validate: impl FnOnce(&TomlValue) -> Result<(), E>,
+    ) -> Result<(), StorageError> {
+        let destination = self.config_path();
+        let parent = destination
+            .parent()
+            .ok_or(StorageError::InvalidDirectories(
+                "state file has no parent directory",
+            ))?;
+        create_directory_durable(parent)?;
+        let _guard = DirectoryLock::new(parent).lock()?;
+        let backup = self.config_backup_path();
+        let bytes = read_optional_bounded(&backup, CONFIG_MAX_BYTES)?.ok_or_else(|| {
+            StorageError::InvalidConfiguration("last-good settings are missing".into())
+        })?;
+        let value = parse_toml_value(&bytes)?;
+        validate(&value)
+            .map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
+        atomic_replace_locked(&destination, &bytes, None, None, &mut |_| Ok(()))?;
         Ok(())
     }
 }
@@ -742,11 +772,13 @@ fn read_optional_bounded(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, Sto
     Ok(Some(bytes))
 }
 
-type AtomicBackup<'a> = (&'a Path, &'a dyn Fn(&Value) -> bool);
+type ExistingValidator<'a> = (u64, &'a dyn Fn(&[u8]) -> Result<(), StorageError>);
+type AtomicBackup<'a> = (&'a Path, ExistingValidator<'a>);
 
 fn atomic_replace(
     destination: &Path,
     bytes: &[u8],
+    validate_existing: Option<ExistingValidator<'_>>,
     backup: Option<AtomicBackup<'_>>,
     hook: &mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
 ) -> Result<(), StorageError> {
@@ -758,13 +790,14 @@ fn atomic_replace(
     create_directory_durable(parent)?;
     let directory_lock = DirectoryLock::new(parent);
     let _guard = directory_lock.lock()?;
-    atomic_replace_locked(destination, bytes, backup, hook)
+    atomic_replace_locked(destination, bytes, validate_existing, backup, hook)
 }
 
 /// Atomically replaces state while the caller holds the destination directory lock.
 fn atomic_replace_locked(
     destination: &Path,
     bytes: &[u8],
+    validate_existing: Option<ExistingValidator<'_>>,
     backup: Option<AtomicBackup<'_>>,
     hook: &mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
 ) -> Result<(), StorageError> {
@@ -773,6 +806,13 @@ fn atomic_replace_locked(
         .ok_or(StorageError::InvalidDirectories(
             "state file has no parent directory",
         ))?;
+    let previous = match validate_existing {
+        Some((limit, validate)) => read_guarded_state(destination, limit, validate)?,
+        None => None,
+    };
+    if let Some((backup_path, (limit, validate))) = backup {
+        read_guarded_state(backup_path, limit, validate)?;
+    }
     let mut temporary = create_sibling_temp(destination, "state")?;
     hook(AtomicWriteStage::TemporaryCreated)?;
     temporary.file_mut().write_all(bytes)?;
@@ -781,28 +821,27 @@ fn atomic_replace_locked(
     temporary.close();
     hook(AtomicWriteStage::TemporarySynced)?;
 
-    if let Some((backup_path, validate_backup)) = backup {
-        let previous = match read_optional_bounded(destination, CONFIG_MAX_BYTES) {
-            Ok(bytes) => bytes,
-            Err(StorageError::DocumentTooLarge) => None,
-            Err(error) => return Err(error),
-        };
-        if let Some(old_bytes) = previous {
-            let old_config_is_valid = match serde_json::from_slice::<Value>(&old_bytes) {
-                Ok(value) => validate_config_safety(&value).is_ok() && validate_backup(&value),
-                Err(_) => false,
-            };
-            if old_config_is_valid {
-                atomic_replace_locked(backup_path, &old_bytes, None, &mut |_| Ok(()))?;
-                hook(AtomicWriteStage::BackupReplaced)?;
-            }
-        }
+    if let (Some((backup_path, _)), Some(old_bytes)) = (backup, previous.as_deref()) {
+        atomic_replace_locked(backup_path, old_bytes, None, None, &mut |_| Ok(()))?;
+        hook(AtomicWriteStage::BackupReplaced)?;
     }
     fs::rename(temporary.path(), destination)?;
     temporary.disarm();
     sync_parent_directory(parent)?;
     hook(AtomicWriteStage::TargetReplaced)?;
     Ok(())
+}
+
+fn read_guarded_state(
+    path: &Path,
+    limit: u64,
+    validate: &dyn Fn(&[u8]) -> Result<(), StorageError>,
+) -> Result<Option<Vec<u8>>, StorageError> {
+    let bytes = read_optional_bounded(path, limit)?;
+    if let Some(bytes) = bytes.as_deref() {
+        validate(bytes)?;
+    }
+    Ok(bytes)
 }
 
 struct OwnedTempFile {
@@ -1212,6 +1251,7 @@ impl ImportJournal {
         atomic_replace_locked(
             path,
             &json_bytes_bounded(record, JOURNAL_MAX_BYTES)?,
+            None,
             None,
             &mut |_| Ok(()),
         )?;
