@@ -84,6 +84,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [COR-008] Require explicit settings recovery to compare the caller's current-byte revision under
   the directory lock; stale restores return `StaleConfiguration` without changing current settings
   or last-good.
+- [COR-008] Reject recursive history-key paths in last-good recovery, including nested and dotted
+  names such as `cursor.history`, without changing current settings or backup bytes.
 - [COR-008] Reject duplicate package identifiers in persisted install-registry JSON during load and
   save validation, preserving the original bytes on either rejection.
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
