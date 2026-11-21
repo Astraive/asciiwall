@@ -464,7 +464,7 @@ impl Drop for WriterLock {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum StoreError {
     Io {
         operation: StoreOperation,
@@ -500,6 +500,38 @@ impl StoreError {
             operation,
             kind: error.kind(),
             message,
+        }
+    }
+}
+impl std::fmt::Debug for StoreError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io {
+                operation,
+                kind,
+                message,
+            } => formatter
+                .debug_struct("Io")
+                .field("operation", operation)
+                .field("kind", kind)
+                .field("message", message)
+                .finish(),
+            Self::TooLarge { limit, actual } => formatter
+                .debug_struct("TooLarge")
+                .field("limit", limit)
+                .field("actual", actual)
+                .finish(),
+            Self::Stale { current } => formatter
+                .debug_struct("Stale")
+                .field("current", &current.as_ref().map(|_| "[REDACTED]"))
+                .finish(),
+            Self::TemporaryNameExhausted => formatter.write_str("TemporaryNameExhausted"),
+            Self::CommitIndeterminate { cause, rollback } => formatter
+                .debug_struct("CommitIndeterminate")
+                .field("cause", cause)
+                .field("rollback", rollback)
+                .finish(),
+            Self::Injected(stage) => formatter.debug_tuple("Injected").field(stage).finish(),
         }
     }
 }
@@ -763,5 +795,33 @@ mod tests {
         ));
         assert_eq!(fs::read(&path).unwrap(), b"last-valid-main");
         assert_eq!(fs::read(&backup).unwrap(), b"last-valid-main");
+    }
+
+    #[test]
+    fn stale_error_debug_and_display_redact_current_bytes() {
+        let secret = b"settings-secret-marker";
+        let error = StoreError::Stale {
+            current: Some(secret.to_vec()),
+        };
+        let config_error = crate::error::ConfigError::from(error.clone());
+        let raw_bytes = format!("{:?}", secret.to_vec());
+        let formatted = [
+            format!("{error:?}"),
+            format!("{error}"),
+            format!("{config_error:?}"),
+            format!("{config_error}"),
+        ];
+
+        for output in &formatted {
+            assert!(!output.contains("settings-secret-marker"));
+            assert!(!output.contains(&raw_bytes));
+            assert!(output.contains("[REDACTED]"));
+        }
+        assert_eq!(
+            error,
+            StoreError::Stale {
+                current: Some(secret.to_vec())
+            }
+        );
     }
 }
