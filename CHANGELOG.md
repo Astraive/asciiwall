@@ -63,7 +63,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   retained concurrent log records through rotation without loss or corruption.
 - [COR-008] Bound diagnostic logs to 16 files of at most 16 MiB each and 64 KiB per record; bound
   portable-export traversal and serialized output, reject over-budget exports without partial data,
-  and redact single-label host-and-port endpoints such as `buildhost:9000`.
+  and redact single-label host-and-port endpoints such as `buildhost:9000` with trailing sentence
+  or angle punctuation while retaining non-endpoint text.
 - [COR-008] Filter bare `host` keys from portable exports so single-label machine names such as
   `buildhost` cannot survive under a generic field name.
 - [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
