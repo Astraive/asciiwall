@@ -1,11 +1,11 @@
 # Current M1 gate receipt
 
-The current immutable receipt is [`signoff-revision-5-2026-11-22.json`](signoff-revision-5-2026-11-22.json) (draft-8, recorded 2026-11-22).
+The current immutable receipt is [`signoff-revision-6-2026-11-22.json`](signoff-revision-6-2026-11-22.json) (draft-9, recorded 2026-11-22; SHA-256 `ebab58129748e7e0ea91356e702457390f86b8d0d1f2da4450736184ba24e977`).
 
-[`signoff.json`](signoff.json) remains byte-for-byte historical draft-4; its QA-102/EC-010 `PASS` came from stale PR #305 evidence and is superseded. Revisions 2, 3, and 4 remain immutable historical snapshots; revision 4's PR #337 OPEN/DRAFT status is superseded by the closure recorded in revision 5.
+[`signoff.json`](signoff.json) remains byte-for-byte historical draft-4; its QA-102/EC-010 `PASS` came from stale PR #305 evidence and is superseded. Revisions 2–5 remain immutable; revision 5 SHA-256 is `e5c816fc571ce7c233c34a8547f09e9fcad35b07086d6c198187498ace16230b`, and the pre-revision-6 `CURRENT.md` SHA-256 was `3981cb1c9354ff209368c1e492da62405bbdbdc8509ac506be39ee59b0714dac`.
 
-Revision 5 records PR #337 CLOSED without merge at exact head `01e9a1f290526ca8748eac9411ece3ba84ad3d3f` (parent `6bb7c004adc2180436053d75d7896cc136ed3907`, based on main `7552713a9c8b4515904d3e562c8b1c188a9d8676`). Component run `44917321240` passed only at the parent, not the closed docs-only head. Preflight confirmed active replacement PR #341 OPEN/DRAFT at exact head `e283576e17b87769d21982bf4b07cbc6c15b9b32`, based on main `7552713a9c8b4515904d3e562c8b1c188a9d8676`; issue #78 remains OPEN.
+Revision 6 records PR #313 pre-edit OPEN/DRAFT at `75443581d73f80ab32d5555ec1873b04031ffff8`, based on main `7552713a9c8b4515904d3e562c8b1c188a9d8676`; it records PR #341 OPEN/DRAFT at `e283576e17b87769d21982bf4b07cbc6c15b9b32` on the same base. Issue #78 and issue #211 remain OPEN.
 
-EC-010 execution remains `NOT RUN` and acceptance `BLOCKED` until an execution receipt exists for the current fixture/scenario. Component CI run `44940619318` is not authenticated scenario acceptance.
+Portable EC-010 decoder-budget execution at PR #341 head `e283576e17b87769d21982bf4b07cbc6c15b9b32` is a narrow `PASS`: rejection before full decoded-output allocation only, not before any allocation. QA-102 and M1 acceptance remain `BLOCKED`; EC-009 remains NOT RUN, and QA-004 integration, required reviewer/owner sign-off, native/manual evidence, and full scenario acceptance remain outstanding.
 
-Current main is `7552713a9c8b4515904d3e562c8b1c188a9d8676`; the historical candidate snapshot remains `539ed2bd3493cb97ded00820f3f8bb7e9e280bea` and its 2026-11-16 observations are unchanged. The global decision remains `no-go`; M1 completion is not claimed and required independent sign-offs remain pending.
+Current main is `7552713a9c8b4515904d3e562c8b1c188a9d8676`; the historical candidate snapshot remains `539ed2bd3493cb97ded00820f3f8bb7e9e280bea` and its 2026-11-16 observations are unchanged. Global disposition remains no-go, `m1_completion_claimed=false`, and required independent sign-offs remain pending.
