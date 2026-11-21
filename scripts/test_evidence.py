@@ -1456,6 +1456,71 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(unrelated.read_bytes(), b"keep")
 
     @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
+    def test_prune_reports_completed_removal_when_later_ntfs_candidate_is_replaced(self):
+        import evidence_windows
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            root = Path(temporary)
+            archive = root / "archive"
+            archive.mkdir()
+            older = evidence.finalize_record(base_record(date="2026-11-12"))
+            newer_expired = evidence.finalize_record(base_record(date="2026-11-13"))
+            retained = evidence.finalize_record(base_record(date="2026-11-14"))
+            older_name = f"qa-evidence-{older['record_id']}.json"
+            newer_expired_name = f"qa-evidence-{newer_expired['record_id']}.json"
+            retained_name = f"qa-evidence-{retained['record_id']}.json"
+            older_path = archive / older_name
+            newer_expired_path = archive / newer_expired_name
+            retained_path = archive / retained_name
+            older_path.write_bytes(evidence.canonical_json(older))
+            newer_expired_path.write_bytes(evidence.canonical_json(newer_expired))
+            retained_bytes = evidence.canonical_json(retained)
+            retained_path.write_bytes(retained_bytes)
+            unrelated = archive / "unrelated.bin"
+            unrelated.write_bytes(b"keep")
+            replacement_path = root / "replacement.bin"
+            replacement_bytes = b"replacement must remain"
+            replacement_path.write_bytes(replacement_bytes)
+            moved_path = root / "moved-original.json"
+            original_open_file = evidence_windows.Directory.open_file
+            attempted = False
+            mutation_denied = False
+            replaced = False
+
+            def replace_later_candidate(directory, name, *, for_delete=False):
+                nonlocal attempted, mutation_denied, replaced
+                if for_delete and name == older_name and not attempted:
+                    attempted = True
+                    try:
+                        older_path.rename(moved_path)
+                        replacement_path.rename(older_path)
+                    except OSError:
+                        mutation_denied = True
+                        if moved_path.exists() and not older_path.exists():
+                            moved_path.rename(older_path)
+                    else:
+                        replaced = True
+                return original_open_file(directory, name, for_delete=for_delete)
+
+            with patch.object(evidence_windows.Directory, "open_file", new=replace_later_candidate):
+                with self.assertRaises(evidence.EvidenceError) as raised:
+                    evidence.prune_archive(archive, keep=1)
+
+            self.assertTrue(attempted)
+            self.assertTrue(replaced)
+            self.assertFalse(mutation_denied)
+            self.assertEqual(
+                str(raised.exception),
+                f"archive changed during pruning of expired artifact {older_name}; "
+                f"already removed 1 expired archive artifact(s): {newer_expired_name}",
+            )
+            self.assertFalse(newer_expired_path.exists())
+            self.assertEqual(older_path.read_bytes(), replacement_bytes)
+            self.assertEqual(moved_path.read_bytes(), evidence.canonical_json(older))
+            self.assertEqual(retained_path.read_bytes(), retained_bytes)
+            self.assertEqual(unrelated.read_bytes(), b"keep")
+
+    @unittest.skipUnless(os.name == "nt", "uses the NTFS anchored-directory integration")
     def test_prune_rejects_duplicate_windows_names_before_deletion(self):
         import evidence_windows
 

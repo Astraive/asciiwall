@@ -1619,50 +1619,58 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                 break
         removed: list[str] = []
         kept: dict[str, int] = {}
-        for kind, _ in patterns:
-            candidates = sorted(valid[kind], key=lambda item: (item[0], item[1]), reverse=True)
-            kept[kind] = min(len(candidates), keep)
-            for _, _, name, snapshot, digest in candidates[keep:]:
-                try:
-                    if os.name == "nt":
-                        # Reopen without write/delete sharing, then re-read through
-                        # the very handle used for deletion. Both the object
-                        # snapshot and the bytes must match the validated scan.
-                        with directory_fd.open_file(name, for_delete=True) as artifact:
-                            try:
-                                raw, current = _read_windows_regular(artifact)
-                            except EvidenceError as exc:
-                                raise EvidenceError(
-                                    f"archive changed during pruning of expired artifact {name}"
-                                ) from exc
-                            if current != snapshot or sha256_bytes(raw) != digest:
+        try:
+            for kind, _ in patterns:
+                candidates = sorted(valid[kind], key=lambda item: (item[0], item[1]), reverse=True)
+                kept[kind] = min(len(candidates), keep)
+                for _, _, name, snapshot, digest in candidates[keep:]:
+                    try:
+                        if os.name == "nt":
+                            # Reopen without write/delete sharing, then re-read through
+                            # the very handle used for deletion. Both the object
+                            # snapshot and the bytes must match the validated scan.
+                            with directory_fd.open_file(name, for_delete=True) as artifact:
+                                try:
+                                    raw, current = _read_windows_regular(artifact)
+                                except EvidenceError as exc:
+                                    raise EvidenceError(
+                                        f"archive changed during pruning of expired artifact {name}"
+                                    ) from exc
+                                if current != snapshot or sha256_bytes(raw) != digest:
+                                    raise EvidenceError(
+                                        f"archive changed during pruning of expired artifact {name}"
+                                    )
+                                if not artifact.delete(snapshot):
+                                    raise EvidenceError(
+                                        f"archive changed during pruning of expired artifact {name}"
+                                    )
+                        else:
+                            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                            if not _same_file_snapshot(snapshot, current):
                                 raise EvidenceError(
                                     f"archive changed during pruning of expired artifact {name}"
                                 )
-                            if not artifact.delete(snapshot):
-                                raise EvidenceError(
-                                    f"archive changed during pruning of expired artifact {name}"
-                                )
-                    else:
-                        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-                        if not _same_file_snapshot(snapshot, current):
+                            # POSIX cannot unlink an entry conditional on its inode.
+                            # Refuse the deletion rather than risk removing a same-name
+                            # replacement installed after the snapshot check.
                             raise EvidenceError(
-                                f"archive changed during pruning of expired artifact {name}"
+                                "cannot safely prune expired artifacts on POSIX: "
+                                "atomic compare-and-unlink is unavailable"
                             )
-                        # POSIX cannot unlink an entry conditional on its inode.
-                        # Refuse the deletion rather than risk removing a same-name
-                        # replacement installed after the snapshot check.
+                    except FileNotFoundError as exc:
                         raise EvidenceError(
-                            "cannot safely prune expired artifacts on POSIX: "
-                            "atomic compare-and-unlink is unavailable"
-                        )
-                except FileNotFoundError as exc:
-                    raise EvidenceError(
-                        f"expired artifact disappeared during pruning: {name}"
-                    ) from exc
-                except OSError as exc:
-                    raise EvidenceError("cannot remove an expired evidence artifact") from exc
-                removed.append(name)
+                            f"expired artifact disappeared during pruning: {name}"
+                        ) from exc
+                    except OSError as exc:
+                        raise EvidenceError("cannot remove an expired evidence artifact") from exc
+                    removed.append(name)
+        except EvidenceError as exc:
+            if removed:
+                removed_names = ", ".join(sorted(removed))
+                raise EvidenceError(
+                    f"{exc}; already removed {len(removed)} expired archive artifact(s): {removed_names}"
+                ) from exc
+            raise
         return {"kept_by_type": kept, "removed": len(removed), "removed_names": sorted(removed)}
     finally:
         if os.name == "nt":
