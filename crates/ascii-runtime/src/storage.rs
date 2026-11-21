@@ -1033,6 +1033,12 @@ impl ImportJournal {
                 "staging path must be normalized and relative",
             ));
         }
+        // A serialized path includes its UTF-8 bytes, so longer inputs cannot fit the journal.
+        // Reject them before cloning; the bounded writer still checks the complete record.
+        if staging_path.len() > usize::try_from(JOURNAL_MAX_BYTES).unwrap_or(usize::MAX) {
+            return Err(StorageError::DocumentTooLarge);
+        }
+
         let path = self.record_path(transaction_id)?;
         create_directory_durable(&self.staging_root)?;
         let _guard = self.directory_lock.lock()?;
