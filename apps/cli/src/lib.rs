@@ -149,22 +149,25 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), ExecutionEr
     if config.is_some() {
         return Err(CliError::capability(
             "configuration loading requires the shared settings registry",
-        ).into());
+        )
+        .into());
     }
     if request.matcher == Matcher::Structural {
-        return Err(CliError::capability(
-            "structural matching is not available in this build",
-        ).into());
+        return Err(
+            CliError::capability("structural matching is not available in this build").into(),
+        );
     }
     if request.color == Color::Source {
         return Err(CliError::capability(
             "source-color density conversion is not available in this build",
-        ).into());
+        )
+        .into());
     }
     if format == Format::Png {
         return Err(CliError::capability(
             "PNG still export requires the shared renderer's PNG export provider",
-        ).into());
+        )
+        .into());
     }
     if cancellation.is_cancelled() {
         return Err(CliError::cancelled("conversion was cancelled").into());
@@ -216,7 +219,8 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), ExecutionEr
         Format::Png => {
             return Err(CliError::capability(
                 "PNG still export requires the shared renderer's PNG export provider",
-            ).into());
+            )
+            .into());
         }
     };
     let exported =
