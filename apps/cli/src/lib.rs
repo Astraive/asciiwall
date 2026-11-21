@@ -346,6 +346,9 @@ fn publish_error(error: output::PublishError) -> CliError {
         output::PublishError::Cancelled => {
             CliError::cancelled("conversion was cancelled before output publication")
         }
+        output::PublishError::Io(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            CliError::usage("output already exists; use --overwrite to replace it")
+        }
         output::PublishError::Io(error) if error.kind() == io::ErrorKind::PermissionDenied => {
             CliError::permission("cannot write conversion output")
         }
@@ -393,7 +396,7 @@ mod tests {
 
     use ascii_core::CancellationToken;
 
-    use super::{publish_stdout, write_success_status};
+    use super::{publish_error, publish_stdout, write_success_status};
 
     struct FailOnNewline {
         bytes: Vec<u8>,
@@ -436,6 +439,17 @@ mod tests {
         assert_eq!(error.category, "cancelled");
         assert_eq!(error.exit, 10);
         assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn publication_existing_output_race_is_usage_conflict() {
+        let error = publish_error(crate::output::PublishError::Io(io::Error::from(
+            io::ErrorKind::AlreadyExists,
+        )));
+
+        assert_eq!(error.code, "cli.usage");
+        assert_eq!(error.exit, 2);
+        assert_eq!(error.message, "output already exists; use --overwrite to replace it");
     }
 
     #[test]
