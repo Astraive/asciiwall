@@ -44,6 +44,11 @@ bytes, not a storage-layer reserialization. Write a bounded sibling temporary fi
 directory-scoped lock; remove the operation's reserved temporary on failure and before retrying an
 interrupted write. Sync the containing directory after replacement and sync each newly created
 directory entry before reporting a first write as durable on platforms that support directory sync.
+
+Settings saves are compare-and-swap writes: callers provide the exact current bytes observed from
+`load_config` or assert that the file was absent. Storage compares this expectation under the same
+directory lock before creating a temporary or rotating `.last-good`; a mismatch returns the typed
+`StaleConfiguration` error without changing either file.
 Ordinary saves never overwrite invalid, unsupported, or oversized current settings and do not rotate
 them into `.last-good`. Explicit recovery can restore a schema-valid `.last-good` to current settings;
 it leaves the backup in place. Recovery refuses a lower integer schema version and fails closed when
