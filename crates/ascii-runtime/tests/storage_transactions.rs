@@ -1405,7 +1405,6 @@ fn portable_export_redacts_user_qualified_home_paths_in_generic_strings() {
     );
 }
 
-
 #[test]
 fn portable_export_filters_bare_host_field_but_preserves_local_backup() {
     let source = json!({"host": "buildhost"});
