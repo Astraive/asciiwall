@@ -126,9 +126,37 @@ def _strip_terminal_controls(value: str) -> str:
     return "".join(output)
 
 
+def _is_bidi_control(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        codepoint == 0x061C
+        or 0x200E <= codepoint <= 0x200F
+        or 0x202A <= codepoint <= 0x202E
+        or 0x2066 <= codepoint <= 0x2069
+    )
+
+
+def _escape_bidi_controls(value: str) -> str:
+    output: list[str] | None = None
+    copied = 0
+    for index, character in enumerate(value):
+        if _is_bidi_control(character):
+            if output is None:
+                output = []
+            output.append(value[copied:index])
+            output.append(f"[U+{ord(character):04X}]")
+            copied = index + 1
+    if output is None:
+        return value
+    output.append(value[copied:])
+    return "".join(output)
+
+
 def _is_log_character(character: str) -> bool:
     codepoint = ord(character)
-    return character in "\n\t" or not (codepoint < 32 or 0x7F <= codepoint <= 0x9F)
+    return character in "\n\t" or not (
+        codepoint < 32 or 0x7F <= codepoint <= 0x9F or _is_bidi_control(character)
+    )
 
 
 class EvidenceError(ValueError):
@@ -300,10 +328,11 @@ def sanitize_text(value: str) -> str:
     value = "".join(pieces)
     # Free-text paths have no reliable delimiter: spaces and punctuation can be
     # part of a component. Drop the entire line rather than retain a fragment.
-    return "\n".join(
+    sanitized = "\n".join(
         "[REDACTED-PATH]" if _PRIVATE_PATH_RE.search(line) else line
         for line in value.split("\n")
     )
+    return _escape_bidi_controls(sanitized)
 
 
 def has_private_text(value: str) -> bool:
@@ -1164,7 +1193,11 @@ def sanitize_log(path: Path) -> dict[str, Any]:
     except UnicodeError as exc:
         raise EvidenceError("log input is not valid UTF-8") from exc
     text = _strip_terminal_controls(text).replace("\r\n", "\n").replace("\r", "\n")
-    text = "".join(character for character in text if _is_log_character(character))
+    text = "".join(
+        character
+        for character in text
+        if _is_log_character(character) or _is_bidi_control(character)
+    )
     content = sanitize_text(text)
     if len(content.encode("utf-8")) > MAX_LOG_BYTES:
         raise EvidenceError("sanitized log exceeds the 256 KiB limit")

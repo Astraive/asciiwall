@@ -47,3 +47,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Redact dotted private-field labels and Windows drive-relative paths from sanitized logs and free-text record metadata; document that artifact content still requires human privacy review.
 - Reject recognized synthetic reports in native-manual manifest references, including oversized JSON disguised by leading whitespace; matching hashes do not authenticate native execution.
 - Reject prefixed synthetic evidence with Unicode-escaped markers regardless of prefix quoting in both manifest and direct-artifact inspection ([QA-004]).
+- Visibly escape bidi formatting controls in sanitized evidence metadata and logs before canonical JSON output ([QA-004]).

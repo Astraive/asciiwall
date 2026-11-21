@@ -85,6 +85,32 @@ class EvidenceRecordTests(unittest.TestCase):
         self.assertEqual(evidence.canonical_json(first), evidence.canonical_json(second))
         self.assertEqual(first["record_id"], evidence.record_identity(first))
 
+    def test_record_cli_escapes_bidi_controls_in_canonical_json(self):
+        raw_summary = (
+            "safe \u202eRLO \u2066LRI \u2067RLI \u2068FSI \u2069PDI "
+            "plain text stays readable"
+        )
+        expected_summary = (
+            "safe [U+202E]RLO [U+2066]LRI [U+2067]RLI [U+2068]FSI "
+            "[U+2069]PDI plain text stays readable"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary)
+            payload = json.dumps(base_record(result={"status": "pass", "summary": raw_summary}))
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "record", "-", "--archive", str(archive)],
+                cwd=ROOT, input=payload, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(completed.returncode, 0)
+            result = json.loads(completed.stdout)
+            record_path = archive / f"qa-evidence-{result['record_id']}.json"
+            encoded = record_path.read_bytes()
+            record = json.loads(encoded)
+            self.assertEqual(record["result"]["summary"], expected_summary)
+            self.assertEqual(encoded, evidence.canonical_json(record))
+            for control in ("\u202e", "\u2066", "\u2067", "\u2068", "\u2069"):
+                self.assertNotIn(control, encoded.decode("utf-8"))
+
     def test_canonical_json_rejects_lone_surrogates_as_evidence_errors(self):
         with self.assertRaisesRegex(evidence.EvidenceError, "invalid Unicode"):
             evidence.canonical_json({"invalid": "\ud800"})
@@ -721,6 +747,30 @@ class SyntheticControlsTests(unittest.TestCase):
             "artifact_id": "\ud800",
         }
         self.assertFalse(evidence.validate_log_report(report))
+
+    def test_sanitize_log_cli_escapes_bidi_controls_in_canonical_json(self):
+        raw_content = (
+            "safe \u202eRLO \u2066LRI \u2067RLI \u2068FSI \u2069PDI "
+            "plain text stays readable"
+        )
+        expected_content = (
+            "safe [U+202E]RLO [U+2066]LRI [U+2067]RLI [U+2068]FSI "
+            "[U+2069]PDI plain text stays readable"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "bidi-controls.log"
+            source.write_text(raw_content, encoding="utf-8")
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPT), "sanitize-log", str(source)],
+                cwd=ROOT, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(completed.returncode, 0)
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["content"], expected_content)
+            self.assertTrue(evidence.validate_log_report(report))
+            self.assertEqual(completed.stdout.encode("utf-8"), evidence.canonical_json(report))
+            for control in ("\u202e", "\u2066", "\u2067", "\u2068", "\u2069"):
+                self.assertNotIn(control, completed.stdout)
 
     def test_sanitized_log_discards_truncated_terminal_string_payloads(self):
         with tempfile.TemporaryDirectory() as temporary:
