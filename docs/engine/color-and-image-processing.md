@@ -32,8 +32,10 @@ crop's aspect rather than the full raster, while fixed-pixel surfaces retain flo
 right/bottom leftovers. The detailed density-conversion result carries any material warning from
 normalization (including the sRGB assumption for unknown profile fields) alongside the generated
 frame; callers must surface that warning rather than discard it. Optional retained quality patches
-are bounded by the shared raster/work budgets before allocation, and their zero-initialization is
+are checked against per-operation raster/work ceilings before allocation, and their zero-initialization is
 charged to work and checked for cancellation at bounded intervals.
+
+Patch dimensions are validated at 1–64 samples per axis and at most 4096 values per output cell. The operation preflights aggregate readable-input, normalized-raster, retained-patch and descriptor bytes together with sampling, zero-initialization, descriptor, and final-frame work before allocating patch/output vectors; cancellation is checked through initialization and sampling. A failed or cancelled call publishes no partial result.
 
 Premultiplied RGBA is scanned in a cancellable preflight before normalized output is allocated;
 each pixel is charged once for that validation and once for normalization. Straight and opaque
