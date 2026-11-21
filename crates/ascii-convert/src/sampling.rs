@@ -1261,10 +1261,7 @@ impl<'a> SamplingSource<'a> {
             return Err(Error::Unsupported(ascii_core::UnsupportedReason::Orientation).into());
         }
 
-        let bytes_per_pixel = match (
-            view.format().channels(),
-            view.format().sample_depth_bits(),
-        ) {
+        let bytes_per_pixel = match (view.format().channels(), view.format().sample_depth_bits()) {
             (ascii_core::PixelChannels::Gray, 8) => 1usize,
             (ascii_core::PixelChannels::Rgb, 8) => 3,
             (ascii_core::PixelChannels::Rgba, 8) => 4,
