@@ -115,3 +115,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   file paths while preserving harmless prose and slash-separated text; add public export coverage.
 - [COR-008] Retain the pre-recovery settings copy when rollback rename fails and expose its path in a
   typed error; deterministic public fault injection verifies the copy remains recoverable.
+- [COR-008] Redact extensionless relative paths beneath recognized local directories in generic
+  portable-export strings while preserving ordinary slash prose; add embedded path coverage.
