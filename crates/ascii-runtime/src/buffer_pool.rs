@@ -30,7 +30,7 @@ static NEXT_POOL_IDENTITY: AtomicU64 = AtomicU64::new(1);
 /// Allocates a process-unique identity without wrapping and reusing an earlier value.
 fn allocate_pool_identity() -> Result<u64, RuntimeError> {
     NEXT_POOL_IDENTITY
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |identity| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |identity| {
             if identity == 0 {
                 None
             } else if identity == u64::MAX {
