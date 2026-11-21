@@ -24,7 +24,8 @@ pub struct Cli {
     /// Request additional diagnostics on stderr.
     #[arg(long, global = true)]
     pub verbose: bool,
-    /// Read application settings from this path (requires the settings registry).
+    /// Read application settings from this path; the settings registry is unavailable in this build.
+    /// A valid `convert` invocation using `--config` returns a capability error (exit 4).
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
     /// Disable diagnostic color; explicit ANSI artwork is unaffected.

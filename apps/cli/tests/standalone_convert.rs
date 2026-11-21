@@ -80,6 +80,10 @@ fn help_describes_headless_convert_and_missing_integrations() {
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("convert"));
     assert!(help.contains("not yet available"));
+    assert!(help.contains("--config"));
+    assert!(help.contains("unavailable in this build"));
+    assert!(help.contains("capability error"));
+    assert!(help.contains("exit 4"));
     let output = run(["convert", "--help"]);
     assert_eq!(status(&output), 0);
     let help = String::from_utf8(output.stdout).unwrap();
