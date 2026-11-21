@@ -372,9 +372,11 @@ fn future_documents_exceeding_limits_remain_read_only_and_unchanged() {
 
     let directory = TestDirectory::new();
     let oversized = {
-        let mut bytes =
-            format!("schema_version = {}\nrevision = 0\n", CURRENT_SCHEMA_VERSION + 1)
-                .into_bytes();
+        let mut bytes = format!(
+            "schema_version = {}\nrevision = 0\n",
+            CURRENT_SCHEMA_VERSION + 1,
+        )
+        .into_bytes();
         bytes.resize(crate::MAX_CONFIG_BYTES + 1, b' ');
         bytes
     };
@@ -452,8 +454,5 @@ fn controller_revision_overflow_preserves_snapshot_and_persisted_bytes() {
     );
     assert!(matches!(result, Err(ConfigError::RevisionOverflow)));
     assert_eq!(controller.snapshot().unwrap(), before);
-    assert_eq!(
-        fs::read(path).unwrap().as_slice(),
-        original.as_bytes()
-    );
+    assert_eq!(fs::read(path).unwrap().as_slice(), original.as_bytes());
 }

@@ -279,7 +279,10 @@ impl SettingsController {
                 schema_version: *schema_version,
             });
         }
-        if matches!(&state.status, ControllerStatus::ReadOnlyUnclassifiableDocument(_)) {
+        if matches!(
+            &state.status,
+            ControllerStatus::ReadOnlyUnclassifiableDocument(_)
+        ) {
             return Err(ConfigError::ReadOnlyUnclassifiableDocument);
         }
         ensure_expected(expected_revision, state.snapshot.revision)?;

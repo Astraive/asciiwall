@@ -519,9 +519,9 @@ fn future_schema_and_unclassifiable_documents_are_read_only() {
     let repair = SettingsController::open(&corrupt_path, registry()).unwrap();
     assert!(matches!(
         repair.status().unwrap(),
-        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
-            DocumentError::InvalidUtf8
-        ))
+        ControllerStatus::ReadOnlyUnclassifiableDocument(
+            ConfigError::Document(DocumentError::InvalidUtf8)
+        )
     ));
     assert!(matches!(
         repair.repair(0),
@@ -611,11 +611,10 @@ fn malformed_document_classes_are_rejected_before_snapshot_publication() {
     fs::write(&path, invalid_utf8).unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
-            DocumentError::InvalidUtf8
-        ))
+        ControllerStatus::ReadOnlyUnclassifiableDocument(
+            ConfigError::Document(DocumentError::InvalidUtf8)
+        )
     ));
-
 }
 
 #[test]
@@ -630,9 +629,9 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
     fs::write(&path, nested).unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
-            DocumentError::ExcessiveNesting { .. }
-        ))
+        ControllerStatus::ReadOnlyUnclassifiableDocument(
+            ConfigError::Document(DocumentError::ExcessiveNesting { .. })
+        )
     ));
 
     fs::write(
@@ -642,7 +641,9 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
     .unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::UnknownSetting(_))
+        ControllerStatus::ReadOnlyUnclassifiableDocument(
+            ConfigError::UnknownSetting(_)
+        )
     ));
 
     let session_controller =
@@ -662,8 +663,8 @@ fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
     fs::write(&path, oversized).unwrap();
     assert!(matches!(
         read_status(&path),
-        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
-            DocumentError::TooLarge { .. }
-        ))
+        ControllerStatus::ReadOnlyUnclassifiableDocument(
+            ConfigError::Document(DocumentError::TooLarge { .. })
+        )
     ));
 }
