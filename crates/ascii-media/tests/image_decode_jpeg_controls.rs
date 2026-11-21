@@ -393,6 +393,24 @@ fn baseline_and_progressive_jpegs_decode_with_expected_dimensions_and_pixels() {
 }
 
 #[test]
+fn oversized_jpeg_fixture_is_rejected_by_public_decoder_with_raster_budget_error() {
+    let fixture = include_bytes!("fixtures/ec010-oversized-budget.jpg");
+    assert_fixture_sha256(
+        fixture,
+        "7ea9607205ef59dd2be26c992ced846f679e58501f0462b86abe62c50b59a320",
+    );
+    assert!(fixture.len() < 32 * 1024);
+
+    let mut decode_limits = limits();
+    decode_limits.budget = Budget::new(1 << 20, 1 << 20, 1 << 20);
+    let mut input = Cursor::new(fixture.as_slice());
+    assert_eq!(
+        decode_image(&mut input, &decode_limits, &CancellationToken::new()).unwrap_err(),
+        Error::BudgetExceeded(BudgetKind::RasterBytes)
+    );
+}
+
+#[test]
 fn progressive_scan_work_is_budgeted_in_addition_to_pixel_work() {
     let progressive = fixture_bytes(PROGRESSIVE_JPEG_HEX);
     let mut decode_limits = limits();
