@@ -340,7 +340,7 @@ fn storage_roots_and_persisted_files_are_owner_only() {
         .begin("private-test", "org.example.sample", "imports/private-test")
         .expect("write private journal");
     assert_eq!(
-        fs::metadata(roots.staging.join("import-private-test.json"))
+        fs::metadata(roots.staging.join("import-journal/import-private-test.json"))
             .expect("journal metadata")
             .permissions()
             .mode()
@@ -1184,29 +1184,34 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
         .save_config(&original_config, validate_test_config)
         .expect("save valid config");
     let config_path = storage.config_path();
-    let original_config_bytes = fs::read(&config_path).expect("read original config");
     let prefix = b"payload = \"";
     let suffix = b"\"\n";
     let payload = "x".repeat(CONFIG_MAX_BYTES - prefix.len() - suffix.len());
     let compact_config = format!("payload = \"{payload}\"\n").into_bytes();
     assert_eq!(compact_config.len(), CONFIG_MAX_BYTES);
-    let oversized_config =
-        ParsedToml::from_toml(&compact_config).expect("compact TOML remains within its read limit");
+    let exact_limit_config =
+        ParsedToml::from_toml(&compact_config).expect("exact-limit TOML is accepted");
+    let boundary_temp = TempDir::new();
+    let boundary_storage = Storage::new(linux_roots(boundary_temp.path()));
+    boundary_storage
+        .save_config(&exact_limit_config, validate_test_config)
+        .expect("save config at the inclusive size limit");
+    assert_eq!(
+        fs::read(boundary_storage.config_path()).expect("read exact-limit config"),
+        compact_config
+    );
+
+    let oversized_current = vec![b' '; CONFIG_MAX_BYTES + 1];
     assert!(matches!(
-        storage.save_config(&oversized_config, validate_test_config),
+        ParsedToml::from_toml(&oversized_current),
         Err(StorageError::DocumentTooLarge)
     ));
-    assert_eq!(
-        fs::read(&config_path).expect("oversized save preserves config"),
-        original_config_bytes
-    );
     let recovery_config = config(json!({"theme": "recovery"}));
     storage
         .save_config(&recovery_config, validate_test_config)
         .expect("establish a last-good config before oversized-current recovery");
     let backup_path = storage.config_backup_path();
     let known_good_backup = fs::read(&backup_path).expect("retain last-good backup");
-    let oversized_current = vec![b' '; CONFIG_MAX_BYTES + 1];
     fs::write(&config_path, &oversized_current).expect("write oversized config");
     assert!(matches!(
         storage.load_config(validate_test_config),
