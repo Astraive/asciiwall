@@ -1176,8 +1176,9 @@ fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly()
         known_good_bytes
     );
 
+    let expected_current = fs::read(&config_path).expect("capture current revision for recovery");
     storage
-        .restore_config_from_backup(validate_theme_config)
+        .restore_config_from_backup(Some(&expected_current), validate_theme_config)
         .expect("explicitly restore the validated last-good config");
     assert_eq!(
         fs::read(&config_path).expect("restored config"),
@@ -1187,6 +1188,39 @@ fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly()
         fs::read(&backup_path).expect("explicit recovery preserves last-good"),
         known_good_bytes
     );
+}
+
+#[test]
+fn restore_config_from_backup_rejects_stale_current_revision_without_mutation() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+
+    let initial = config(json!({"theme": "initial"}));
+    save_current_config(&storage, &initial, validate_test_config).expect("save initial settings");
+    let stale_revision = fs::read(storage.config_path()).expect("capture initial revision");
+    let recovery_target = config(json!({"theme": "recovery target"}));
+    save_current_config(&storage, &recovery_target, validate_test_config)
+        .expect("save recovery target");
+    let expected_current = fs::read(storage.config_path()).expect("capture recovery revision");
+    let concurrent_winner = config(json!({"theme": "concurrent winner"}));
+    save_current_config(&storage, &concurrent_winner, validate_test_config)
+        .expect("write newer current settings");
+    let current_before = fs::read(storage.config_path()).expect("current settings bytes");
+    let backup_before = fs::read(storage.config_backup_path()).expect("last-good settings bytes");
+
+    assert!(matches!(
+        storage.restore_config_from_backup(Some(&expected_current), validate_test_config),
+        Err(StorageError::StaleConfiguration)
+    ));
+    assert_eq!(
+        fs::read(storage.config_path()).expect("stale recovery preserves current settings"),
+        current_before
+    );
+    assert_eq!(
+        fs::read(storage.config_backup_path()).expect("stale recovery preserves last-good"),
+        backup_before
+    );
+    assert_ne!(stale_revision, expected_current);
 }
 
 #[test]
@@ -1227,7 +1261,7 @@ fn newer_settings_schema_is_not_replaced_by_older_writer_or_explicit_recovery() 
         known_good_backup
     );
     assert!(matches!(
-        storage.restore_config_from_backup(validate_schema_v1),
+        storage.restore_config_from_backup(Some(&newer[..]), validate_schema_v1),
         Err(StorageError::UnsupportedVersion {
             kind: "settings configuration",
             version: 2
@@ -1265,7 +1299,7 @@ fn restore_rejects_versioned_versionless_comparisons() {
             fs::read(storage.config_backup_path()).expect("last-good settings bytes");
 
         assert!(matches!(
-            storage.restore_config_from_backup(validate_test_config),
+            storage.restore_config_from_backup(Some(&current_before), validate_test_config),
             Err(StorageError::InvalidConfiguration(_))
         ));
         assert_eq!(
@@ -1495,7 +1529,7 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
         known_good_backup
     );
     storage
-        .restore_config_from_backup(validate_test_config)
+        .restore_config_from_backup(Some(&oversized_current), validate_test_config)
         .expect("explicitly restore from last-good");
     assert_eq!(
         storage

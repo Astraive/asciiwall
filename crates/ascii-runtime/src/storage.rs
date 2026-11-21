@@ -12,8 +12,8 @@
 //! [`Storage::save_registry`] operate on the single versioned install registry. Settings use
 //! `settings.toml`: [`ParsedToml::from_toml`] validates bounded TOML syntax only, while
 //! [`Storage::load_config`] and [`Storage::save_config`] invoke the caller-owned schema validator.
-//! Settings saves require the exact current bytes previously observed by the caller (`None` for
-//! absence); stale snapshots fail under the directory lock before temporary or backup mutation.
+//! Settings saves and explicit recovery require the exact current bytes previously observed by the
+//! caller (`None` for absence); stale snapshots fail under the directory lock before any mutation.
 //! Ordinary settings saves reject invalid or unsupported current settings before touching either the
 //! destination or `settings.toml.last-good`; registry saves likewise reject invalid or unsupported
 //! current registries before replacement. [`Storage::restore_config_from_backup`] is the explicit
@@ -768,11 +768,13 @@ impl Storage {
         Ok(())
     }
 
-    /// Explicitly restores schema-valid last-good TOML without changing the backup. A lower
-    /// versioned backup is refused, as is a comparison where only one parseable document is
-    /// versioned.
+    /// Explicitly restores schema-valid last-good TOML only if `expected_current` still matches
+    /// the exact current bytes (or absence) observed by the caller. A stale snapshot returns
+    /// [`StorageError::StaleConfiguration`] before mutation. A lower versioned backup is refused,
+    /// as is a comparison where only one parseable document is versioned.
     pub fn restore_config_from_backup<E: fmt::Display>(
         &self,
+        expected_current: Option<&[u8]>,
         validate: impl FnOnce(&TomlValue) -> Result<(), E>,
     ) -> Result<(), StorageError> {
         let destination = self.config_path();
@@ -782,18 +784,33 @@ impl Storage {
                 "state file has no parent directory",
             ))?;
         create_directory_durable(parent)?;
-        let directory_lock = DirectoryLock::new(parent);
-        let _guard = directory_lock.lock()?;
-
-        let current = match read_optional_bounded(&destination, CONFIG_MAX_BYTES) {
-            Ok(Some(bytes)) => match parse_toml_value(&bytes) {
+        let expected_current = match expected_current {
+            Some(bytes) => CurrentExpectation::Bytes(bytes),
+            None => CurrentExpectation::Missing,
+        };
+        let current_bytes = match read_optional_bounded(&destination, CONFIG_MAX_BYTES) {
+            Ok(bytes) => {
+                if !expected_current_matches(bytes.as_deref(), expected_current) {
+                    return Err(StorageError::StaleConfiguration);
+                }
+                bytes
+            }
+            Err(StorageError::DocumentTooLarge) => {
+                if !current_matches_revision(&destination, expected_current)? {
+                    return Err(StorageError::StaleConfiguration);
+                }
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let current = match current_bytes {
+            Some(bytes) => match parse_toml_value(&bytes) {
                 Ok(value) => Some(value),
                 Err(StorageError::InvalidConfiguration(_))
                 | Err(StorageError::DocumentTooLarge) => None,
                 Err(error) => return Err(error),
             },
-            Ok(None) | Err(StorageError::DocumentTooLarge) => None,
-            Err(error) => return Err(error),
+            None => None,
         };
         let backup = self.config_backup_path();
         let bytes = read_optional_bounded(&backup, CONFIG_MAX_BYTES)?.ok_or_else(|| {
@@ -827,7 +844,7 @@ impl Storage {
         atomic_replace_locked(
             &destination,
             &bytes,
-            CurrentExpectation::Unchecked,
+            expected_current,
             None,
             None,
             &mut |_| Ok(()),
@@ -893,6 +910,56 @@ fn read_optional_bounded(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, Sto
     }
     Ok(Some(bytes))
 }
+fn expected_current_matches(
+    current: Option<&[u8]>,
+    expected_current: CurrentExpectation<'_>,
+) -> bool {
+    match expected_current {
+        CurrentExpectation::Unchecked => true,
+        CurrentExpectation::Missing => current.is_none(),
+        CurrentExpectation::Bytes(expected) => current.is_some_and(|current| current == expected),
+    }
+}
+
+fn current_matches_revision(
+    path: &Path,
+    expected_current: CurrentExpectation<'_>,
+) -> Result<bool, StorageError> {
+    let expected_bytes = match expected_current {
+        CurrentExpectation::Unchecked => return Ok(true),
+        CurrentExpectation::Missing => None,
+        CurrentExpectation::Bytes(bytes) => Some(bytes),
+    };
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(expected_bytes.is_none());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let Some(expected_bytes) = expected_bytes else {
+        return Ok(false);
+    };
+    let mut offset = 0;
+    let mut buffer = [0; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(offset == expected_bytes.len());
+        }
+        let Some(end) = offset.checked_add(read) else {
+            return Ok(false);
+        };
+        let Some(expected_chunk) = expected_bytes.get(offset..end) else {
+            return Ok(false);
+        };
+        if &buffer[..read] != expected_chunk {
+            return Ok(false);
+        }
+        offset = end;
+    }
+}
+
 
 type ExistingValidator<'a> = (u64, &'a dyn Fn(&[u8]) -> Result<(), StorageError>);
 type AtomicBackup<'a> = (&'a Path, ExistingValidator<'a>);
@@ -947,13 +1014,8 @@ fn atomic_replace_locked(
     let previous = match validate_existing {
         Some((limit, validate)) => {
             let previous = read_optional_bounded(destination, limit)?;
-            let matches_expected = match expected_current {
-                CurrentExpectation::Unchecked => true,
-                CurrentExpectation::Missing => previous.is_none(),
-                CurrentExpectation::Bytes(expected) => previous
-                    .as_deref()
-                    .is_some_and(|current| current == expected),
-            };
+            let matches_expected =
+                expected_current_matches(previous.as_deref(), expected_current);
             if !matches_expected {
                 return Err(StorageError::StaleConfiguration);
             }
@@ -962,11 +1024,11 @@ fn atomic_replace_locked(
             }
             previous
         }
-        None if matches!(expected_current, CurrentExpectation::Unchecked) => None,
         None => {
-            return Err(StorageError::InvalidStoredState(
-                "compare-and-swap requires destination validation",
-            ));
+            if !current_matches_revision(destination, expected_current)? {
+                return Err(StorageError::StaleConfiguration);
+            }
+            None
         }
     };
     if let Some((backup_path, (limit, validate))) = backup {
