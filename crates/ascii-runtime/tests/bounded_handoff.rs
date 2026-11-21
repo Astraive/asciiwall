@@ -473,6 +473,45 @@ fn descriptor_mapping_and_generation_are_checked_before_reading() {
     assert_eq!(pool.slot_state(0).unwrap(), SlotState::Free);
 }
 
+#[test]
+fn same_generation_pool_descriptors_cannot_alias() {
+    let resources = runtime_budget();
+    let old_pool = BufferPool::new(&resources, 7, 1, 3).unwrap();
+    let old_descriptor = publish(&old_pool, 42);
+    let new_pool = BufferPool::new(&resources, 7, 1, 3).unwrap();
+    let new_descriptor = publish(&new_pool, 42);
+
+    assert_eq!(old_descriptor.slot_id, new_descriptor.slot_id);
+    assert_eq!(old_descriptor.generation, new_descriptor.generation);
+    assert_eq!(old_descriptor.publication_id, new_descriptor.publication_id);
+    assert_ne!(old_descriptor.pool_identity, new_descriptor.pool_identity);
+    let mut old_descriptor_with_new_identity = old_descriptor;
+    old_descriptor_with_new_identity.pool_identity = new_descriptor.pool_identity;
+    assert_eq!(old_descriptor_with_new_identity, new_descriptor);
+
+    assert_eq!(
+        new_pool
+            .consume(&old_descriptor, &budget(), &CancellationToken::new())
+            .unwrap_err(),
+        RuntimeError::InvalidDescriptor
+    );
+    assert!(!new_pool.discard(&old_descriptor).unwrap());
+    assert_eq!(
+        new_pool.slot_state(new_descriptor.slot_id).unwrap(),
+        SlotState::Published
+    );
+
+    let mut lease = new_pool
+        .consume(&new_descriptor, &budget(), &CancellationToken::new())
+        .unwrap();
+    assert_eq!(
+        lease.with_pixels(|pixels| pixels.to_vec()).unwrap(),
+        vec![42, 2, 3]
+    );
+    lease.completion_token().unwrap().acknowledge();
+    lease.release().unwrap();
+}
+
 fn invalid_publish(metadata: RasterDescriptorMetadata, pixels: &[u8]) -> RuntimeError {
     let pool = BufferPool::new(&runtime_budget(), 1, 1, 8).unwrap();
     let mut fill = pool.begin_fill().unwrap();
