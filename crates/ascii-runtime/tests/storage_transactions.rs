@@ -1350,6 +1350,34 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
 }
 
 #[test]
+fn portable_export_redacts_user_qualified_home_paths_in_generic_strings() {
+    use ascii_runtime::storage::PortableExport;
+
+    let source = json!({
+        "note": "~alice/Documents/private.mov",
+        "nested": {
+            "note": "~bob\\Documents\\private.mp4"
+        },
+        "ordinary": "ordinary note about ~visitor without a path"
+    });
+    let portable =
+        PortableExport::from_value(&source, ExportMode::Portable).expect("portable export");
+    let encoded = String::from_utf8(portable.to_json().unwrap()).unwrap();
+
+    for private_value in ["alice", "private.mov", "bob", "private.mp4"] {
+        assert!(
+            !encoded.contains(private_value),
+            "portable export retained {private_value}"
+        );
+    }
+    assert_eq!(
+        portable.content(),
+        &json!({"ordinary": "ordinary note about ~visitor without a path"})
+    );
+}
+
+
+#[test]
 fn portable_export_filters_bare_host_field_but_preserves_local_backup() {
     let source = json!({"host": "buildhost"});
     let portable =
