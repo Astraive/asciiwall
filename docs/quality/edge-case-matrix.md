@@ -2,7 +2,7 @@
 
 ## Status
 
-This matrix defines **120 proposed scenarios** and expected outcomes. It is not a record of tests already executed. P0 blocks a release claiming support for the affected capability/host; P1 requires a pass or an explicit accepted limitation. Unsupported capabilities are tested for safe fallback rather than fabricated parity.
+This matrix defines **120 proposed scenarios** and expected outcomes; those proposals are not themselves a record of tests already executed. The QA-101 scenario results and run records below apply only to their explicitly listed scenarios. P0 blocks a release claiming support for the affected capability/host; P1 requires a pass or an explicit accepted limitation. Unsupported capabilities are tested for safe fallback rather than fabricated parity.
 
 ## Input and conversion
 
