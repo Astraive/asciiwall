@@ -1694,7 +1694,7 @@ class RetentionTests(unittest.TestCase):
                 file_handles.add(artifact._handle)
                 return artifact
 
-            def fail_scan(artifact):
+            def fail_scan(artifact, *, budget=None):
                 raise scan_error
 
             def close_file_then_fail(handle):
