@@ -84,6 +84,7 @@ pub enum StorageError {
     InvalidRegistry(&'static str),
     InvalidJournal(&'static str),
     InvalidConfiguration(String),
+    InvalidStoredState(&'static str),
     StaleConfiguration,
     RecoveryRollbackFailed {
         sync_error: io::Error,
@@ -1594,6 +1595,8 @@ impl ImportJournal {
             None,
             None,
             &mut |_| Ok(()),
+            &mut || Ok(()),
+            None,
         )?;
         Ok(())
     }
