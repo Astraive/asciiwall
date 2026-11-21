@@ -467,37 +467,234 @@ def _contains_synthetic_marker(value: Any) -> bool:
     return False
 
 
-def _looks_like_json_scalar(prefix: str | bytes) -> bool:
-    if isinstance(prefix, str):
-        if not prefix or prefix[0] not in "tfn-0123456789":
+class _NativeJsonPrefixScanner:
+    """Recognize JSON containers and complete primitive scalars while streaming."""
+
+    _whitespace = frozenset((0x20, 0x09, 0x0A, 0x0D))
+
+    def __init__(self) -> None:
+        self._probe = bytearray()
+        self._encoding: str | None = None
+        self._state = "start"
+        self._keyword: bytes | None = None
+        self._keyword_index = 0
+        self._invalid = False
+        self._container = False
+        self._pending_byte: int | None = None
+        self._pending_high_surrogate = False
+        self._malformed = False
+
+    def update(self, raw: bytes) -> None:
+        if self._encoding is None:
+            needed = 4 - len(self._probe)
+            take = min(needed, len(raw))
+            self._probe.extend(raw[:take])
+            raw = raw[take:]
+            if not self._select_encoding(final=False):
+                return
+        self._process(raw)
+
+    def _select_encoding(self, *, final: bool) -> bool:
+        if len(self._probe) < 4 and not final:
             return False
-    elif not prefix or prefix[:1] not in b"tfn-0123456789":
-        return False
-    try:
-        json.loads(prefix)
-    except (ValueError, UnicodeError, RecursionError):
-        return False
-    return True
-
-
-def _looks_like_json(raw: bytes) -> bool | None:
-    raw = raw[:65_536]
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        try:
-            prefix = raw.decode("utf-16").lstrip()
-        except UnicodeError:
-            return True
-        if not prefix:
-            return None
-        if prefix.startswith(("{", "[", '"')):
-            return True
-        return _looks_like_json_scalar(prefix)
-    prefix = raw.replace(b"\x00", b"").lstrip(b"\xef\xbb\xbf \t\r\n")
-    if not prefix:
-        return None
-    if prefix.startswith((b"{", b"[", b'"')):
+        probe = bytes(self._probe)
+        self._probe.clear()
+        if probe.startswith(b"\xff\xfe"):
+            self._encoding = "utf-16-le"
+            probe = probe[2:]
+        elif probe.startswith(b"\xfe\xff"):
+            self._encoding = "utf-16-be"
+            probe = probe[2:]
+        elif probe.startswith(b"\xef\xbb\xbf"):
+            self._encoding = "utf-8"
+            probe = probe[3:]
+        elif (
+            len(probe) >= 4
+            and probe[0] < 0x80 and probe[0] != 0 and probe[1] == 0
+            and probe[2] < 0x80 and probe[2] != 0 and probe[3] == 0
+        ):
+            self._encoding = "utf-16-le"
+        elif (
+            len(probe) >= 4
+            and probe[0] == 0 and probe[1] < 0x80 and probe[1] != 0
+            and probe[2] == 0 and probe[3] < 0x80 and probe[3] != 0
+        ):
+            self._encoding = "utf-16-be"
+        else:
+            self._encoding = "utf-8"
+        self._process(probe)
         return True
-    return _looks_like_json_scalar(prefix)
+
+    def _process(self, raw: bytes) -> None:
+        if self._invalid or self._container or self._malformed:
+            return
+        if self._encoding == "utf-8":
+            for byte in raw:
+                self._consume(byte)
+                if self._invalid or self._container:
+                    return
+            return
+        if self._pending_byte is not None:
+            if not raw:
+                return
+            first = self._pending_byte
+            second = raw[0]
+            self._pending_byte = None
+            self._consume_utf16_unit(
+                first | (second << 8)
+                if self._encoding == "utf-16-le"
+                else (first << 8) | second
+            )
+            raw = raw[1:]
+        even_length = len(raw) & ~1
+        for index in range(0, even_length, 2):
+            first = raw[index]
+            second = raw[index + 1]
+            self._consume_utf16_unit(
+                first | (second << 8)
+                if self._encoding == "utf-16-le"
+                else (first << 8) | second
+            )
+            if self._invalid or self._container or self._malformed:
+                return
+        if even_length < len(raw):
+            self._pending_byte = raw[-1]
+
+    def _consume_utf16_unit(self, unit: int) -> None:
+        if self._pending_high_surrogate:
+            if 0xDC00 <= unit <= 0xDFFF:
+                self._pending_high_surrogate = False
+                self._consume(0x10000)
+            else:
+                self._malformed = True
+            return
+        if 0xD800 <= unit <= 0xDBFF:
+            self._pending_high_surrogate = True
+        elif 0xDC00 <= unit <= 0xDFFF:
+            self._malformed = True
+        else:
+            self._consume(unit)
+
+    def _consume(self, character: int) -> None:
+        if self._invalid or self._container or self._malformed:
+            return
+        state = self._state
+        if state == "start":
+            if character in self._whitespace:
+                return
+            if character in (ord("{"), ord("["), ord('"')):
+                self._container = True
+            elif character in (ord("t"), ord("f"), ord("n")):
+                self._keyword = {
+                    ord("t"): b"true",
+                    ord("f"): b"false",
+                    ord("n"): b"null",
+                }[character]
+                self._keyword_index = 1
+                self._state = "keyword"
+            elif character == ord("-"):
+                self._state = "number-minus"
+            elif character == ord("0"):
+                self._state = "number-zero"
+            elif ord("1") <= character <= ord("9"):
+                self._state = "number-integer"
+            else:
+                self._invalid = True
+        elif state == "keyword":
+            if character != self._keyword[self._keyword_index]:
+                self._invalid = True
+                return
+            self._keyword_index += 1
+            if self._keyword_index == len(self._keyword):
+                self._state = "keyword-complete"
+        elif state == "keyword-complete":
+            if character in self._whitespace:
+                self._state = "trailing"
+            else:
+                self._invalid = True
+        elif state == "number-minus":
+            if character == ord("0"):
+                self._state = "number-zero"
+            elif ord("1") <= character <= ord("9"):
+                self._state = "number-integer"
+            else:
+                self._invalid = True
+        elif state == "number-zero":
+            if character == ord("."):
+                self._state = "number-fraction-start"
+            elif character in (ord("e"), ord("E")):
+                self._state = "number-exponent-start"
+            elif character in self._whitespace:
+                self._state = "trailing"
+            else:
+                self._invalid = True
+        elif state == "number-integer":
+            if ord("0") <= character <= ord("9"):
+                return
+            if character == ord("."):
+                self._state = "number-fraction-start"
+            elif character in (ord("e"), ord("E")):
+                self._state = "number-exponent-start"
+            elif character in self._whitespace:
+                self._state = "trailing"
+            else:
+                self._invalid = True
+        elif state == "number-fraction-start":
+            if ord("0") <= character <= ord("9"):
+                self._state = "number-fraction"
+            else:
+                self._invalid = True
+        elif state == "number-fraction":
+            if ord("0") <= character <= ord("9"):
+                return
+            if character in (ord("e"), ord("E")):
+                self._state = "number-exponent-start"
+            elif character in self._whitespace:
+                self._state = "trailing"
+            else:
+                self._invalid = True
+        elif state == "number-exponent-start":
+            if character in (ord("+"), ord("-")):
+                self._state = "number-exponent-sign"
+            elif ord("0") <= character <= ord("9"):
+                self._state = "number-exponent"
+            else:
+                self._invalid = True
+        elif state == "number-exponent-sign":
+            if ord("0") <= character <= ord("9"):
+                self._state = "number-exponent"
+            else:
+                self._invalid = True
+        elif state == "number-exponent":
+            if ord("0") <= character <= ord("9"):
+                return
+            if character in self._whitespace:
+                self._state = "trailing"
+            else:
+                self._invalid = True
+        elif state == "trailing" and character not in self._whitespace:
+            self._invalid = True
+
+    def looks_like_json(self) -> bool:
+        if self._encoding is None:
+            self._select_encoding(final=True)
+        if self._pending_byte is not None or self._pending_high_surrogate:
+            self._malformed = True
+        return (
+            self._container
+            or self._malformed
+            or (
+                not self._invalid
+                and self._state in {
+                    "keyword-complete",
+                    "number-zero",
+                    "number-integer",
+                    "number-fraction",
+                    "number-exponent",
+                    "trailing",
+                }
+            )
+        )
 
 
 class _SyntheticMarkerScanner:
@@ -555,7 +752,6 @@ class _SyntheticMarkerScanner:
                 self.backslash_run = 0
             self._append(byte)
 
-
 def _contains_synthetic_bytes(raw: bytes) -> bool:
     markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
     if any(marker in raw.lower() for marker in markers):
@@ -570,7 +766,7 @@ def _hash_native_stream(read: Callable[[int], bytes], limit: int) -> tuple[str, 
     prefix = bytearray()
     overlap = b""
     escaped_marker_scanner = _SyntheticMarkerScanner()
-    json_prefix: bool | None = None
+    json_prefix = _NativeJsonPrefixScanner()
     size = 0
     markers = (b"synthetic-control-report", b"synthetic-control-only", b"cpu-grid-diff")
     while chunk := read(min(65_536, limit - size + 1)):
@@ -578,8 +774,7 @@ def _hash_native_stream(read: Callable[[int], bytes], limit: int) -> tuple[str, 
         if size > limit:
             raise EvidenceError("native evidence artifacts exceed their size limit")
         digest.update(chunk)
-        if json_prefix is None:
-            json_prefix = _looks_like_json(chunk)
+        json_prefix.update(chunk)
         escaped_marker_scanner.update(chunk)
         if escaped_marker_scanner.found:
             raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
@@ -593,13 +788,13 @@ def _hash_native_stream(read: Callable[[int], bytes], limit: int) -> tuple[str, 
     if not size:
         raise EvidenceError("native evidence artifact must not be empty")
     if size > MAX_JSON_BYTES:
-        if json_prefix:
+        if json_prefix.looks_like_json():
             raise EvidenceError("native evidence JSON exceeds the 1 MiB inspection limit")
     else:
         try:
             content = json.loads(bytes(prefix), object_pairs_hook=unique_object, parse_constant=reject_constant)
         except (ValueError, UnicodeError, RecursionError) as exc:
-            if json_prefix:
+            if json_prefix.looks_like_json():
                 raise EvidenceError("native evidence JSON must be inspectable") from exc
         else:
             if _contains_synthetic_marker(content):
