@@ -8,6 +8,10 @@
 
 use std::fmt;
 use std::mem::size_of;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::vec::Vec;
 
 use ascii_core::{
@@ -329,21 +333,118 @@ impl fmt::Display for ColorNormalizationError {
 
 impl std::error::Error for ColorNormalizationError {}
 
+/// Shared retained-memory owner for concurrently live normalized rasters.
+///
+/// Clone one owner and pass it to every normalization operation whose retained output shares a
+/// ceiling. Only owned normalized output bytes are reserved; borrowed input extents remain part of
+/// each operation's [`Budget`] check.
+#[derive(Clone, Debug)]
+pub struct NormalizedRasterResources {
+    shared: Arc<SharedRasterMemory>,
+}
+
+#[derive(Debug)]
+struct SharedRasterMemory {
+    max_retained_bytes: u64,
+    retained_bytes: AtomicU64,
+}
+
+impl NormalizedRasterResources {
+    /// Creates a shared owner with an explicit concurrently retained output-byte ceiling.
+    #[must_use]
+    pub fn new(max_retained_bytes: u64) -> Self {
+        Self {
+            shared: Arc::new(SharedRasterMemory {
+                max_retained_bytes,
+                retained_bytes: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// Returns the maximum retained normalized-output bytes.
+    #[must_use]
+    pub fn max_retained_bytes(&self) -> u64 {
+        self.shared.max_retained_bytes
+    }
+
+    /// Returns output bytes currently reserved by live normalized rasters.
+    #[must_use]
+    pub fn retained_bytes_in_use(&self) -> u64 {
+        self.shared.retained_bytes.load(Ordering::Acquire)
+    }
+
+    fn try_reserve(&self, bytes: u64) -> Result<RasterReservation, Error> {
+        let mut retained = self.shared.retained_bytes.load(Ordering::Acquire);
+        loop {
+            let next = retained
+                .checked_add(bytes)
+                .ok_or(Error::BudgetExceeded(BudgetKind::RasterBytes))?;
+            if next > self.shared.max_retained_bytes {
+                return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
+            }
+            match self.shared.retained_bytes.compare_exchange_weak(
+                retained,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(RasterReservation {
+                        shared: Arc::clone(&self.shared),
+                        bytes,
+                    });
+                }
+                Err(observed) => retained = observed,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RasterReservation {
+    shared: Arc<SharedRasterMemory>,
+    bytes: u64,
+}
+
+impl Drop for RasterReservation {
+    fn drop(&mut self) {
+        let previous = self
+            .shared
+            .retained_bytes
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+        debug_assert!(
+            previous >= self.bytes,
+            "normalized raster memory reservation underflow"
+        );
+    }
+}
+
 /// An owned, top-down raster normalized to linear-premultiplied RGBA.
 ///
 /// `NormalizedRaster` intentionally does not implement `Clone`; copying the pixel buffer outside a
-/// budgeted, cancellable operation could exceed raster limits or fail allocation infallibly.
+/// budgeted, cancellable operation could exceed raster limits or fail allocation infallibly. Its
+/// retained-output reservation is held until this value is dropped.
 ///
 /// ```compile_fail
 /// fn requires_clone<T: Clone>() {}
 /// requires_clone::<ascii_convert::NormalizedRaster>();
 /// ```
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct NormalizedRaster {
     width: u32,
     height: u32,
     pixels: Vec<LinearPremultipliedRgba>,
     warning: Option<ColorNormalizationWarning>,
+    _reservation: RasterReservation,
+}
+
+impl PartialEq for NormalizedRaster {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.pixels == other.pixels
+            && self.warning == other.warning
+    }
 }
 
 impl NormalizedRaster {
@@ -436,30 +537,33 @@ pub fn encode_output(linear: LinearRgb, encoding: OutputEncoding) -> EncodedOutp
 /// Display-P3/Rec. 2020 and PQ/HLG are rejected; this function performs no clipping, tone mapping,
 /// wide-gamut conversion, or ICC profile interpretation.
 ///
-/// The raster-byte ceiling covers the checked sum of the borrowed input's minimum readable extent
-/// (`(height - 1) * row_stride + row_bytes`) and the requested owned output pixel storage
-/// (`width * height * size_of::<LinearPremultipliedRgba>()`). Inter-row padding is included;
+/// The per-operation raster-byte ceiling covers the checked sum of the borrowed input's minimum
+/// readable extent (`(height - 1) * row_stride + row_bytes`) and the requested owned output pixel
+/// storage (`width * height * size_of::<LinearPremultipliedRgba>()`). Inter-row padding is included;
 /// trailing input bytes beyond the final pixel are not. The borrowed input extent is counted once
-/// alongside the distinct output even though the normalizer does not allocate the input buffer.
+/// beside the distinct output even though the normalizer does not allocate the input buffer.
 /// Premultiplied input is validated in a cancellable full-raster preflight before output allocation;
 /// that pass and normalization are both charged to `max_work_units`.
-/// This is an operation-local ceiling check: `Budget` stores numeric ceilings, not shared
-/// reservations or process-wide usage. The returned raster remains owned and live after this call;
-/// callers must enforce any limit across it and other concurrently retained storage. Unused input
-/// backing capacity and allocator overhead or over-allocation are outside this extent/request check.
-/// The input extent is already part of this operation's calculation and must not be subtracted from
-/// the budget passed here.
+///
+/// `NormalizedRasterResources` separately reserves only the checked output bytes before allocation.
+/// Its shared ceiling applies across every live raster using that owner, and each reservation stays
+/// attached to the returned raster until drop. The per-operation [`Budget`] remains allocation-free
+/// and tracks no shared usage. Unused input backing capacity and allocator overhead or over-allocation
+/// are outside these logical byte checks. The input extent is already part of the operation
+/// calculation and must not be subtracted from the budget passed here.
 pub fn normalize_raster(
     view: RasterFrameView<'_>,
     budget: &Budget,
     cancellation: &CancellationToken,
+    resources: &NormalizedRasterResources,
 ) -> Result<NormalizedRaster, ColorNormalizationError> {
-    normalize_raster_with_cancel_check(view, budget, || cancellation.is_cancelled())
+    normalize_raster_with_cancel_check(view, budget, resources, || cancellation.is_cancelled())
 }
 
 fn normalize_raster_with_cancel_check(
     view: RasterFrameView<'_>,
     budget: &Budget,
+    resources: &NormalizedRasterResources,
     mut is_cancelled: impl FnMut() -> bool,
 ) -> Result<NormalizedRaster, ColorNormalizationError> {
     if is_cancelled() {
@@ -483,8 +587,7 @@ fn normalize_raster_with_cancel_check(
             return Err(Error::Unsupported(UnsupportedReason::PixelFormat).into());
         }
     };
-    validate_alpha_layout(view.format().channels(), view.color().alpha_mode())?;
-    let (transfer, warning) = resolve_profile(view.color())?;
+    let (transfer, warning) = resolve_raster_metadata(view.format().channels(), view.color())?;
 
     let width = usize::try_from(u64::from(view.width())).map_err(|_| Error::SizeOverflow)?;
     let height = usize::try_from(u64::from(view.height())).map_err(|_| Error::SizeOverflow)?;
@@ -537,6 +640,7 @@ fn normalize_raster_with_cancel_check(
     if view.pixels().len() < required_extent {
         return Err(Error::Malformed(MalformedReason::RasterBackingTooShort).into());
     }
+    let reservation = resources.try_reserve(output_bytes)?;
     if is_cancelled() {
         return Err(Error::Cancelled.into());
     }
@@ -593,6 +697,7 @@ fn normalize_raster_with_cancel_check(
         height: view.height(),
         pixels,
         warning,
+        _reservation: reservation,
     })
 }
 
@@ -641,6 +746,14 @@ fn validate_premultiplied_pixels(
         return Err(Error::Cancelled.into());
     }
     Ok(())
+}
+
+pub(crate) fn resolve_raster_metadata(
+    channels: PixelChannels,
+    color: ColorDescription,
+) -> Result<(TransferFunction, Option<ColorNormalizationWarning>), ColorNormalizationError> {
+    validate_alpha_layout(channels, color.alpha_mode())?;
+    resolve_profile(color)
 }
 
 fn validate_alpha_layout(
@@ -799,7 +912,9 @@ impl From<Error> for ColorNormalizationError {
 }
 #[cfg(test)]
 mod tests {
-    use super::{ColorNormalizationError, normalize_raster_with_cancel_check};
+    use super::{
+        ColorNormalizationError, NormalizedRasterResources, normalize_raster_with_cancel_check,
+    };
     use ascii_core::{
         AlphaMode, Budget, ColorDescription, Error, PixelFormat, RasterFrameView, RasterOrientation,
     };
@@ -817,10 +932,12 @@ mod tests {
             &pixels,
         );
         let mut polls = 0;
+        let resources = NormalizedRasterResources::new(1 << 20);
 
         let result = normalize_raster_with_cancel_check(
             raster,
             &Budget::new(1 << 20, 1 << 20, 1 << 20),
+            &resources,
             || {
                 polls += 1;
                 polls == 5
@@ -832,6 +949,7 @@ mod tests {
             Err(ColorNormalizationError::Raster(Error::Cancelled))
         );
         assert_eq!(polls, 5);
+        assert_eq!(resources.retained_bytes_in_use(), 0);
     }
 
     #[test]
@@ -847,10 +965,12 @@ mod tests {
             &pixels,
         );
         let mut polls = 0;
+        let resources = NormalizedRasterResources::new(1 << 20);
 
         let result = normalize_raster_with_cancel_check(
             raster,
             &Budget::new(1 << 20, 1 << 20, 1 << 20),
+            &resources,
             || {
                 polls += 1;
                 polls == 5
@@ -862,5 +982,6 @@ mod tests {
             Err(ColorNormalizationError::Raster(Error::Cancelled))
         );
         assert_eq!(polls, 5);
+        assert_eq!(resources.retained_bytes_in_use(), 0);
     }
 }

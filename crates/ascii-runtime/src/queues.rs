@@ -7,7 +7,8 @@
 //!
 //! Queue locks are released before pool operations. The handoff coordinator's operation lock is
 //! outermost and serializes publish, receive, and generation invalidation; it is never held while
-//! invoking user code. See the crate-level lock and callback contract.
+//! invoking user code. Urgent publication and the final ordinary dequeue share an atomic commit
+//! point, described at [`ControlQueue::try_recv`]. See the crate-level lock and callback contract.
 
 use std::collections::VecDeque;
 use std::mem::size_of;
@@ -24,6 +25,8 @@ use crate::{
 
 const URGENT_STOP: u8 = 0b01;
 const URGENT_REVOKE: u8 = 0b10;
+const ORDINARY_DEQUEUE_COMMITTED: u8 = 0b100;
+const URGENT_MASK: u8 = URGENT_STOP | URGENT_REVOKE;
 
 /// Control messages that are independent from the frame-data queue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,8 +120,9 @@ impl FrameQueue {
 
 /// Bounded FIFO ordinary controls plus reserved, coalescing Stop/revocation signals.
 ///
-/// The urgent mailbox is a fixed two-bit atomic state, so urgent shutdown/revocation events neither
-/// allocate nor contend with an ordinary control queue that has reached capacity.
+/// The urgent events occupy two fixed mailbox bits; a third atomic bit commits the final ordinary
+/// dequeue against concurrent urgent publication. Urgent events therefore remain independent of
+/// ordinary queue capacity, including when that queue is full.
 #[derive(Debug)]
 pub struct ControlQueue {
     ordinary: Mutex<QueueInner<ControlEvent>>,
@@ -181,19 +185,65 @@ impl ControlQueue {
 
     /// Receives urgent Stop first, then revocation, then ordinary FIFO controls.
     pub fn try_recv(&self) -> Option<ControlEvent> {
-        if let Some(event) = self.take_urgent() {
-            return Some(event);
-        }
-        self.try_recv_after_urgent_check()
+        self.try_recv_with_before_dequeue_commit(|| {})
     }
 
-    fn try_recv_after_urgent_check(&self) -> Option<ControlEvent> {
-        let mut ordinary = lock_unpoisoned(&self.ordinary);
-        // Urgent producers bypass this mutex, so recheck after waiting for it.
+    fn try_recv_with_before_dequeue_commit<F>(
+        &self,
+        before_dequeue_commit: F,
+    ) -> Option<ControlEvent>
+    where
+        F: FnOnce(),
+    {
         if let Some(event) = self.take_urgent() {
             return Some(event);
         }
-        ordinary.items.pop_front()
+        self.try_recv_after_urgent_check(before_dequeue_commit)
+    }
+
+    fn try_recv_after_urgent_check<F>(&self, before_dequeue_commit: F) -> Option<ControlEvent>
+    where
+        F: FnOnce(),
+    {
+        let mut ordinary = lock_unpoisoned(&self.ordinary);
+        let mut state = self.urgent.load(Ordering::Acquire);
+        if state & URGENT_MASK != 0 {
+            if let Some(event) = self.take_urgent() {
+                return Some(event);
+            }
+            state = self.urgent.load(Ordering::Acquire);
+        }
+        if ordinary.items.is_empty() {
+            return None;
+        }
+
+        before_dequeue_commit();
+        loop {
+            if state & URGENT_MASK != 0 {
+                if let Some(event) = self.take_urgent() {
+                    return Some(event);
+                }
+                state = self.urgent.load(Ordering::Acquire);
+                continue;
+            }
+
+            match self.urgent.compare_exchange(
+                state,
+                state | ORDINARY_DEQUEUE_COMMITTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    // This CAS is the ordinary dequeue's linearization point: urgent publication
+                    // either changes `state` first and wins, or follows this committed dequeue.
+                    let event = ordinary.items.pop_front();
+                    self.urgent
+                        .fetch_and(!ORDINARY_DEQUEUE_COMMITTED, Ordering::AcqRel);
+                    return event;
+                }
+                Err(actual) => state = actual,
+            }
+        }
     }
 
     fn take_urgent(&self) -> Option<ControlEvent> {
@@ -574,14 +624,15 @@ mod tests {
         );
     }
     #[test]
-    fn urgent_control_recheck_wins_before_fifo_pop() {
+    fn pending_stop_before_fifo_commit_wins_the_dequeue_race() {
         let resource_budget = resource_budget();
         let controls = ControlQueue::new(&resource_budget, 1).unwrap();
         controls.try_send(ControlEvent::Refresh).unwrap();
-        controls.try_send(ControlEvent::Stop).unwrap();
 
         assert_eq!(
-            controls.try_recv_after_urgent_check(),
+            controls.try_recv_with_before_dequeue_commit(|| {
+                controls.try_send(ControlEvent::Stop).unwrap();
+            }),
             Some(ControlEvent::Stop)
         );
         assert_eq!(controls.try_recv(), Some(ControlEvent::Refresh));
