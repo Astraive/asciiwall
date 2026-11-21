@@ -419,7 +419,6 @@ impl Drop for RasterReservation {
     }
 }
 
-
 /// An owned, top-down raster normalized to linear-premultiplied RGBA.
 ///
 /// `NormalizedRaster` intentionally does not implement `Clone`; copying the pixel buffer outside a
