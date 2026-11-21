@@ -2262,7 +2262,6 @@ mod codec_cancellation_tests {
         marker + 2 + segment_length
     }
 
-
     #[test]
     fn oversized_jpeg_is_rejected_before_output_allocation() {
         let bytes = include_bytes!("../tests/fixtures/ec010-oversized-budget.jpg");
