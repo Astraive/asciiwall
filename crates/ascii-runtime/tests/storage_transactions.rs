@@ -960,7 +960,7 @@ fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly()
 }
 
 #[test]
-fn newer_settings_schema_is_not_replaced_by_an_older_writer() {
+fn newer_settings_schema_is_not_replaced_by_older_writer_or_explicit_recovery() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
     let validate_schema_v1 = |value: &TomlValue| {
@@ -997,6 +997,21 @@ fn newer_settings_schema_is_not_replaced_by_an_older_writer() {
     );
     assert_eq!(
         fs::read(&backup_path).expect("newer current preserves last-good"),
+        known_good_backup
+    );
+    assert!(matches!(
+        storage.restore_config_from_backup(validate_schema_v1),
+        Err(StorageError::UnsupportedVersion {
+            kind: "settings configuration",
+            version: 2
+        })
+    ));
+    assert_eq!(
+        fs::read(storage.config_path()).expect("future-schema settings stay untouched"),
+        newer
+    );
+    assert_eq!(
+        fs::read(&backup_path).expect("refused recovery preserves last-good"),
         known_good_backup
     );
 }
