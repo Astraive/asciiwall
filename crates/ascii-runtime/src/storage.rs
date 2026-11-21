@@ -1948,16 +1948,6 @@ fn looks_like_relative_local_path(value: &str) -> bool {
         final_component = component;
     }
     let relative_prefix = matches!(first, "." | "..");
-    if let Some((stem, extension)) = final_component.rsplit_once('.') {
-        return (relative_prefix || first.chars().any(char::is_alphanumeric))
-            && !stem.is_empty()
-            && !extension.is_empty()
-            && extension.len() <= 10
-            && extension
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric());
-    }
-
     const COMMON_LOCAL_DIRECTORY_ROOTS: &[&str] = &[
         "documents",
         "desktop",
@@ -1974,10 +1964,19 @@ fn looks_like_relative_local_path(value: &str) -> bool {
         || COMMON_LOCAL_DIRECTORY_ROOTS
             .iter()
             .any(|root| first.eq_ignore_ascii_case(root));
-    let plain_file_component = final_component
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
-    recognized_root && plain_file_component
+    if recognized_root && final_component.starts_with('.') {
+        return true;
+    }
+    if let Some((stem, extension)) = final_component.rsplit_once('.') {
+        return (relative_prefix || first.chars().any(char::is_alphanumeric))
+            && !stem.is_empty()
+            && !extension.is_empty()
+            && extension.len() <= 10
+            && extension
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric());
+    }
+    recognized_root && !final_component.is_empty()
 }
 
 fn trim_export_punctuation(value: &str) -> &str {
