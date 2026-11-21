@@ -68,3 +68,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reject contain transforms when f64 rounding cannot preserve centered letterbox margins at extreme destination sizes (`#294`).
 - Normalize box-sampling overlap per axis before combining weights, allowing valid subnormal footprints without requiring representable absolute 2D area (`[CNV-001]`).
 - Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
+- Reject uninspectable long-integer JSON in direct native evidence instead of treating it as non-JSON text ([QA-004]).

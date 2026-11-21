@@ -286,6 +286,31 @@ class EvidenceRecordTests(unittest.TestCase):
             with self.assertRaises(evidence.EvidenceError):
                 evidence.finalize_record(record)
 
+    @unittest.skipUnless(
+        hasattr(sys, "get_int_max_str_digits"),
+        "Python does not limit decimal integer conversion",
+    )
+    def test_native_manual_rejects_uninspectable_long_integer_json(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            artifact = Path(temporary) / "oversized-integer.json"
+            artifact.write_bytes(b"9" * 5000)
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id="NATIVE-INTEGER-001",
+                ec_ids=[],
+                evidence_path=artifact.relative_to(ROOT).as_posix(),
+            )
+            old_limit = sys.get_int_max_str_digits()
+            try:
+                sys.set_int_max_str_digits(4300)
+                with self.assertRaisesRegex(
+                    evidence.EvidenceError, "native-manual JSON evidence must be inspectable"
+                ):
+                    evidence.finalize_record(record)
+            finally:
+                sys.set_int_max_str_digits(old_limit)
+
 
     def test_native_manual_manifest_rejects_oversized_utf16_synthetic_json(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:

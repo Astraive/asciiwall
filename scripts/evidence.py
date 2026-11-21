@@ -994,7 +994,9 @@ def _inspect_native_pass_content(raw: bytes, record: dict[str, Any]) -> None:
             text = raw.decode("utf-8")
         except UnicodeError as decode_error:
             raise EvidenceError("native-manual evidence type cannot be inspected safely") from decode_error
-        if text.lstrip("\ufeff \t\r\n").startswith(("{", "[", '"')):
+        json_prefix = _NativeJsonPrefixScanner()
+        json_prefix.update(raw)
+        if json_prefix.looks_like_json():
             raise EvidenceError("native-manual JSON evidence must be inspectable") from exc
         if any(not _is_log_character(character) and character != "\r" for character in text):
             raise EvidenceError("native-manual evidence type cannot be inspected safely")
