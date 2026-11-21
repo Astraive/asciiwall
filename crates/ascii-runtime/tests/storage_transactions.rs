@@ -898,6 +898,41 @@ fn saving_config_revalidates_against_the_active_schema_before_replacement() {
 }
 
 #[test]
+fn config_saves_reject_nested_history_keys_without_rotating_state() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    storage
+        .save_config(&config(json!({"theme": "previous"})), validate_test_config)
+        .expect("save previous config");
+    storage
+        .save_config(&config(json!({"theme": "current"})), validate_test_config)
+        .expect("save current config and establish last-good");
+    let config_path = storage.config_path();
+    let backup_path = storage.config_backup_path();
+    let current_before = fs::read(&config_path).expect("current config bytes");
+    let backup_before = fs::read(&backup_path).expect("last-good config bytes");
+
+    for bytes in [
+        b"[ui]\ncursor_history = [\"recent\"]\n".as_slice(),
+        b"[ui]\nwindow = { geometry = { window_geometry_history = [\"recent\"] } }\n",
+    ] {
+        let forbidden = ParsedToml::from_toml(bytes).expect("parse nested history config");
+        assert!(matches!(
+            storage.save_config(&forbidden, validate_test_config),
+            Err(StorageError::InvalidConfiguration(_))
+        ));
+        assert_eq!(
+            fs::read(&config_path).expect("current config remains unchanged"),
+            current_before
+        );
+        assert_eq!(
+            fs::read(&backup_path).expect("last-good remains unchanged"),
+            backup_before
+        );
+    }
+}
+
+#[test]
 fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
