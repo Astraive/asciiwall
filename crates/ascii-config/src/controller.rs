@@ -85,63 +85,60 @@ impl SettingsController {
         let defaults = build_snapshot(&registry, 0, BTreeMap::new())?;
         let (status, snapshot, disk_bytes) = match store.read_main() {
             Ok(None) => (ControllerStatus::Ready, defaults, None),
-            Ok(Some(bytes)) => {
-                match decode_and_validate(&registry, &bytes) {
-                    Ok(document) if document.schema_version > CURRENT_SCHEMA_VERSION => {
-                        let snapshot =
-                            build_snapshot(&registry, document.revision, BTreeMap::new())?;
-                        (
-                            ControllerStatus::ReadOnlyFutureSchema {
-                                schema_version: document.schema_version,
-                            },
-                            snapshot,
-                            Some(bytes),
-                        )
-                    }
-                    Ok(document) if document.schema_version < CURRENT_SCHEMA_VERSION => {
-                        let migrated = migrate(document).map_err(map_migration_error)?;
-                        validate_overrides(&registry, &migrated.overrides)?;
-                        let effective = resolve_overrides(&registry, &migrated.overrides)?;
-                        let revision = migrated
-                            .revision
-                            .checked_add(1)
-                            .filter(|revision| *revision <= i64::MAX as u64)
-                            .ok_or(ConfigError::RevisionOverflow)?;
-                        let serialized = encode(revision, &migrated.overrides)?;
-                        store.commit(Some(&bytes), &serialized, BackupMode::ReplaceWithPrevious)?;
-                        (
-                            ControllerStatus::Ready,
-                            Arc::new(SettingsSnapshot {
-                                revision,
-                                effective,
-                                overrides: Arc::new(migrated.overrides),
-                            }),
-                            Some(serialized),
-                        )
-                    }
-                    Ok(document) => {
-                        validate_overrides(&registry, &document.overrides)?;
-                        let effective = resolve_overrides(&registry, &document.overrides)?;
-                        (
-                            ControllerStatus::Ready,
-                            Arc::new(SettingsSnapshot {
-                                revision: document.revision,
-                                effective,
-                                overrides: Arc::new(document.overrides),
-                            }),
-                            Some(bytes),
-                        )
-                    }
-                    Err(error) => {
-                        let issue = error;
-                        (
-                            ControllerStatus::RepairRequired(issue),
-                            defaults,
-                            Some(bytes),
-                        )
-                    }
+            Ok(Some(bytes)) => match decode_and_validate(&registry, &bytes) {
+                Ok(document) if document.schema_version > CURRENT_SCHEMA_VERSION => {
+                    let snapshot = build_snapshot(&registry, document.revision, BTreeMap::new())?;
+                    (
+                        ControllerStatus::ReadOnlyFutureSchema {
+                            schema_version: document.schema_version,
+                        },
+                        snapshot,
+                        Some(bytes),
+                    )
                 }
-            }
+                Ok(document) if document.schema_version < CURRENT_SCHEMA_VERSION => {
+                    let migrated = migrate(document).map_err(map_migration_error)?;
+                    validate_overrides(&registry, &migrated.overrides)?;
+                    let effective = resolve_overrides(&registry, &migrated.overrides)?;
+                    let revision = migrated
+                        .revision
+                        .checked_add(1)
+                        .filter(|revision| *revision <= i64::MAX as u64)
+                        .ok_or(ConfigError::RevisionOverflow)?;
+                    let serialized = encode(revision, &migrated.overrides)?;
+                    store.commit(Some(&bytes), &serialized, BackupMode::ReplaceWithPrevious)?;
+                    (
+                        ControllerStatus::Ready,
+                        Arc::new(SettingsSnapshot {
+                            revision,
+                            effective,
+                            overrides: Arc::new(migrated.overrides),
+                        }),
+                        Some(serialized),
+                    )
+                }
+                Ok(document) => {
+                    validate_overrides(&registry, &document.overrides)?;
+                    let effective = resolve_overrides(&registry, &document.overrides)?;
+                    (
+                        ControllerStatus::Ready,
+                        Arc::new(SettingsSnapshot {
+                            revision: document.revision,
+                            effective,
+                            overrides: Arc::new(document.overrides),
+                        }),
+                        Some(bytes),
+                    )
+                }
+                Err(error) => {
+                    let issue = error;
+                    (
+                        ControllerStatus::RepairRequired(issue),
+                        defaults,
+                        Some(bytes),
+                    )
+                }
+            },
             Err(StoreError::TooLarge { limit, .. }) => (
                 ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::TooLarge {
                     limit,
