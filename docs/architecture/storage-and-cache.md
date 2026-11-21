@@ -2,7 +2,7 @@
 
 ## Storage classes
 
-Keep configuration, installed immutable content, derived cache, temporary staging, logs, and runtime IPC separate. On Linux, use XDG-style config/data/cache/runtime locations; on Windows use the appropriate per-user application directories; on macOS use standard Application Support and Caches conventions. Paths are computed by a platform-aware library, not hard-coded usernames.
+Keep configuration, installed immutable content, derived cache, temporary staging, logs, and runtime IPC separate. On Linux, use XDG-style config/data/cache/runtime locations; on Windows use the appropriate per-user application directories; on macOS use standard Application Support and Caches conventions. A platform-aware path provider selects the `settings.toml` location; the settings crate does not hard-code users or infer an OS path.
 
 ```text
 config/     settings.toml, display-assignments.json, permissions.json
@@ -25,7 +25,11 @@ A file path plus modification time is not a trustworthy identity for long-lived 
 
 ## Transactions
 
-Write configuration to a new file, flush according to platform guarantees, then atomically replace. Keep a last-good backup. Package imports extract into a private staging directory, validate completely, and commit an immutable directory plus registry update. A crash-recovery journal distinguishes staged, verified, committed, and abandoned work.
+Write configuration to a same-directory temporary file, sync it, then atomically replace and sync the parent directory where supported. Keep a last-good backup. Package imports extract into a private staging directory, validate completely, and commit an immutable directory plus registry update. A crash-recovery journal distinguishes staged, verified, committed, and abandoned work.
+
+`ascii-config` accepts at most 256 KiB, preflights nesting to depth 16 and caps settings at 4,096 scalar entries, rejecting duplicate keys, invalid UTF-8, non-finite values, and unknown settings. Writes are serialized through a revisioned controller and an OS-locked `settings.toml.lock` sidecar; stale controller instances receive a conflict rather than replacing newer bytes. The controller preserves the previous valid document in `settings.toml.bak`; explicit repair archives corrupt bytes separately. Unix settings/temp files are owner-only (`0600`) and replacement syncs the parent directory. Windows temporary files inherit the containing config-directory ACL; native ACL verification is not implemented here.
+
+The settings crate receives its path from its consumer instead of choosing a platform location. Main has no desktop host or CLI integration yet, and this PR does not wire `--config` or startup wallpaper restoration.
 
 ## Eviction
 
