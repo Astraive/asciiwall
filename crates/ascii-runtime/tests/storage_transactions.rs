@@ -423,6 +423,41 @@ fn storage_roots_and_persisted_files_are_owner_only() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn directory_lock_file_is_owner_only_when_created_and_reused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let lock_path = storage.roots().data.join(".ascii-runtime-storage.lock");
+    storage
+        .update_registry(|_| {})
+        .expect("create directory lock");
+    assert_eq!(
+        fs::metadata(&lock_path)
+            .expect("created directory lock")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644))
+        .expect("make existing lock permissive");
+    storage
+        .update_registry(|_| {})
+        .expect("reuse directory lock");
+    assert_eq!(
+        fs::metadata(&lock_path)
+            .expect("reused directory lock")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
 #[test]
 fn root_resolution_separates_lexical_and_symlink_aliases() {
     let temp = TempDir::new();
@@ -516,6 +551,34 @@ fn windows_roots_separate_case_aliases_when_final_directories_are_missing() {
     assert!(
         !roaming.exists(),
         "resolution does not create Windows roots"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_directory_lock_preserves_unicode_expanding_path_for_io() {
+    let temp = TempDir::new();
+    assert_eq!("İ".to_lowercase(), "i\u{307}");
+    let storage = Storage::new(
+        StorageRoots::resolve(
+            "org.example.wall",
+            &DirectoryInputs::Windows {
+                roaming_app_data: temp.path().join("Roaming"),
+                local_app_data: temp.path().join("Local İ"),
+            },
+        )
+        .expect("resolve Unicode Windows roots"),
+    );
+
+    storage
+        .update_registry(|_| {})
+        .expect("use canonical-case lock I/O path");
+    assert!(
+        storage
+            .roots()
+            .data
+            .join(".ascii-runtime-storage.lock")
+            .is_file()
     );
 }
 
@@ -2344,6 +2407,42 @@ fn portable_export_filters_machine_local_fields_and_labels_local_backup() {
             !backup_json.contains(private_history),
             "local backup retained forbidden history {private_history}"
         );
+    }
+}
+
+#[test]
+fn nested_cursor_and_window_histories_are_filtered_in_both_export_modes() {
+    let source = json!({
+        "settings": {
+            "cursor": {"history": ["nested-cursor-history-marker"]},
+            "window": {
+                "geometry": {"history": [{"marker": "nested-window-history-marker"}]}
+            },
+            "entries": [
+                {"cursor": {"history": ["array-cursor-history-marker"]}},
+                {"window": {"geometry": {"history": ["array-window-history-marker"]}}}
+            ],
+            "theme": "dark"
+        }
+    });
+
+    for mode in [ExportMode::Portable, ExportMode::NonportableLocalBackup] {
+        let export = ascii_runtime::storage::PortableExport::from_value(&source, mode)
+            .expect("bounded nested export");
+        let encoded = String::from_utf8(export.to_json().unwrap()).unwrap();
+        assert!(!encoded.contains("history"));
+        for marker in [
+            "nested-cursor-history-marker",
+            "nested-window-history-marker",
+            "array-cursor-history-marker",
+            "array-window-history-marker",
+        ] {
+            assert!(
+                !encoded.contains(marker),
+                "export retained nested history marker {marker}"
+            );
+        }
+        assert_eq!(export.content()["settings"]["theme"], json!("dark"));
     }
 }
 
