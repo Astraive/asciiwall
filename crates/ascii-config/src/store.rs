@@ -32,6 +32,8 @@ pub(crate) struct FileStore {
     path: PathBuf,
     #[cfg(test)]
     fail_at: Option<PersistStage>,
+    #[cfg(test)]
+    fail_disk_full: bool,
 }
 
 impl FileStore {
@@ -40,6 +42,8 @@ impl FileStore {
             path: path.into(),
             #[cfg(test)]
             fail_at: None,
+            #[cfg(test)]
+            fail_disk_full: false,
         }
     }
 
@@ -109,6 +113,17 @@ impl FileStore {
         if self.fail_at == Some(stage) {
             self.fail_at = None;
             return Err(StoreError::Injected(stage));
+        }
+        #[cfg(test)]
+        if self.fail_disk_full && stage == PersistStage::TempWrite {
+            self.fail_disk_full = false;
+            return Err(StoreError::io(
+                StoreOperation::WriteTemporary,
+                std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "injected disk-full failure",
+                ),
+            ));
         }
         #[cfg(not(test))]
         let _ = stage;
@@ -266,6 +281,10 @@ impl FileStore {
     #[cfg(test)]
     pub(crate) fn inject_failure(&mut self, stage: PersistStage) {
         self.fail_at = Some(stage);
+    }
+    #[cfg(test)]
+    pub(crate) fn inject_disk_full(&mut self) {
+        self.fail_disk_full = true;
     }
 }
 
@@ -592,7 +611,7 @@ fn sync_parent(parent: &Path) -> std::io::Result<()> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{BackupMode, FileStore, PersistStage};
+    use super::{BackupMode, FileStore, PersistStage, StoreError, StoreOperation};
     use std::{
         fs,
         path::PathBuf,
@@ -705,5 +724,30 @@ mod tests {
             assert_eq!(fs::read(&path).unwrap(), b"corrupt-main");
             assert_eq!(fs::read(&backup).unwrap(), b"last-good-backup");
         }
+    }
+    #[test]
+    fn disk_full_after_partial_temp_write_keeps_last_valid_bytes() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let backup = directory.0.join("settings.toml.bak");
+        fs::write(&path, b"last-valid-main").unwrap();
+        fs::write(&backup, b"prior-backup").unwrap();
+
+        let mut store = FileStore::new(&path);
+        store.inject_disk_full();
+        assert!(matches!(
+            store.commit(
+                Some(b"last-valid-main"),
+                b"candidate-settings",
+                BackupMode::ReplaceWithPrevious,
+            ),
+            Err(StoreError::Io {
+                operation: StoreOperation::WriteTemporary,
+                kind: std::io::ErrorKind::StorageFull,
+                ..
+            })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"last-valid-main");
+        assert_eq!(fs::read(&backup).unwrap(), b"last-valid-main");
     }
 }
