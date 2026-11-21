@@ -81,6 +81,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [COR-008] Inject failures at every config/registry atomic-write hook boundary and verify recovery
   yields only complete valid state, cleans owned temporaries, and permits subsequent writes; race
   retained concurrent log records through rotation without loss or corruption.
+- [COR-008] Preserve retained settings-recovery copies across retry attempts by creating
+  collision-safe sibling snapshots; verify bytes survive recovery retries after rollback failure.
 - [COR-008] Bound diagnostic logs to 16 files of at most 16 MiB each and 64 KiB per record; bound
   portable-export traversal and serialized output, reject over-budget exports without partial data,
   and redact single-label host-and-port endpoints such as `buildhost:9000` with trailing sentence,

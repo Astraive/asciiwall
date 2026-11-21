@@ -1382,6 +1382,13 @@ fn recovery_rollback_rename_failure_retains_and_reports_original_bytes() {
         fs::read(&backup_path).expect("last-good backup remains unchanged"),
         backup_before
     );
+    storage
+        .restore_config_from_backup(Some(&current_after), validate_test_config)
+        .expect("retry settings recovery after rollback failure");
+    assert_eq!(
+        fs::read(&retained_copy).expect("retained recovery copy survives retry"),
+        current_before
+    );
 }
 
 #[test]
