@@ -1,0 +1,605 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, Barrier, atomic::{AtomicU64, Ordering}},
+    thread,
+};
+
+use ascii_config::{
+    resolve_settings, ConfigError, ConstraintReason, Constraints, ControllerStatus,
+    DocumentError, EffectiveConstraint, InvalidationClass, Registry, ResolveError,
+    SemanticValidator, SettingChange, SettingDescriptor, SettingKey, SettingLayers,
+    SettingPhase, SettingScope, SettingSource, SettingType, SettingValue,
+    SettingsController, TypeViolation, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH,
+};
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct TestDirectory(PathBuf);
+
+impl TestDirectory {
+    fn new() -> Self {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "ascii-config-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create isolated test directory");
+        Self(path)
+    }
+
+    fn config(&self) -> PathBuf {
+        self.0.join("settings.toml")
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn key(value: &str) -> SettingKey {
+    SettingKey::new(value).expect("valid fixture setting key")
+}
+
+fn number(value: f64) -> SettingValue {
+    SettingValue::number(value).expect("finite fixture number")
+}
+
+fn descriptor(
+    name: &str,
+    default: SettingValue,
+    value_type: SettingType,
+    scope: SettingScope,
+    capability: Option<&str>,
+    invalidation: InvalidationClass,
+    semantic_validator: SemanticValidator,
+) -> SettingDescriptor {
+    SettingDescriptor::new(
+        key(name),
+        default,
+        value_type,
+        scope,
+        SettingPhase::V1,
+        capability,
+        invalidation,
+        semantic_validator,
+    )
+    .expect("valid test descriptor")
+}
+
+fn registry() -> Arc<Registry> {
+    Arc::new(
+        Registry::new([
+            descriptor(
+                "grid.columns",
+                SettingValue::Integer(240),
+                SettingType::Integer { min: 32, max: 1024 },
+                SettingScope::P,
+                None,
+                InvalidationClass::Conversion,
+                SemanticValidator::None,
+            ),
+            descriptor(
+                "playback.fps",
+                SettingValue::Integer(30),
+                SettingType::Integer { min: 1, max: 120 },
+                SettingScope::P,
+                None,
+                InvalidationClass::Scheduler,
+                SemanticValidator::None,
+            ),
+            descriptor(
+                "conversion.brightness",
+                number(0.0),
+                SettingType::Number { min: -1.0, max: 1.0 },
+                SettingScope::P,
+                None,
+                InvalidationClass::Conversion,
+                SemanticValidator::None,
+            ),
+            descriptor(
+                "conversion.gamma",
+                number(1.0),
+                SettingType::Number { min: 0.1, max: 5.0 },
+                SettingScope::P,
+                None,
+                InvalidationClass::Conversion,
+                SemanticValidator::None,
+            ),
+            descriptor(
+                "privacy.pointer-observation",
+                SettingValue::Boolean(false),
+                SettingType::Boolean,
+                SettingScope::A,
+                Some("pointer-position"),
+                InvalidationClass::Observer,
+                SemanticValidator::None,
+            ),
+            descriptor(
+                "visibility.covered-threshold",
+                number(0.98),
+                SettingType::Number { min: 0.5, max: 1.0 },
+                SettingScope::A,
+                Some("window-rectangles"),
+                InvalidationClass::Runtime,
+                SemanticValidator::None,
+            ),
+            descriptor(
+                "visibility.resume-threshold",
+                number(0.9),
+                SettingType::Number { min: 0.0, max: 0.99 },
+                SettingScope::A,
+                Some("window-rectangles"),
+                InvalidationClass::Runtime,
+                SemanticValidator::LessThan(key("visibility.covered-threshold")),
+            ),
+            descriptor(
+                "diagnostics.overlay",
+                SettingValue::Boolean(false),
+                SettingType::Boolean,
+                SettingScope::S,
+                None,
+                InvalidationClass::Runtime,
+                SemanticValidator::None,
+            ),
+        ])
+        .expect("valid fixture registry"),
+    )
+}
+
+fn read_status(path: &Path) -> ControllerStatus {
+    SettingsController::open(path, registry())
+        .expect("open config")
+        .status()
+        .expect("read controller status")
+}
+
+#[test]
+fn registry_metadata_and_range_endpoints_are_exact() {
+    let registry = registry();
+    let columns = registry.get_str("grid.columns").expect("columns descriptor");
+    assert_eq!(columns.scope(), SettingScope::P);
+    assert_eq!(columns.phase(), SettingPhase::V1);
+    assert_eq!(columns.invalidation(), InvalidationClass::Conversion);
+    assert_eq!(columns.default(), &SettingValue::Integer(240));
+    assert_eq!(
+        columns.value_type(),
+        &SettingType::Integer { min: 32, max: 1024 }
+    );
+    let pointer = registry
+        .get_str("privacy.pointer-observation")
+        .expect("pointer descriptor");
+    assert_eq!(pointer.capability(), Some("pointer-position"));
+    assert_eq!(pointer.semantic_validator(), &SemanticValidator::None);
+    let resume = registry
+        .get_str("visibility.resume-threshold")
+        .expect("resume threshold descriptor");
+    assert_eq!(
+        resume.semantic_validator(),
+        &SemanticValidator::LessThan(key("visibility.covered-threshold"))
+    );
+
+    for value in [32, 1024] {
+        let mut layers = SettingLayers::default();
+        layers.set(
+            SettingSource::Package,
+            key("grid.columns"),
+            SettingValue::Integer(value),
+        );
+        assert!(resolve_settings(&registry, &layers, &Constraints::default()).is_ok());
+    }
+    for value in [31, 1025, i64::MAX] {
+        let mut layers = SettingLayers::default();
+        layers.set(
+            SettingSource::Package,
+            key("grid.columns"),
+            SettingValue::Integer(value),
+        );
+        assert!(matches!(
+            resolve_settings(&registry, &layers, &Constraints::default()),
+            Err(ResolveError::InvalidValue {
+                violation: TypeViolation::OutOfRange,
+                ..
+            })
+        ));
+    }
+    for value in -32..=1088 {
+        let mut layers = SettingLayers::default();
+        layers.set(
+            SettingSource::Package,
+            key("grid.columns"),
+            SettingValue::Integer(value),
+        );
+        assert_eq!(
+            resolve_settings(&registry, &layers, &Constraints::default()).is_ok(),
+            (32..=1024).contains(&value),
+        );
+    }
+}
+
+#[test]
+fn package_scope_cannot_enable_pointer_observation() {
+    let mut layers = SettingLayers::default();
+    layers.set(
+        SettingSource::Package,
+        key("privacy.pointer-observation"),
+        SettingValue::Boolean(true),
+    );
+    assert!(matches!(
+        resolve_settings(&registry(), &layers, &Constraints::default()),
+        Err(ResolveError::UnauthorizedSource {
+            source: SettingSource::Package,
+            scope: SettingScope::A,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn effective_constraints_preserve_the_requested_value() {
+    let registry = registry();
+    let mut layers = SettingLayers::default();
+    layers.set(
+        SettingSource::Package,
+        key("playback.fps"),
+        SettingValue::Integer(60),
+    );
+    let mut constraints = Constraints::default();
+    constraints.set(
+        key("playback.fps"),
+        EffectiveConstraint::AtMost {
+            value: SettingValue::Integer(10),
+            reason: ConstraintReason::PowerPolicy,
+        },
+    );
+    let resolved = resolve_settings(&registry, &layers, &constraints).expect("valid resolution");
+    let fps = resolved.get_str("playback.fps").expect("FPS setting");
+    assert_eq!(fps.requested(), &SettingValue::Integer(60));
+    assert_eq!(fps.effective(), &SettingValue::Integer(10));
+    assert_eq!(fps.constraint_reason(), Some(ConstraintReason::PowerPolicy));
+}
+
+#[test]
+fn inverted_semantic_thresholds_are_rejected() {
+    let mut layers = SettingLayers::default();
+    layers.set(
+        SettingSource::Application,
+        key("visibility.covered-threshold"),
+        number(0.9),
+    );
+    layers.set(
+        SettingSource::Application,
+        key("visibility.resume-threshold"),
+        number(0.95),
+    );
+    assert!(matches!(
+        resolve_settings(&registry(), &layers, &Constraints::default()),
+        Err(ResolveError::SemanticViolation { .. })
+    ));
+    assert!(SettingValue::number(f64::NAN).is_err());
+    assert!(SettingValue::number(f64::INFINITY).is_err());
+}
+
+#[test]
+fn synthetic_migration_preserves_defaults_absence_and_backup() {
+    const OLD: &[u8] = include_bytes!("fixtures/synthetic-v1-defaults-and-absent-consent.toml");
+    const GOLDEN: &[u8] = include_bytes!("fixtures/synthetic-v2-defaults-and-absent-consent.toml");
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    fs::write(&path, OLD).expect("write synthetic legacy fixture");
+
+    let controller = SettingsController::open(&path, registry()).expect("migrate fixture");
+    let migrated = controller.snapshot().expect("migrated snapshot");
+    assert_eq!(migrated.revision(), 5);
+    assert_eq!(fs::read(path.with_file_name("settings.toml.bak")).unwrap(), OLD);
+    let golden_path = directory.0.join("golden.toml");
+    fs::write(&golden_path, GOLDEN).unwrap();
+    let golden = SettingsController::open(&golden_path, registry())
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    assert_eq!(migrated.as_ref(), golden.as_ref());
+    assert_eq!(
+        migrated
+            .effective()
+            .get_str("privacy.pointer-observation")
+            .unwrap()
+            .requested(),
+        &SettingValue::Boolean(false)
+    );
+    assert!(!migrated
+        .overrides()
+        .contains_key(&key("privacy.pointer-observation")));
+}
+
+#[test]
+fn explicit_synthetic_consent_and_overrides_survive_migration_and_restore() {
+    const OLD: &[u8] = include_bytes!("fixtures/synthetic-v1-explicit-overrides.toml");
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    fs::write(&path, OLD).unwrap();
+    let controller = SettingsController::open(&path, registry()).unwrap();
+    let migrated = controller.snapshot().unwrap();
+    assert_eq!(migrated.revision(), 7);
+    assert_eq!(
+        migrated
+            .effective()
+            .get_str("privacy.pointer-observation")
+            .unwrap()
+            .requested(),
+        &SettingValue::Boolean(true)
+    );
+    assert_eq!(
+        migrated
+            .effective()
+            .get_str("conversion.gamma")
+            .unwrap()
+            .requested(),
+        &number(1.25)
+    );
+
+    let changed = controller
+        .apply_batch(
+            7,
+            &[(key("conversion.gamma"), SettingChange::Set(number(1.5)))],
+        )
+        .unwrap();
+    let restored = controller.restore_backup(changed.revision()).unwrap();
+    assert_eq!(restored.revision(), 9);
+    assert_eq!(
+        restored
+            .effective()
+            .get_str("conversion.gamma")
+            .unwrap()
+            .requested(),
+        &number(1.25)
+    );
+}
+
+#[test]
+fn batch_validation_is_atomic_and_stale_revision_returns_current_revision() {
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    let controller = SettingsController::open(&path, registry()).unwrap();
+    let invalid_batch = [
+        (key("grid.columns"), SettingChange::Set(SettingValue::Integer(300))),
+        (key("playback.fps"), SettingChange::Set(SettingValue::Integer(0))),
+    ];
+    assert!(matches!(
+        controller.apply_batch(0, &invalid_batch),
+        Err(ConfigError::InvalidPersistentValue {
+            violation: TypeViolation::OutOfRange,
+            ..
+        })
+    ));
+    assert_eq!(controller.snapshot().unwrap().revision(), 0);
+    assert!(!path.exists());
+
+    let first = controller
+        .apply_batch(
+            0,
+            &[(key("conversion.gamma"), SettingChange::Set(number(1.25)))],
+        )
+        .unwrap();
+    assert_eq!(first.revision(), 1);
+    assert!(matches!(
+        controller.apply_batch(
+            0,
+            &[(key("conversion.gamma"), SettingChange::Set(number(1.5)))],
+        ),
+        Err(ConfigError::Conflict { expected: 0, current: 1 })
+    ));
+    assert_eq!(controller.snapshot().unwrap().revision(), 1);
+}
+
+#[test]
+fn concurrent_same_revision_writes_commit_exactly_once() {
+    let directory = TestDirectory::new();
+    let controller = Arc::new(SettingsController::open(directory.config(), registry()).unwrap());
+    let barrier = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for gamma in [1.25, 1.5] {
+        let controller = controller.clone();
+        let barrier = barrier.clone();
+        workers.push(thread::spawn(move || {
+            barrier.wait();
+            controller.apply_batch(
+                0,
+                &[(key("conversion.gamma"), SettingChange::Set(number(gamma)))],
+            )
+        }));
+    }
+    barrier.wait();
+    let outcomes = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, Err(ConfigError::Conflict { current: 1, .. })))
+            .count(),
+        1
+    );
+    assert_eq!(controller.snapshot().unwrap().revision(), 1);
+}
+
+#[test]
+fn independent_controllers_cannot_overwrite_the_same_revision() {
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    let first = Arc::new(SettingsController::open(&path, registry()).unwrap());
+    let second = Arc::new(SettingsController::open(&path, registry()).unwrap());
+    let barrier = Arc::new(Barrier::new(3));
+    let first_worker = {
+        let first = first.clone();
+        let barrier = barrier.clone();
+        thread::spawn(move || {
+            barrier.wait();
+            first.apply_batch(
+                0,
+                &[(key("conversion.gamma"), SettingChange::Set(number(1.25)))],
+            )
+        })
+    };
+    let second_worker = {
+        let second = second.clone();
+        let barrier = barrier.clone();
+        thread::spawn(move || {
+            barrier.wait();
+            second.apply_batch(
+                0,
+                &[(key("conversion.gamma"), SettingChange::Set(number(1.5)))],
+            )
+        })
+    };
+    barrier.wait();
+    let outcomes = [first_worker.join().unwrap(), second_worker.join().unwrap()];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, Err(ConfigError::Conflict { current: 1, .. })))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn future_schema_is_read_only_and_corrupt_repair_keeps_library_data() {
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    fs::write(
+        &path,
+        b"schema_version = 99\nrevision = 17\nfuture_field = true\n",
+    )
+    .unwrap();
+    let future = SettingsController::open(&path, registry()).unwrap();
+    assert!(matches!(
+        future.status().unwrap(),
+        ControllerStatus::ReadOnlyFutureSchema { schema_version: 99 }
+    ));
+    assert!(matches!(
+        future.apply_batch(17, &[]),
+        Err(ConfigError::ReadOnlyFutureSchema { schema_version: 99 })
+    ));
+
+    let library_file = directory.0.join("library").join("keep.bin");
+    fs::create_dir_all(library_file.parent().unwrap()).unwrap();
+    fs::write(&library_file, b"immutable user library data").unwrap();
+    let corrupt_path = directory.0.join("corrupt.toml");
+    fs::write(&corrupt_path, [0xff, 0xfe]).unwrap();
+    let repair = SettingsController::open(&corrupt_path, registry()).unwrap();
+    assert!(matches!(
+        repair.status().unwrap(),
+        ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::InvalidUtf8))
+    ));
+    repair.repair(0).unwrap();
+    assert_eq!(fs::read(library_file).unwrap(), b"immutable user library data");
+    let corrupt_archive_exists = fs::read_dir(&directory.0)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("corrupt.toml.corrupt-")
+        });
+    assert!(corrupt_archive_exists);
+}
+
+#[test]
+fn malformed_document_classes_are_rejected_before_snapshot_publication() {
+    let cases: &[(&[u8], fn(&DocumentError) -> bool)] = &[
+        (
+            b"schema_version = 2\nrevision = 0\n[settings]\n\"grid.columns\" = 240\n\"grid.columns\" = 241\n",
+            |error| matches!(error, DocumentError::DuplicateKey),
+        ),
+        (
+            b"schema_version = 2\nrevision = 0\n[settings]\n\"conversion.gamma\" = nan\n",
+            |error| matches!(error, DocumentError::NonFiniteNumber),
+        ),
+        (
+            b"schema_version = 0\nrevision = 0\n[settings]\n",
+            |error| matches!(error, DocumentError::UnsupportedVersion(0)),
+        ),
+        (
+            b"schema_version = 2\nrevision = 9223372036854775808\n[settings]\n",
+            |error| matches!(error, DocumentError::InvalidToml),
+        ),
+    ];
+    for (index, (bytes, expected)) in cases.iter().enumerate() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join(format!("case-{index}.toml"));
+        fs::write(&path, bytes).unwrap();
+        let controller = SettingsController::open(&path, registry()).unwrap();
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::RepairRequired(ConfigError::Document(error)) if expected(error)
+        ));
+        assert_eq!(controller.snapshot().unwrap().revision(), 0);
+    }
+
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    let mut invalid_utf8 = b"schema_version = 2\nrevision = 0\n[settings]\n".to_vec();
+    invalid_utf8.push(0xff);
+    fs::write(&path, invalid_utf8).unwrap();
+    assert!(matches!(
+        read_status(&path),
+        ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::InvalidUtf8))
+    ));
+}
+
+#[test]
+fn nesting_unknown_keys_overflow_and_session_persistence_are_bounded() {
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    let nested = format!(
+        "schema_version = 2\nrevision = 0\n[settings]\n\"grid.columns\" = {}0{}\n",
+        "[".repeat(MAX_NESTING_DEPTH + 1),
+        "]".repeat(MAX_NESTING_DEPTH + 1)
+    );
+    fs::write(&path, nested).unwrap();
+    assert!(matches!(
+        read_status(&path),
+        ControllerStatus::RepairRequired(ConfigError::Document(
+            DocumentError::ExcessiveNesting { .. }
+        ))
+    ));
+
+    fs::write(
+        &path,
+        b"schema_version = 2\nrevision = 0\n[settings]\n\"grid.colums\" = 240\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        read_status(&path),
+        ControllerStatus::RepairRequired(ConfigError::UnknownSetting(_))
+    ));
+
+    let session_controller = SettingsController::open(
+        directory.0.join("session.toml"),
+        registry(),
+    )
+    .unwrap();
+    assert!(matches!(
+        session_controller.apply_batch(
+            0,
+            &[(key("diagnostics.overlay"), SettingChange::Set(SettingValue::Boolean(true)))],
+        ),
+        Err(ConfigError::SessionSettingCannotPersist(_))
+    ));
+
+    let oversized = vec![b' '; MAX_CONFIG_BYTES + 1];
+    fs::write(&path, oversized).unwrap();
+    assert!(matches!(
+        read_status(&path),
+        ControllerStatus::RepairRequired(ConfigError::Document(
+            DocumentError::TooLarge { .. }
+        ))
+    ));
+}
