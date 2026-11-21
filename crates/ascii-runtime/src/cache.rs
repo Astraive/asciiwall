@@ -1032,6 +1032,13 @@ fn create_cache_instance_staging_dir(root: &Path) -> Result<PathBuf, CacheError>
 }
 
 fn create_cache_instance_dir(root: &Path) -> Result<PathBuf, CacheError> {
+    create_cache_instance_dir_with_sync(root, crate::storage::sync_parent_directory)
+}
+
+fn create_cache_instance_dir_with_sync(
+    root: &Path,
+    mut sync_directory: impl FnMut(&Path) -> io::Result<()>,
+) -> Result<PathBuf, CacheError> {
     verify_managed_root(root)?;
     let _initialization_lock = lock_cache_initialization(root)?;
     let managed_dir = root.join(CACHE_INSTANCE_DIR);
@@ -1047,9 +1054,14 @@ fn create_cache_instance_dir(root: &Path) -> Result<PathBuf, CacheError> {
         let _ = fs::remove_dir_all(&staging_dir);
         return Err(error);
     }
+    if let Err(error) = sync_directory(&staging_dir) {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(CacheError::Io(error));
+    }
     if let Err(error) = fs::rename(&staging_dir, &managed_dir) {
         let _ = fs::remove_dir_all(&staging_dir);
         if cache_instance_is_owned(root, &managed_dir)? {
+            sync_directory(root)?;
             return Ok(managed_dir);
         }
         return match fs::symlink_metadata(&managed_dir) {
@@ -1060,6 +1072,7 @@ fn create_cache_instance_dir(root: &Path) -> Result<PathBuf, CacheError> {
             Err(path_error) => Err(CacheError::Io(path_error)),
         };
     }
+    sync_directory(root)?;
     Ok(managed_dir)
 }
 
@@ -2385,6 +2398,81 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn cache_instance_publication_syncs_staging_before_root() {
+        use std::cell::RefCell;
+
+        let directory = TempManagedDirectory::new();
+        let root = fs::canonicalize(&directory.0).unwrap();
+        let managed_dir = root.join(CACHE_INSTANCE_DIR);
+        let sync_events = RefCell::new(Vec::with_capacity(2));
+        let created = create_cache_instance_dir_with_sync(&root, |path| {
+            if path == root.as_path() {
+                assert_eq!(
+                    fs::read(managed_dir.join(CACHE_OWNER_FILE))?,
+                    CACHE_OWNER_MARKER
+                );
+                sync_events.borrow_mut().push("root");
+            } else {
+                assert_eq!(path.parent(), Some(root.as_path()));
+                assert!(!managed_dir.exists());
+                assert_eq!(fs::read(path.join(CACHE_OWNER_FILE))?, CACHE_OWNER_MARKER);
+                sync_events.borrow_mut().push("staging");
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(created, managed_dir);
+        assert_eq!(sync_events.into_inner(), vec!["staging", "root"]);
+    }
+
+    #[test]
+    fn cache_instance_staging_sync_failure_prevents_publication() {
+        let directory = TempManagedDirectory::new();
+        let root = fs::canonicalize(&directory.0).unwrap();
+        let managed_dir = root.join(CACHE_INSTANCE_DIR);
+        let error = create_cache_instance_dir_with_sync(&root, |_| {
+            Err(io::Error::other("injected staging-directory sync failure"))
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, CacheError::Io(_)));
+        assert!(!managed_dir.exists());
+        assert!(fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{CACHE_INSTANCE_DIR}.init-"))
+        }));
+    }
+
+    #[test]
+    fn cache_instance_root_sync_failure_is_reported_after_publication() {
+        use std::cell::RefCell;
+
+        let directory = TempManagedDirectory::new();
+        let root = fs::canonicalize(&directory.0).unwrap();
+        let managed_dir = root.join(CACHE_INSTANCE_DIR);
+        let sync_events = RefCell::new(Vec::with_capacity(2));
+        let error = create_cache_instance_dir_with_sync(&root, |path| {
+            if path == root.as_path() {
+                assert!(cache_instance_is_owned(&root, &managed_dir).unwrap());
+                sync_events.borrow_mut().push("root");
+                Err(io::Error::other("injected root-directory sync failure"))
+            } else {
+                assert!(!managed_dir.exists());
+                sync_events.borrow_mut().push("staging");
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, CacheError::Io(_)));
+        assert_eq!(sync_events.into_inner(), vec!["staging", "root"]);
+        assert!(cache_instance_is_owned(&root, &managed_dir).unwrap());
     }
 
     #[test]
