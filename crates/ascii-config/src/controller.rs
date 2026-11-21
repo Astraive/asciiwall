@@ -140,7 +140,7 @@ impl SettingsController {
                             Some(bytes),
                         )
                     }
-                };
+                }
             }
             Err(StoreError::TooLarge { limit, .. }) => (
                 ControllerStatus::RepairRequired(ConfigError::Document(DocumentError::TooLarge {
