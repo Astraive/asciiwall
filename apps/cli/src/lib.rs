@@ -153,8 +153,7 @@ fn execute(cli: Cli, cancellation: &CancellationToken) -> Result<(), CliError> {
         CliError::capability("no built-in font is available; select a local font with --font")
     })?;
     let budget = Budget::new(8_000_000, 64_000_000, 16_000_000);
-    let normalized_raster_resources =
-        NormalizedRasterResources::new(budget.max_raster_bytes());
+    let normalized_raster_resources = NormalizedRasterResources::new(budget.max_raster_bytes());
     let geometry = GlyphConfig::new(8.0, 8, 12, 9)
         .map_err(|_| CliError::validation("configured font geometry is invalid"))?;
     let verbose = verbose && !quiet;
