@@ -1,7 +1,7 @@
 use ascii_runtime::storage::{
     AtomicWriteStage, DiagnosticLog, DirectoryInputs, ExportMode, ImportJournal, InstallEntry,
-    InstallRegistry, JournalRecord, JournalState, LogLimits, RecoveryAction, Storage, StorageError,
-    StorageRoots, ValidatedConfig, validate_application_id,
+    InstallRegistry, JournalRecord, JournalState, LogLimits, ParsedToml, RecoveryAction, Storage,
+    StorageError, StorageRoots, validate_application_id,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -10,6 +10,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
+use toml::Value as TomlValue;
+
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
@@ -235,6 +237,170 @@ fn platform_directory_inputs_map_to_distinct_storage_classes() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn storage_roots_and_persisted_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new();
+    let roots = linux_roots(temp.path());
+    fs::create_dir_all(&roots.config).expect("create previously permissive config root");
+    fs::set_permissions(
+        &roots.config,
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("make existing config root broadly accessible");
+    let storage = Storage::new(roots.clone());
+    roots.create_all().expect("create private storage roots");
+    for directory in [
+        &roots.config,
+        &roots.data,
+        &roots.library,
+        &roots.projects,
+        &roots.catalog,
+        &roots.cache,
+        &roots.staging,
+        &roots.logs,
+        &roots.runtime,
+    ] {
+        assert_eq!(
+            fs::metadata(directory).expect("storage directory metadata").permissions().mode()
+                & 0o777,
+            0o700,
+            "storage directory is private: {directory:?}"
+        );
+    }
+
+    let first_config = config(json!({"theme": "private"}));
+    storage
+        .save_config_with_hook(&first_config, validate_test_config, |stage| {
+            if stage == AtomicWriteStage::TemporaryCreated {
+                let paths = fs::read_dir(&roots.config)?
+                    .map(|entry| entry.map(|entry| entry.path()))
+                    .collect::<io::Result<Vec<_>>>()?;
+                let temporary = paths
+                    .into_iter()
+                    .find(|path| {
+                        path.file_name()
+                            .is_some_and(|name| name.to_string_lossy().ends_with(".state.tmp"))
+                    })
+                    .ok_or_else(|| io::Error::other("atomic temporary was not created"))?;
+                assert_eq!(
+                    fs::metadata(temporary)?.permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+            Ok(())
+        })
+        .expect("write private config");
+    assert_eq!(
+        fs::metadata(storage.config_path())
+            .expect("config metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    fs::set_permissions(
+        storage.config_path(),
+        fs::Permissions::from_mode(0o644),
+    )
+    .expect("make old config broadly readable for replacement regression");
+    storage
+        .save_config(&config(json!({"theme": "replacement"})), validate_test_config)
+        .expect("replace config without broadening permissions");
+    assert_eq!(
+        fs::metadata(storage.config_path())
+            .expect("replacement config metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    let initial_registry = registry("1.0.0");
+    storage
+        .save_registry_with_hook(&initial_registry, |stage| {
+            if stage == AtomicWriteStage::TemporaryCreated {
+                let temporary = roots.data.join(".ascii-runtime-install-registry.json.state.tmp");
+                assert_eq!(
+                    fs::metadata(temporary)?.permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+            Ok(())
+        })
+        .expect("write private registry");
+    assert_eq!(
+        fs::metadata(storage.registry_path())
+            .expect("registry metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    let journal = ImportJournal::new(roots.staging.clone());
+    journal
+        .begin(
+            "private-test",
+            "org.example.sample",
+            "imports/private-test",
+        )
+        .expect("write private journal");
+    assert_eq!(
+        fs::metadata(roots.staging.join("import-private-test.json"))
+            .expect("journal metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    let log = DiagnosticLog::new(
+        roots.logs.clone(),
+        temp.path().join("home"),
+        LogLimits::new(256, 2, 128).expect("valid bounds"),
+    );
+    let previous_log = log.current_path();
+    fs::write(&previous_log, vec![b'x'; 240]).expect("seed existing diagnostic log");
+    fs::set_permissions(&previous_log, fs::Permissions::from_mode(0o644))
+        .expect("make existing log broadly readable");
+    log.append("private log record").expect("write private log");
+    assert_eq!(
+        fs::metadata(log.current_path())
+            .expect("log metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(roots.logs.join("runtime.log.1"))
+            .expect("rotated log metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let isolated_roots = linux_roots(&temp.path().join("isolated"));
+    ImportJournal::new(isolated_roots.staging.clone())
+        .begin("first-write", "org.example.sample", "imports/first-write")
+        .expect("create journal storage without prior root initialization");
+    for directory in [&isolated_roots.data, &isolated_roots.staging] {
+        assert_eq!(
+            fs::metadata(directory)
+                .expect("nested app storage directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "nested app storage directory is private: {directory:?}"
+        );
+    }
+}
+
+
 #[test]
 fn root_resolution_separates_lexical_and_symlink_aliases() {
     let temp = TempDir::new();
@@ -363,21 +529,13 @@ fn windows_filesystem_atomic_save_recovery_smoke() {
         Err(StorageError::Io(_))
     ));
     assert_eq!(
-        ValidatedConfig::from_json(
-            &fs::read(storage.config_path()).expect("read replaced Windows config"),
-            validate_test_config,
-        )
-        .expect("replacement config remains valid")
-        .value(),
+        parse_config(&fs::read(storage.config_path()).expect("read replaced Windows config"))
+            .value(),
         replacement.value()
     );
     assert_eq!(
-        ValidatedConfig::from_json(
-            &fs::read(storage.config_backup_path()).expect("read Windows last-good backup"),
-            validate_test_config,
-        )
-        .expect("last-good config remains valid")
-        .value(),
+        parse_config(&fs::read(storage.config_backup_path()).expect("read Windows last-good backup"))
+            .value(),
         second.value()
     );
     let subsequent = config(json!({"theme": "windows-subsequent"}));
@@ -532,6 +690,39 @@ fn registry_is_versioned_atomic_and_failed_replacement_preserves_old_state() {
 }
 
 #[test]
+fn registry_write_rejects_newer_and_invalid_current_bytes() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let replacement = registry("2.0.0");
+    storage
+        .save_registry(&registry("1.0.0"))
+        .expect("save supported registry");
+    let path = storage.registry_path();
+
+    let newer = br#"{"schema_version":2,"packages":{}}"#;
+    fs::write(&path, newer).expect("write newer registry schema");
+    assert!(matches!(
+        storage.save_registry(&replacement),
+        Err(StorageError::UnsupportedVersion { .. })
+    ));
+    assert_eq!(
+        fs::read(&path).expect("newer registry remains untouched"),
+        newer
+    );
+
+    let invalid = b"{not-json";
+    fs::write(&path, invalid).expect("write invalid registry");
+    assert!(matches!(
+        storage.save_registry(&replacement),
+        Err(StorageError::Json(_))
+    ));
+    assert_eq!(
+        fs::read(&path).expect("invalid registry remains untouched"),
+        invalid
+    );
+}
+
+#[test]
 fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
@@ -558,14 +749,15 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
         original
     );
 
-    let invalid_history = br#"{"cursor_history":[1,2]}"#;
-    assert!(ValidatedConfig::from_json(invalid_history, |_| Ok::<(), &'static str>(())).is_err());
-    let invalid_window_history = br#"{"window_geometry_history":[{"x":1}]}"#;
+    let syntax_only = ParsedToml::from_toml(b"unrecognized_setting = true")
+        .expect("valid TOML syntax does not impose a settings schema");
+    validate_test_config(syntax_only.value()).expect("TOML parser does not invent settings keys");
     assert!(
-        ValidatedConfig::from_json(invalid_window_history, |_| Ok::<(), &'static str>(())).is_err()
+        storage
+            .load_config(|_| Err::<(), _>("unsupported schema"))
+            .is_err(),
+        "caller-owned schema validator remains authoritative"
     );
-    let invalid_schema = br#"{"unexpected":true}"#;
-    assert!(ValidatedConfig::from_json(invalid_schema, |_| Err("unknown field")).is_err());
 
     storage
         .save_config(&second, validate_test_config)
@@ -573,7 +765,7 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
     assert_eq!(fs::read(&backup_path).expect("last-good backup"), original);
     assert_eq!(
         storage
-            .load_config(|value| value.is_object().then_some(()).ok_or("object required"))
+            .load_config(validate_test_config)
             .expect("load validated config")
             .unwrap()
             .value(),
@@ -593,11 +785,7 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
     );
     assert_eq!(
         fs::read(&config_path).expect("new state survives post-replacement interruption"),
-        serde_json::to_vec_pretty(third.value())
-            .unwrap()
-            .into_iter()
-            .chain(b"\n".iter().copied())
-            .collect::<Vec<_>>()
+        third.as_bytes().to_vec()
     );
     assert_eq!(
         fs::read(&backup_path).expect("last-good remains previous valid state"),
@@ -644,8 +832,7 @@ fn configuration_failures_at_each_atomic_boundary_preserve_valid_recovery() {
             baseline.value()
         };
         let current_bytes = fs::read(&config_path).expect("current config remains complete");
-        let recovered_current = ValidatedConfig::from_json(&current_bytes, validate_test_config)
-            .expect("current state remains valid");
+        let recovered_current = parse_config(&current_bytes);
         assert_eq!(recovered_current.value(), expected_current);
 
         let expected_backup = if matches!(
@@ -658,20 +845,19 @@ fn configuration_failures_at_each_atomic_boundary_preserve_valid_recovery() {
         };
         let backup_bytes = fs::read(&backup_path).expect("last-good backup remains present");
         assert_eq!(&backup_bytes, expected_backup);
-        let recovered_backup = ValidatedConfig::from_json(&backup_bytes, validate_test_config)
-            .expect("last-good state remains valid");
-        assert!(recovered_backup.value().is_object());
+        let recovered_backup = parse_config(&backup_bytes);
+        assert!(matches!(recovered_backup.value(), TomlValue::Table(_)));
 
         let parent = config_path.parent().expect("configuration directory");
         assert!(
             !parent
-                .join(".ascii-runtime-settings.json.state.tmp")
+                .join(".ascii-runtime-settings.toml.state.tmp")
                 .exists(),
             "failed config write removes its owned temporary"
         );
         assert!(
             !parent
-                .join(".ascii-runtime-settings.json.last-good.state.tmp")
+                .join(".ascii-runtime-settings.toml.last-good.state.tmp")
                 .exists(),
             "failed backup write leaves no owned temporary"
         );
@@ -688,11 +874,8 @@ fn configuration_failures_at_each_atomic_boundary_preserve_valid_recovery() {
                 .value(),
             subsequent.value()
         );
-        let replaced_backup = ValidatedConfig::from_json(
-            &fs::read(&backup_path).expect("subsequent write records last-good"),
-            validate_test_config,
-        )
-        .expect("subsequent write preserves valid state");
+        let replaced_backup =
+            parse_config(&fs::read(&backup_path).expect("subsequent write records last-good"));
         assert_eq!(replaced_backup.value(), expected_current);
     }
 }
@@ -719,7 +902,7 @@ fn saving_config_revalidates_against_the_active_schema_before_replacement() {
 }
 
 #[test]
-fn invalid_config_does_not_replace_last_good_backup_on_interruption() {
+fn invalid_current_config_is_rejected_and_last_good_can_be_restored_explicitly() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
     let known_good = config(json!({"theme": "known-good"}));
@@ -731,44 +914,90 @@ fn invalid_config_does_not_replace_last_good_backup_on_interruption() {
     storage
         .save_config(&config(json!({"theme": "current"})), validate_theme_config)
         .expect("save current config");
+    let config_path = storage.config_path();
     let backup_path = storage.config_backup_path();
-    assert_eq!(
-        fs::read(&backup_path).expect("known-good backup exists"),
-        known_good_bytes
-    );
-    fs::write(storage.config_path(), b"{malformed").expect("corrupt current config");
+    let known_good_backup = fs::read(&backup_path).expect("known-good backup exists");
+    assert_eq!(known_good_backup, known_good_bytes);
 
+    let malformed = b"settings = [";
+    fs::write(&config_path, malformed).expect("corrupt current config");
     let replacement = config(json!({"theme": "replacement"}));
-    assert!(
-        storage
-            .save_config_with_hook(
-                &replacement,
-                validate_theme_config,
-                injected_failure(AtomicWriteStage::TargetReplaced)
-            )
-            .is_err()
-    );
-    let backup = fs::read(&backup_path).expect("preserve known-good backup");
-    assert_eq!(backup, known_good_bytes);
-    fs::write(storage.config_path(), br#"{"theme":42}"#)
-        .expect("write schema-invalid current config");
-    let schema_replacement = config(json!({"theme": "schema-replacement"}));
-    assert!(
-        storage
-            .save_config_with_hook(
-                &schema_replacement,
-                validate_theme_config,
-                injected_failure(AtomicWriteStage::TargetReplaced),
-            )
-            .is_err()
+    assert!(matches!(
+        storage.save_config_with_hook(
+            &replacement,
+            validate_theme_config,
+            injected_failure(AtomicWriteStage::TargetReplaced)
+        ),
+        Err(StorageError::InvalidConfiguration(_))
+    ));
+    assert_eq!(fs::read(&config_path).expect("malformed file stays untouched"), malformed);
+    assert_eq!(fs::read(&backup_path).expect("backup stays untouched"), known_good_backup);
+
+    let invalid_schema = b"theme = 42\n";
+    fs::write(&config_path, invalid_schema).expect("write schema-invalid TOML");
+    assert!(matches!(
+        storage.save_config(&replacement, validate_theme_config),
+        Err(StorageError::InvalidConfiguration(_))
+    ));
+    assert_eq!(
+        fs::read(&config_path).expect("schema-invalid file stays untouched"),
+        invalid_schema
     );
     assert_eq!(
         fs::read(&backup_path).expect("schema-invalid config cannot replace backup"),
         known_good_bytes
     );
-    let parsed_backup = ValidatedConfig::from_json(&backup, validate_theme_config)
-        .expect("prior backup remains a valid config");
-    assert_eq!(parsed_backup.value(), known_good.value());
+
+    storage
+        .restore_config_from_backup(validate_theme_config)
+        .expect("explicitly restore the validated last-good config");
+    assert_eq!(fs::read(&config_path).expect("restored config"), known_good_bytes);
+    assert_eq!(
+        fs::read(&backup_path).expect("explicit recovery preserves last-good"),
+        known_good_bytes
+    );
+}
+
+#[test]
+fn newer_settings_schema_is_not_replaced_by_an_older_writer() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let validate_schema_v1 = |value: &TomlValue| {
+        (value.get("schema_version").and_then(TomlValue::as_integer) == Some(1))
+            .then_some(())
+            .ok_or("unsupported settings schema")
+    };
+    let supported = ParsedToml::from_toml(
+        b"schema_version = 1\nrevision = 1\n[settings]\ntheme = \"known-good\"\n",
+    )
+    .expect("parse supported TOML");
+    storage
+        .save_config(&supported, validate_schema_v1)
+        .expect("save supported schema");
+    let current = ParsedToml::from_toml(
+        b"schema_version = 1\nrevision = 2\n[settings]\ntheme = \"current\"\n",
+    )
+    .expect("parse current TOML");
+    storage
+        .save_config(&current, validate_schema_v1)
+        .expect("save current supported schema");
+    let backup_path = storage.config_backup_path();
+    let known_good_backup = fs::read(&backup_path).expect("read supported last-good");
+
+    let newer = b"schema_version = 2\nrevision = 3\n[settings]\ntheme = \"newer\"\n";
+    fs::write(storage.config_path(), newer).expect("write newer schema");
+    assert!(matches!(
+        storage.save_config(&supported, validate_schema_v1),
+        Err(StorageError::InvalidConfiguration(_))
+    ));
+    assert_eq!(
+        fs::read(storage.config_path()).expect("newer schema stays untouched"),
+        newer
+    );
+    assert_eq!(
+        fs::read(&backup_path).expect("newer current preserves last-good"),
+        known_good_backup
+    );
 }
 
 #[test]
@@ -940,13 +1169,13 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
         .expect("save valid config");
     let config_path = storage.config_path();
     let original_config_bytes = fs::read(&config_path).expect("read original config");
-    let large_value = json!({"payload": "x".repeat(CONFIG_MAX_BYTES - 15)});
-    let compact_config = serde_json::to_vec(&large_value).expect("serialize compact config");
-    assert!(compact_config.len() <= CONFIG_MAX_BYTES);
-    let oversized_config = ValidatedConfig::from_json(&compact_config, |value| {
-        value.is_object().then_some(()).ok_or("object required")
-    })
-    .expect("compact config remains within its read limit");
+    let prefix = b"payload = \"";
+    let suffix = b"\"\n";
+    let payload = "x".repeat(CONFIG_MAX_BYTES - prefix.len() - suffix.len());
+    let compact_config = format!("payload = \"{payload}\"\n").into_bytes();
+    assert_eq!(compact_config.len(), CONFIG_MAX_BYTES);
+    let oversized_config =
+        ParsedToml::from_toml(&compact_config).expect("compact TOML remains within its read limit");
     assert!(matches!(
         storage.save_config(&oversized_config, validate_test_config),
         Err(StorageError::DocumentTooLarge)
@@ -961,25 +1190,34 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
         .expect("establish a last-good config before oversized-current recovery");
     let backup_path = storage.config_backup_path();
     let known_good_backup = fs::read(&backup_path).expect("retain last-good backup");
-    fs::write(&config_path, vec![b' '; CONFIG_MAX_BYTES + 1]).expect("write oversized config");
+    let oversized_current = vec![b' '; CONFIG_MAX_BYTES + 1];
+    fs::write(&config_path, &oversized_current).expect("write oversized config");
     assert!(matches!(
-        storage.load_config(|_| Ok::<(), &'static str>(())),
+        storage.load_config(validate_test_config),
         Err(StorageError::DocumentTooLarge)
     ));
     let replacement = config(json!({"theme": "recovered"}));
-    storage
-        .save_config(&replacement, validate_test_config)
-        .expect("replace oversized current config");
+    assert!(matches!(
+        storage.save_config(&replacement, validate_test_config),
+        Err(StorageError::DocumentTooLarge)
+    ));
     assert_eq!(
-        storage
-            .load_config(validate_test_config)
-            .unwrap()
-            .unwrap()
-            .value(),
-        replacement.value()
+        fs::read(&config_path).expect("oversized current remains untouched"),
+        oversized_current
     );
     assert_eq!(
-        fs::read(backup_path).expect("oversized current did not replace last-good"),
+        fs::read(&backup_path).expect("oversized current preserves last-good"),
+        known_good_backup
+    );
+    storage
+        .restore_config_from_backup(validate_test_config)
+        .expect("explicitly restore from last-good");
+    assert_eq!(
+        storage.load_config(validate_test_config).unwrap().unwrap().value(),
+        original_config.value()
+    );
+    assert_eq!(
+        fs::read(&backup_path).expect("recovery preserves last-good"),
         known_good_backup
     );
 
