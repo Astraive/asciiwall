@@ -1373,6 +1373,7 @@ fn is_machine_local_string(value: &str) -> bool {
         });
         let bytes = token.as_bytes();
         token.starts_with("~/")
+            || looks_like_user_home_path(token)
             || token.starts_with('/')
             || token.starts_with("\\\\")
             || token.contains('\\')
@@ -1384,6 +1385,21 @@ fn is_machine_local_string(value: &str) -> bool {
                 && matches!(bytes[2], b'/' | b'\\'))
             || looks_like_network_endpoint(token)
     })
+}
+
+fn looks_like_user_home_path(token: &str) -> bool {
+    let Some((username, _)) = token
+        .strip_prefix('~')
+        .and_then(|path| path.split_once(['/', '\\']))
+    else {
+        return false;
+    };
+
+    !username.is_empty()
+        && username.chars().any(char::is_alphanumeric)
+        && username
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '.' | '_' | '-'))
 }
 
 fn contains_file_uri(value: &str) -> bool {
