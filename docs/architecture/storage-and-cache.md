@@ -45,15 +45,16 @@ directory-scoped lock; remove the operation's reserved temporary on failure and 
 interrupted write. Sync the containing directory after replacement and sync each newly created
 directory entry before reporting a first write as durable on platforms that support directory sync.
 
-Settings saves are compare-and-swap writes: callers provide the exact current bytes observed from
-`load_config` or assert that the file was absent. Storage compares this expectation under the same
-directory lock before creating a temporary or rotating `.last-good`; a mismatch returns the typed
+Settings saves and explicit recovery are compare-and-swap writes: callers provide the exact current
+bytes observed from `load_config` or, when recovering an invalid file, the raw bytes previously
+read from its path; callers pass `None` only when the file was absent. Storage compares this
+expectation under the directory lock before replacement; a mismatch returns the typed
 `StaleConfiguration` error without changing either file.
 Ordinary saves never overwrite invalid, unsupported, or oversized current settings and do not rotate
 them into `.last-good`. Explicit recovery can restore a schema-valid `.last-good` to current settings;
-it leaves the backup in place. Recovery refuses a lower integer schema version and fails closed when
-exactly one parseable current or backup document declares an integer version. Hook-injected failures
-cover temporary creation, temporary sync, backup replacement, and destination replacement; tests
+it leaves the backup in place. Recovery refuses a lower integer schema version and fails closed
+when exactly one parseable current or backup document declares an integer version. Hook-injected
+failures cover temporary creation, temporary sync, backup replacement, and destination replacement; tests
 check complete valid current and last-good documents, owned-temporary cleanup, rejection without byte
 changes, explicit recovery, and subsequent successful saves at each boundary. App-owned storage
 directories are mode `0700`; persisted state and diagnostic log files, including rotated logs, are
