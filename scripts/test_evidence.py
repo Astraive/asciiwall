@@ -286,6 +286,44 @@ class EvidenceRecordTests(unittest.TestCase):
             with self.assertRaises(evidence.EvidenceError):
                 evidence.finalize_record(record)
 
+
+    def test_native_manual_manifest_rejects_oversized_utf16_synthetic_json(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            artifact = directory / "oversized-utf16-native.bin"
+            manifest_path = directory / "native-evidence.json"
+            report = evidence.fake_control("timestamp-fault")
+            payload = (
+                " " * (evidence.MAX_JSON_BYTES // 2 + 1)
+                + json.dumps(report, separators=(",", ":"))
+            ).encode("utf-16")
+            self.assertGreater(len(payload), evidence.MAX_JSON_BYTES)
+            artifact.write_bytes(payload)
+            artifact_relative = artifact.relative_to(ROOT).as_posix()
+            manifest_relative = manifest_path.relative_to(ROOT).as_posix()
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id="NATIVE-UTF16-001",
+                ec_ids=[],
+                evidence_path=manifest_relative,
+            )
+            manifest = {
+                "schema_version": 1,
+                "artifact_type": "native-manual-evidence",
+                "execution": "manual",
+                "procedure_id": record["procedure_id"],
+                "reviewer": record["reviewer"],
+                "date": record["date"],
+                "status": "pass",
+                "artifacts": [{
+                    "path": artifact_relative,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }],
+            }
+            manifest_path.write_bytes(evidence.canonical_json(manifest))
+            with self.assertRaisesRegex(evidence.EvidenceError, "native evidence JSON exceeds the 1 MiB inspection limit"):
+                evidence.finalize_record(record)
     def test_native_manual_manifest_binds_pass_to_binary_artifact(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             directory = Path(temporary)
@@ -821,6 +859,7 @@ class RetentionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
             old = evidence.finalize_record(base_record(date="2026-11-12"))
+            old_path = archive / f"qa-evidence-{old['record_id']}.json"
             recent = evidence.finalize_record(base_record(date="2026-11-14"))
             for record in (old, recent):
                 path = archive / f"qa-evidence-{record['record_id']}.json"
@@ -840,21 +879,26 @@ class RetentionTests(unittest.TestCase):
                 if int_limit_getter is not None and int_limit_setter is not None
                 else None
             )
-            if old_int_limit is not None:
-                int_limit_setter(4300)
             try:
-                result = evidence.prune_archive(archive, keep=1)
+                if old_int_limit is not None:
+                    int_limit_setter(4300)
+                if os.name == "posix":
+                    with self.assertRaisesRegex(evidence.EvidenceError, "atomic compare-and-unlink"):
+                        evidence.prune_archive(archive, keep=1)
+                    self.assertEqual(old_path.read_bytes(), evidence.canonical_json(old))
+                else:
+                    result = evidence.prune_archive(archive, keep=1)
+                    self.assertEqual(result["removed"], 1)
+                    self.assertEqual(result["removed_names"], [f"qa-evidence-{old['record_id']}.json"])
+                    self.assertFalse(old_path.exists())
+                self.assertTrue((archive / f"qa-evidence-{recent['record_id']}.json").exists())
+                self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me")
+                self.assertTrue(malformed.exists())
+                self.assertEqual(huge_integer.read_text(encoding="utf-8"), huge_integer_payload)
             finally:
                 if old_int_limit is not None:
                     int_limit_setter(old_int_limit)
 
-            self.assertEqual(result["removed"], 1)
-            self.assertEqual(result["removed_names"], [f"qa-evidence-{old['record_id']}.json"])
-            self.assertFalse((archive / f"qa-evidence-{old['record_id']}.json").exists())
-            self.assertTrue((archive / f"qa-evidence-{recent['record_id']}.json").exists())
-            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me")
-            self.assertTrue(malformed.exists())
-            self.assertEqual(huge_integer.read_text(encoding="utf-8"), huge_integer_payload)
 
     def test_prune_rejects_a_reparse_archive_directory_without_deleting_entries(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
@@ -899,44 +943,48 @@ class RetentionTests(unittest.TestCase):
 
     @unittest.skipUnless(
         os.name == "posix" and _supports_safe_directory_access(),
-        "parent-replacement injection requires POSIX directory-relative access",
+        "same-directory replacement injection requires POSIX directory-relative access",
     )
-    def test_prune_parent_replacement_cannot_redirect_deletion(self):
+    def test_prune_fails_closed_for_same_directory_replacement_at_delete_boundary(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
-            root = Path(temporary)
-            archive = root / "archive"
-            archive.mkdir()
+            archive = Path(temporary)
             old = evidence.finalize_record(base_record(date="2026-11-12"))
             recent = evidence.finalize_record(base_record(date="2026-11-14"))
             old_name = f"qa-evidence-{old['record_id']}.json"
             recent_name = f"qa-evidence-{recent['record_id']}.json"
-            (archive / old_name).write_bytes(evidence.canonical_json(old))
+            old_path = archive / old_name
+            old_bytes = evidence.canonical_json(old)
+            old_path.write_bytes(old_bytes)
             (archive / recent_name).write_bytes(evidence.canonical_json(recent))
-            replacement = root / "replacement"
-            replacement.mkdir()
-            replacement_entry = replacement / old_name
-            replacement_entry.write_bytes(b"replacement entry must not be deleted")
-            displaced = root / "displaced"
-            original_unlink = os.unlink
-            swapped = False
+            replacement_path = archive / "replacement.bin"
+            replacement_bytes = b"same-directory replacement must be preserved"
+            replacement_path.write_bytes(replacement_bytes)
+            displaced_path = archive / "displaced-original.json"
+            original_compare = evidence._same_file_snapshot
+            original_snapshot = old_path.stat()
+            matching_checks = 0
 
-            def replace_parent_before_unlink(name, *args, **kwargs):
-                nonlocal swapped
-                if not swapped and name == old_name and kwargs.get("dir_fd") is not None:
-                    archive.rename(displaced)
-                    replacement.rename(archive)
-                    swapped = True
-                return original_unlink(name, *args, **kwargs)
+            def replace_after_snapshot_check(left, right):
+                nonlocal matching_checks
+                matches = original_compare(left, right)
+                if (
+                    matches
+                    and (left.st_dev, left.st_ino) == (original_snapshot.st_dev, original_snapshot.st_ino)
+                ):
+                    matching_checks += 1
+                    if matching_checks == 2:
+                        old_path.rename(displaced_path)
+                        replacement_path.rename(old_path)
+                return matches
 
-            with patch.object(evidence.os, "unlink", side_effect=replace_parent_before_unlink):
-                result = evidence.prune_archive(archive, keep=1)
+            with patch.object(evidence, "_same_file_snapshot", side_effect=replace_after_snapshot_check):
+                with self.assertRaisesRegex(evidence.EvidenceError, "atomic compare-and-unlink"):
+                    evidence.prune_archive(archive, keep=1)
 
-            self.assertTrue(swapped)
-            self.assertEqual(result["removed_names"], [old_name])
-            self.assertFalse((displaced / old_name).exists())
-            self.assertEqual((archive / old_name).read_bytes(), b"replacement entry must not be deleted")
-            self.assertTrue((displaced / recent_name).is_file())
-
+            self.assertEqual(matching_checks, 2)
+            self.assertEqual(old_path.read_bytes(), replacement_bytes)
+            self.assertEqual(displaced_path.read_bytes(), old_bytes)
+            self.assertTrue((archive / recent_name).is_file())
     @unittest.skipUnless(
         os.name == "posix" and _supports_safe_directory_access(),
         "same-directory replacement injection requires POSIX directory-relative access",
@@ -1090,10 +1138,14 @@ class RetentionTests(unittest.TestCase):
             os.utime(reviewed_path, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
             os.utime(unreviewed_path, ns=(1_800_000_000_000_000_000, 1_800_000_000_000_000_000))
 
-            result = evidence.prune_archive(archive, keep=1)
-
-            self.assertEqual(result["removed"], 1)
-            self.assertFalse(reviewed_path.exists())
+            if os.name == "posix":
+                with self.assertRaisesRegex(evidence.EvidenceError, "atomic compare-and-unlink"):
+                    evidence.prune_archive(archive, keep=1)
+                self.assertTrue(reviewed_path.is_file())
+            else:
+                result = evidence.prune_archive(archive, keep=1)
+                self.assertEqual(result["removed"], 1)
+                self.assertFalse(reviewed_path.exists())
             self.assertTrue(unreviewed_path.exists())
 
     def test_retention_bounds_reports_diffs_and_sanitized_logs_separately(self):
@@ -1119,14 +1171,19 @@ class RetentionTests(unittest.TestCase):
             unrelated = archive / "unrelated.bin"
             unrelated.write_bytes(b"keep")
 
-            result = evidence.prune_archive(archive, keep=1)
-
-            self.assertEqual(result["removed"], 3)
-            self.assertEqual(set(result["kept_by_type"]), {"evidence", "control", "grid-diff", "log"})
+            if os.name == "posix":
+                with self.assertRaisesRegex(evidence.EvidenceError, "atomic compare-and-unlink"):
+                    evidence.prune_archive(archive, keep=1)
+                for prefix in ("qa-control-", "qa-grid-diff-", "qa-log-"):
+                    self.assertEqual(len(list(archive.glob(f"{prefix}*.json"))), 2)
+            else:
+                result = evidence.prune_archive(archive, keep=1)
+                self.assertEqual(result["removed"], 3)
+                self.assertEqual(set(result["kept_by_type"]), {"evidence", "control", "grid-diff", "log"})
+                for prefix in ("qa-control-", "qa-grid-diff-", "qa-log-"):
+                    self.assertEqual(len(list(archive.glob(f"{prefix}*.json"))), 1)
             self.assertTrue(unrelated.is_file())
             self.assertEqual(unrelated.read_bytes(), b"keep")
-            for prefix in ("qa-control-", "qa-grid-diff-", "qa-log-"):
-                self.assertEqual(len(list(archive.glob(f"{prefix}*.json"))), 1)
 
     def test_prune_limit_is_bounded_and_requires_existing_archive(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:

@@ -468,7 +468,13 @@ def _contains_synthetic_marker(value: Any) -> bool:
 
 
 def _looks_like_json(raw: bytes) -> bool | None:
-    prefix = raw.replace(b"\x00", b"").lstrip(b"\xef\xbb\xbf\xff\xfe \t\r\n")
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            prefix = raw.decode("utf-16").lstrip()
+        except UnicodeError:
+            return True
+        return prefix.startswith(("{", "[", '"')) if prefix else None
+    prefix = raw.replace(b"\x00", b"").lstrip(b"\xef\xbb\xbf \t\r\n")
     return prefix.startswith((b"{", b"[", b'"')) if prefix else None
 
 
@@ -1349,10 +1355,13 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                         current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                         if not _same_file_snapshot(snapshot, current):
                             continue
-                        # The directory descriptor pins the validated archive, even if
-                        # its pathname is concurrently replaced. POSIX has no atomic
-                        # compare-inode-and-unlink primitive for an entry in that directory.
-                        os.unlink(name, dir_fd=directory_fd)
+                        # POSIX cannot unlink an entry conditional on its inode.
+                        # Refuse the deletion rather than risk removing a same-name
+                        # replacement installed after the snapshot check.
+                        raise EvidenceError(
+                            "cannot safely prune expired artifacts on POSIX: "
+                            "atomic compare-and-unlink is unavailable"
+                        )
                 except FileNotFoundError:
                     continue
                 except OSError as exc:
