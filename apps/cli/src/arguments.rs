@@ -56,16 +56,19 @@ pub struct ConvertArgs {
     /// Requested output grid width.
     #[arg(long, default_value_t = 240, value_parser = clap::value_parser!(u32).range(1..))]
     pub columns: u32,
-    /// Matching algorithm.
+    /// Matching algorithm. Density is available; structural is recognized but unavailable
+    /// (capability error, exit 4).
     #[arg(long, value_enum, default_value = "density")]
     pub matcher: Matcher,
     /// Strict supported single-cell glyph repertoire.
     #[arg(long, default_value = " .:-=+*#%@", value_name = "GLYPHS")]
     pub charset: String,
-    /// Monochrome cells or sampled source colors.
+    /// Cell color. Monochrome is available; source color is recognized but unavailable
+    /// (capability error, exit 4).
     #[arg(long, value_enum, default_value = "mono")]
     pub color: Color,
-    /// Output format; inferred from .txt, .ans/.ansi, or .png if omitted.
+    /// Output format; inferred from .txt, .ans/.ansi, or .png. PNG is recognized but
+    /// unavailable (capability error, exit 4).
     #[arg(long, value_enum)]
     pub format: Option<Format>,
     /// Replace an existing output only after a complete successful export.

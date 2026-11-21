@@ -3,6 +3,7 @@
 ## Status and conventions
 
 The `asciiwall` binary converts local PNG/JPEG inputs to bounded monochrome density `.txt` and `.ans` output through the shared decoder, density matcher, and terminal-safe exporter. It does not start a controller or wallpaper host. PNG output, structural matching, source-color matching, and settings-file loading are unavailable capabilities; those requests fail closed without publishing output.
+Only `asciiwall convert` is registered by the current parser. The `preview`, `bake`, `benchmark`, desktop, package/library, config-command, `doctor`, and `cache` descriptions below are planned reference only; those commands are unavailable in this binary.
 
 The binary accepts global `--json`, `--quiet`, `--verbose`, `--config <path>`, `--no-color`, `--offline`, and `--help` before or after `convert`. Diagnostics are uncolored and go to stderr unless `--json` requests a structured result on stdout; help remains plain text. `--quiet` never suppresses errors. Paths are separate arguments, never shell strings. This build makes no network requests, so it is always offline; the shared settings registry is not available, and explicitly supplying `--config` reports a capability error. No saved online preference is loaded or overridden until settings support exists.
 
@@ -10,12 +11,12 @@ The binary accepts global `--json`, `--quiet`, `--verbose`, `--config <path>`, `
 
 | Command | Purpose | Important flags |
 |---|---|---|
-| `asciiwall convert <image> --output <file>` | Image to text/ANSI; PNG output is not available in this build | `--columns`, `--matcher density|structural`, `--charset`, `--color`, `--format txt|ansi|png`, `--overwrite` |
-| `asciiwall preview <source>` | Normal interactive preview window | `--preset`, `--columns`, `--safe-mode` |
-| `asciiwall bake <source> --output <file>` | Precompute character clip or rendered video | `--format ascii-clip|video`, `--fps`, `--duration`, `--seed`, `--width`, `--height`, `--encoder`, `--overwrite` |
-| `asciiwall benchmark <source>` | Explicit local benchmark | `--preset`, `--warmup`, `--frames`, `--output`, `--json` |
+| `asciiwall convert <image> --output <file>` | Current executable path: monochrome density rendering to text/ANSI; PNG output is unavailable | `--columns`, `--matcher`, `--charset`, `--color`, `--format`, `--overwrite` |
+| `asciiwall preview <source>` | Planned; unavailable in current binary — normal interactive preview window | `--preset`, `--columns`, `--safe-mode` |
+| `asciiwall bake <source> --output <file>` | Planned; unavailable in current binary — precompute character clip or rendered video | `--format ascii-clip|video`, `--fps`, `--duration`, `--seed`, `--width`, `--height`, `--encoder`, `--overwrite` |
+| `asciiwall benchmark <source>` | Planned; unavailable in current binary — explicit local benchmark | `--preset`, `--warmup`, `--frames`, `--output`, `--json` |
 
-File extension can suggest a format but explicit conflicting flags are rejected. `bake --format video` requires an encoder actually included in the build; print supported encoders rather than inventing availability. Audio is absent/muted unless a future explicit supported option is selected.
+File extension can suggest a format for executable `convert`, but explicit conflicting flags are rejected. The `bake --format video` and audio notes describe planned behavior only: if implemented, video must require an encoder actually included in the build; print supported encoders rather than inventing availability. Audio is absent/muted unless a future explicit supported option is selected.
 
 The request parser defaults to 240 columns, `--matcher density`, monochrome (`--color mono`), and the literal printable ASCII repertoire ` .:-=+*#%@`. `--charset <glyphs>` uses `ascii-convert`'s strict single-cell repertoire (printable ASCII, block elements, and Braille); unsupported or duplicate scalars are rejected. `--matcher structural` and `--color source` are recognized but report unavailable capabilities, not fallback output. There is no production built-in font: omitting `--font <path>` returns a capability error rather than silently selecting a font. An explicit font is measured into a shared glyph table using the current fixed geometry (8 px raster size, 8×12 cell, baseline 9). The density path decodes PNG/JPEG through `ascii-media`, calls the shared CPU density matcher, and serializes `.txt` or `.ans` through `ascii-render`; `.ans` currently uses true-color SGR. PNG rendering and structural/source-color conversion remain unavailable.
 
@@ -33,7 +34,7 @@ asciiwall --json convert mountain.png --font font.ttf --format txt --output moun
 
 ```
 
-## Desktop control
+## Planned desktop control (unavailable in current binary)
 
 | Command | Purpose |
 |---|---|
@@ -46,9 +47,9 @@ asciiwall --json convert mountain.png --font font.ttf --format txt --output moun
 | `asciiwall refresh --scope redraw|source|scene|desktop|library` | Explicit refresh action |
 | `asciiwall quit` | Graceful controller/host shutdown |
 
-`--all-displays` is an explicit alternative to `--display`, not an implicit default for destructive replacement. Without a controller, mutation commands either start it through a documented `--start` option or return an unavailable-controller error. They must not silently create multiple daemon instances.
+For the planned desktop-control commands, `--all-displays` is an explicit alternative to `--display`, not an implicit default for destructive replacement. Without a controller, mutation commands either start it through a documented `--start` option or return an unavailable-controller error. They must not silently create multiple daemon instances.
 
-## Packages and library
+## Planned packages and library (unavailable in current binary)
 
 | Command | Purpose |
 |---|---|
@@ -63,13 +64,13 @@ asciiwall --json convert mountain.png --font font.ttf --format txt --output moun
 | `asciiwall library download <id> --version <version>` | Explicit verified download, not auto-Apply |
 | `asciiwall library remove <id> --version <version>` | Remove managed package after dependency checks |
 
-`package pack` permits a clearly named source descriptor with computed inventory omitted; the output manifest always contains final actual hashes/sizes. `package validate` defaults to no network and does not follow URLs from metadata. Download origin approval cannot be bypassed by a package.
+When implemented, planned `package pack` will permit a clearly named source descriptor with computed inventory omitted; the output manifest will always contain final actual hashes/sizes. Planned `package validate` will default to no network and will not follow URLs from metadata. Download origin approval cannot be bypassed by a package.
 
-## Configuration and diagnostics
+## Planned configuration and diagnostics (unavailable in current binary)
 
-`config get <key>`, `config set <key> <value>`, `config reset <key>`, and `config explain <key>` use the [settings registry](../settings/settings-reference.md). `--expect-revision <n>` prevents stale writes. A batch config file is validated atomically.
+Planned `config get <key>`, `config set <key> <value>`, `config reset <key>`, and `config explain <key>` will use the [settings registry](../settings/settings-reference.md). `--expect-revision <n>` will prevent stale writes. A batch config file will be validated atomically.
 
-`doctor` reports environment, adapter candidates, permissions, graphics capabilities, codec inventory, and safe remediation. `doctor --export <file>` produces a reviewed redacted diagnostic report; it never uploads it. `cache clear` removes derived data only and respects active resource leases.
+Planned `doctor` will report environment, adapter candidates, permissions, graphics capabilities, codec inventory, and safe remediation. `doctor --export <file>` will produce a reviewed redacted diagnostic report; it will never upload it. Planned `cache clear` will remove derived data only and respect active resource leases.
 
 ## Output safety
 
