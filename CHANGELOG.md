@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
 - Added decoder-to-converter EC-008 coverage using a rights-cleared odd-width PNG and borrowed `DecodedFrame::view()`; verified EC-010 through the existing bounded-JPEG decoder regression without duplicating it. Focused/workspace tests, formatting, and strict Clippy pass. EC-009 restricted-worker/UI, QA-004 #35 evidence receipt, and native/manual scenarios remain not-run. [The edge-case matrix](docs/quality/edge-case-matrix.md) records the exact CNV-001 base and portable evidence; QA-102 acceptance remains open.
+- Persisted a rights-cleared 1024×1024 EC-010 JPEG fixture with a pinned SHA-256 and added a public-decoder regression requiring `Error::BudgetExceeded(BudgetKind::RasterBytes)` under a 1 MiB raster cap. No current-head run receipt is claimed; EC-009/worker/UI, QA-004 #35 receipt, native/manual evidence, and full QA-102 acceptance remain outstanding ([edge-case matrix](docs/quality/edge-case-matrix.md)).
 
 ### Changed
 
