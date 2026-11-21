@@ -713,9 +713,8 @@ impl Storage {
         let current = match read_optional_bounded(&destination, CONFIG_MAX_BYTES) {
             Ok(Some(bytes)) => match parse_toml_value(&bytes) {
                 Ok(value) => Some(value),
-                Err(StorageError::InvalidConfiguration(_)) | Err(StorageError::DocumentTooLarge) => {
-                    None
-                }
+                Err(StorageError::InvalidConfiguration(_))
+                | Err(StorageError::DocumentTooLarge) => None,
                 Err(error) => return Err(error),
             },
             Ok(None) | Err(StorageError::DocumentTooLarge) => None,
