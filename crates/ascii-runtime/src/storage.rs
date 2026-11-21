@@ -42,6 +42,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Weak};
 use toml::Value as TomlValue;
 
@@ -1244,7 +1245,7 @@ fn prepare_replace_rollback(destination: &Path) -> io::Result<ReplaceRollback> {
     match fs::symlink_metadata(destination) {
         Ok(_) => {
             let mut original = File::open(destination)?;
-            let mut temporary = create_sibling_temp(destination, "recovery-original")?;
+            let mut temporary = create_unique_sibling_temp(destination, "recovery-original")?;
             io::copy(&mut original, temporary.file_mut())?;
             temporary.file_mut().flush()?;
             temporary.file_mut().sync_all()?;
@@ -1325,6 +1326,29 @@ fn create_sibling_temp(destination: &Path, label: &str) -> io::Result<OwnedTempF
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    create_owned_sibling_temp(candidate)
+}
+
+fn create_unique_sibling_temp(destination: &Path, label: &str) -> io::Result<OwnedTempFile> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no file name"))?
+        .to_string_lossy();
+    static NEXT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+    loop {
+        let sequence = NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".ascii-runtime-{name}.{label}-{sequence}.tmp"));
+        match create_owned_sibling_temp(candidate) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            result => return result,
+        }
+    }
+}
+
+fn create_owned_sibling_temp(candidate: PathBuf) -> io::Result<OwnedTempFile> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
