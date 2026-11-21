@@ -2375,9 +2375,7 @@ mod tests {
                     fs::read(directory.join(CACHE_FILE_ID_HIGH_WATER))?,
                     b"0000000000000007\n"
                 );
-                counter_events
-                    .borrow_mut()
-                    .push(SyncEvent::ParentDirectory);
+                counter_events.borrow_mut().push(SyncEvent::ParentDirectory);
                 Ok(())
             },
         )
@@ -2397,9 +2395,7 @@ mod tests {
                 Ok(())
             },
             |_| {
-                update_events
-                    .borrow_mut()
-                    .push(SyncEvent::ParentDirectory);
+                update_events.borrow_mut().push(SyncEvent::ParentDirectory);
                 Ok(())
             },
         )
@@ -2419,9 +2415,7 @@ mod tests {
                     fs::symlink_metadata(directory.join(CACHE_FILE_ID_HIGH_WATER_MARKER))?.len(),
                     0
                 );
-                marker_events
-                    .borrow_mut()
-                    .push(SyncEvent::ParentDirectory);
+                marker_events.borrow_mut().push(SyncEvent::ParentDirectory);
                 Ok(())
             },
         )
