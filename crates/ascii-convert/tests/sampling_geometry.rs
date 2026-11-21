@@ -609,6 +609,118 @@ fn collapsed_inverse_mapped_boundaries_preserve_64_wide_box_patches() {
 }
 
 #[test]
+fn collapsed_box_patch_sampling_uses_each_orthogonal_footprint() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let source_height = 1_024_u32;
+    let pixels = (0..source_height)
+        .map(|row| u8::try_from(row % 256).expect("fixture sample fits gray8"))
+        .collect::<Vec<_>>();
+    let smallest_positive = f64::from_bits(1);
+    let crop = CropRect::new(0.0, 0.0, smallest_positive * 2.0, 1.0)
+        .expect("subnormal-width crop is valid");
+    let wide_patch = PatchDimensions::new(64, 64).expect("maximum patch size is valid");
+    let settings = one_cell_settings(
+        &table,
+        &cancellation,
+        FitMode::CustomCrop(crop),
+        SamplingFilter::Box,
+        Some(wide_patch),
+    );
+    let limits = Budget::new(8_000_000, 64_000_000, 500_000);
+    let conversion = convert_density_detailed(
+        linear_gray_raster(&pixels, 1, source_height, 1),
+        &table,
+        &settings,
+        &limits,
+    )
+    .expect("collapsed Box sampling stays within the footprint work bound");
+
+    let transform = conversion.transform();
+    let source_rect = transform.source_rect();
+    let display_rect = transform.display_rect();
+    let source_sample_span_x = (f64::from(CELL_WIDTH) / f64::from(wide_patch.width()))
+        * source_rect.width()
+        / display_rect.width();
+    let source_sample_span_y = (f64::from(CELL_HEIGHT) / f64::from(wide_patch.height()))
+        * source_rect.height()
+        / display_rect.height();
+    assert_eq!(source_sample_span_x, 0.0);
+    assert_eq!(source_sample_span_y, 16.0);
+
+    let values = conversion
+        .patches()
+        .expect("collapsed conversion retains quality patches")
+        .luminance_for_cell(0)
+        .expect("one-cell patch exists");
+    assert_eq!(values.len(), 64 * 64);
+    for patch_y in 0..64 {
+        let first_row = patch_y * 16;
+        let sum = pixels[first_row..first_row + 16]
+            .iter()
+            .copied()
+            .map(u32::from)
+            .sum::<u32>();
+        let expected = f64::from(sum) / (16.0 * 255.0);
+        for patch_x in 0..64 {
+            let actual = f64::from(values[patch_y * 64 + patch_x]);
+            assert!(
+                (actual - expected).abs() <= 1.0e-6,
+                "patch ({patch_x}, {patch_y}) expected {expected}, got {actual}"
+            );
+        }
+    }
+    let horizontal_crop = CropRect::new(0.0, 0.0, 1.0, smallest_positive * 2.0)
+        .expect("subnormal-height crop is valid");
+    let horizontal_settings = one_cell_settings(
+        &table,
+        &cancellation,
+        FitMode::CustomCrop(horizontal_crop),
+        SamplingFilter::Box,
+        Some(wide_patch),
+    );
+    let horizontal_conversion = convert_density_detailed(
+        linear_gray_raster(&pixels, source_height, 1, pixels.len()),
+        &table,
+        &horizontal_settings,
+        &limits,
+    )
+    .expect("collapsed Box sampling stays within the horizontal footprint bound");
+    let horizontal_transform = horizontal_conversion.transform();
+    let horizontal_source_rect = horizontal_transform.source_rect();
+    let horizontal_display_rect = horizontal_transform.display_rect();
+    let horizontal_sample_span_x = (f64::from(CELL_WIDTH) / f64::from(wide_patch.width()))
+        * horizontal_source_rect.width()
+        / horizontal_display_rect.width();
+    let horizontal_sample_span_y = (f64::from(CELL_HEIGHT) / f64::from(wide_patch.height()))
+        * horizontal_source_rect.height()
+        / horizontal_display_rect.height();
+    assert_eq!(horizontal_sample_span_x, 16.0);
+    assert_eq!(horizontal_sample_span_y, 0.0);
+    let horizontal_values = horizontal_conversion
+        .patches()
+        .expect("horizontal crop retains quality patches")
+        .luminance_for_cell(0)
+        .expect("one-cell horizontal patch exists");
+    for patch_x in 0..64 {
+        let first_column = patch_x * 16;
+        let sum = pixels[first_column..first_column + 16]
+            .iter()
+            .copied()
+            .map(u32::from)
+            .sum::<u32>();
+        let expected = f64::from(sum) / (16.0 * 255.0);
+        for patch_y in 0..64 {
+            let actual = f64::from(horizontal_values[patch_y * 64 + patch_x]);
+            assert!(
+                (actual - expected).abs() <= 1.0e-6,
+                "patch ({patch_x}, {patch_y}) expected {expected}, got {actual}"
+            );
+        }
+    }
+}
+
+#[test]
 fn sampling_identity_changes_with_filter_patch_size_and_resolved_geometry() {
     let table = build_table();
     let cancellation = CancellationToken::new();

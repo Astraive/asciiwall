@@ -948,6 +948,12 @@ fn sample_collapsed_box_footprint(
 ) -> Result<f64, Error> {
     let source_rect = transform.source_rect;
     let display_rect = transform.display_rect;
+    let source_offset_x =
+        (display_sample.x - display_rect.x) * source_rect.width / display_rect.width;
+    let source_offset_y =
+        (display_sample.y - display_rect.y) * source_rect.height / display_rect.height;
+    let span_x = display_sample.width * source_rect.width / display_rect.width;
+    let span_y = display_sample.height * source_rect.height / display_rect.height;
     let sample_start_x = (display_sample.x - display_rect.x) / display_rect.width;
     let sample_start_y = (display_sample.y - display_rect.y) / display_rect.height;
     let sample_end_x = (display_sample.right() - display_rect.x) / display_rect.width;
@@ -969,10 +975,40 @@ fn sample_collapsed_box_footprint(
         .clamp(0.0, 1.0);
     let mut weighted_luminance = 0.0;
     if covered_fraction_x > 0.0 && covered_fraction_y > 0.0 {
-        let first_x = source_rect.x.floor().max(0.0) as u32;
-        let first_y = source_rect.y.floor().max(0.0) as u32;
-        let end_x = source_rect.right().ceil().min(f64::from(raster.width())) as u32;
-        let end_y = source_rect.bottom().ceil().min(f64::from(raster.height())) as u32;
+        let mut first_x = source_rect.x.floor().max(0.0) as u32;
+        let mut first_y = source_rect.y.floor().max(0.0) as u32;
+        let mut end_x = source_rect.right().ceil().min(f64::from(raster.width())) as u32;
+        let mut end_y = source_rect.bottom().ceil().min(f64::from(raster.height())) as u32;
+        let y_interval = if span_x == 0.0 && span_y > 0.0 {
+            collapsed_box_sample_axis_interval(
+                source_rect.y,
+                source_rect.height,
+                source_offset_y,
+                span_y,
+                raster.height(),
+            )?
+        } else {
+            None
+        };
+        if let Some(interval) = y_interval {
+            first_y = first_y.max(interval.first_pixel);
+            end_y = end_y.min(interval.end_pixel);
+        }
+        let x_interval = if span_y == 0.0 && span_x > 0.0 {
+            collapsed_box_sample_axis_interval(
+                source_rect.x,
+                source_rect.width,
+                source_offset_x,
+                span_x,
+                raster.width(),
+            )?
+        } else {
+            None
+        };
+        if let Some(interval) = x_interval {
+            first_x = first_x.max(interval.first_pixel);
+            end_x = end_x.min(interval.end_pixel);
+        }
         for y in first_y..end_y {
             let weight_y = normalized_pixel_overlap(
                 sample_start_y,
@@ -1008,6 +1044,28 @@ fn sample_collapsed_box_footprint(
     }
     let uncovered_fraction = (1.0 - covered_fraction_x * covered_fraction_y).max(0.0);
     Ok(weighted_luminance + background.luminance().value() * uncovered_fraction)
+}
+fn collapsed_box_sample_axis_interval(
+    source_start: f64,
+    source_extent: f64,
+    source_offset: f64,
+    sample_span: f64,
+    raster_extent: u32,
+) -> Result<Option<BoxAxisInterval>, Error> {
+    let source_origin = source_start.floor() as u32;
+    let source_fraction = source_start - f64::from(source_origin);
+    let remaining_extent = raster_extent
+        .checked_sub(source_origin)
+        .ok_or(Error::SizeOverflow)?;
+    let crop_extent = source_extent.min(f64::from(remaining_extent) - source_fraction);
+    box_axis_interval(
+        source_origin,
+        source_fraction,
+        source_offset,
+        sample_span,
+        crop_extent,
+        raster_extent,
+    )
 }
 
 // Preserve the rounding residual when deciding which source pixel contains a fractional start.
