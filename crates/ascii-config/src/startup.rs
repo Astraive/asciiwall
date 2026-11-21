@@ -71,7 +71,7 @@ impl RestoreFailureState {
         self.window_started_unix_millis
     }
 
-    /// Clears failures after a successful validated startup restore.
+    /// Clears failures after the host reports a completely successful restore.
     pub fn record_success(&mut self) {
         self.window_started_unix_millis = None;
         self.failures = 0;
@@ -106,10 +106,7 @@ impl RestoreFailureState {
             return Err(RestoreGateError::Suppressed);
         }
         match validate(candidate) {
-            Ok(validated) => {
-                self.record_success();
-                Ok(validated)
-            }
+            Ok(validated) => Ok(validated),
             Err(error) => {
                 self.record_failure(now_unix_millis, policy);
                 Err(RestoreGateError::ValidationFailed(error))
@@ -174,13 +171,45 @@ mod tests {
     }
 
     #[test]
-    fn expired_window_and_success_restore_the_validation_gate() {
+    fn expired_window_restarts_before_validation() {
         let policy = RestorePolicy::new(1, 100).unwrap();
         let mut state = RestoreFailureState::from_persisted(Some(10), 1);
         let validated = state
             .validate_before_restore(true, 110, policy, 42, |value| Ok::<_, ()>(value + 1))
             .unwrap();
         assert_eq!(validated, 43);
+        assert_eq!(state.window_started_unix_millis(), Some(110));
+        assert_eq!(state.failures(), 0);
+
+        state.record_failure(120, policy);
+        assert_eq!(state.window_started_unix_millis(), Some(110));
+        assert_eq!(state.failures(), 1);
+    }
+
+    #[test]
+    fn successful_validation_preserves_activation_failures_until_restore_success() {
+        let policy = RestorePolicy::new(2, 300_000).unwrap();
+        let mut state = RestoreFailureState::default();
+
+        let first =
+            state.validate_before_restore(true, 10_000, policy, 1, |value| Ok::<_, ()>(value + 1));
+        assert_eq!(first, Ok(2));
+        assert_eq!(state.failures(), 0);
+        assert_eq!(state.window_started_unix_millis(), Some(10_000));
+        state.record_failure(10_500, policy);
+        assert_eq!(state.failures(), 1);
+
+        let second =
+            state.validate_before_restore(true, 11_000, policy, 2, |value| Ok::<_, ()>(value + 1));
+        assert_eq!(second, Ok(3));
+        assert_eq!(state.failures(), 1);
+        state.record_failure(11_500, policy);
+        assert_eq!(state.failures(), 2);
+
+        let suppressed =
+            state.validate_before_restore(true, 12_000, policy, 3, |value| Ok::<_, ()>(value + 1));
+        assert_eq!(suppressed, Err(RestoreGateError::Suppressed));
+        state.record_success();
         assert_eq!(state, RestoreFailureState::default());
     }
 }
