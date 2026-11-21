@@ -242,12 +242,7 @@ impl SettingsController {
             return ensure_writable(&state.status).and_then(|()| Err(ConfigError::NotRepairable));
         }
         ensure_expected(expected_revision, state.snapshot.revision)?;
-        if let Some(expected_bytes) = &state.disk_bytes {
-            let actual = state.store.read_main()?;
-            if actual.as_deref() != Some(expected_bytes.as_slice()) {
-                return Err(external_change(&state, actual.as_deref()));
-            }
-        }
+        ensure_disk_matches_for_repair(&mut state)?;
         let overrides = BTreeMap::new();
         let revision = next_revision(state.snapshot.revision)?;
         let effective = resolve_overrides(&self.registry, &overrides)?;

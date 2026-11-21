@@ -81,7 +81,7 @@ impl FileStore {
     }
 
     fn read_path(&self, path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
-        let mut file = match File::open(path) {
+        let file = match File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(StoreError::io(StoreOperation::Read, error)),
@@ -615,7 +615,7 @@ fn sync_parent(parent: &Path) -> std::io::Result<()> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{BackupMode, FileStore, PersistStage, StoreError, StoreOperation};
+    use super::{BackupMode, ConfigStore, FileStore, PersistStage, StoreError, StoreOperation};
     use std::{
         fs,
         path::PathBuf,
