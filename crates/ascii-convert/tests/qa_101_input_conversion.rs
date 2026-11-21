@@ -293,7 +293,9 @@ fn hex_nibble(byte: u8) -> u8 {
 fn jpeg_fixture_bytes(hex: &str) -> Vec<u8> {
     assert_eq!(hex.len() % 2, 0);
     hex.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]))
         .collect()
 }
@@ -323,7 +325,10 @@ fn jpeg_with_exif_orientation(jpeg: &[u8], orientation: u16) -> Vec<u8> {
 
 fn assert_jpeg_fixture_sha256(name: &str, bytes: &[u8], expected: &str) {
     let actual = format!("{:x}", Sha256::digest(bytes));
-    println!("fixture={name} format=jpeg bytes={} sha256={actual}", bytes.len());
+    println!(
+        "fixture={name} format=jpeg bytes={} sha256={actual}",
+        bytes.len()
+    );
     assert_eq!(actual, expected);
 }
 
@@ -355,7 +360,9 @@ fn assert_decoded_gray_grid(frame: &DecodedFrame, width: u32, height: u32, expec
 
     for (index, (pixel, expected)) in frame
         .pixels()
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .zip(expected.iter().copied())
         .enumerate()
     {
@@ -762,7 +769,10 @@ fn ec_004_exif_orientation_is_applied_once_before_density_grid_sizing() {
     );
 
     let table = glyph_table();
-    assert_eq!((table.cell_width(), table.cell_height()), (CELL_WIDTH, CELL_HEIGHT));
+    assert_eq!(
+        (table.cell_width(), table.cell_height()),
+        (CELL_WIDTH, CELL_HEIGHT)
+    );
     let cancellation = CancellationToken::new();
     let conversion_settings = settings(
         &table,
