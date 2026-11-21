@@ -32,6 +32,7 @@
 //! paths, media-bearing and clipped messages by default.
 
 use serde::{Deserialize, Serialize};
+use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::env;
@@ -469,7 +470,42 @@ pub fn validate_application_id(value: &str) -> Result<(), StorageError> {
 #[serde(deny_unknown_fields)]
 pub struct InstallRegistry {
     pub schema_version: u32,
+    #[serde(deserialize_with = "deserialize_unique_packages")]
     pub packages: BTreeMap<String, InstallEntry>,
+}
+
+fn deserialize_unique_packages<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, InstallEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniquePackages;
+
+    impl<'de> Visitor<'de> for UniquePackages {
+        type Value = BTreeMap<String, InstallEntry>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an object with unique package identifiers")
+        }
+
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut packages = BTreeMap::new();
+            while let Some((package_id, entry)) = map.next_entry::<String, InstallEntry>()? {
+                if packages.insert(package_id, entry).is_some() {
+                    return Err(M::Error::custom(
+                        "duplicate package identifier in install registry",
+                    ));
+                }
+            }
+            Ok(packages)
+        }
+    }
+
+    deserializer.deserialize_map(UniquePackages)
 }
 
 impl Default for InstallRegistry {
