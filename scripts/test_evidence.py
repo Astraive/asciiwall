@@ -347,7 +347,7 @@ class EvidenceRecordTests(unittest.TestCase):
                 }],
             }
             manifest_path.write_bytes(evidence.canonical_json(manifest))
-            with self.assertRaisesRegex(evidence.EvidenceError, "native evidence JSON exceeds the 1 MiB inspection limit"):
+            with self.assertRaisesRegex(evidence.EvidenceError, "synthetic artifacts cannot support a native-manual pass"):
                 evidence.finalize_record(record)
 
     def test_native_manual_manifest_rejects_prefixed_oversized_utf16_synthetic_report(self):
