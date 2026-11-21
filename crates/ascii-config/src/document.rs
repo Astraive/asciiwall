@@ -360,9 +360,7 @@ impl std::error::Error for DocumentError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        decode, DocumentError, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH, MAX_SETTING_ENTRIES,
-    };
+    use super::{DocumentError, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH, MAX_SETTING_ENTRIES, decode};
     use crate::model::{SettingKey, SettingValue};
     use std::fmt::Write as _;
 
@@ -372,9 +370,8 @@ mod tests {
             .map(|_| "segment")
             .collect::<Vec<_>>()
             .join(".");
-        let at_limit = format!(
-            "schema_version = 2\nrevision = 0\nsettings = {{ {dotted_key} = 1 }}\n"
-        );
+        let at_limit =
+            format!("schema_version = 2\nrevision = 0\nsettings = {{ {dotted_key} = 1 }}\n");
         assert!(at_limit.len() <= MAX_CONFIG_BYTES);
         assert!(matches!(
             decode(at_limit.as_bytes()),
@@ -385,9 +382,8 @@ mod tests {
             .map(|_| "segment")
             .collect::<Vec<_>>()
             .join(".");
-        let over_limit = format!(
-            "schema_version = 2\nrevision = 0\nsettings = {{ {dotted_key} = 1 }}\n"
-        );
+        let over_limit =
+            format!("schema_version = 2\nrevision = 0\nsettings = {{ {dotted_key} = 1 }}\n");
         assert!(matches!(
             decode(over_limit.as_bytes()),
             Err(DocumentError::ExcessiveNesting {
@@ -398,10 +394,9 @@ mod tests {
 
     #[test]
     fn shallow_inline_settings_table_keeps_quoted_dotted_setting_keys() {
-        let document = decode(
-            b"schema_version = 2\nrevision = 4\nsettings = { \"grid.columns\" = 240 }\n",
-        )
-        .unwrap();
+        let document =
+            decode(b"schema_version = 2\nrevision = 4\nsettings = { \"grid.columns\" = 240 }\n")
+                .unwrap();
 
         assert_eq!(
             document

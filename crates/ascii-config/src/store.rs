@@ -611,7 +611,6 @@ fn owner_only_mode(mode: u32) -> u32 {
     if owner_bits == 0 { 0o600 } else { owner_bits }
 }
 
-
 fn open_restrictive(path: &Path, mode: u32) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -870,11 +869,7 @@ mod tests {
 
         let directory = TestDirectory::new();
         let path = directory.0.join("settings.toml");
-        fs::write(
-            &path,
-            vec![b'x'; crate::document::MAX_CONFIG_BYTES + 1],
-        )
-        .unwrap();
+        fs::write(&path, vec![b'x'; crate::document::MAX_CONFIG_BYTES + 1]).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
         let mut store = FileStore::new(&path);
@@ -893,11 +888,7 @@ mod tests {
             })
             .expect("oversized config archived separately");
         assert_eq!(
-            fs::metadata(archive.path())
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            fs::metadata(archive.path()).unwrap().permissions().mode() & 0o777,
             0o600
         );
     }
