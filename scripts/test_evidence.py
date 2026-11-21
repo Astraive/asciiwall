@@ -1370,7 +1370,7 @@ class RetentionTests(unittest.TestCase):
         os.name == "posix" and _supports_safe_directory_access(),
         "same-directory replacement injection requires POSIX directory-relative access",
     )
-    def test_prune_fails_closed_for_same_directory_replacement_at_delete_boundary(self):
+    def test_prune_reports_replacement_after_snapshot_check_before_posix_fallback(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
             old = evidence.finalize_record(base_record(date="2026-11-12"))
@@ -1403,7 +1403,7 @@ class RetentionTests(unittest.TestCase):
                 return matches
 
             with patch.object(evidence, "_same_file_snapshot", side_effect=replace_after_snapshot_check):
-                with self.assertRaisesRegex(evidence.EvidenceError, "atomic compare-and-unlink"):
+                with self.assertRaisesRegex(evidence.EvidenceError, "archive changed during pruning of expired artifact"):
                     evidence.prune_archive(archive, keep=1)
 
             self.assertEqual(matching_checks, 2)

@@ -1669,6 +1669,14 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                                 raise EvidenceError(
                                     f"archive changed during pruning of expired artifact {name}"
                                 )
+                            # Recheck before reporting the POSIX limitation so replacements
+                            # installed after the initial snapshot check produce an explicit
+                            # incomplete-prune error.
+                            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                            if not _same_file_snapshot(snapshot, current):
+                                raise EvidenceError(
+                                    f"archive changed during pruning of expired artifact {name}"
+                                )
                             # POSIX cannot unlink an entry conditional on its inode.
                             # Refuse the deletion rather than risk removing a same-name
                             # replacement installed after the snapshot check.
