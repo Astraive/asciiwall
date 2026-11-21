@@ -96,7 +96,10 @@ pub enum StorageError {
     },
     DocumentTooLarge,
     InvalidLogLimits,
-    UnsupportedVersion { kind: &'static str, version: u32 },
+    UnsupportedVersion {
+        kind: &'static str,
+        version: u32,
+    },
     UnsupportedPlatform,
 }
 
@@ -958,8 +961,7 @@ impl Storage {
         }
         let rollback = prepare_replace_rollback(&destination)?;
         let hook = RefCell::new(hook);
-        let mut rollback_hook =
-            || (hook.borrow_mut())(AtomicWriteStage::RecoveryRollbackRename);
+        let mut rollback_hook = || (hook.borrow_mut())(AtomicWriteStage::RecoveryRollbackRename);
         let mut sync_hook = || (hook.borrow_mut())(AtomicWriteStage::ParentDirectorySync);
         atomic_replace_locked(
             &destination,
@@ -1187,12 +1189,10 @@ fn atomic_replace_locked(
     temporary.disarm();
     if let Err(sync_error) = before_parent_sync().and_then(|()| sync_parent_directory(parent)) {
         if let Some(rollback) = rollback_on_sync_error {
-            let rollback_result =
-                match rollback.restore(destination, before_rollback_rename) {
-                    Ok(()) => sync_parent_directory(parent)
-                        .map_err(|error| (error, None)),
-                    Err(error) => Err(error),
-                };
+            let rollback_result = match rollback.restore(destination, before_rollback_rename) {
+                Ok(()) => sync_parent_directory(parent).map_err(|error| (error, None)),
+                Err(error) => Err(error),
+            };
             if let Err((rollback_error, retained_recovery_copy)) = rollback_result {
                 return Err(StorageError::RecoveryRollbackFailed {
                     sync_error,
@@ -1256,8 +1256,6 @@ fn prepare_replace_rollback(destination: &Path) -> io::Result<ReplaceRollback> {
         Err(error) => Err(error),
     }
 }
- 
-
 
 fn read_guarded_state(
     path: &Path,
@@ -1931,7 +1929,9 @@ fn looks_like_relative_local_path(value: &str) -> bool {
             && !stem.is_empty()
             && !extension.is_empty()
             && extension.len() <= 10
-            && extension.chars().all(|character| character.is_ascii_alphanumeric());
+            && extension
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric());
     }
 
     const COMMON_LOCAL_DIRECTORY_ROOTS: &[&str] = &[
@@ -1950,9 +1950,9 @@ fn looks_like_relative_local_path(value: &str) -> bool {
         || COMMON_LOCAL_DIRECTORY_ROOTS
             .iter()
             .any(|root| first.eq_ignore_ascii_case(root));
-    let plain_file_component = final_component.chars().all(|character| {
-        character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
-    });
+    let plain_file_component = final_component
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
     recognized_root && plain_file_component
 }
 

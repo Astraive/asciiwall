@@ -1346,9 +1346,9 @@ fn recovery_rollback_rename_failure_retains_and_reports_original_bytes() {
             AtomicWriteStage::ParentDirectorySync => {
                 Err(io::Error::other("injected parent-directory sync failure"))
             }
-            AtomicWriteStage::RecoveryRollbackRename => {
-                Err(io::Error::other("injected recovery rollback rename failure"))
-            }
+            AtomicWriteStage::RecoveryRollbackRename => Err(io::Error::other(
+                "injected recovery rollback rename failure",
+            )),
             other => panic!("unexpected recovery hook stage: {other:?}"),
         },
     );
@@ -2329,7 +2329,11 @@ fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
     let portable =
         PortableExport::from_value(&source, ExportMode::Portable).expect("portable export");
 
-    for private_key in ["embedded_posix", "embedded_windows", "embedded_extensionless"] {
+    for private_key in [
+        "embedded_posix",
+        "embedded_windows",
+        "embedded_extensionless",
+    ] {
         assert!(
             portable.content().get(private_key).is_none(),
             "portable export retained {private_key}"
