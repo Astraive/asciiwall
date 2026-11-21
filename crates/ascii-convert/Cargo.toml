@@ -10,3 +10,6 @@ ascii-core = { path = "../ascii-core" }
 fontdue = { version = "=0.9.3", default-features = false, features = ["hashbrown"] }
 ttf-parser = "=0.21.1"
 sha2 = "=0.10.9"
+
+[dev-dependencies]
+ascii-media = { path = "../ascii-media" }

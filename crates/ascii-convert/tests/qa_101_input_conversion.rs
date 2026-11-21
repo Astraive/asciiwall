@@ -9,11 +9,13 @@ use ascii_convert::{
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, Error,
-    FrameMetadata, GlyphTableId, MalformedReason, PixelFormat, RasterFrameView, RasterOrientation,
-    TransferFunction,
+    FrameMetadata, GlyphTableId, GridSize, MalformedReason, PixelFormat, RasterFrameView,
+    RasterOrientation, TransferFunction,
 };
+use ascii_media::{DecodeLimits, DecodeResources, DecodedFrame, ReadSeek, decode_image};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::io::Cursor;
 
 use sha2::{Digest, Sha256};
 use support::synthetic_font::synthetic_font;
@@ -262,6 +264,119 @@ fn glyph_slot(table: &GlyphTable, character: char) -> u32 {
             .expect("fixture repertoire contains the character"),
     )
     .expect("fixture table position fits u32")
+}
+
+// Rights-cleared synthetic 4x3 grayscale JPEG used by the media decoder controls fixture.
+// Samples: [20,70,120,170,35,85,135,185,50,100,150,200],
+// quality=95, subsampling=0, optimize=false.
+// The EXIF variant inserts one APP1 orientation entry before the JPEG body.
+const BASELINE_JPEG_HEX: &str = concat!(
+    "ffd8ffe000104a46494600010100000100010000ffdb004300020101010101020101010202020202",
+    "0403020202020504040304060506060605060606070908060709070606080b08090a0a0a0a0a0608",
+    "0b0c0b0a0c090a0a0affc0000b080003000401011100ffc4001f0000010501010101010100000000",
+    "000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300",
+    "041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a",
+    "25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475",
+    "767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9ba",
+    "c2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffda",
+    "0008010100003f00f74ff82497813c21ff000c41e17ff8905bff001763fdc8fdebffd9",
+);
+
+fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => panic!("invalid fixture hex digit"),
+    }
+}
+
+fn jpeg_fixture_bytes(hex: &str) -> Vec<u8> {
+    assert_eq!(hex.len() % 2, 0);
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]))
+        .collect()
+}
+
+fn jpeg_with_exif_orientation(jpeg: &[u8], orientation: u16) -> Vec<u8> {
+    assert!((1..=8).contains(&orientation));
+    assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
+
+    let mut payload = b"Exif\0\0".to_vec();
+    payload.extend_from_slice(&[
+        b'I', b'I', 42, 0, 8, 0, 0, 0, // TIFF header; IFD0 starts at offset 8.
+        1, 0, // One IFD entry.
+        0x12, 0x01, 3, 0, 1, 0, 0, 0, // Orientation tag, SHORT, one value.
+    ]);
+    payload.extend_from_slice(&orientation.to_le_bytes());
+    payload.extend_from_slice(&[0; 6]); // Inline value padding and next-IFD offset.
+
+    let app1_length = u16::try_from(payload.len() + 2).expect("small EXIF segment");
+    let mut tagged = Vec::with_capacity(jpeg.len() + payload.len() + 4);
+    tagged.extend_from_slice(&jpeg[..2]);
+    tagged.extend_from_slice(&[0xff, 0xe1]);
+    tagged.extend_from_slice(&app1_length.to_be_bytes());
+    tagged.extend_from_slice(&payload);
+    tagged.extend_from_slice(&jpeg[2..]);
+    tagged
+}
+
+fn assert_jpeg_fixture_sha256(name: &str, bytes: &[u8], expected: &str) {
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    println!("fixture={name} format=jpeg bytes={} sha256={actual}", bytes.len());
+    assert_eq!(actual, expected);
+}
+
+fn decode_jpeg_fixture(bytes: &[u8]) -> DecodedFrame {
+    let decode_limits = DecodeLimits::new(
+        Budget::new(1 << 20, 1 << 20, 1 << 20),
+        DecodeResources::new(4, 16 << 20),
+        1024,
+        1024,
+        1 << 20,
+        1 << 20,
+    );
+    let cancellation = CancellationToken::new();
+    let mut input = Cursor::new(bytes);
+    decode_image(
+        &mut input as &mut dyn ReadSeek,
+        &decode_limits,
+        &cancellation,
+    )
+    .expect("rights-cleared synthetic JPEG decodes within fixture limits")
+}
+
+fn assert_decoded_gray_grid(frame: &DecodedFrame, width: u32, height: u32, expected: &[u8]) {
+    assert_eq!((frame.width(), frame.height()), (width, height));
+    assert_eq!(frame.row_stride(), width as usize * 3);
+    assert_eq!(frame.view().format(), PixelFormat::rgb8());
+    assert_eq!(frame.pixels().len(), expected.len() * 3);
+    assert_eq!(expected.len(), (width * height) as usize);
+
+    for (index, (pixel, expected)) in frame
+        .pixels()
+        .chunks_exact(3)
+        .zip(expected.iter().copied())
+        .enumerate()
+    {
+        for (channel_index, channel) in pixel.iter().copied().enumerate() {
+            assert!(
+                channel.abs_diff(expected) <= 8,
+                "pixel {index}, channel {channel_index}: expected gray {expected}, got {channel}"
+            );
+        }
+        assert!(pixel[0].abs_diff(pixel[1]) <= 3);
+        assert!(pixel[1].abs_diff(pixel[2]) <= 3);
+    }
+}
+
+fn expected_srgb_gray_luminance(encoded: u8) -> f64 {
+    let encoded = f64::from(encoded) / 255.0;
+    if encoded <= 0.04045 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 #[test]
@@ -612,6 +727,109 @@ fn ec_003_extreme_portrait_and_wide_sources_preserve_aspect_and_centered_crop_ou
         assert_close(cover_source.y(), expected_y, 1.0e-12);
         assert_close(cover_source.width(), expected_width, 1.0e-12);
         assert_close(cover_source.height(), expected_height, 1.0e-12);
+    }
+}
+
+#[test]
+fn ec_004_exif_orientation_is_applied_once_before_density_grid_sizing() {
+    println!(
+        "scenario=EC-004 report_status=testable acceptance_receipt=not-authenticated \
+         run_provenance=not-run native_provenance=not-run"
+    );
+    let baseline = jpeg_fixture_bytes(BASELINE_JPEG_HEX);
+    assert_jpeg_fixture_sha256(
+        "ec004-rights-cleared-baseline",
+        &baseline,
+        "90f84b4bf806830d877894c41bc6ab5b0688565237094060abeca4b2fdee4982",
+    );
+    let exif_orientation_6 = jpeg_with_exif_orientation(&baseline, 6);
+    assert_jpeg_fixture_sha256(
+        "ec004-rights-cleared-exif-orientation-6",
+        &exif_orientation_6,
+        "5bc7485e75366ad9e771708914faa9f59a81a27865268d2f1c64fe9d6a997f08",
+    );
+
+    let decoded = decode_jpeg_fixture(&exif_orientation_6);
+    let oriented_samples = [50, 35, 20, 100, 85, 70, 150, 135, 120, 200, 185, 170];
+    assert_decoded_gray_grid(&decoded, 3, 4, &oriented_samples);
+    report_fixture(
+        "ec004-decoded-exif-orientation-6",
+        "rgb8-srgb-opaque",
+        decoded.width(),
+        decoded.height(),
+        decoded.row_stride(),
+        decoded.pixels(),
+    );
+
+    let table = glyph_table();
+    assert_eq!((table.cell_width(), table.cell_height()), (CELL_WIDTH, CELL_HEIGHT));
+    let cancellation = CancellationToken::new();
+    let conversion_settings = settings(
+        &table,
+        &cancellation,
+        GridSizing::columns(3),
+        LinearRgb::BLACK,
+        LinearRgb::WHITE,
+    )
+    .with_sampling(SamplingOptions::new(
+        FitMode::Contain,
+        SamplingFilter::Nearest,
+        Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
+    ));
+    report_settings("ec004-exif-orientation-6", &conversion_settings);
+
+    let conversion_budget = budget();
+    let resources = resources_for_raster(decoded.width(), decoded.height(), &conversion_budget);
+    let converted = convert_density_detailed(
+        decoded.view(),
+        &table,
+        &conversion_settings,
+        &conversion_budget,
+        &resources,
+    )
+    .expect("oriented decoded JPEG converts through the consumer API");
+    let transform = converted.transform();
+    assert_eq!(transform.source_dimensions(), (3, 4));
+    assert_eq!(transform.display_dimensions(), (24, 36));
+    assert_eq!(
+        (
+            transform.display_rect().x(),
+            transform.display_rect().y(),
+            transform.display_rect().width(),
+            transform.display_rect().height(),
+        ),
+        (0.0, 2.0, 24.0, 32.0)
+    );
+    assert_eq!(converted.frame().size(), GridSize::new(3, 3));
+    assert_eq!(
+        GridSizing::columns(3)
+            .resolve(4, 3, CELL_WIDTH, CELL_HEIGHT)
+            .expect("fixture's un-oriented dimensions fit the column grid"),
+        GridSize::new(3, 2),
+        "the converter grid must be derived from the decoded, oriented dimensions"
+    );
+
+    // With a 24×36 display and Contain, the 3×4 source occupies y=2..34.
+    // Cell-center rows y=6,18,30 map to source rows 0,2,3; Nearest floors the y=18
+    // boundary to row 2. This checks content order through the actual conversion patches.
+    let patches = converted
+        .patches()
+        .expect("EC-004 retains one quality sample per output cell");
+    assert_eq!(
+        patches.dimensions(),
+        PatchDimensions::new(1, 1).expect("one-sample patch is valid")
+    );
+    assert_eq!(patches.cell_count(), 9);
+    let expected_patch_grays = [50, 35, 20, 150, 135, 120, 200, 185, 170];
+    for (cell_index, expected_gray) in expected_patch_grays.into_iter().enumerate() {
+        let sample = patches
+            .luminance_for_cell(cell_index)
+            .expect("each output cell has one quality sample")[0];
+        assert_close(
+            f64::from(sample),
+            expected_srgb_gray_luminance(expected_gray),
+            0.06,
+        );
     }
 }
 
