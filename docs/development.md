@@ -64,7 +64,7 @@ Repository hooks live under `.githooks/` (`pre-commit`, `commit-msg`, and `.gith
 
 ## Rust workspace and feature boundaries
 
-The workspace now has separate `ascii-core`, `ascii-convert`, and `ascii-media` package boundaries. Portability CI checks the dependency-free core on Windows, Linux, and macOS; the workspace's Rust formatting and Clippy gates also cover all members. This is not a complete feature matrix:
+The workspace now has separate `ascii-core`, `ascii-convert`, and `ascii-media` package boundaries. Portability CI checks and tests the dependency-free core on Windows, Linux, and macOS and runs the `ascii-convert` and `ascii-media` package test suites on all three; the workspace's Rust formatting and Clippy gates also cover all members. This is not a complete feature matrix:
 
 | Subset | Current interface and blocker |
 |---|---|
@@ -84,6 +84,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo check --locked --package ascii-core --no-default-features
 cargo test --locked --package ascii-core --no-default-features
+cargo test --locked --package ascii-convert
 cargo test --locked --package ascii-media
 cargo tree --locked --package ascii-core --edges all
 ```

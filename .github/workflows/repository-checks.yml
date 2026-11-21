@@ -87,6 +87,8 @@ jobs:
         run: cargo check --locked --package ascii-core --no-default-features
       - name: Run core-only tests
         run: cargo test --locked --package ascii-core --no-default-features
+      - name: Run ascii-convert tests
+        run: cargo test --locked --package ascii-convert
       - name: Run portable ascii-media image tests
         run: cargo test --locked --package ascii-media
       - name: Inspect core dependency boundary
