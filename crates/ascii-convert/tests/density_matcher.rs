@@ -1109,14 +1109,16 @@ fn premultiplied_validation_pass_is_charged_to_the_work_budget() {
             BudgetKind::WorkUnits
         )))
     );
-    assert!(convert_density_detailed(
-        opaque,
-        &table,
-        &conversion_settings,
-        &exact_work,
-        unlimited_raster_resources(),
-    )
-    .is_ok());
+    assert!(
+        convert_density_detailed(
+            opaque,
+            &table,
+            &conversion_settings,
+            &exact_work,
+            unlimited_raster_resources(),
+        )
+        .is_ok()
+    );
 }
 
 #[test]
