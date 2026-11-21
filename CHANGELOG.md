@@ -77,6 +77,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   marker on platforms that support directory sync, preserving ID evidence across eviction.
 - [COR-009] Update existing generated-file ID high-water marks via a synced sibling and
   target-specific replacement, preserving the prior counter on publication failure.
+- [COR-009] Stage initial counter bytes in a fully written, synced sibling before no-clobber
+  publication; partial-write failures leave no final counter behind.
 - [COR-009] Use a synced recoverable backup swap where filesystems cannot replace an existing
   high-water counter name; transactional output publication remains no-clobber on those targets.
 - [COR-009] Sync the marked-cache staging directory before publishing it and sync the root after rename
