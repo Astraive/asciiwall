@@ -80,15 +80,13 @@ pub fn publish_file(
             .persist(destination)
             .map_err(|error| PublishError::Io(error.error))?;
     } else {
-        staging
-            .persist_noclobber(destination)
-            .map_err(|error| {
-                if error.error.kind() == io::ErrorKind::AlreadyExists {
-                    PublishError::DestinationExists
-                } else {
-                    PublishError::Io(error.error)
-                }
-            })?;
+        staging.persist_noclobber(destination).map_err(|error| {
+            if error.error.kind() == io::ErrorKind::AlreadyExists {
+                PublishError::DestinationExists
+            } else {
+                PublishError::Io(error.error)
+            }
+        })?;
     }
     Ok(())
 }
