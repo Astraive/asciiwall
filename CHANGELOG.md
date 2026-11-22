@@ -59,3 +59,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Normalize box-sampling overlap per axis before combining weights, allowing valid subnormal footprints without requiring representable absolute 2D area (`[CNV-001]`).
 - Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
 - Import `ascii-render`'s synthetic-font test fixture from `CARGO_MANIFEST_DIR` for portable rustfmt resolution, keeping its description as ordinary comments so the shared source remains valid when included in a nested test module ([VID-010]).
+- Composite ANSI foreground/background alpha in linear-light sRGB before sRGB8 quantization, with exact color and palette regression coverage ([VID-010]).

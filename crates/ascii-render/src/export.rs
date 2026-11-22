@@ -4,7 +4,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::vec::Vec;
 
-use ascii_convert::GlyphTable;
+use ascii_convert::{decode_srgb, encode_output, EncodedSrgb, LinearRgb, OutputEncoding};
 use ascii_core::{
     AsciiCell, AsciiFrame, Budget, BudgetKind, CancellationToken, Error, GlyphTableId, GridSize,
     MalformedReason, validate_frame,
@@ -352,8 +352,9 @@ enum EncodedColors {
 }
 
 fn encode_cell_colors(cell: AsciiCell, mode: AnsiColorMode) -> EncodedColors {
-    let background = composite_srgba(cell.bg_srgba8(), [0, 0, 0]);
-    let foreground = composite_srgba(cell.fg_srgba8(), background);
+    let (background_linear, background) = composite_srgba(cell.bg_srgba8(), LinearRgb::BLACK);
+    // Preserve the exact flattened background until the foreground has been composited.
+    let (_, foreground) = composite_srgba(cell.fg_srgba8(), background_linear);
     match mode {
         AnsiColorMode::Ansi16 => EncodedColors::Basic {
             foreground: nearest_ansi16(foreground),
@@ -370,15 +371,24 @@ fn encode_cell_colors(cell: AsciiCell, mode: AnsiColorMode) -> EncodedColors {
     }
 }
 
-fn composite_srgba(source: [u8; 4], background: [u8; 3]) -> [u8; 3] {
-    let alpha = u32::from(source[3]);
-    let inverse_alpha = 255 - alpha;
-    [0, 1, 2].map(|channel| {
-        let source_channel = u32::from(source[channel]);
-        let background_channel = u32::from(background[channel]);
-        u8::try_from((source_channel * alpha + background_channel * inverse_alpha + 127) / 255)
-            .expect("alpha compositing remains in the byte range")
-    })
+fn composite_srgba(source: [u8; 4], background: LinearRgb) -> (LinearRgb, [u8; 3]) {
+    let encoded = EncodedSrgb::new(
+        f64::from(source[0]) / 255.0,
+        f64::from(source[1]) / 255.0,
+        f64::from(source[2]) / 255.0,
+    )
+    .expect("sRGBA8 color channels are normalized");
+    let source_linear = decode_srgb(encoded);
+    let alpha = f64::from(source[3]) / 255.0;
+    let inverse_alpha = 1.0 - alpha;
+    let composite = LinearRgb::new(
+        source_linear.red() * alpha + background.red() * inverse_alpha,
+        source_linear.green() * alpha + background.green() * inverse_alpha,
+        source_linear.blue() * alpha + background.blue() * inverse_alpha,
+    )
+    .expect("linear-light alpha compositing remains in the unit range");
+    let encoded = encode_output(composite, OutputEncoding::Srgb8).channels();
+    (composite, encoded)
 }
 
 fn nearest_ansi16(color: [u8; 3]) -> u8 {
