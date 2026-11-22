@@ -135,9 +135,8 @@ fn handle_has_filesystem_file_path(file: &File) -> bool {
 
     let handle = file.as_raw_handle();
     // SAFETY: A null buffer with zero capacity asks for the required buffer length.
-    let required = unsafe {
-        GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, PATH_FLAGS)
-    };
+    let required =
+        unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, PATH_FLAGS) };
     let Some(capacity) = usize::try_from(required)
         .ok()
         .and_then(|required| required.checked_add(1))

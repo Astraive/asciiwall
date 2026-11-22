@@ -135,7 +135,9 @@ fn extended_length_filesystem_font_paths_remain_supported() {
     let dir = tempfile::tempdir().unwrap();
     let ordinary_path = dir.path().join("extended font.ttf");
     fs::write(&ordinary_path, synthetic_font::synthetic_font(false)).unwrap();
-    let ordinary_path = ordinary_path.to_str().expect("temporary path is valid UTF-8");
+    let ordinary_path = ordinary_path
+        .to_str()
+        .expect("temporary path is valid UTF-8");
     let extended_path = if let Some(unc_path) = ordinary_path.strip_prefix(r"\\") {
         PathBuf::from(format!(r"\\?\UNC\{unc_path}"))
     } else {
@@ -145,12 +147,5 @@ fn extended_length_filesystem_font_paths_remain_supported() {
     let geometry = GlyphConfig::new(8.0, 8, 12, 9).unwrap();
     let budget = Budget::new(8_000_000, 64_000_000, 16_000_000);
     let cancellation = CancellationToken::new();
-    load_glyph_table(
-        &extended_path,
-        " AB",
-        &geometry,
-        &budget,
-        &cancellation,
-    )
-    .unwrap();
+    load_glyph_table(&extended_path, " AB", &geometry, &budget, &cancellation).unwrap();
 }
