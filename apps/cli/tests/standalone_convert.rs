@@ -311,14 +311,21 @@ fn offline_unc_paths_are_rejected_before_destination_metadata() {
         existing_output.as_os_str(),
     ]));
 
-    // An empty image fails request validation before destination metadata if offline preflight
-    // were absent, keeping this output-path regression away from share access.
+    // A missing local image would fail request validation before destination metadata if offline
+    // preflight were absent, keeping this output-path regression away from share access.
+    assert_rejected(run([
+        OsStr::new("--offline"),
+        OsStr::new("convert"),
+        OsStr::new("missing source.png"),
+        OsStr::new("--output"),
+        OsStr::new("//offline.invalid/share/output.txt"),
+    ]));
+    // The raw-argv veto also runs before Clap rejects an empty positional value.
     assert_rejected(run([
         OsStr::new("--offline"),
         OsStr::new("convert"),
         OsStr::new(""),
-        OsStr::new("--output"),
-        OsStr::new("//offline.invalid/share/output.txt"),
+        OsStr::new("--output=//offline.invalid/share/output.txt"),
     ]));
     assert_eq!(fs::read(existing_output).unwrap(), b"preserve this output");
 }

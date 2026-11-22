@@ -50,6 +50,20 @@ fn run_with_cancellation_to(
         .take_while(|arg| arg.as_os_str() != OsStr::new("--"))
         .any(|arg| arg.as_os_str() == OsStr::new("--json"));
     let command = parse_error_command(&args);
+    #[cfg(windows)]
+    if args.iter().skip(1).any(|argument| {
+        argument.as_os_str() == OsStr::new("--offline")
+            && args.iter().skip(1).any(|argument| {
+                let argument = argument.as_os_str();
+                let value = argument
+                    .to_str()
+                    .and_then(|argument| argument.split_once('='))
+                    .map_or(argument, |(_, value)| OsStr::new(value));
+                is_unc_path(Path::new(value))
+            })
+    }) {
+        return report_error(&offline_path_error(), json_requested, command, stdout);
+    }
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(error)
@@ -159,6 +173,18 @@ fn reject_offline_network_paths(
 
     #[cfg(windows)]
     {
+        // Check the original spellings before `Path` normalization can treat slash-style UNC
+        // paths as rooted local paths.
+        let raw_paths = [
+            Some(request.image.as_path()),
+            request.font.as_deref(),
+            (request.output.as_os_str() != OsStr::new("-")).then_some(request.output.as_path()),
+            config,
+        ];
+        if raw_paths.into_iter().flatten().any(is_unc_path) {
+            return Err(offline_path_error());
+        }
+
         let mut current_directory = None;
         let image = resolve_offline_path(&request.image, &mut current_directory)
             .map_err(|()| offline_path_error())?;
@@ -180,7 +206,12 @@ fn reject_offline_network_paths(
             .map(|path| resolve_offline_path(path, &mut current_directory))
             .transpose()
             .map_err(|()| offline_path_error())?;
-        let paths = [Some(&image), font.as_ref(), output.as_ref(), config.as_ref()];
+        let paths = [
+            Some(&image),
+            font.as_ref(),
+            output.as_ref(),
+            config.as_ref(),
+        ];
 
         // Inspect all effective roots before probing any path component, so a network path in
         // one argument vetoes the invocation before local destination metadata can take priority.
@@ -193,9 +224,14 @@ fn reject_offline_network_paths(
 
         // Check each component without following its final reparse point. Stop at the first one
         // before any descendant can be resolved through a junction or symlink target.
-        for path in [Some(&image), font.as_ref(), output.as_ref(), config.as_ref()]
-            .into_iter()
-            .flatten()
+        for path in [
+            Some(&image),
+            font.as_ref(),
+            output.as_ref(),
+            config.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             if path_has_reparse_component(path.as_ref()).unwrap_or(true) {
                 return Err(offline_path_error());
@@ -240,7 +276,16 @@ fn resolve_offline_path<'a>(
 
 #[cfg(windows)]
 fn is_unc_path(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
     use std::path::{Component, Prefix};
+
+    let mut spelling = path.as_os_str().encode_wide();
+    let first = spelling.next();
+    let second = spelling.next();
+    let separator = |unit| unit == u16::from(b'\\') || unit == u16::from(b'/');
+    if first.is_some_and(separator) && second.is_some_and(separator) {
+        return true;
+    }
 
     matches!(
         path.components().next(),
