@@ -244,6 +244,28 @@ fn rendered_blocks_and_fixed_cell_metrics_come_from_masks() {
     let lower_eighth = record(&table, '\u{2581}');
     let lower_half = record(&table, '\u{2584}');
     let full_block = record(&table, '\u{2588}');
+    let full_coverage = full_block
+        .mask()
+        .iter()
+        .map(|&coverage| u64::from(coverage))
+        .sum::<u64>();
+    for (character, quarters) in [('\u{2591}', 1), ('\u{2592}', 2), ('\u{2593}', 3)] {
+        let coverage = record(&table, character)
+            .mask()
+            .iter()
+            .map(|&coverage| u64::from(coverage))
+            .sum::<u64>();
+        let expected_scaled_coverage = full_coverage * quarters;
+        let measured_scaled_coverage = coverage * 4;
+        let tolerance = full_coverage / 10;
+        assert!(
+            measured_scaled_coverage.abs_diff(expected_scaled_coverage) <= tolerance,
+            "U+{:04X} shade mask should cover approximately {quarters}/4 of full-block area: \
+             scaled coverage {measured_scaled_coverage}, expected {expected_scaled_coverage} \
+             (tolerance {tolerance})",
+            character as u32,
+        );
+    }
     assert!(upper_half.mean_coverage() > lower_eighth.mean_coverage());
     assert!(full_block.mean_coverage() > upper_half.mean_coverage());
     let upper_ink = ink_in_rows(upper_half.mask(), table.cell_width() as usize, 0, 6);
