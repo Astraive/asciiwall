@@ -55,6 +55,17 @@ fn conversion_budget() -> Budget {
     Budget::new(1_000_000, 2_000_000, 2_000_000)
 }
 
+fn decode_limits() -> DecodeLimits {
+    DecodeLimits::new(
+        conversion_budget(),
+        DecodeResources::new(1, 2_000_000),
+        64,
+        64,
+        1_000_000,
+        512 * 1024,
+    )
+}
+
 fn normalized_resources_for_pixels(pixel_count: u64) -> NormalizedRasterResources {
     let bytes_per_pixel = u64::try_from(size_of::<LinearPremultipliedRgba>())
         .expect("normalized pixel size fits u64");
@@ -77,7 +88,7 @@ fn gray_raster(pixels: &[u8], width: u32, height: u32, row_stride: usize) -> Ras
 }
 
 #[test]
-fn ec_006_unsupported_hdr_and_profile_return_typed_reasons() {
+fn ec_006_unsupported_hdr_and_profile_errors_are_actionable_through_public_conversion() {
     let table = glyph_table();
     let cancellation = CancellationToken::new();
     let settings = conversion_settings(
@@ -167,15 +178,68 @@ fn ec_007_black_white_and_flat_images_map_stably_by_measured_glyph_coverage() {
     let mut black_output_slot = None;
     let mut white_output_slot = None;
 
+    let limits = decode_limits();
     for sample in [0_u8, 128, 255] {
         let source = [sample; 8 * 12];
-        let input = gray_raster(&source, 8, 12, 8);
-        let first =
-            convert_density_detailed(input, &table, &settings, &conversion_budget(), &resources)
-                .expect("a constant gray raster converts");
-        let repeated =
-            convert_density_detailed(input, &table, &settings, &conversion_budget(), &resources)
-                .expect("repeating the flat-raster conversion remains valid");
+        let mut encoded_png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut encoded_png)
+            .write_image(&source, 8, 12, image::ColorType::L8.into())
+            .expect("synthetic flat PNG fixture encodes");
+        let mut encoded_input = Cursor::new(encoded_png.as_slice());
+        let decoded = decode_image(&mut encoded_input, &limits, &cancellation)
+            .expect("synthetic flat PNG decodes");
+        assert_eq!((decoded.width(), decoded.height()), (8, 12));
+        assert_eq!(decoded.row_stride(), 8 * 3);
+        assert_eq!(decoded.pixels().len(), 8 * 12 * 3);
+        assert!(
+            decoded
+                .pixels()
+                .chunks_exact(3)
+                .all(|pixel| pixel.iter().all(|&channel| channel == sample))
+        );
+
+        let normalized = normalize_raster(
+            decoded.view(),
+            &conversion_budget(),
+            &cancellation,
+            &resources,
+        )
+        .expect("decoded flat raster normalizes");
+        assert_eq!((normalized.width(), normalized.height()), (8, 12));
+        let normalized_color = normalized.pixels()[0].straight_rgb();
+        assert!(
+            normalized
+                .pixels()
+                .iter()
+                .all(|pixel| pixel.straight_rgb() == normalized_color)
+        );
+        match sample {
+            0 => assert_eq!(normalized_color, LinearRgb::BLACK),
+            255 => assert_eq!(normalized_color, LinearRgb::WHITE),
+            _ => {
+                assert!(normalized_color.red() > 0.0 && normalized_color.red() < 1.0);
+                assert_eq!(normalized_color.red(), normalized_color.green());
+                assert_eq!(normalized_color.green(), normalized_color.blue());
+            }
+        }
+        drop(normalized);
+
+        let first = convert_density_detailed(
+            decoded.view(),
+            &table,
+            &settings,
+            &conversion_budget(),
+            &resources,
+        )
+        .expect("a decoded constant gray raster converts");
+        let repeated = convert_density_detailed(
+            decoded.view(),
+            &table,
+            &settings,
+            &conversion_budget(),
+            &resources,
+        )
+        .expect("repeating the decoded flat-raster conversion remains valid");
         let first_glyph = first.frame().cells()[0].glyph();
 
         assert_eq!(first.frame().cells(), repeated.frame().cells());
@@ -237,7 +301,7 @@ fn ec_007_black_white_and_flat_images_map_stably_by_measured_glyph_coverage() {
 }
 
 #[test]
-fn ec_008_odd_row_stride_ignores_padding_through_density_conversion() {
+fn ec_008_padded_odd_stride_preserves_visible_rows_and_ignores_padding() {
     // Three gray pixels plus two poison padding bytes per row; the final row ends at its last pixel.
     let padded_odd_stride = [0, 0, 0, 0xE1, 0x7C, 255, 255, 255];
     let different_padding = [0, 0, 0, 0x7C, 0xE1, 255, 255, 255];
@@ -329,7 +393,7 @@ fn ec_008_odd_row_stride_ignores_padding_through_density_conversion() {
 }
 
 #[test]
-fn ec_008_odd_width_png_decodes_into_density_conversion() {
+fn ec_008_decoder_stride_preserves_odd_width_rows_through_conversion() {
     const WIDTH: u32 = 3;
     const HEIGHT: u32 = 2;
     let source = [0, 0, 0, 255, 255, 255];
@@ -338,18 +402,11 @@ fn ec_008_odd_width_png_decodes_into_density_conversion() {
         .write_image(&source, WIDTH, HEIGHT, image::ColorType::L8.into())
         .expect("synthetic odd-width PNG fixture encodes");
     println!(
-        "EC-008 decoder smoke: fixture_sha256={:x}",
+        "EC-008 decoder row regression: fixture_sha256={:x}",
         Sha256::digest(&encoded_png)
     );
 
-    let limits = DecodeLimits::new(
-        conversion_budget(),
-        DecodeResources::new(1, 2_000_000),
-        64,
-        64,
-        1_000_000,
-        512 * 1024,
-    );
+    let limits = decode_limits();
     let cancellation = CancellationToken::new();
     let mut encoded_input = Cursor::new(encoded_png.as_slice());
     let decoded = decode_image(&mut encoded_input, &limits, &cancellation)
@@ -394,8 +451,9 @@ fn ec_008_odd_width_png_decodes_into_density_conversion() {
         ),
         (WIDTH, HEIGHT)
     );
+    assert_eq!(converted.frame().cells().len(), (WIDTH * HEIGHT) as usize);
     println!(
-        "EC-008 decoder smoke: decoded={}x{} stride={} converted={}x{}",
+        "EC-008 decoder row regression: decoded={}x{} stride={} converted={}x{}",
         decoded.width(),
         decoded.height(),
         decoded.row_stride(),

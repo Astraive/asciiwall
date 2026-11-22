@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added decoder-to-converter EC-008 coverage using a rights-cleared odd-width PNG and borrowed `DecodedFrame::view()`; verified EC-010 through the existing bounded-JPEG decoder regression without duplicating it. Focused/workspace tests, formatting, and strict Clippy pass. EC-009 restricted-worker/UI, QA-004 #35 evidence receipt, and native/manual scenarios remain not-run. [The edge-case matrix](docs/quality/edge-case-matrix.md) records the exact CNV-001 base and portable evidence; QA-102 acceptance remains open.
 - Persisted a rights-cleared 1024×1024 EC-010 JPEG fixture with a pinned SHA-256 and added a public-decoder regression requiring `Error::BudgetExceeded(BudgetKind::RasterBytes)` under a 1 MiB raster cap. No current-head run receipt is claimed; EC-009/worker/UI, QA-004 #35 receipt, native/manual evidence, and full QA-102 acceptance remain outstanding ([edge-case matrix](docs/quality/edge-case-matrix.md)).
 
+- Strengthened EC-006–EC-008 QA-102 regressions with exact public HDR/profile error messages, decoded flat-image normalization and output checks, and odd-width decoder-row conversion assertions (`[QA-102]`).
+
 ### Changed
 
 - Repaired relative Markdown navigation across existing original root documentation entrypoints (`c321475`, committed after PR `#1` and prior to `[PRJ-004]`).
