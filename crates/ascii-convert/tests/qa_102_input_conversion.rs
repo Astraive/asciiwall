@@ -192,10 +192,9 @@ fn ec_007_black_white_and_flat_images_map_stably_by_measured_glyph_coverage() {
         assert_eq!(decoded.row_stride(), 8 * 3);
         assert_eq!(decoded.pixels().len(), 8 * 12 * 3);
         assert!(
-            decoded
-                .pixels()
-                .chunks_exact(3)
-                .all(|pixel| pixel.iter().all(|&channel| channel == sample))
+            decoded.pixels().chunks(3).all(|pixel| {
+                pixel.len() == 3 && pixel.iter().all(|&channel| channel == sample)
+            })
         );
 
         let normalized = normalize_raster(
