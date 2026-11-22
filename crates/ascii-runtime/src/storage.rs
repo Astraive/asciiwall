@@ -8,13 +8,18 @@
 //! # API and recovery semantics
 //!
 //! Construct [`DirectoryInputs`] explicitly (or use [`DirectoryInputs::current`]), resolve
-//! [`StorageRoots`], and pass them to [`Storage`]. [`Storage::load_registry`] and
-//! [`Storage::save_registry`] operate on the single versioned install registry. Config callers own
-//! schema validation: [`ValidatedConfig::from_json`] and [`Storage::load_config`] require the caller's
-//! validator; [`Storage::save_config`] uses the same validator to decide whether the current file can
-//! replace `settings.json.last-good`. Invalid, unparseable, or oversized current files never
-//! overwrite that backup. The `*_with_hook` variants expose [`AtomicWriteStage`] boundaries for
-//! deterministic interruption injection; failed in-process writes remove their owned temporary.
+//! [`StorageRoots`], and pass them to [`Storage`]. [`Storage::load_registry`] reads the current
+//! install registry; [`Storage::save_registry`] replaces the entire document. Use
+//! [`Storage::update_registry`] for serialized read-modify-write updates against the latest state.
+//! [`Storage::load_config`] and [`Storage::save_config`] invoke the caller-owned schema validator.
+//! Settings saves and explicit recovery require the exact current bytes previously observed by the
+//! caller (`None` for absence); stale snapshots fail under the directory lock before any mutation.
+//! Ordinary settings saves reject invalid or unsupported current settings before touching either the
+//! destination or `settings.toml.last-good`; registry saves likewise reject invalid or unsupported
+//! current registries before replacement. [`Storage::restore_config_from_backup`] is the explicit
+//! settings recovery path and never replaces the last-good file. The `*_with_hook` variants expose
+//! [`AtomicWriteStage`] boundaries for deterministic interruption injection; failed in-process
+//! writes remove their owned temporary.
 //!
 //! [`ImportJournal`] accepts only staged→verified/abandoned and verified→committed/abandoned
 //! transitions, serialized across callers sharing its journal directory. [`ImportJournal::recover`]
@@ -26,8 +31,10 @@
 //! rotates within [`LogLimits`], coordinates writers targeting the same directory, and redacts home
 //! paths, media-bearing and clipped messages by default.
 
+use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
@@ -35,7 +42,9 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Weak};
+use toml::Value as TomlValue;
 
 const REGISTRY_VERSION: u32 = 1;
 const CONFIG_MAX_BYTES: u64 = 8 * 1024 * 1024;
@@ -63,6 +72,10 @@ pub enum AtomicWriteStage {
     BackupReplaced,
     /// The new destination has been atomically installed and its parent synced where supported.
     TargetReplaced,
+    /// The parent directory is about to be synced after installing the new destination.
+    ParentDirectorySync,
+    /// A preserved prior-state copy is about to be renamed into place during rollback.
+    RecoveryRollbackRename,
 }
 
 /// Filesystem error, malformed persisted state, or rejected input.
@@ -76,9 +89,18 @@ pub enum StorageError {
     InvalidJournal(&'static str),
     InvalidConfiguration(String),
     InvalidStoredState(&'static str),
+    StaleConfiguration,
+    RecoveryRollbackFailed {
+        sync_error: io::Error,
+        rollback_error: io::Error,
+        retained_recovery_copy: Option<PathBuf>,
+    },
     DocumentTooLarge,
     InvalidLogLimits,
-    UnsupportedVersion { kind: &'static str, version: u32 },
+    UnsupportedVersion {
+        kind: &'static str,
+        version: u32,
+    },
     UnsupportedPlatform,
 }
 
@@ -95,6 +117,25 @@ impl fmt::Display for StorageError {
             Self::InvalidJournal(reason) => write!(f, "import journal is invalid: {reason}"),
             Self::InvalidConfiguration(_) => f.write_str("configuration is invalid"),
             Self::InvalidStoredState(_) => f.write_str("stored state is invalid"),
+            Self::StaleConfiguration => f.write_str("configuration changed since it was read"),
+            Self::RecoveryRollbackFailed {
+                sync_error,
+                rollback_error,
+                retained_recovery_copy,
+            } => {
+                write!(
+                    f,
+                    "parent-directory sync failed ({sync_error}); restoring prior state also failed ({rollback_error})"
+                )?;
+                if let Some(path) = retained_recovery_copy {
+                    write!(
+                        f,
+                        "; original bytes remain recoverable at {}",
+                        path.display()
+                    )?;
+                }
+                Ok(())
+            }
             Self::DocumentTooLarge => f.write_str("document exceeds size limit"),
             Self::InvalidLogLimits => f.write_str("diagnostic log bounds are invalid"),
             Self::UnsupportedVersion { kind, version } => {
@@ -112,6 +153,7 @@ impl Error for StorageError {
         match self {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
+            Self::RecoveryRollbackFailed { rollback_error, .. } => Some(rollback_error),
             _ => None,
         }
     }
@@ -333,20 +375,29 @@ impl StorageRoots {
         ))
     }
 
-    /// Creates each storage root. Nested data classes are intentionally separate subdirectories.
+    /// Creates each app-owned storage root with owner-only Unix permissions.
     pub fn create_all(&self) -> Result<(), StorageError> {
-        for path in [
-            &self.config,
-            &self.data,
-            &self.library,
-            &self.projects,
-            &self.catalog,
-            &self.cache,
-            &self.staging,
-            &self.logs,
-            &self.runtime,
-        ] {
-            fs::create_dir_all(path)?;
+        let paths = [
+            self.config.as_path(),
+            self.data.as_path(),
+            self.library.as_path(),
+            self.projects.as_path(),
+            self.catalog.as_path(),
+            self.cache.as_path(),
+            self.staging.as_path(),
+            self.logs.as_path(),
+            self.runtime.as_path(),
+        ];
+        for path in paths.iter().copied() {
+            create_directory_durable(path)?;
+            let identities = paths.map(normalized_path_identity);
+            for later in 1..identities.len() {
+                if identities[..later].contains(&identities[later]) {
+                    return Err(StorageError::InvalidDirectories(
+                        "storage classes resolve to the same path",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -368,21 +419,27 @@ fn require_absolute(path: &Path) -> Result<(), StorageError> {
         ))
     }
 }
-/// Resolves aliases without creating paths, canonicalizing the longest existing prefix first.
-fn normalized_path_identity(path: &Path) -> PathBuf {
+
+/// Resolves aliases without creating paths, retaining filesystem spelling for I/O.
+fn normalized_path_for_io(path: &Path) -> PathBuf {
     let mut ancestor = path;
     loop {
-        if let Ok(mut identity) = fs::canonicalize(ancestor)
+        if let Ok(mut resolved) = fs::canonicalize(ancestor)
             && let Ok(suffix) = path.strip_prefix(ancestor)
         {
-            append_normalized_components(&mut identity, suffix);
-            return normalize_path_identity_case(identity);
+            append_normalized_components(&mut resolved, suffix);
+            return resolved;
         }
         match ancestor.parent() {
             Some(parent) if parent != ancestor => ancestor = parent,
-            _ => return normalize_path_identity_case(normalize_path(path)),
+            _ => return normalize_path(path),
         }
     }
+}
+
+/// Resolves aliases and case for identity comparisons without creating paths.
+fn normalized_path_identity(path: &Path) -> PathBuf {
+    normalize_path_identity_case(normalized_path_for_io(path))
 }
 
 #[cfg(windows)]
@@ -461,7 +518,42 @@ pub fn validate_application_id(value: &str) -> Result<(), StorageError> {
 #[serde(deny_unknown_fields)]
 pub struct InstallRegistry {
     pub schema_version: u32,
+    #[serde(deserialize_with = "deserialize_unique_packages")]
     pub packages: BTreeMap<String, InstallEntry>,
+}
+
+fn deserialize_unique_packages<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, InstallEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct UniquePackages;
+
+    impl<'de> Visitor<'de> for UniquePackages {
+        type Value = BTreeMap<String, InstallEntry>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an object with unique package identifiers")
+        }
+
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut packages = BTreeMap::new();
+            while let Some((package_id, entry)) = map.next_entry::<String, InstallEntry>()? {
+                if packages.insert(package_id, entry).is_some() {
+                    return Err(M::Error::custom(
+                        "duplicate package identifier in install registry",
+                    ));
+                }
+            }
+            Ok(packages)
+        }
+    }
+
+    deserializer.deserialize_map(UniquePackages)
 }
 
 impl Default for InstallRegistry {
@@ -532,50 +624,85 @@ fn is_safe_relative_path(value: &str) -> bool {
         })
 }
 
-/// Configuration JSON that has passed the caller's schema/business validator.
+/// Bounded TOML syntax tree; this type does not imply that application settings passed schema validation.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ValidatedConfig {
-    value: Value,
+pub struct ParsedToml {
+    value: TomlValue,
+    bytes: Vec<u8>,
 }
 
-impl ValidatedConfig {
-    /// Parses JSON, rejects persisted cursor/window histories, then invokes the owning schema validator.
-    pub fn from_json<E: fmt::Display>(
-        bytes: &[u8],
-        validate: impl FnOnce(&Value) -> Result<(), E>,
-    ) -> Result<Self, StorageError> {
-        if bytes.len() as u64 > CONFIG_MAX_BYTES {
-            return Err(StorageError::InvalidConfiguration(
-                "configuration exceeds size limit".into(),
-            ));
-        }
-        let value: Value = serde_json::from_slice(bytes)?;
-        validate_config_safety(&value)?;
-        validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
-        Ok(Self { value })
+impl ParsedToml {
+    /// Parses a bounded TOML document without imposing settings keys or application defaults.
+    pub fn from_toml(bytes: &[u8]) -> Result<Self, StorageError> {
+        enforce_toml_size_limit(bytes)?;
+        Self::from_owned_toml(bytes.to_vec())
     }
 
-    /// Returns the validated JSON value without transferring ownership.
-    pub fn value(&self) -> &Value {
+    fn from_owned_toml(bytes: Vec<u8>) -> Result<Self, StorageError> {
+        let value = parse_toml_value(&bytes)?;
+        Ok(Self { value, bytes })
+    }
+
+    /// Returns the TOML syntax tree; callers still own application-schema validation.
+    pub fn value(&self) -> &TomlValue {
         &self.value
     }
+
+    /// Returns the original bounded TOML bytes without reserialization.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
-fn validate_config_safety(value: &Value) -> Result<(), StorageError> {
+fn enforce_toml_size_limit(bytes: &[u8]) -> Result<(), StorageError> {
+    if bytes.len() as u64 > CONFIG_MAX_BYTES {
+        Err(StorageError::DocumentTooLarge)
+    } else {
+        Ok(())
+    }
+}
+
+fn parse_toml_value(bytes: &[u8]) -> Result<TomlValue, StorageError> {
+    enforce_toml_size_limit(bytes)?;
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
+    toml::from_str(text).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))
+}
+
+fn config_schema_version(value: &TomlValue) -> Option<i64> {
+    value.get("schema_version")?.as_integer()
+}
+
+fn reject_history_keys(value: &TomlValue) -> Result<(), StorageError> {
+    reject_history_keys_at(value, &mut String::new())
+}
+
+fn reject_history_keys_at(
+    value: &TomlValue,
+    normalized_path: &mut String,
+) -> Result<(), StorageError> {
     match value {
-        Value::Object(object) => {
-            for (key, nested) in object {
-                if is_history_key(key) {
+        TomlValue::Table(table) => {
+            for (key, nested) in table {
+                let path_length = normalized_path.len();
+                for character in key
+                    .chars()
+                    .filter(|character| character.is_ascii_alphanumeric())
+                {
+                    normalized_path.push(character.to_ascii_lowercase());
+                }
+                if is_normalized_history_key(normalized_path) {
                     return Err(StorageError::InvalidConfiguration(
-                        "cursor and window geometry histories must not be persisted".into(),
+                        "history settings are not allowed in local configuration".into(),
                     ));
                 }
-                validate_config_safety(nested)?;
+                reject_history_keys_at(nested, normalized_path)?;
+                normalized_path.truncate(path_length);
             }
         }
-        Value::Array(items) => {
-            for item in items {
-                validate_config_safety(item)?;
+        TomlValue::Array(items) => {
+            for nested in items {
+                reject_history_keys_at(nested, normalized_path)?;
             }
         }
         _ => {}
@@ -583,7 +710,7 @@ fn validate_config_safety(value: &Value) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Authoritative local state paths and atomic JSON/configuration operations.
+/// Authoritative local state paths and atomic registry/settings operations.
 #[derive(Clone, Debug)]
 pub struct Storage {
     roots: StorageRoots,
@@ -603,11 +730,11 @@ impl Storage {
     }
 
     pub fn config_path(&self) -> PathBuf {
-        self.roots.config.join("settings.json")
+        self.roots.config.join("settings.toml")
     }
 
     pub fn config_backup_path(&self) -> PathBuf {
-        self.roots.config.join("settings.json.last-good")
+        self.roots.config.join("settings.toml.last-good")
     }
 
     /// Reads the sole authoritative registry. A missing file means a new empty installation.
@@ -621,7 +748,8 @@ impl Storage {
         Ok(registry)
     }
 
-    /// Atomically replaces the versioned registry; there is no second authority or backup registry.
+    /// Atomically replaces the entire registry after existing bytes pass version and integrity checks.
+    /// This is a full-document replacement; use [`Self::update_registry`] to modify the latest state.
     pub fn save_registry(&self, registry: &InstallRegistry) -> Result<(), StorageError> {
         self.save_registry_with_hook(registry, |_| Ok(()))
     }
@@ -634,51 +762,260 @@ impl Storage {
     ) -> Result<(), StorageError> {
         registry.validate()?;
         let bytes = json_bytes_bounded(registry, REGISTRY_MAX_BYTES)?;
-        atomic_replace(&self.registry_path(), &bytes, None, &mut hook)?;
+        let validate_existing = |current: &[u8]| {
+            let current: InstallRegistry = serde_json::from_slice(current)?;
+            current.validate()
+        };
+        atomic_replace(
+            &self.registry_path(),
+            &bytes,
+            CurrentExpectation::Unchecked,
+            Some((REGISTRY_MAX_BYTES, &validate_existing)),
+            None,
+            &mut hook,
+        )?;
         Ok(())
     }
 
-    /// Loads and validates configuration with the caller-owned schema validator.
+    /// Applies a read-modify-write closure to the latest validated registry under its directory lock.
+    ///
+    /// Use this method to preserve independent updates from concurrent callers. `save_registry`
+    /// replaces the whole document and is appropriate only when replacing it intentionally.
+    pub fn update_registry(
+        &self,
+        update: impl FnOnce(&mut InstallRegistry),
+    ) -> Result<(), StorageError> {
+        self.update_registry_with_hook(update, |_| Ok(()))
+    }
+
+    /// Hook-enabled counterpart of [`Self::update_registry`].
+    ///
+    /// A parent-directory-sync failure restores the previous registry bytes when rollback succeeds.
+    pub fn update_registry_with_hook(
+        &self,
+        update: impl FnOnce(&mut InstallRegistry),
+        hook: impl FnMut(AtomicWriteStage) -> io::Result<()>,
+    ) -> Result<(), StorageError> {
+        let destination = self.registry_path();
+        let parent = destination
+            .parent()
+            .ok_or(StorageError::InvalidDirectories(
+                "state file has no parent directory",
+            ))?;
+        create_directory_durable(parent)?;
+        let directory_lock = DirectoryLock::new(parent);
+        let _guard = directory_lock.lock()?;
+
+        let current_bytes = read_optional_bounded(&destination, REGISTRY_MAX_BYTES)?;
+        let mut registry = match current_bytes.as_deref() {
+            Some(bytes) => {
+                let registry: InstallRegistry = serde_json::from_slice(bytes)?;
+                registry.validate()?;
+                registry
+            }
+            None => InstallRegistry::default(),
+        };
+        update(&mut registry);
+        registry.validate()?;
+        let bytes = json_bytes_bounded(&registry, REGISTRY_MAX_BYTES)?;
+        let validate_existing = |current: &[u8]| {
+            let current: InstallRegistry = serde_json::from_slice(current)?;
+            current.validate()
+        };
+        let expected_current = match current_bytes.as_deref() {
+            Some(bytes) => CurrentExpectation::Bytes(bytes),
+            None => CurrentExpectation::Missing,
+        };
+        let rollback = prepare_replace_rollback(&destination)?;
+        let hook = RefCell::new(hook);
+        let mut stage_hook = |stage| (hook.borrow_mut())(stage);
+        let mut sync_hook = || (hook.borrow_mut())(AtomicWriteStage::ParentDirectorySync);
+        let mut rollback_hook = || (hook.borrow_mut())(AtomicWriteStage::RecoveryRollbackRename);
+        atomic_replace_locked(
+            &destination,
+            &bytes,
+            expected_current,
+            Some((REGISTRY_MAX_BYTES, &validate_existing)),
+            None,
+            AtomicReplaceHooks {
+                stage: &mut stage_hook,
+                before_parent_sync: &mut sync_hook,
+                before_rollback_rename: &mut rollback_hook,
+                rollback_on_sync_error: Some(rollback),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Parses settings TOML and applies the caller-owned schema validator.
     pub fn load_config<E: fmt::Display>(
         &self,
-        validate: impl FnOnce(&Value) -> Result<(), E>,
-    ) -> Result<Option<ValidatedConfig>, StorageError> {
+        validate: impl FnOnce(&TomlValue) -> Result<(), E>,
+    ) -> Result<Option<ParsedToml>, StorageError> {
         let bytes = match read_optional_bounded(&self.config_path(), CONFIG_MAX_BYTES)? {
             Some(bytes) => bytes,
             None => return Ok(None),
         };
-        ValidatedConfig::from_json(&bytes, validate).map(Some)
+        let config = ParsedToml::from_owned_toml(bytes)?;
+        validate(config.value())
+            .map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
+        Ok(Some(config))
     }
 
-    /// Writes a configuration and backs up the previous file only when the caller's
-    /// schema validator accepts both the new and previous documents.
+    /// Writes TOML only if `expected_current` still matches the exact current bytes (or absence)
+    /// observed by the caller. A mismatch returns [`StorageError::StaleConfiguration`] before any
+    /// temporary or `.last-good` mutation.
     pub fn save_config<E: fmt::Display>(
         &self,
-        config: &ValidatedConfig,
-        validate: impl Fn(&Value) -> Result<(), E>,
+        expected_current: Option<&[u8]>,
+        config: &ParsedToml,
+        validate: impl Fn(&TomlValue) -> Result<(), E>,
     ) -> Result<(), StorageError> {
-        self.save_config_with_hook(config, validate, |_| Ok(()))
+        self.save_config_with_hook(expected_current, config, validate, |_| Ok(()))
     }
 
-    /// Configuration counterpart of [`Self::save_config`] with injectable interruption boundaries.
+    /// TOML counterpart of [`Self::save_config`] with injectable interruption boundaries.
+    /// `expected_current` is compared under the destination directory lock before any write.
     /// Returning an error from `hook` simulates failure at that boundary; failed writes remove their
     /// owned temporary sibling, and the destination is complete on either side of the atomic rename.
     pub fn save_config_with_hook<E: fmt::Display>(
         &self,
-        config: &ValidatedConfig,
-        validate: impl Fn(&Value) -> Result<(), E>,
+        expected_current: Option<&[u8]>,
+        config: &ParsedToml,
+        validate: impl Fn(&TomlValue) -> Result<(), E>,
         mut hook: impl FnMut(AtomicWriteStage) -> io::Result<()>,
     ) -> Result<(), StorageError> {
-        validate(&config.value)
+        reject_history_keys(config.value())?;
+        validate(config.value())
             .map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
-        let bytes = json_bytes_bounded(&config.value, CONFIG_MAX_BYTES)?;
+        let validate_existing = |bytes: &[u8]| {
+            let value = parse_toml_value(bytes)?;
+            reject_history_keys(&value)?;
+            validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))
+        };
+        let expected_current = match expected_current {
+            Some(bytes) => CurrentExpectation::Bytes(bytes),
+            None => CurrentExpectation::Missing,
+        };
         let backup_path = self.config_backup_path();
-        let validate_backup = |value: &Value| validate(value).is_ok();
         atomic_replace(
             &self.config_path(),
-            &bytes,
-            Some((&backup_path, &validate_backup)),
+            config.as_bytes(),
+            expected_current,
+            Some((CONFIG_MAX_BYTES, &validate_existing)),
+            Some((&backup_path, (CONFIG_MAX_BYTES, &validate_existing))),
             &mut hook,
+        )?;
+        Ok(())
+    }
+
+    /// Explicitly restores schema-valid last-good TOML only if `expected_current` still matches
+    /// the exact current bytes (or absence) observed by the caller. A stale snapshot returns
+    /// [`StorageError::StaleConfiguration`] before mutation. A lower versioned backup is refused,
+    /// as is a comparison where only one parseable document is versioned.
+    pub fn restore_config_from_backup<E: fmt::Display>(
+        &self,
+        expected_current: Option<&[u8]>,
+        validate: impl FnOnce(&TomlValue) -> Result<(), E>,
+    ) -> Result<(), StorageError> {
+        self.restore_config_from_backup_with_hook(expected_current, validate, |_| Ok(()))
+    }
+
+    /// Sync-hook counterpart of [`Self::restore_config_from_backup`].
+    ///
+    /// The hook runs before parent-directory sync and, after a sync failure, before rollback rename.
+    /// A rollback-rename failure retains the old bytes at a path exposed by
+    /// [`StorageError::RecoveryRollbackFailed`]; other rollback failures are reported without
+    /// claiming that the prior current-file state was restored.
+    pub fn restore_config_from_backup_with_hook<E: fmt::Display>(
+        &self,
+        expected_current: Option<&[u8]>,
+        validate: impl FnOnce(&TomlValue) -> Result<(), E>,
+        hook: impl FnMut(AtomicWriteStage) -> io::Result<()>,
+    ) -> Result<(), StorageError> {
+        let destination = self.config_path();
+        let parent = destination
+            .parent()
+            .ok_or(StorageError::InvalidDirectories(
+                "state file has no parent directory",
+            ))?;
+        create_directory_durable(parent)?;
+        let directory_lock = DirectoryLock::new(parent);
+        let _guard = directory_lock.lock()?;
+        let expected_current = match expected_current {
+            Some(bytes) => CurrentExpectation::Bytes(bytes),
+            None => CurrentExpectation::Missing,
+        };
+        let current_bytes = match read_optional_bounded(&destination, CONFIG_MAX_BYTES) {
+            Ok(bytes) => {
+                if !expected_current_matches(bytes.as_deref(), expected_current) {
+                    return Err(StorageError::StaleConfiguration);
+                }
+                bytes
+            }
+            Err(StorageError::DocumentTooLarge) => {
+                if !current_matches_revision(&destination, expected_current)? {
+                    return Err(StorageError::StaleConfiguration);
+                }
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let current = match current_bytes {
+            Some(bytes) => match parse_toml_value(&bytes) {
+                Ok(value) => Some(value),
+                Err(StorageError::InvalidConfiguration(_))
+                | Err(StorageError::DocumentTooLarge) => None,
+                Err(error) => return Err(error),
+            },
+            None => None,
+        };
+        let backup = self.config_backup_path();
+        let bytes = read_optional_bounded(&backup, CONFIG_MAX_BYTES)?.ok_or_else(|| {
+            StorageError::InvalidConfiguration("last-good settings are missing".into())
+        })?;
+        let value = parse_toml_value(&bytes)?;
+        reject_history_keys(&value)?;
+        validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
+        let current_version = current.as_ref().and_then(config_schema_version);
+        let backup_version = config_schema_version(&value);
+        match (current.as_ref(), current_version, backup_version) {
+            (Some(_), Some(current_version), Some(backup_version))
+                if current_version > backup_version =>
+            {
+                let version = u32::try_from(current_version).map_err(|_| {
+                    StorageError::InvalidConfiguration(format!(
+                        "current settings schema version {current_version} is newer than last-good version {backup_version}"
+                    ))
+                })?;
+                return Err(StorageError::UnsupportedVersion {
+                    kind: "settings configuration",
+                    version,
+                });
+            }
+            (Some(_), Some(_), None) | (Some(_), None, Some(_)) => {
+                return Err(StorageError::InvalidConfiguration(
+                    "cannot compare versioned and versionless settings during recovery".into(),
+                ));
+            }
+            _ => {}
+        }
+        let rollback = prepare_replace_rollback(&destination)?;
+        let hook = RefCell::new(hook);
+        let mut rollback_hook = || (hook.borrow_mut())(AtomicWriteStage::RecoveryRollbackRename);
+        let mut sync_hook = || (hook.borrow_mut())(AtomicWriteStage::ParentDirectorySync);
+        atomic_replace_locked(
+            &destination,
+            &bytes,
+            expected_current,
+            None,
+            None,
+            AtomicReplaceHooks {
+                stage: &mut |_| Ok(()),
+                before_parent_sync: &mut sync_hook,
+                before_rollback_rename: &mut rollback_hook,
+                rollback_on_sync_error: Some(rollback),
+            },
         )?;
         Ok(())
     }
@@ -741,12 +1078,78 @@ fn read_optional_bounded(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, Sto
     }
     Ok(Some(bytes))
 }
+fn expected_current_matches(
+    current: Option<&[u8]>,
+    expected_current: CurrentExpectation<'_>,
+) -> bool {
+    match expected_current {
+        CurrentExpectation::Unchecked => true,
+        CurrentExpectation::Missing => current.is_none(),
+        CurrentExpectation::Bytes(expected) => current.is_some_and(|current| current == expected),
+    }
+}
 
-type AtomicBackup<'a> = (&'a Path, &'a dyn Fn(&Value) -> bool);
+fn current_matches_revision(
+    path: &Path,
+    expected_current: CurrentExpectation<'_>,
+) -> Result<bool, StorageError> {
+    let expected_bytes = match expected_current {
+        CurrentExpectation::Unchecked => return Ok(true),
+        CurrentExpectation::Missing => None,
+        CurrentExpectation::Bytes(bytes) => Some(bytes),
+    };
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(expected_bytes.is_none());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let Some(expected_bytes) = expected_bytes else {
+        return Ok(false);
+    };
+    let mut offset = 0;
+    let mut buffer = [0; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(offset == expected_bytes.len());
+        }
+        let Some(end) = offset.checked_add(read) else {
+            return Ok(false);
+        };
+        let Some(expected_chunk) = expected_bytes.get(offset..end) else {
+            return Ok(false);
+        };
+        if &buffer[..read] != expected_chunk {
+            return Ok(false);
+        }
+        offset = end;
+    }
+}
+
+type ExistingValidator<'a> = (u64, &'a dyn Fn(&[u8]) -> Result<(), StorageError>);
+type AtomicBackup<'a> = (&'a Path, ExistingValidator<'a>);
+
+#[derive(Clone, Copy)]
+enum CurrentExpectation<'a> {
+    Unchecked,
+    Missing,
+    Bytes(&'a [u8]),
+}
+
+struct AtomicReplaceHooks<'a> {
+    stage: &'a mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
+    before_parent_sync: &'a mut dyn FnMut() -> io::Result<()>,
+    before_rollback_rename: &'a mut dyn FnMut() -> io::Result<()>,
+    rollback_on_sync_error: Option<ReplaceRollback>,
+}
 
 fn atomic_replace(
     destination: &Path,
     bytes: &[u8],
+    expected_current: CurrentExpectation<'_>,
+    validate_existing: Option<ExistingValidator<'_>>,
     backup: Option<AtomicBackup<'_>>,
     hook: &mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
 ) -> Result<(), StorageError> {
@@ -758,51 +1161,169 @@ fn atomic_replace(
     create_directory_durable(parent)?;
     let directory_lock = DirectoryLock::new(parent);
     let _guard = directory_lock.lock()?;
-    atomic_replace_locked(destination, bytes, backup, hook)
+    atomic_replace_locked(
+        destination,
+        bytes,
+        expected_current,
+        validate_existing,
+        backup,
+        AtomicReplaceHooks {
+            stage: hook,
+            before_parent_sync: &mut || Ok(()),
+            before_rollback_rename: &mut || Ok(()),
+            rollback_on_sync_error: None,
+        },
+    )
 }
 
 /// Atomically replaces state while the caller holds the destination directory lock.
 fn atomic_replace_locked(
     destination: &Path,
     bytes: &[u8],
+    expected_current: CurrentExpectation<'_>,
+    validate_existing: Option<ExistingValidator<'_>>,
     backup: Option<AtomicBackup<'_>>,
-    hook: &mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
+    hooks: AtomicReplaceHooks<'_>,
 ) -> Result<(), StorageError> {
+    let AtomicReplaceHooks {
+        stage,
+        before_parent_sync,
+        before_rollback_rename,
+        rollback_on_sync_error,
+    } = hooks;
     let parent = destination
         .parent()
         .ok_or(StorageError::InvalidDirectories(
             "state file has no parent directory",
         ))?;
+    let previous = match validate_existing {
+        Some((limit, validate)) => {
+            let previous = read_optional_bounded(destination, limit)?;
+            let matches_expected = expected_current_matches(previous.as_deref(), expected_current);
+            if !matches_expected {
+                return Err(StorageError::StaleConfiguration);
+            }
+            if let Some(bytes) = previous.as_deref() {
+                validate(bytes)?;
+            }
+            previous
+        }
+        None => {
+            if !current_matches_revision(destination, expected_current)? {
+                return Err(StorageError::StaleConfiguration);
+            }
+            None
+        }
+    };
+    if let Some((backup_path, (limit, validate))) = backup {
+        read_guarded_state(backup_path, limit, validate)?;
+    }
     let mut temporary = create_sibling_temp(destination, "state")?;
-    hook(AtomicWriteStage::TemporaryCreated)?;
+    stage(AtomicWriteStage::TemporaryCreated)?;
     temporary.file_mut().write_all(bytes)?;
     temporary.file_mut().flush()?;
     temporary.file_mut().sync_all()?;
     temporary.close();
-    hook(AtomicWriteStage::TemporarySynced)?;
+    stage(AtomicWriteStage::TemporarySynced)?;
 
-    if let Some((backup_path, validate_backup)) = backup {
-        let previous = match read_optional_bounded(destination, CONFIG_MAX_BYTES) {
-            Ok(bytes) => bytes,
-            Err(StorageError::DocumentTooLarge) => None,
-            Err(error) => return Err(error),
-        };
-        if let Some(old_bytes) = previous {
-            let old_config_is_valid = match serde_json::from_slice::<Value>(&old_bytes) {
-                Ok(value) => validate_config_safety(&value).is_ok() && validate_backup(&value),
-                Err(_) => false,
-            };
-            if old_config_is_valid {
-                atomic_replace_locked(backup_path, &old_bytes, None, &mut |_| Ok(()))?;
-                hook(AtomicWriteStage::BackupReplaced)?;
-            }
-        }
+    if let (Some((backup_path, _)), Some(old_bytes)) = (backup, previous.as_deref()) {
+        atomic_replace_locked(
+            backup_path,
+            old_bytes,
+            CurrentExpectation::Unchecked,
+            None,
+            None,
+            AtomicReplaceHooks {
+                stage: &mut |_| Ok(()),
+                before_parent_sync: &mut || Ok(()),
+                before_rollback_rename: &mut || Ok(()),
+                rollback_on_sync_error: None,
+            },
+        )?;
+        stage(AtomicWriteStage::BackupReplaced)?;
     }
     fs::rename(temporary.path(), destination)?;
     temporary.disarm();
-    sync_parent_directory(parent)?;
-    hook(AtomicWriteStage::TargetReplaced)?;
+    if let Err(sync_error) = before_parent_sync().and_then(|()| sync_parent_directory(parent)) {
+        if let Some(rollback) = rollback_on_sync_error {
+            let rollback_result = match rollback.restore(destination, before_rollback_rename) {
+                Ok(()) => sync_parent_directory(parent).map_err(|error| (error, None)),
+                Err(error) => Err(error),
+            };
+            if let Err((rollback_error, retained_recovery_copy)) = rollback_result {
+                return Err(StorageError::RecoveryRollbackFailed {
+                    sync_error,
+                    rollback_error,
+                    retained_recovery_copy,
+                });
+            }
+        }
+        return Err(sync_error.into());
+    }
+    stage(AtomicWriteStage::TargetReplaced)?;
     Ok(())
+}
+
+enum ReplaceRollback {
+    Restore(OwnedTempFile),
+    Remove,
+}
+
+impl ReplaceRollback {
+    fn restore(
+        self,
+        destination: &Path,
+        before_restore: &mut dyn FnMut() -> io::Result<()>,
+    ) -> Result<(), (io::Error, Option<PathBuf>)> {
+        match self {
+            Self::Restore(mut original) => {
+                original.close();
+                let retained_copy = original.path().to_path_buf();
+                original.cleanup = false;
+                match before_restore().and_then(|()| fs::rename(&retained_copy, destination)) {
+                    Ok(()) => Ok(()),
+                    Err(error) => Err((error, Some(retained_copy))),
+                }
+            }
+            Self::Remove => match fs::remove_file(destination) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err((error, None)),
+            },
+        }
+    }
+}
+
+fn prepare_replace_rollback(destination: &Path) -> io::Result<ReplaceRollback> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
+    match fs::symlink_metadata(destination) {
+        Ok(_) => {
+            let mut original = File::open(destination)?;
+            let mut temporary = create_unique_sibling_temp(destination, "recovery-original")?;
+            io::copy(&mut original, temporary.file_mut())?;
+            temporary.file_mut().flush()?;
+            temporary.file_mut().sync_all()?;
+            temporary.close();
+            sync_parent_directory(parent)?;
+            Ok(ReplaceRollback::Restore(temporary))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ReplaceRollback::Remove),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_guarded_state(
+    path: &Path,
+    limit: u64,
+    validate: &dyn Fn(&[u8]) -> Result<(), StorageError>,
+) -> Result<Option<Vec<u8>>, StorageError> {
+    let bytes = read_optional_bounded(path, limit)?;
+    if let Some(bytes) = bytes.as_deref() {
+        validate(bytes)?;
+    }
+    Ok(bytes)
 }
 
 struct OwnedTempFile {
@@ -861,15 +1382,48 @@ fn create_sibling_temp(destination: &Path, label: &str) -> io::Result<OwnedTempF
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&candidate)?;
-    Ok(OwnedTempFile {
+    create_owned_sibling_temp(candidate)
+}
+
+fn create_unique_sibling_temp(destination: &Path, label: &str) -> io::Result<OwnedTempFile> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no file name"))?
+        .to_string_lossy();
+    static NEXT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+    loop {
+        let sequence = NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".ascii-runtime-{name}.{label}-{sequence}.tmp"));
+        match create_owned_sibling_temp(candidate) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            result => return result,
+        }
+    }
+}
+
+fn create_owned_sibling_temp(candidate: PathBuf) -> io::Result<OwnedTempFile> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&candidate)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    let temporary = OwnedTempFile {
         path: candidate,
         file: Some(file),
         cleanup: true,
-    })
+    };
+    Ok(temporary)
 }
 
 fn create_directory_durable(path: &Path) -> io::Result<()> {
@@ -899,14 +1453,54 @@ fn create_directory_durable(path: &Path) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    fs::create_dir_all(directory)?;
     for created in missing.iter().rev() {
+        create_storage_directory(created)?;
         let parent = created
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         sync_parent_directory(parent)?;
     }
+    if missing.is_empty() {
+        restrict_storage_directory(directory)?;
+    }
+    Ok(())
+}
+
+fn create_storage_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
+    match builder.create(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if !fs::metadata(path)?.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotADirectory,
+                    "storage parent is not a directory",
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    restrict_storage_directory(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_storage_directory(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn restrict_storage_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -918,16 +1512,17 @@ struct DirectoryLock {
 
 impl DirectoryLock {
     fn new(directory: &Path) -> Self {
-        let directory = normalized_path_identity(directory);
+        let directory = normalized_path_for_io(directory);
+        let identity = normalize_path_identity_case(directory.clone());
         let mut registry = DIRECTORY_LOCKS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         registry.retain(|_, lock| lock.strong_count() != 0);
-        let local = match registry.get(&directory).and_then(Weak::upgrade) {
+        let local = match registry.get(&identity).and_then(Weak::upgrade) {
             Some(local) => local,
             None => {
                 let local = Arc::new(Mutex::new(()));
-                registry.insert(directory.clone(), Arc::downgrade(&local));
+                registry.insert(identity, Arc::downgrade(&local));
                 local
             }
         };
@@ -943,12 +1538,19 @@ impl DirectoryLock {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Keep a stable hidden file so separate processes serialize the same directory operations.
-        let lock_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.lock_path)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let lock_file = options.open(&self.lock_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            lock_file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         lock_file.lock()?;
         Ok(DirectoryLockGuard {
             _file: lock_file,
@@ -1163,8 +1765,15 @@ impl ImportJournal {
         atomic_replace_locked(
             path,
             &json_bytes_bounded(record, JOURNAL_MAX_BYTES)?,
+            CurrentExpectation::Unchecked,
             None,
-            &mut |_| Ok(()),
+            None,
+            AtomicReplaceHooks {
+                stage: &mut |_| Ok(()),
+                before_parent_sync: &mut || Ok(()),
+                before_rollback_rename: &mut || Ok(()),
+                rollback_on_sync_error: None,
+            },
         )?;
         Ok(())
     }
@@ -1196,7 +1805,9 @@ impl PortableExport {
             ExportMode::NonportableLocalBackup => "nonportable-local-backup",
         };
         let mut budget = ExportBudget::new();
-        let content = filter_export(value, mode, &mut budget, 0)?.unwrap_or(Value::Null);
+        let mut key_path = String::new();
+        let content =
+            filter_export(value, mode, &mut budget, 0, &mut key_path)?.unwrap_or(Value::Null);
         Ok(Self {
             schema_version: 1,
             mode: label,
@@ -1284,6 +1895,7 @@ fn filter_export(
     mode: ExportMode,
     budget: &mut ExportBudget,
     depth: usize,
+    key_path: &mut String,
 ) -> Result<Option<Value>, StorageError> {
     budget.visit_node(depth)?;
     match value {
@@ -1294,11 +1906,17 @@ fn filter_export(
                 if key.len() > PORTABLE_EXPORT_MAX_KEY_BYTES {
                     return Err(StorageError::DocumentTooLarge);
                 }
-                if is_history_key(key) || (mode == ExportMode::Portable && is_nonportable_key(key))
+                let key_path_length = key_path.len();
+                append_normalized_key(key_path, key);
+                if is_normalized_history_key(key_path)
+                    || (mode == ExportMode::Portable && is_nonportable_key(key))
                 {
+                    key_path.truncate(key_path_length);
                     continue;
                 }
-                if let Some(nested) = filter_export(nested, mode, budget, depth + 1)? {
+                let nested = filter_export(nested, mode, budget, depth + 1, key_path)?;
+                key_path.truncate(key_path_length);
+                if let Some(nested) = nested {
                     budget.account_key(key.len(), depth)?;
                     filtered.insert(key.clone(), nested);
                 }
@@ -1308,7 +1926,7 @@ fn filter_export(
         Value::Array(items) => {
             let mut filtered = Vec::new();
             for item in items {
-                if let Some(item) = filter_export(item, mode, budget, depth + 1)? {
+                if let Some(item) = filter_export(item, mode, budget, depth + 1, key_path)? {
                     filtered.push(item);
                 }
             }
@@ -1331,20 +1949,31 @@ fn filter_export(
     }
 }
 
-fn normalize_key(key: &str) -> String {
-    key.chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+fn append_normalized_key(path: &mut String, key: &str) {
+    path.extend(
+        key.chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase),
+    );
 }
 
-fn is_history_key(key: &str) -> bool {
-    let key = normalize_key(key);
+fn normalize_key(key: &str) -> String {
+    let mut normalized = String::with_capacity(key.len());
+    append_normalized_key(&mut normalized, key);
+    normalized
+}
+
+fn is_normalized_history_key(key: &str) -> bool {
     (key.contains("cursor") && key.contains("history"))
         || (key.contains("window") && key.contains("geometry") && key.contains("history"))
 }
 
 fn is_nonportable_key(key: &str) -> bool {
+    let has_host_component = key
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|component| {
+            component.eq_ignore_ascii_case("host") || component.eq_ignore_ascii_case("hostname")
+        });
     let key = normalize_key(key);
     key.contains("path")
         || key.contains("monitor")
@@ -1359,8 +1988,8 @@ fn is_nonportable_key(key: &str) -> bool {
         || key.contains("user")
         || key.contains("home")
         || key.contains("address")
-        || key == "host"
-        || key.contains("hostname")
+        || has_host_component
+        || matches!(key.as_str(), "host" | "hostname")
         || key.contains("server")
         || key.contains("connection")
         || key == "port"
@@ -1371,41 +2000,81 @@ fn is_machine_local_string(value: &str) -> bool {
         return true;
     }
     value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|character: char| {
-            matches!(
-                character,
-                '"' | '\''
-                    | '('
-                    | ')'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | '='
-                    | ','
-                    | ';'
-                    | '.'
-                    | '!'
-                    | '<'
-                    | '>'
-            )
-        });
-        let bytes = token.as_bytes();
-        token.starts_with("~/")
-            || looks_like_user_home_path(token)
-            || token
-                .split_once('=')
-                .is_some_and(|(_, value)| looks_like_user_home_path(value))
-            || token.starts_with('/')
-            || token.starts_with("\\\\")
-            || token.contains('\\')
-            || token.contains("=/")
-            || token.contains("=\\")
-            || (bytes.len() >= 3
-                && bytes[0].is_ascii_alphabetic()
-                && bytes[1] == b':'
-                && matches!(bytes[2], b'/' | b'\\'))
-            || looks_like_network_endpoint(token)
+        let token = trim_export_punctuation(token);
+        token.split([':', '=']).any(|part| {
+            let part = trim_export_punctuation(part);
+            part.starts_with("~/")
+                || looks_like_user_home_path(part)
+                || part.starts_with('/')
+                || part.starts_with("\\\\")
+                || part.contains('\\')
+                || looks_like_relative_local_path(part)
+        }) || looks_like_network_endpoint(token)
+    })
+}
+
+fn looks_like_relative_local_path(value: &str) -> bool {
+    let mut components = value.split(['/', '\\']);
+    let Some(first) = components.next() else {
+        return false;
+    };
+    let Some(mut final_component) = components.next() else {
+        return false;
+    };
+    if first.is_empty() || final_component.is_empty() {
+        return false;
+    }
+    for component in components {
+        if component.is_empty() {
+            return false;
+        }
+        final_component = component;
+    }
+    let relative_prefix = matches!(first, "." | "..");
+    const COMMON_LOCAL_DIRECTORY_ROOTS: &[&str] = &[
+        "documents",
+        "desktop",
+        "downloads",
+        "pictures",
+        "photos",
+        "videos",
+        "movies",
+        "music",
+        "media",
+        "library",
+    ];
+    let recognized_root = relative_prefix
+        || COMMON_LOCAL_DIRECTORY_ROOTS
+            .iter()
+            .any(|root| first.eq_ignore_ascii_case(root));
+    if recognized_root && final_component.starts_with('.') {
+        return true;
+    }
+    if let Some((stem, _)) = final_component.rsplit_once('.') {
+        return recognized_root && !stem.is_empty();
+    }
+    recognized_root && !final_component.is_empty()
+}
+
+fn trim_export_punctuation(value: &str) -> &str {
+    value.trim_matches(|character: char| {
+        matches!(
+            character,
+            '"' | '\''
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '='
+                | ','
+                | ';'
+                | '.'
+                | '!'
+                | '<'
+                | '>'
+        )
     })
 }
 
@@ -1518,7 +2187,7 @@ impl DiagnosticLog {
         }
     }
     pub fn append(&self, message: &str) -> Result<(), StorageError> {
-        fs::create_dir_all(&self.directory)?;
+        create_directory_durable(&self.directory)?;
         let _guard = self.directory_lock.lock()?;
         self.prune_rotation_files()?;
 
@@ -1547,7 +2216,19 @@ impl DiagnosticLog {
         if existing_len.saturating_add(record.len()) > self.limits.max_file_bytes {
             self.rotate(&path)?;
         }
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(&record)?;
         file.flush()?;
         Ok(())
@@ -1597,7 +2278,14 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
 fn rename_if_present_bounded(source: &Path, destination: &Path, limit: usize) -> io::Result<()> {
     match fs::metadata(source) {
         Ok(metadata) if metadata.len() > limit as u64 => remove_if_present(source),
-        Ok(_) => fs::rename(source, destination),
+        Ok(_) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(source, fs::Permissions::from_mode(0o600))?;
+            }
+            fs::rename(source, destination)
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }

@@ -65,15 +65,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   storage directory; clean owned interrupted-write temporaries, sync newly created directory
   entries where supported, preserve only schema-valid last-good configs, and redact clipped
   diagnostics plus portable file URIs and network endpoints.
+- [COR-008] Re-check normalized root identities after each directory is created; fail closed
+  on aliases revealed by dangling-symlink materialization.
 - [COR-008] Inject failures at every config/registry atomic-write hook boundary and verify recovery
   yields only complete valid state, cleans owned temporaries, and permits subsequent writes; race
   retained concurrent log records through rotation without loss or corruption.
+- [COR-008] Filter nested cursor/window-history keys from both export modes; preserve
+  case-preserving canonical paths for directory-lock I/O and enforce owner-only Unix lock files.
+- [COR-008] Preserve retained settings-recovery copies across retry attempts by creating
+  collision-safe sibling snapshots; verify bytes survive recovery retries after rollback failure.
+- [COR-008] Redact extensionless Unicode names and dotfiles beneath recognized local roots in
+  portable exports.
+- [COR-008] Redact dotted filenames beneath recognized local roots even when their suffixes are
+  Unicode or otherwise not ASCII extensions, while preserving harmless version text such as
+  `Supported versions v1.0/v2.0`.
+- [COR-008] Restore prior registry bytes when an update fails at the parent-directory sync
+  boundary; expose the write hook for deterministic rollback coverage.
 - [COR-008] Bound diagnostic logs to 16 files of at most 16 MiB each and 64 KiB per record; bound
   portable-export traversal and serialized output, reject over-budget exports without partial data,
   and redact single-label host-and-port endpoints such as `buildhost:9000` with trailing sentence,
   angle, or colon punctuation while retaining non-endpoint text.
 - [COR-008] Filter bare `host` keys from portable exports so single-label machine names such as
   `buildhost` cannot survive under a generic field name.
+- [COR-008] Filter exact host/hostname key components, including composed fields such as
+  `service_host`, from portable exports while preserving benign substring matches and supported-version prose.
 - [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
   explicitly labeled nonportable local backups.
 - COR-009 cache hardening preserves output bytes written after a disk-probe snapshot, captures
@@ -105,6 +120,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [COR-008] Redact user-qualified home paths in generic portable-export strings, including
   `=`-prefixed values, while preserving tilde text without a path; reject over-limit journal paths
   before cloning and retain the final whole-document size guard.
+- [COR-008] Persist canonical TOML settings and reject replacement of malformed or unsupported current
+  state without changing its bytes or `.last-good`. Provide explicit validated recovery, restrict
+  app-owned directories and persisted files to owner-only Unix permissions, and redact machine-local
+  paths after colon delimiters.
+- [COR-008] Reject TOML inputs above the 8 MiB configuration limit before copying them for parsing;
+  preserve `DocumentTooLarge` for oversized input.
+- [COR-008] Reject nested cursor and window-geometry history keys in local settings before
+  saving or rotating last-good.
+- [COR-008] Fail closed when recovery compares versioned settings with a versionless last-good file.
+- [COR-008] Require settings saves to compare the observed current bytes or absence under the
+  directory lock; stale writes return a typed conflict before current or last-good mutation.
+- [COR-008] Acquire the destination directory lock before reading current and last-good settings,
+  holding it through revision comparison, validation, and replacement so recovery serializes with
+  competing writers; stale restores leave current settings and last-good unchanged.
+- [COR-008] Reject recursive history-key paths in last-good recovery, including nested and dotted
+  names such as `cursor.history`, without changing current settings or backup bytes.
+- [COR-008] Reject duplicate package identifiers in persisted install-registry JSON during load and
+  save validation, preserving the original bytes on either rejection.
+- [COR-008] Roll back restored settings after parent-directory sync failure, preserving pre-recovery
+  current and last-good bytes; report rollback failures explicitly and cover the public recovery
+  sync hook with a deterministic byte-preservation regression.
+- [COR-008] Redact generic portable-export strings containing embedded POSIX or Windows relative
+  file paths while preserving harmless prose and slash-separated text; add public export coverage.
+- [COR-008] Retain the pre-recovery settings copy when rollback rename fails and expose its path in a
+  typed error; deterministic public fault injection verifies the copy remains recoverable.
+- [COR-008] Redact extensionless relative paths beneath recognized local directories in generic
+  portable-export strings while preserving ordinary slash prose; add embedded path coverage.
+- [COR-008] Add serialized atomic registry read-modify-write updates so concurrent callers preserve
+  independent package changes; retain full replacement for explicit save operations.
+- Assign checked, non-reused process-unique identities to public COR-005 frame descriptors so same-generation metadata from different pools cannot alias; add deterministic public-path regression coverage ([COR-005]).
+- Replace deprecated `AtomicU64::fetch_update` with `try_update` for COR-005 pool identities, preserving checked non-wrapping allocation and relaxed ordering (`[COR-005]`).
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
 - Size density grids from the selected custom-crop geometry, retain normalized profile warnings in detailed conversion results, and preflight and cancellably initialize bounded quality-patch storage ([CNV-001]).
 - Charge premultiplied validation and readable input extent to density-conversion work and simultaneous-memory budgets; cancel before quality-patch buffer reservations and reject sRGB8-indistinguishable foreground/background colors ([CNV-001]).
