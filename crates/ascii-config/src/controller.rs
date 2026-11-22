@@ -299,12 +299,8 @@ impl SettingsController {
         let effective = resolve_overrides(&self.registry, &document.overrides)?;
         let revision = next_revision(state.snapshot.revision)?;
         let bytes = encode(revision, &document.overrides)?;
-        let backup_mode = if matches!(&state.status, ControllerStatus::RepairRequired(_)) {
-            BackupMode::PreserveLastGood
-        } else {
-            BackupMode::ReplaceWithPrevious
-        };
-        commit_state(&mut state, &bytes, backup_mode)?;
+        // Leave the selected backup available if replacing the main file fails.
+        commit_state(&mut state, &bytes, BackupMode::PreserveLastGood)?;
         let snapshot = Arc::new(SettingsSnapshot {
             revision,
             effective,
@@ -620,5 +616,29 @@ mod persistence_tests {
             )))
         ));
         assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn failed_backup_restore_keeps_selected_backup_usable() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let backup_path = directory.0.join("settings.toml.bak");
+        let original = b"schema_version = 2\nrevision = 5\n[settings]\n\"application.enabled\" = true\n";
+        let backup = b"schema_version = 2\nrevision = 4\n[settings]\n\"application.enabled\" = false\n";
+        fs::write(&path, original).unwrap();
+        fs::write(&backup_path, backup).unwrap();
+        let mut store = FileStore::new(path.clone());
+        store.inject_failure(PersistStage::MainReplace);
+        let controller = SettingsController::open_for_test(registry(), Box::new(store)).unwrap();
+
+        assert!(matches!(
+            controller.restore_backup(5),
+            Err(ConfigError::Storage(StoreError::Injected(
+                PersistStage::MainReplace
+            )))
+        ));
+        assert_eq!(controller.snapshot().unwrap().revision(), 5);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read(&backup_path).unwrap(), backup);
     }
 }
