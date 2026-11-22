@@ -1969,6 +1969,11 @@ fn is_normalized_history_key(key: &str) -> bool {
 }
 
 fn is_nonportable_key(key: &str) -> bool {
+    let has_host_component = key
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|component| {
+            component.eq_ignore_ascii_case("host") || component.eq_ignore_ascii_case("hostname")
+        });
     let key = normalize_key(key);
     key.contains("path")
         || key.contains("monitor")
@@ -1983,8 +1988,8 @@ fn is_nonportable_key(key: &str) -> bool {
         || key.contains("user")
         || key.contains("home")
         || key.contains("address")
-        || key == "host"
-        || key.contains("hostname")
+        || has_host_component
+        || matches!(key.as_str(), "host" | "hostname")
         || key.contains("server")
         || key.contains("connection")
         || key == "port"

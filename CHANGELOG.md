@@ -80,6 +80,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   angle, or colon punctuation while retaining non-endpoint text.
 - [COR-008] Filter bare `host` keys from portable exports so single-label machine names such as
   `buildhost` cannot survive under a generic field name.
+- [COR-008] Filter exact host/hostname key components, including composed fields such as
+  `service_host`, from portable exports while preserving benign substring matches and supported-version prose.
 - [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
   explicitly labeled nonportable local backups.
 - [COR-008] Redact user-qualified home paths in generic portable-export strings, including
