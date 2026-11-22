@@ -116,17 +116,7 @@ fn encode_with_serializer(
             return Err(DocumentError::NonFiniteNumber);
         }
     }
-    let mut text_bytes = 0usize;
-    for value in overrides.values() {
-        if let SettingValue::Text(text) = value {
-            if text.len() > MAX_CONFIG_BYTES - text_bytes {
-                return Err(DocumentError::TooLarge {
-                    limit: MAX_CONFIG_BYTES,
-                });
-            }
-            text_bytes += text.len();
-        }
-    }
+    preflight_encoded_size(revision, overrides)?;
 
     let mut settings = toml::map::Map::new();
     for (key, value) in overrides {
@@ -146,6 +136,195 @@ fn encode_with_serializer(
         });
     }
     Ok(text.into_bytes())
+}
+
+// Count the canonical inline-table output before the TOML serializer allocates its String.
+fn preflight_encoded_size(
+    revision: u64,
+    overrides: &BTreeMap<SettingKey, SettingValue>,
+) -> Result<(), DocumentError> {
+    let mut size = 0;
+    add_encoded_size(&mut size, "revision = ".len())?;
+    add_encoded_size(&mut size, signed_integer_encoded_len(revision as i64))?;
+    add_encoded_size(&mut size, "\nschema_version = ".len())?;
+    add_encoded_size(&mut size, signed_integer_encoded_len(CURRENT_SCHEMA_VERSION))?;
+    add_encoded_size(&mut size, "\nsettings = {".len())?;
+
+    for (index, (key, value)) in overrides.iter().enumerate() {
+        if index > 0 {
+            add_encoded_size(&mut size, 1)?;
+        }
+        add_encoded_size(&mut size, 1)?;
+        let key = key.as_str();
+        let encoded_key_len = key.len() + if key.contains('.') { 2 } else { 0 };
+        add_encoded_size(&mut size, encoded_key_len)?;
+        add_encoded_size(&mut size, " = ".len())?;
+        let value_len = match value {
+            SettingValue::Boolean(true) => 4,
+            SettingValue::Boolean(false) => 5,
+            SettingValue::Integer(value) => signed_integer_encoded_len(*value),
+            SettingValue::Number(value) => toml_float_encoded_len(*value),
+            SettingValue::Text(value) => toml_string_encoded_len(value)
+                .ok_or(DocumentError::TooLarge {
+                    limit: MAX_CONFIG_BYTES,
+                })?,
+        };
+        add_encoded_size(&mut size, value_len)?;
+    }
+
+    if !overrides.is_empty() {
+        add_encoded_size(&mut size, 1)?;
+    }
+    add_encoded_size(&mut size, "}\n".len())?;
+    Ok(())
+}
+
+fn add_encoded_size(size: &mut usize, additional: usize) -> Result<(), DocumentError> {
+    let Some(total) = size
+        .checked_add(additional)
+        .filter(|total| *total <= MAX_CONFIG_BYTES)
+    else {
+        return Err(DocumentError::TooLarge {
+            limit: MAX_CONFIG_BYTES,
+        });
+    };
+    *size = total;
+    Ok(())
+}
+
+fn signed_integer_encoded_len(value: i64) -> usize {
+    let mut magnitude = value.unsigned_abs();
+    let mut length = if value < 0 { 1 } else { 0 };
+    loop {
+        length += 1;
+        if magnitude < 10 {
+            return length;
+        }
+        magnitude /= 10;
+    }
+}
+
+fn toml_float_encoded_len(value: f64) -> usize {
+    if value == 0.0 {
+        return if value.is_sign_negative() { 4 } else { 3 };
+    }
+
+    let mut length = FormatLength(0);
+    let result = if value % 1.0 == 0.0 {
+        std::fmt::write(&mut length, format_args!("{value}.0"))
+    } else {
+        std::fmt::write(&mut length, format_args!("{value}"))
+    };
+    debug_assert!(result.is_ok());
+    length.0
+}
+
+struct FormatLength(usize);
+
+impl std::fmt::Write for FormatLength {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        self.0 += value.len();
+        Ok(())
+    }
+}
+
+/// Counts the TOML writer's chosen string representation without allocating it.
+fn toml_string_encoded_len(value: &str) -> Option<usize> {
+    if value.len() > MAX_CONFIG_BYTES {
+        return None;
+    }
+    let mut max_single_quote_run = 0;
+    let mut max_double_quote_run = 0;
+    let mut single_quote_run = 0;
+    let mut double_quote_run = 0;
+    let mut escape_codes = false;
+    let mut escape = false;
+    let mut newline = false;
+
+    for byte in value.as_bytes() {
+        if *byte == b'\'' {
+            single_quote_run += 1;
+            max_single_quote_run = max_single_quote_run.max(single_quote_run);
+        } else {
+            single_quote_run = 0;
+        }
+        if *byte == b'"' {
+            double_quote_run += 1;
+            max_double_quote_run = max_double_quote_run.max(double_quote_run);
+        } else {
+            double_quote_run = 0;
+        }
+
+        match *byte {
+            b'\\' => escape = true,
+            b'\t' => {}
+            b'\n' => newline = true,
+            byte if byte <= 0x1f || byte == 0x7f => escape_codes = true,
+            _ => {}
+        }
+    }
+
+    let (delimiter_len, multiline, escaped) =
+        if !escape_codes && !escape && max_double_quote_run == 0 && !newline {
+            (2, false, true)
+        } else if !escape_codes && max_single_quote_run == 0 && !newline {
+            (2, false, false)
+        } else if !escape_codes && !escape && max_double_quote_run <= 2 {
+            (6, true, true)
+        } else if !escape_codes && max_single_quote_run <= 2 {
+            (6, true, false)
+        } else if newline {
+            (6, true, true)
+        } else {
+            (2, false, true)
+        };
+
+    let mut length = 0;
+    add_encoded_size(&mut length, delimiter_len).ok()?;
+    if multiline && newline {
+        add_encoded_size(&mut length, 1).ok()?;
+    }
+    if !escaped {
+        add_encoded_size(&mut length, value.len()).ok()?;
+        return Some(length);
+    }
+
+    double_quote_run = 0;
+    for byte in value.as_bytes() {
+        let encoded_len = match *byte {
+            b'"' if multiline => {
+                double_quote_run += 1;
+                if double_quote_run == 3 {
+                    double_quote_run = 0;
+                    2
+                } else {
+                    1
+                }
+            }
+            b'"' => {
+                double_quote_run = 0;
+                2
+            }
+            b'\n' if multiline => {
+                double_quote_run = 0;
+                1
+            }
+            b'\x08' | b'\t' | b'\n' | b'\x0c' | b'\r' | b'\\' => {
+                double_quote_run = 0;
+                2
+            }
+            byte if byte <= 0x1f || byte == 0x7f => {
+                double_quote_run = 0;
+                6
+            }
+            _ => {
+                double_quote_run = 0;
+                1
+            }
+        };
+        add_encoded_size(&mut length, encoded_len).ok()?;
+    }
+    Some(length)
 }
 
 fn decode_scalar(value: toml::Value) -> Result<SettingValue, DocumentError> {
@@ -433,7 +612,7 @@ impl std::error::Error for DocumentError {}
 mod tests {
     use super::{
         DocumentError, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH, MAX_SETTING_ENTRIES, decode,
-        encode_with_serializer,
+        encode, encode_with_serializer,
     };
     use crate::model::{SettingKey, SettingType, SettingValue};
     use std::{cell::Cell, collections::BTreeMap, fmt::Write as _};
@@ -504,6 +683,54 @@ mod tests {
         ));
         assert_eq!(serializer_calls.get(), 0);
         assert_eq!(overrides, original);
+    }
+
+    #[test]
+    fn escaped_toml_expansion_is_rejected_before_serialization() {
+        let schema_type = SettingType::String {
+            max_chars: MAX_CONFIG_BYTES,
+        };
+        let value = SettingValue::text("\0".repeat(MAX_CONFIG_BYTES / 2));
+        assert!(schema_type.validates(&value).is_ok());
+        let SettingValue::Text(text) = &value else {
+            unreachable!()
+        };
+        assert!(text.len() < MAX_CONFIG_BYTES);
+
+        let mut overrides = BTreeMap::new();
+        overrides.insert(SettingKey::new("application.label").unwrap(), value);
+        assert!(matches!(
+            encode(0, &overrides),
+            Err(DocumentError::TooLarge {
+                limit: MAX_CONFIG_BYTES
+            })
+        ));
+        let serializer_calls = Cell::new(0);
+        let result = encode_with_serializer(0, &overrides, |_| {
+            serializer_calls.set(serializer_calls.get() + 1);
+            Ok(String::new())
+        });
+
+        assert!(matches!(
+            result,
+            Err(DocumentError::TooLarge {
+                limit: MAX_CONFIG_BYTES
+            })
+        ));
+        assert_eq!(serializer_calls.get(), 0);
+    }
+
+    #[test]
+    fn encoder_accepts_a_document_at_the_byte_limit() {
+        let key = SettingKey::new("application.label").unwrap();
+        let mut overrides = BTreeMap::new();
+        overrides.insert(key.clone(), SettingValue::text(""));
+        let empty_document = encode(0, &overrides).unwrap();
+        let text_length = MAX_CONFIG_BYTES - empty_document.len();
+        overrides.insert(key, SettingValue::text("x".repeat(text_length)));
+
+        let encoded = encode(0, &overrides).unwrap();
+        assert_eq!(encoded.len(), MAX_CONFIG_BYTES);
     }
 
     #[test]
