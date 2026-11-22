@@ -4,7 +4,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::vec::Vec;
 
-use ascii_convert::{EncodedSrgb, LinearRgb, OutputEncoding, decode_srgb, encode_output};
+use ascii_convert::{EncodedSrgb, GlyphTable, LinearRgb, OutputEncoding, decode_srgb, encode_output};
 use ascii_core::{
     AsciiCell, AsciiFrame, Budget, BudgetKind, CancellationToken, Error, GlyphTableId, GridSize,
     MalformedReason, validate_frame,
