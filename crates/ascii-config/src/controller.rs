@@ -389,22 +389,28 @@ fn validate_overrides(
     registry: &Registry,
     overrides: &BTreeMap<SettingKey, SettingValue>,
 ) -> Result<(), ConfigError> {
+    let mut validation_error = None;
     for (key, value) in overrides {
         let Some(descriptor) = registry.get(key) else {
             return Err(ConfigError::UnknownSetting(key.clone()));
         };
-        if descriptor.scope == SettingScope::S {
-            return Err(ConfigError::SessionSettingCannotPersist(key.clone()));
+        if validation_error.is_some() {
+            continue;
         }
-        descriptor
-            .value_type
-            .validates(value)
-            .map_err(|violation| ConfigError::InvalidPersistentValue {
-                key: key.clone(),
-                violation,
-            })?;
+        validation_error = if descriptor.scope == SettingScope::S {
+            Some(ConfigError::SessionSettingCannotPersist(key.clone()))
+        } else {
+            descriptor
+                .value_type
+                .validates(value)
+                .err()
+                .map(|violation| ConfigError::InvalidPersistentValue {
+                    key: key.clone(),
+                    violation,
+                })
+        };
     }
-    Ok(())
+    validation_error.map_or(Ok(()), Err)
 }
 
 fn ensure_writable(status: &ControllerStatus) -> Result<(), ConfigError> {

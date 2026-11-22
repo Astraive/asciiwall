@@ -37,7 +37,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Bound inline-table dotted-key nesting and setting-entry counts, retained restore failure counts through activation, redacted stale settings bytes from errors, and enforced owner-only Unix modes for existing settings, backups, and oversized repair archives with deterministic regressions ([CFG-001]).
-- Preserve the parsed revision when recognized current-schema settings fail semantic validation, so explicit repair advances from that revision; future-schema and unclassifiable documents remain read-only with original bytes preserved ([CFG-001]).
+- Keep documents with unknown settings read-only even when a known invalid value sorts first, preserving the original bytes through rejected repair ([CFG-001]).
 - Fixed inline settings-table assignment preflight so exactly 4,096 entries pass and 4,097 fail in both inline and table forms ([CFG-001]).
 - Corrected preflight scanning after legal extra quote/apostrophe runs at multiline string terminators and covered subsequent nesting-limit checks ([CFG-001]).
 - Count quoted basic and literal table-header key components when enforcing dotted-key nesting limits, including keys with escaped quotes and closing brackets ([CFG-001]).

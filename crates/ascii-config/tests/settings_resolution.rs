@@ -568,6 +568,29 @@ fn explicit_repair_remains_available_for_known_current_schema_data() {
 }
 
 #[test]
+fn unknown_setting_keeps_mixed_invalid_document_read_only() {
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    let original =
+        b"schema_version = 2\nrevision = 17\n[settings]\n\"grid.columns\" = 0\n\"z.unknown\" = 1\n";
+    fs::write(&path, original).unwrap();
+    let controller = SettingsController::open(&path, registry()).unwrap();
+
+    assert!(matches!(
+        controller.status().unwrap(),
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::UnknownSetting(key))
+            if key.as_str() == "z.unknown"
+    ));
+    assert_eq!(controller.snapshot().unwrap().revision(), 17);
+    assert_eq!(fs::read(&path).unwrap().as_slice(), &original[..]);
+    assert!(matches!(
+        controller.repair(17),
+        Err(ConfigError::ReadOnlyUnclassifiableDocument)
+    ));
+    assert_eq!(fs::read(&path).unwrap().as_slice(), &original[..]);
+}
+
+#[test]
 fn malformed_document_classes_are_rejected_before_snapshot_publication() {
     type MalformedDocumentCase<'a> = (&'a [u8], fn(&DocumentError) -> bool);
 
