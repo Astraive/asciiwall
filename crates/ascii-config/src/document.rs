@@ -131,6 +131,7 @@ fn encode_with_serializer(
     root.insert("revision".to_owned(), toml::Value::Integer(revision as i64));
     root.insert("settings".to_owned(), toml::Value::Table(settings));
     let text = serialize(&toml::Value::Table(root))?;
+    let text = canonicalize_settings_table(&text)?;
     if text.len() > MAX_CONFIG_BYTES {
         return Err(DocumentError::TooLarge {
             limit: MAX_CONFIG_BYTES,
@@ -139,7 +140,83 @@ fn encode_with_serializer(
     Ok(text.into_bytes())
 }
 
-// Count the canonical inline-table output before the TOML serializer allocates its String.
+fn canonicalize_settings_table(text: &str) -> Result<String, DocumentError> {
+    if text.ends_with("settings = {}\n") {
+        return Ok(text.to_owned());
+    }
+    let Some((header, entries)) = text.split_once("\n\n[settings]\n") else {
+        return Err(DocumentError::Serialization);
+    };
+    let mut canonical = String::with_capacity(text.len());
+    canonical.push_str(header);
+    canonical.push_str("\nsettings = {");
+    if !entries.is_empty() {
+        canonical.push(' ');
+        append_inline_entries(&mut canonical, entries);
+        canonical.push(' ');
+    }
+    canonical.push_str("}\n");
+    Ok(canonical)
+}
+
+fn append_inline_entries(output: &mut String, entries: &str) {
+    let bytes = entries.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut entry_start = 0;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some((quote_byte, multiline)) = quote {
+            if quote_byte == b'"' && escaped {
+                escaped = false;
+            } else if quote_byte == b'"' && byte == b'\\' {
+                escaped = true;
+            } else if byte == quote_byte {
+                let run = bytes[index..]
+                    .iter()
+                    .take_while(|next| **next == quote_byte)
+                    .count();
+                if multiline && run >= 3 {
+                    quote = None;
+                    index += run - 1;
+                } else if !multiline {
+                    quote = None;
+                }
+            }
+        } else if matches!(byte, b'"' | b'\'') {
+            let multiline =
+                bytes.get(index + 1) == Some(&byte) && bytes.get(index + 2) == Some(&byte);
+            quote = Some((byte, multiline));
+            if multiline {
+                index += 2;
+            }
+        } else if byte == b'\n' {
+            if entry_start < index {
+                if output.ends_with(" = { ") {
+                    output.push_str(&entries[entry_start..index]);
+                } else {
+                    output.push_str(", ");
+                    output.push_str(&entries[entry_start..index]);
+                }
+            }
+            entry_start = index + 1;
+        }
+        index += 1;
+    }
+
+    if entry_start < entries.len() {
+        if output.ends_with(" = { ") {
+            output.push_str(&entries[entry_start..]);
+        } else {
+            output.push_str(", ");
+            output.push_str(&entries[entry_start..]);
+        }
+    }
+}
+
+// Count the canonical inline-table output before allocating the encoded document.
 fn preflight_encoded_size(
     revision: u64,
     overrides: &BTreeMap<SettingKey, SettingValue>,
