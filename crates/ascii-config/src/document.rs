@@ -728,13 +728,36 @@ mod tests {
     fn encoder_accepts_a_document_at_the_byte_limit() {
         let key = SettingKey::new("application.label").unwrap();
         let mut overrides = BTreeMap::new();
-        overrides.insert(key.clone(), SettingValue::text(""));
-        let empty_document = encode(0, &overrides).unwrap();
-        let text_length = MAX_CONFIG_BYTES - empty_document.len();
-        overrides.insert(key, SettingValue::text("x".repeat(text_length)));
+        overrides.insert(key.clone(), SettingValue::text("x"));
+        let one_byte_document = encode(0, &overrides).unwrap();
+        let encoded_overhead = one_byte_document
+            .len()
+            .checked_sub(1)
+            .expect("the serialized document contains the x byte");
+        let text_length = MAX_CONFIG_BYTES
+            .checked_sub(encoded_overhead)
+            .expect("the document has less than the configured byte limit of overhead");
+        overrides.insert(key.clone(), SettingValue::text("x".repeat(text_length)));
 
         let encoded = encode(0, &overrides).unwrap();
         assert_eq!(encoded.len(), MAX_CONFIG_BYTES);
+
+        let over_limit_length = text_length
+            .checked_add(1)
+            .expect("the exact-limit fixture is well below usize::MAX");
+        overrides.insert(key, SettingValue::text("x".repeat(over_limit_length)));
+        let serializer_calls = Cell::new(0);
+        let result = encode_with_serializer(0, &overrides, |_| {
+            serializer_calls.set(serializer_calls.get() + 1);
+            Ok(String::new())
+        });
+        assert!(matches!(
+            result,
+            Err(DocumentError::TooLarge {
+                limit: MAX_CONFIG_BYTES
+            })
+        ));
+        assert_eq!(serializer_calls.get(), 0);
     }
 
     #[test]
