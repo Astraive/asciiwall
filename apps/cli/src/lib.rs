@@ -480,10 +480,7 @@ mod tests {
 
     use ascii_core::CancellationToken;
 
-    use super::{
-        Format, SuccessReport, publish_error, publish_stdout, run_with_cancellation_to,
-        write_success_status,
-    };
+    use super::{publish_error, publish_stdout, run_with_cancellation_to, write_success_status};
 
     #[allow(dead_code)]
     mod synthetic_font {
@@ -493,23 +490,52 @@ mod tests {
         ));
     }
 
-    struct FailAfterPartialResponse {
+    struct FailAfterPartialSuccessStatus {
         bytes: Vec<u8>,
-        response_attempts: usize,
+        pending_json: Vec<u8>,
+        success_status_attempts: usize,
+        error_response_attempts: usize,
+        success_status: Option<serde_json::Value>,
     }
 
-    impl Write for FailAfterPartialResponse {
+    impl Write for FailAfterPartialSuccessStatus {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if bytes.first() == Some(&b'{') {
-                self.response_attempts += 1;
+            let ends_with_newline = bytes.ends_with(b"\n");
+            let response_bytes = if ends_with_newline {
+                &bytes[..bytes.len() - 1]
+            } else {
+                bytes
+            };
+            self.pending_json.extend_from_slice(response_bytes);
+            if let Ok(response) = serde_json::from_slice::<serde_json::Value>(&self.pending_json) {
+                if response["schema_version"] == 1
+                    && response["command"] == "convert"
+                    && response["status"] == "ok"
+                    && response["format"] == "txt"
+                    && response["columns"] == 12
+                    && response["rows"].as_u64().is_some_and(|rows| rows > 0)
+                {
+                    self.success_status_attempts += 1;
+                    self.success_status = Some(response);
+                    self.bytes.extend_from_slice(&self.pending_json[..4]);
+                    self.pending_json.clear();
+                    return Err(io::Error::other("simulated partial success status write failure"));
+                }
+                if response["schema_version"] == 1
+                    && response["command"] == "convert"
+                    && response["status"] == "error"
+                    && response["error"].is_object()
+                    && response["result"].is_null()
+                {
+                    self.error_response_attempts += 1;
+                    self.bytes.extend_from_slice(&self.pending_json);
+                    self.pending_json.clear();
+                }
             }
-            let remaining = 4usize.saturating_sub(self.bytes.len());
-            if remaining == 0 {
-                return Err(io::Error::other("simulated partial status write failure"));
+            if ends_with_newline {
+                self.bytes.push(b'\n');
             }
-            let written = remaining.min(bytes.len());
-            self.bytes.extend_from_slice(&bytes[..written]);
-            Ok(written)
+            Ok(bytes.len())
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -640,26 +666,25 @@ mod tests {
     #[test]
     fn top_level_partial_success_status_write_does_not_attempt_second_json_response() {
         const RIGHTS_CLEARED_PNG: &[u8] = &[
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
-            0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
-            0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
-            0xff, 0xff, 0xff, 0x7f, 0x00, 0x09, 0xfb, 0x03, 0xfd, 0x2a, 0x86, 0xe3, 0x8a, 0x00, 0x00,
-            0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xff, 0xff, 0xff, 0x7f, 0x00, 0x09, 0xfb, 0x03, 0xfd, 0x2a, 0x86,
+            0xe3, 0x8a, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ];
         let directory = tempfile::tempdir().unwrap();
         let image = directory.path().join("image.png");
         let font = directory.path().join("font.ttf");
         let output = directory.path().join("published.txt");
         std::fs::write(&image, RIGHTS_CLEARED_PNG).unwrap();
-        std::fs::write(
-            &font,
-            synthetic_font::synthetic_font(false),
-        )
-        .unwrap();
+        std::fs::write(&font, synthetic_font::synthetic_font(false)).unwrap();
 
-        let mut stdout = FailAfterPartialResponse {
+        let mut stdout = FailAfterPartialSuccessStatus {
             bytes: Vec::new(),
-            response_attempts: 0,
+            pending_json: Vec::new(),
+            success_status_attempts: 0,
+            error_response_attempts: 0,
+            success_status: None,
         };
         let exit = run_with_cancellation_to(
             [
@@ -674,20 +699,47 @@ mod tests {
                 output.as_os_str().to_owned(),
                 OsString::from("--columns"),
                 OsString::from("12"),
+                OsString::from("--charset"),
+                OsString::from(" "),
+                OsString::from("--format"),
+                OsString::from("txt"),
             ],
             &CancellationToken::new(),
             &mut stdout,
         );
 
         assert_eq!(exit, ExitCode::from(8));
-        assert_eq!(stdout.bytes.len(), 4, "status write must fail after a prefix");
         assert_eq!(
-            stdout.response_attempts, 1,
-            "the error response must not be attempted on partially written stdout"
+            stdout.success_status_attempts, 1,
+            "exactly one success JSON response must be attempted"
         );
-        assert!(
-            !std::fs::read(&output).unwrap().is_empty(),
-            "status failure must not roll back the published artifact"
+        assert_eq!(
+            stdout.error_response_attempts, 0,
+            "a failed success response must not trigger an error JSON response"
+        );
+        assert!(stdout.pending_json.is_empty(), "no incomplete JSON response");
+        let success_status = stdout
+            .success_status
+            .as_ref()
+            .expect("the response writer must identify the success status");
+        assert_eq!(success_status["schema_version"], 1);
+        assert_eq!(success_status["command"], "convert");
+        assert_eq!(success_status["status"], "ok");
+        assert_eq!(success_status["format"], "txt");
+        assert_eq!(success_status["columns"], 12);
+        let status_json = serde_json::to_vec(success_status).unwrap();
+        assert_eq!(stdout.bytes, status_json[..4]);
+
+        let rows = success_status["rows"].as_u64().unwrap();
+        assert!(rows > 0);
+        let mut expected_artifact = Vec::new();
+        for _ in 0..rows {
+            expected_artifact.extend_from_slice(b"            \n");
+        }
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            expected_artifact,
+            "the fully published text artifact must survive the status failure"
         );
     }
 }
