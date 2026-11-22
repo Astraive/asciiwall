@@ -516,9 +516,9 @@ mod tests {
 
     use ascii_core::CancellationToken;
 
-    use super::{publish_error, publish_stdout, run_with_cancellation_to, write_success_status};
     #[cfg(windows)]
     use super::{is_unc_path, reject_offline_unc_paths};
+    use super::{publish_error, publish_stdout, run_with_cancellation_to, write_success_status};
 
     #[allow(dead_code)]
     mod synthetic_font {
