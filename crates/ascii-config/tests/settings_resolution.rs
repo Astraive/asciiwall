@@ -592,19 +592,19 @@ fn explicit_repair_recovers_recognized_current_schema_decode_errors() {
         ),
         (
             "missing-revision",
-            b"schema_version = 2\n[settings]\n\"application.enabled\" = true\n",
+            b"schema_version = 2\n[settings]\n\"grid.columns\" = 240\n",
             0,
             |error| matches!(error, DocumentError::InvalidField("revision")),
         ),
         (
             "invalid-revision",
-            b"schema_version = 2\nrevision = \"invalid\"\n[settings]\n\"application.enabled\" = true\n",
+            b"schema_version = 2\nrevision = \"invalid\"\n[settings]\n\"grid.columns\" = 240\n",
             0,
             |error| matches!(error, DocumentError::InvalidField("revision")),
         ),
         (
             "overflow-revision",
-            b"schema_version = 2\nrevision = 9223372036854775808\n[settings]\n\"application.enabled\" = true\n",
+            b"schema_version = 2\nrevision = 9223372036854775808\n[settings]\n\"grid.columns\" = 240\n",
             0,
             |error| matches!(error, DocumentError::InvalidToml),
         ),
