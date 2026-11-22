@@ -196,7 +196,7 @@ fn ansi_alpha_flattening_and_palette_quantization_are_reported() {
     .expect("true-color export succeeds");
     assert_eq!(
         true_color.bytes(),
-        "\x1b[0m\x1b[38;2;128;0;64;48;2;0;0;128m█\x1b[0m\n".as_bytes()
+        "\x1b[0m\x1b[38;2;188;0;137;48;2;0;0;188m█\x1b[0m\n".as_bytes()
     );
     assert_eq!(
         true_color.loss_notice(),
@@ -211,7 +211,7 @@ fn ansi_alpha_flattening_and_palette_quantization_are_reported() {
         &cancellation,
     )
     .expect("ANSI16 export succeeds");
-    assert_eq!(ansi16.bytes(), "\x1b[0m\x1b[31;44m█\x1b[0m\n".as_bytes());
+    assert_eq!(ansi16.bytes(), "\x1b[0m\x1b[35;44m█\x1b[0m\n".as_bytes());
     assert_eq!(
         ansi16.loss_notice(),
         "ANSI 16-color output flattens background alpha against black and foreground alpha against the flattened background, then quantizes both colors to the conventional 16-color palette; the terminal palette affects color appearance, the source font and live effects are not preserved, and character-cell aspect depends on the terminal font and layout."
@@ -227,11 +227,31 @@ fn ansi_alpha_flattening_and_palette_quantization_are_reported() {
     .expect("ANSI256 export succeeds");
     assert_eq!(
         ansi256.bytes(),
-        "\x1b[0m\x1b[38;5;89;48;5;4m█\x1b[0m\n".as_bytes()
+        "\x1b[0m\x1b[38;5;126;48;5;19m█\x1b[0m\n".as_bytes()
     );
     assert_eq!(
         ansi256.loss_notice(),
         "ANSI 256-color output flattens background alpha against black and foreground alpha against the flattened background, then quantizes both colors to the xterm 256-color palette; the terminal palette affects color appearance, the source font and live effects are not preserved, and character-cell aspect depends on the terminal font and layout."
+    );
+}
+
+#[test]
+fn ansi_true_color_alpha_composites_in_linear_light() {
+    let table = build_table("█");
+    let frame = grid_frame_with_colors(&table, &['█'], 1, 1, [255, 0, 0, 128], [0, 0, 255, 128]);
+    let cancellation = CancellationToken::new();
+    let output = export(
+        &frame,
+        &table,
+        ExportTarget::Ansi(AnsiColorMode::TrueColor),
+        &FONT_BUDGET,
+        &cancellation,
+    )
+    .expect("true-color export succeeds");
+
+    assert_eq!(
+        output.bytes(),
+        "\x1b[0m\x1b[38;2;188;0;137;48;2;0;0;188m█\x1b[0m\n".as_bytes()
     );
 }
 
