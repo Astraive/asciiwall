@@ -58,6 +58,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   storage directory; clean owned interrupted-write temporaries, sync newly created directory
   entries where supported, preserve only schema-valid last-good configs, and redact clipped
   diagnostics plus portable file URIs and network endpoints.
+- [COR-008] Re-check normalized root identities after each directory is created; fail closed
+  on aliases revealed by dangling-symlink materialization.
 - [COR-008] Inject failures at every config/registry atomic-write hook boundary and verify recovery
   yields only complete valid state, cleans owned temporaries, and permits subsequent writes; race
   retained concurrent log records through rotation without loss or corruption.
