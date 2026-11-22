@@ -647,19 +647,22 @@ fn inline_settings_keys_are_known(line: &str, registry: &Registry) -> bool {
 
 fn known_setting_syntax(registry: &Registry, raw_key: &str) -> bool {
     let raw_key = raw_key.trim();
-    let key = match raw_key
+    let (key, quoted) = match raw_key
         .strip_prefix('"')
         .and_then(|key| key.strip_suffix('"'))
     {
-        Some(key) => key,
+        Some(key) => (key, true),
         None => match raw_key
             .strip_prefix('\'')
             .and_then(|key| key.strip_suffix('\''))
         {
-            Some(key) => key,
-            None => raw_key,
+            Some(key) => (key, true),
+            None => (raw_key, false),
         },
     };
+    if !quoted && key.contains('.') {
+        return false;
+    }
     known_setting_name(registry, key)
 }
 

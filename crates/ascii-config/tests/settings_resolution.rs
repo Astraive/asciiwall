@@ -647,6 +647,28 @@ fn explicit_repair_recovers_recognized_current_schema_decode_errors() {
 }
 
 #[test]
+fn unquoted_dotted_setting_path_without_revision_remains_read_only() {
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    let original = b"schema_version = 2\n[settings]\ngrid.columns = \n";
+    fs::write(&path, original).unwrap();
+    let controller = SettingsController::open(&path, registry()).unwrap();
+
+    assert!(matches!(
+        controller.status().unwrap(),
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+            DocumentError::InvalidToml
+        ))
+    ));
+    assert_eq!(controller.snapshot().unwrap().revision(), 0);
+    assert!(matches!(
+        controller.repair(0),
+        Err(ConfigError::ReadOnlyUnclassifiableDocument)
+    ));
+    assert_eq!(fs::read(&path).unwrap().as_slice(), &original[..]);
+}
+
+#[test]
 fn unknown_setting_keeps_mixed_invalid_document_read_only() {
     let directory = TestDirectory::new();
     let path = directory.config();

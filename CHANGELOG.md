@@ -41,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Keep the selected `.bak` unchanged when an explicit restore fails to replace the main document, so the restore can be retried ([CFG-001]).
 - Allow explicit repair of malformed current-schema documents only when the schema and all setting keys are safely recognized; keep unknown and future-schema documents read-only ([CFG-001]).
 - Keep malformed current-schema recovery read-only when any same-line setting assignment is unknown or ambiguous; explicit repair still handles recognized decode errors ([CFG-001]).
+- Keep unquoted dotted TOML paths read-only during missing-revision recovery, preserving the original bytes when explicit repair is rejected ([CFG-001]).
 - Preserve canonical inline-table output and exact document-size limits, repair recognized current-schema documents missing a revision, and prevent corrupt-archive name collisions from replacing existing data ([CFG-001]).
 - Fixed inline settings-table assignment preflight so exactly 4,096 entries pass and 4,097 fail in both inline and table forms ([CFG-001]).
 - Keep TOML assignment preflight linear by tracking line starts and rejecting repeated same-line root assignments before rescanning prefixes ([CFG-001]).
