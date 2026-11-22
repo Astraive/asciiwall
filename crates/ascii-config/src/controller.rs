@@ -446,19 +446,20 @@ fn recovery_metadata_from_prefix(text: &str) -> Option<RecoveryMetadata> {
             _ => return None,
         }
     }
-    (schema_version == Some(CURRENT_SCHEMA_VERSION))
-        .then_some(RecoveryMetadata { revision })
+    (schema_version == Some(CURRENT_SCHEMA_VERSION)).then_some(RecoveryMetadata { revision })
 }
 
 fn is_revision_assignment(line: &str) -> bool {
-    let mut key = None;
+    let mut saw_key = false;
+    let mut is_revision = false;
     assignment_keys_are_unambiguous(line, |raw_key| {
-        if key.is_some() {
+        if saw_key {
             return false;
         }
-        key = Some(raw_key.trim());
+        saw_key = true;
+        is_revision = raw_key.trim() == "revision";
         true
-    }) && key == Some("revision")
+    }) && is_revision
 }
 
 fn assignment_keys_are_unambiguous(
@@ -489,9 +490,7 @@ fn assignment_keys_are_unambiguous(
 
         match byte {
             b'"' | b'\'' => {
-                if bytes.get(index + 1) == Some(&byte)
-                    && bytes.get(index + 2) == Some(&byte)
-                {
+                if bytes.get(index + 1) == Some(&byte) && bytes.get(index + 2) == Some(&byte) {
                     return false;
                 }
                 quote = Some(byte);
@@ -648,7 +647,10 @@ fn inline_settings_keys_are_known(line: &str, registry: &Registry) -> bool {
 
 fn known_setting_syntax(registry: &Registry, raw_key: &str) -> bool {
     let raw_key = raw_key.trim();
-    let key = match raw_key.strip_prefix('"').and_then(|key| key.strip_suffix('"')) {
+    let key = match raw_key
+        .strip_prefix('"')
+        .and_then(|key| key.strip_suffix('"'))
+    {
         Some(key) => key,
         None => match raw_key
             .strip_prefix('\'')
@@ -948,8 +950,10 @@ mod persistence_tests {
         let directory = TestDirectory::new();
         let path = directory.0.join("settings.toml");
         let backup_path = directory.0.join("settings.toml.bak");
-        let original = b"schema_version = 2\nrevision = 5\n[settings]\n\"application.enabled\" = true\n";
-        let backup = b"schema_version = 2\nrevision = 4\n[settings]\n\"application.enabled\" = false\n";
+        let original =
+            b"schema_version = 2\nrevision = 5\n[settings]\n\"application.enabled\" = true\n";
+        let backup =
+            b"schema_version = 2\nrevision = 4\n[settings]\n\"application.enabled\" = false\n";
         fs::write(&path, original).unwrap();
         fs::write(&backup_path, backup).unwrap();
         let mut store = FileStore::new(path.clone());

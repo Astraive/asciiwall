@@ -202,18 +202,30 @@ impl FileStore {
             )));
         }
         drop(temporary_file);
-
         if let Err(error) = self.fail(replace_stage) {
             return Err(WriteFailure::before_replace(error));
         }
-        if let Err(error) = fs::rename(temporary.path(), target) {
+
+        let replace_result = if replace_stage == PersistStage::ArchiveReplace {
+            fs::hard_link(temporary.path(), target)
+        } else {
+            fs::rename(temporary.path(), target)
+        };
+        if let Err(error) = replace_result {
             return Err(WriteFailure::before_replace(StoreError::io(
                 StoreOperation::Replace,
                 error,
             )));
         }
+        if replace_stage == PersistStage::ArchiveReplace
+            && let Err(error) = fs::remove_file(temporary.path())
+        {
+            return Err(WriteFailure::after_replace(StoreError::io(
+                StoreOperation::Replace,
+                error,
+            )));
+        }
         temporary.disarm();
-
         if let Err(error) = self.fail(directory_sync_stage(replace_stage)) {
             return Err(WriteFailure::after_replace(error));
         }
@@ -335,7 +347,8 @@ impl ConfigStore for FileStore {
 
         if oversized {
             let archive = self.unique_corrupt_path();
-            fs::rename(&self.path, &archive)
+            self.fail(PersistStage::ArchiveReplace)?;
+            archive_without_replace(&self.path, &archive)
                 .map_err(|error| StoreError::io(StoreOperation::ArchiveCorrupt, error))?;
             return match self.atomic_write(&self.path.clone(), contents, PersistStage::MainReplace)
             {
@@ -566,6 +579,15 @@ pub enum StoreOperation {
     Rollback,
 }
 
+fn archive_without_replace(source: &Path, archive: &Path) -> std::io::Result<()> {
+    fs::hard_link(source, archive)?;
+    if let Err(error) = fs::remove_file(source) {
+        let _ = fs::remove_file(archive);
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path
         .file_name()
@@ -662,7 +684,10 @@ fn sync_parent(parent: &Path) -> std::io::Result<()> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{BackupMode, ConfigStore, FileStore, PersistStage, StoreError, StoreOperation};
+    use super::{
+        BackupMode, ConfigStore, FileStore, PersistStage, StoreError, StoreOperation,
+        archive_without_replace,
+    };
     use std::{
         fs,
         path::PathBuf,
@@ -689,6 +714,21 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn corrupt_archive_name_collision_preserves_both_files() {
+        let directory = TestDirectory::new();
+        let source = directory.0.join("settings.toml");
+        let archive = directory.0.join("settings.toml.corrupt-reused-name");
+        fs::write(&source, b"corrupt-main").unwrap();
+        fs::write(&archive, b"existing-archive").unwrap();
+
+        let error = archive_without_replace(&source, &archive).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&source).unwrap(), b"corrupt-main");
+        assert_eq!(fs::read(&archive).unwrap(), b"existing-archive");
     }
 
     #[test]

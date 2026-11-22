@@ -576,12 +576,7 @@ fn explicit_repair_remains_available_for_known_current_schema_data() {
 
 #[test]
 fn explicit_repair_recovers_recognized_current_schema_decode_errors() {
-    type RepairableCase<'a> = (
-        &'a str,
-        &'a [u8],
-        u64,
-        fn(&DocumentError) -> bool,
-    );
+    type RepairableCase<'a> = (&'a str, &'a [u8], u64, fn(&DocumentError) -> bool);
 
     let cases: &[RepairableCase<'_>] = &[
         (
@@ -609,6 +604,7 @@ fn explicit_repair_recovers_recognized_current_schema_decode_errors() {
             |error| matches!(error, DocumentError::InvalidToml),
         ),
     ];
+    for (name, original, expected_revision, expected_error) in cases {
         let directory = TestDirectory::new();
         let path = directory.config();
         let backup_path = directory.0.join("settings.toml.bak");
@@ -617,12 +613,18 @@ fn explicit_repair_recovers_recognized_current_schema_decode_errors() {
         fs::write(&backup_path, backup).unwrap();
         let controller = SettingsController::open(&path, registry()).unwrap();
 
-        assert!(matches!(
-            controller.status().unwrap(),
-            ControllerStatus::RepairRequired(ConfigError::Document(error))
-                if expected_error(&error)
-        ), "{name}");
-        assert_eq!(controller.snapshot().unwrap().revision(), *expected_revision);
+        assert!(
+            matches!(
+                controller.status().unwrap(),
+                ControllerStatus::RepairRequired(ConfigError::Document(error))
+                    if expected_error(&error)
+            ),
+            "{name}"
+        );
+        assert_eq!(
+            controller.snapshot().unwrap().revision(),
+            *expected_revision
+        );
         assert_eq!(fs::read(&path).unwrap().as_slice(), *original);
         assert_eq!(fs::read(&backup_path).unwrap().as_slice(), backup);
 
@@ -666,8 +668,7 @@ fn unknown_setting_keeps_mixed_invalid_document_read_only() {
     ));
     assert_eq!(fs::read(&path).unwrap().as_slice(), &original[..]);
     let malformed_path = directory.0.join("unknown-malformed.toml");
-    let malformed_original =
-        b"schema_version = 2\nrevision = 17\n[settings]\n\"z.unknown\" = \n";
+    let malformed_original = b"schema_version = 2\nrevision = 17\n[settings]\n\"z.unknown\" = \n";
     fs::write(&malformed_path, malformed_original).unwrap();
     let malformed = SettingsController::open(&malformed_path, registry()).unwrap();
     assert!(matches!(
