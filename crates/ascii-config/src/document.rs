@@ -147,7 +147,10 @@ fn preflight_encoded_size(
     add_encoded_size(&mut size, "revision = ".len())?;
     add_encoded_size(&mut size, signed_integer_encoded_len(revision as i64))?;
     add_encoded_size(&mut size, "\nschema_version = ".len())?;
-    add_encoded_size(&mut size, signed_integer_encoded_len(CURRENT_SCHEMA_VERSION))?;
+    add_encoded_size(
+        &mut size,
+        signed_integer_encoded_len(CURRENT_SCHEMA_VERSION),
+    )?;
     add_encoded_size(&mut size, "\nsettings = {".len())?;
 
     for (index, (key, value)) in overrides.iter().enumerate() {
@@ -164,10 +167,11 @@ fn preflight_encoded_size(
             SettingValue::Boolean(false) => 5,
             SettingValue::Integer(value) => signed_integer_encoded_len(*value),
             SettingValue::Number(value) => toml_float_encoded_len(*value),
-            SettingValue::Text(value) => toml_string_encoded_len(value)
-                .ok_or(DocumentError::TooLarge {
+            SettingValue::Text(value) => {
+                toml_string_encoded_len(value).ok_or(DocumentError::TooLarge {
                     limit: MAX_CONFIG_BYTES,
-                })?,
+                })?
+            }
         };
         add_encoded_size(&mut size, value_len)?;
     }
@@ -611,8 +615,8 @@ impl std::error::Error for DocumentError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        DocumentError, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH, MAX_SETTING_ENTRIES, decode,
-        encode, encode_with_serializer,
+        DocumentError, MAX_CONFIG_BYTES, MAX_NESTING_DEPTH, MAX_SETTING_ENTRIES, decode, encode,
+        encode_with_serializer,
     };
     use crate::model::{SettingKey, SettingType, SettingValue};
     use std::{cell::Cell, collections::BTreeMap, fmt::Write as _};
