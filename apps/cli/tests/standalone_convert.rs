@@ -265,7 +265,7 @@ fn unavailable_matcher_color_and_configuration_are_explicit() {
 
 #[cfg(windows)]
 #[test]
-fn offline_unc_paths_are_rejected_before_file_access() {
+fn offline_unc_paths_are_rejected_before_destination_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let existing_output = dir.path().join("existing output.txt");
     fs::write(&existing_output, b"preserve this output").unwrap();
@@ -279,8 +279,8 @@ fn offline_unc_paths_are_rejected_before_file_access() {
         );
     };
 
-    // Existing local output would win request validation before any source/font access if the
-    // offline lexical preflight ran too late.
+    // Request validation would inspect this existing local destination and report its conflict;
+    // the offline diagnostic proves that the veto returns before that metadata probe.
     assert_rejected(run([
         OsStr::new("--offline"),
         OsStr::new("convert"),
@@ -320,6 +320,55 @@ fn offline_unc_paths_are_rejected_before_file_access() {
         OsStr::new("--output"),
         OsStr::new("//offline.invalid/share/output.txt"),
     ]));
+    assert_eq!(fs::read(existing_output).unwrap(), b"preserve this output");
+}
+
+#[cfg(windows)]
+#[test]
+fn offline_reparse_source_is_rejected_before_target_or_output_metadata() {
+    use std::os::windows::fs::MetadataExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("local target");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("source.png"), b"local junction target").unwrap();
+
+    let junction = dir.path().join("source junction");
+    let junction_result = Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&target)
+        .output()
+        .expect("Windows command processor creates a directory junction");
+    assert!(
+        junction_result.status.success(),
+        "failed to create test junction: {}",
+        String::from_utf8_lossy(&junction_result.stderr)
+    );
+    assert_ne!(
+        fs::symlink_metadata(&junction).unwrap().file_attributes() & 0x0000_0400,
+        0
+    );
+
+    let existing_output = dir.path().join("existing output.txt");
+    fs::write(&existing_output, b"preserve this output").unwrap();
+    let junction_source = junction.join("source.png");
+    let output = run([
+        OsStr::new("--offline"),
+        OsStr::new("convert"),
+        junction_source.as_os_str(),
+        OsStr::new("--font"),
+        OsStr::new("local font.ttf"),
+        OsStr::new("--output"),
+        existing_output.as_os_str(),
+    ]);
+    assert_eq!(status(&output), 2);
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("offline mode does not allow network-backed UNC paths")
+    );
     assert_eq!(fs::read(existing_output).unwrap(), b"preserve this output");
 }
 

@@ -147,22 +147,95 @@ impl From<CliError> for ExecutionError {
         Self::Cli(error)
     }
 }
-fn reject_offline_unc_paths(
+
+fn reject_offline_network_paths(
     offline: bool,
     config: Option<&Path>,
     request: &arguments::ConvertArgs,
 ) -> Result<(), CliError> {
-    if offline
-        && (is_unc_path(&request.image)
-            || request.font.as_deref().is_some_and(is_unc_path)
-            || is_unc_path(&request.output)
-            || config.is_some_and(is_unc_path))
-    {
-        return Err(CliError::usage(
-            "offline mode does not allow network-backed UNC paths",
-        ));
+    if !offline {
+        return Ok(());
     }
+
+    #[cfg(windows)]
+    {
+        let mut current_directory = None;
+        let image = resolve_offline_path(&request.image, &mut current_directory)
+            .map_err(|()| offline_path_error())?;
+        let font = request
+            .font
+            .as_deref()
+            .map(|path| resolve_offline_path(path, &mut current_directory))
+            .transpose()
+            .map_err(|()| offline_path_error())?;
+        let output = if request.output.as_os_str() == OsStr::new("-") {
+            None
+        } else {
+            Some(
+                resolve_offline_path(&request.output, &mut current_directory)
+                    .map_err(|()| offline_path_error())?,
+            )
+        };
+        let config = config
+            .map(|path| resolve_offline_path(path, &mut current_directory))
+            .transpose()
+            .map_err(|()| offline_path_error())?;
+        let paths = [Some(&image), font.as_ref(), output.as_ref(), config.as_ref()];
+
+        // Inspect all effective roots before probing any path component, so a network path in
+        // one argument vetoes the invocation before local destination metadata can take priority.
+        for path in paths.into_iter().flatten() {
+            let path = path.as_ref();
+            if is_unc_path(path) || is_remote_drive_path(path) {
+                return Err(offline_path_error());
+            }
+        }
+
+        // Check each component without following its final reparse point. Stop at the first one
+        // before any descendant can be resolved through a junction or symlink target.
+        for path in [Some(&image), font.as_ref(), output.as_ref(), config.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if path_has_reparse_component(path.as_ref()).unwrap_or(true) {
+                return Err(offline_path_error());
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    let _ = (config, request);
+
     Ok(())
+}
+
+#[cfg(windows)]
+fn offline_path_error() -> CliError {
+    CliError::usage(
+        "offline mode does not allow network-backed UNC paths, mapped drives, non-volume device namespaces, or filesystem reparse points; paths must be safely inspectable",
+    )
+}
+
+#[cfg(windows)]
+fn resolve_offline_path<'a>(
+    path: &'a Path,
+    current_directory: &mut Option<std::path::PathBuf>,
+) -> Result<std::borrow::Cow<'a, Path>, ()> {
+    if path.is_absolute() {
+        return Ok(std::borrow::Cow::Borrowed(path));
+    }
+
+    if current_directory.is_none() {
+        // On Windows this obtains the process path with GetCurrentDirectoryW; it does not inspect
+        // file contents or follow a reparse point.
+        *current_directory = Some(std::env::current_dir().map_err(|_| ())?);
+    }
+    let mut absolute = current_directory.as_ref().ok_or(())?.clone();
+    absolute.push(path);
+    if !absolute.is_absolute() {
+        return Err(());
+    }
+    Ok(std::borrow::Cow::Owned(absolute))
 }
 
 #[cfg(windows)]
@@ -176,9 +249,98 @@ fn is_unc_path(path: &Path) -> bool {
     )
 }
 
-#[cfg(not(windows))]
-fn is_unc_path(_: &Path) -> bool {
-    false
+#[cfg(windows)]
+fn is_remote_drive_path(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+
+    let drive = match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+            Prefix::DeviceNS(_) => return true,
+            Prefix::Verbatim(prefix) => return !is_local_volume_prefix(prefix),
+            _ => return false,
+        },
+        _ => return false,
+    };
+
+    const DRIVE_REMOTE: u32 = 4;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetDriveTypeW(root_path_name: *const u16) -> u32;
+    }
+
+    let root_path = [u16::from(drive), b':' as u16, b'\\' as u16, 0];
+    // The root-only drive-type query classifies a mapped drive without opening a share path.
+    // SAFETY: `root_path` is a fixed, NUL-terminated UTF-16 buffer for this call.
+    unsafe { GetDriveTypeW(root_path.as_ptr()) == DRIVE_REMOTE }
+}
+
+#[cfg(windows)]
+fn is_local_volume_prefix(prefix: &OsStr) -> bool {
+    let Some(prefix) = prefix.to_str() else {
+        return false;
+    };
+    prefix
+        .get(..7)
+        .is_some_and(|start| start.eq_ignore_ascii_case("Volume{"))
+        && prefix.ends_with('}')
+}
+
+#[cfg(windows)]
+fn path_has_reparse_component(path: &Path) -> Result<bool, ()> {
+    use std::os::windows::fs::MetadataExt;
+    use std::path::{Component, PathBuf};
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let mut resolved = PathBuf::new();
+    let mut checked_component_depth = 0usize;
+    let mut unresolved_suffix_depth = 0usize;
+
+    // Do not probe descendants of a missing or non-directory component. Track the unresolved
+    // suffix so a later `..` can return to a previously checked prefix.
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                resolved.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if unresolved_suffix_depth > 0 {
+                    resolved.pop();
+                    unresolved_suffix_depth -= 1;
+                } else if checked_component_depth > 0 {
+                    resolved.pop();
+                    checked_component_depth -= 1;
+                }
+            }
+            Component::Normal(_) => {
+                resolved.push(component.as_os_str());
+                if unresolved_suffix_depth > 0 {
+                    unresolved_suffix_depth += 1;
+                    continue;
+                }
+                match std::fs::symlink_metadata(&resolved) {
+                    Ok(metadata)
+                        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 =>
+                    {
+                        return Ok(true);
+                    }
+                    Ok(_) => checked_component_depth += 1,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        unresolved_suffix_depth = 1;
+                    }
+                    Err(_) => return Err(()),
+                }
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 fn execute(
@@ -196,7 +358,8 @@ fn execute(
         ..
     } = cli;
     let Command::Convert(request) = command;
-    reject_offline_unc_paths(offline, config.as_deref(), &request)?;
+    // This veto must precede `validate`, which inspects destination metadata.
+    reject_offline_network_paths(offline, config.as_deref(), &request)?;
     let (format, repertoire) = request.validate(json)?;
 
     if config.is_some() {
@@ -517,7 +680,7 @@ mod tests {
     use ascii_core::CancellationToken;
 
     #[cfg(windows)]
-    use super::{is_unc_path, reject_offline_unc_paths};
+    use super::{is_unc_path, reject_offline_network_paths};
     use super::{publish_error, publish_stdout, run_with_cancellation_to, write_success_status};
 
     #[allow(dead_code)]
@@ -530,7 +693,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn offline_unc_paths_are_rejected_lexically_for_every_cli_path() {
+    fn offline_unc_paths_are_rejected_before_local_path_metadata() {
         use std::path::{Path, PathBuf};
 
         use super::arguments::{Color, ConvertArgs, Format, Matcher};
@@ -559,7 +722,7 @@ mod tests {
 
             request.image = PathBuf::from(unc_path);
             assert_eq!(
-                reject_offline_unc_paths(true, None, &request)
+                reject_offline_network_paths(true, None, &request)
                     .unwrap_err()
                     .exit,
                 2
@@ -568,7 +731,7 @@ mod tests {
             request.image = local_image.clone();
             request.font = Some(PathBuf::from(unc_path));
             assert_eq!(
-                reject_offline_unc_paths(true, None, &request)
+                reject_offline_network_paths(true, None, &request)
                     .unwrap_err()
                     .exit,
                 2
@@ -577,7 +740,7 @@ mod tests {
             request.font = Some(local_font.clone());
             request.output = PathBuf::from(unc_path);
             assert_eq!(
-                reject_offline_unc_paths(true, None, &request)
+                reject_offline_network_paths(true, None, &request)
                     .unwrap_err()
                     .exit,
                 2
@@ -585,14 +748,14 @@ mod tests {
 
             request.output = local_output.clone();
             assert_eq!(
-                reject_offline_unc_paths(true, Some(Path::new(unc_path)), &request)
+                reject_offline_network_paths(true, Some(Path::new(unc_path)), &request)
                     .unwrap_err()
                     .exit,
                 2
             );
         }
 
-        assert!(reject_offline_unc_paths(false, None, &request).is_ok());
+        assert!(reject_offline_network_paths(false, None, &request).is_ok());
     }
 
     struct FailAfterPartialSuccessStatus {
