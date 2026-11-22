@@ -451,7 +451,74 @@ fn recovery_metadata_from_prefix(text: &str) -> Option<RecoveryMetadata> {
 }
 
 fn is_revision_assignment(line: &str) -> bool {
-    matches!(assignment_key(line), Some(key) if key.trim() == "revision")
+    let mut key = None;
+    assignment_keys_are_unambiguous(line, |raw_key| {
+        if key.is_some() {
+            return false;
+        }
+        key = Some(raw_key.trim());
+        true
+    }) && key == Some("revision")
+}
+
+fn assignment_keys_are_unambiguous(
+    line: &str,
+    mut key_is_allowed: impl FnMut(&str) -> bool,
+) -> bool {
+    let bytes = line.as_bytes();
+    let mut segment_start = 0;
+    let mut assignment = false;
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if let Some(quote_byte) = quote {
+            if quote_byte == b'"' {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == quote_byte {
+                    quote = None;
+                }
+            } else if byte == quote_byte {
+                quote = None;
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' | b'\'' => {
+                if bytes.get(index + 1) == Some(&byte)
+                    && bytes.get(index + 2) == Some(&byte)
+                {
+                    return false;
+                }
+                quote = Some(byte);
+            }
+            b'#' => return assignment,
+            b'=' if !assignment => {
+                if !key_is_allowed(&line[segment_start..index]) {
+                    return false;
+                }
+                assignment = true;
+            }
+            b'=' => return false,
+            b',' if assignment => {
+                segment_start = index + 1;
+                assignment = false;
+            }
+            b',' => return false,
+            b'[' | b'{' | b']' | b'}' => return false,
+            _ => {}
+        }
+    }
+
+    quote.is_none() && assignment
+}
+
+fn assignment_keys_are_known(line: &str, registry: &Registry) -> bool {
+    assignment_keys_are_unambiguous(line, |key| known_setting_syntax(registry, key))
 }
 
 fn is_settings_assignment(line: &str) -> bool {
@@ -514,13 +581,8 @@ fn settings_keys_are_known(text: &str, registry: &Registry) -> bool {
             inline_settings_seen = true;
             continue;
         }
-        if in_settings_table {
-            let Some(key) = assignment_key(line) else {
-                return false;
-            };
-            if !known_setting_syntax(registry, key) {
-                return false;
-            }
+        if in_settings_table && !assignment_keys_are_known(line, registry) {
+            return false;
         }
     }
     true

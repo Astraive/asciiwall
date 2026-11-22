@@ -609,7 +609,6 @@ fn explicit_repair_recovers_recognized_current_schema_decode_errors() {
             |error| matches!(error, DocumentError::InvalidToml),
         ),
     ];
-    for (name, original, expected_revision, expected_error) in cases {
         let directory = TestDirectory::new();
         let path = directory.config();
         let backup_path = directory.0.join("settings.toml.bak");
@@ -685,6 +684,28 @@ fn unknown_setting_keeps_mixed_invalid_document_read_only() {
         fs::read(&malformed_path).unwrap().as_slice(),
         &malformed_original[..]
     );
+}
+
+#[test]
+fn unknown_assignment_on_malformed_line_remains_read_only() {
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    let original = b"schema_version = 2\nrevision = 17\n[settings]\n\"grid.columns\" = 240, \"z.unknown\" = 1\n";
+    fs::write(&path, original).unwrap();
+    let controller = SettingsController::open(&path, registry()).unwrap();
+
+    assert!(matches!(
+        controller.status().unwrap(),
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+            DocumentError::InvalidToml
+        ))
+    ));
+    let revision = controller.snapshot().unwrap().revision();
+    assert!(matches!(
+        controller.repair(revision),
+        Err(ConfigError::ReadOnlyUnclassifiableDocument)
+    ));
+    assert_eq!(fs::read(&path).unwrap().as_slice(), &original[..]);
 }
 
 #[test]

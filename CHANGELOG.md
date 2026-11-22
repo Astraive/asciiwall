@@ -40,6 +40,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Keep documents with unknown settings read-only even when a known invalid value sorts first, preserving the original bytes through rejected repair ([CFG-001]).
 - Keep the selected `.bak` unchanged when an explicit restore fails to replace the main document, so the restore can be retried ([CFG-001]).
 - Allow explicit repair of malformed current-schema documents only when the schema and all setting keys are safely recognized; keep unknown and future-schema documents read-only ([CFG-001]).
+- Keep malformed current-schema recovery read-only when any same-line setting assignment is unknown or ambiguous; explicit repair still handles recognized decode errors ([CFG-001]).
 - Fixed inline settings-table assignment preflight so exactly 4,096 entries pass and 4,097 fail in both inline and table forms ([CFG-001]).
 - Keep TOML assignment preflight linear by tracking line starts and rejecting repeated same-line root assignments before rescanning prefixes ([CFG-001]).
 - Document canonical inline settings serialization and assert migration persists that exact current representation ([CFG-001]).
