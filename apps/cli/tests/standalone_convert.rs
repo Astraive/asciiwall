@@ -263,6 +263,66 @@ fn unavailable_matcher_color_and_configuration_are_explicit() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn offline_unc_paths_are_rejected_before_file_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing_output = dir.path().join("existing output.txt");
+    fs::write(&existing_output, b"preserve this output").unwrap();
+    let assert_rejected = |output: Output| {
+        assert_eq!(status(&output), 2);
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("offline mode does not allow network-backed UNC paths")
+        );
+    };
+
+    // Existing local output would win request validation before any source/font access if the
+    // offline lexical preflight ran too late.
+    assert_rejected(run([
+        OsStr::new("--offline"),
+        OsStr::new("convert"),
+        OsStr::new(r"\\offline.invalid\share\source.png"),
+        OsStr::new("--font"),
+        OsStr::new("local font.ttf"),
+        OsStr::new("--output"),
+        existing_output.as_os_str(),
+    ]));
+    assert_rejected(run([
+        OsStr::new("--offline"),
+        OsStr::new("convert"),
+        OsStr::new("missing source.png"),
+        OsStr::new("--font"),
+        OsStr::new(r"\\?\UNC\offline.invalid\share\font.ttf"),
+        OsStr::new("--output"),
+        existing_output.as_os_str(),
+    ]));
+    assert_rejected(run([
+        OsStr::new("--offline"),
+        OsStr::new("--config"),
+        OsStr::new(r"\\offline.invalid\share\settings.toml"),
+        OsStr::new("convert"),
+        OsStr::new("missing source.png"),
+        OsStr::new("--font"),
+        OsStr::new("local font.ttf"),
+        OsStr::new("--output"),
+        existing_output.as_os_str(),
+    ]));
+
+    // An empty image fails request validation before destination metadata if offline preflight
+    // were absent, keeping this output-path regression away from share access.
+    assert_rejected(run([
+        OsStr::new("--offline"),
+        OsStr::new("convert"),
+        OsStr::new(""),
+        OsStr::new("--output"),
+        OsStr::new("//offline.invalid/share/output.txt"),
+    ]));
+    assert_eq!(fs::read(existing_output).unwrap(), b"preserve this output");
+}
+
 #[test]
 fn shared_decoder_density_and_text_ansi_export_are_wired_end_to_end() {
     let dir = tempfile::tempdir().unwrap();

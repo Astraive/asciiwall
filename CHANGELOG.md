@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Avoid appending an error JSON response when CLI success-status output fails ([CLI-001]).
 - Strengthen CLI-001's status-write regression to verify the published artifact survives a partially written success response without a duplicate error response (`[CLI-001]`).
 - Clarify that `--config` settings loading is unavailable in this build and valid conversion requests using it fail with capability error `4` (`[CLI-001]`).
+- Reject Windows UNC source, font, output, and config paths lexically before filesystem access in `--offline` mode ([CLI-001]).
 - Map FNT-002 typed missing-requested-glyph and multi-cell failures to stable, glyph-safe CLI validation diagnostics, with a process-level JSON regression ([CLI-001]).
 - Hardened FNT-001 cancellation through parser preflight, glyph description, rasterization, and final sorting; prevented implicit deep clones of budgeted tables, validated legacy cmap format 2 beside Unicode maps, fixed one-pixel edge descriptors, expanded fingerprint invalidation coverage, and documented the checked parser-allocation envelope.
 - Bounded in-flight PNG/JPEG cancellation to each 128-byte compressed-input refill, preserving codec errors and releasing reservations without publishing partial frames. Work on the currently buffered compressed input is not preempted (`[IMG-001]`).

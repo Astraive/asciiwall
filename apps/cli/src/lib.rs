@@ -8,6 +8,7 @@ pub mod output;
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::{Parser, error::ErrorKind};
@@ -146,6 +147,39 @@ impl From<CliError> for ExecutionError {
         Self::Cli(error)
     }
 }
+fn reject_offline_unc_paths(
+    offline: bool,
+    config: Option<&Path>,
+    request: &arguments::ConvertArgs,
+) -> Result<(), CliError> {
+    if offline
+        && (is_unc_path(&request.image)
+            || request.font.as_deref().is_some_and(is_unc_path)
+            || is_unc_path(&request.output)
+            || config.is_some_and(is_unc_path))
+    {
+        return Err(CliError::usage(
+            "offline mode does not allow network-backed UNC paths",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_unc_path(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _))
+    )
+}
+
+#[cfg(not(windows))]
+fn is_unc_path(_: &Path) -> bool {
+    false
+}
 
 fn execute(
     cli: Cli,
@@ -156,11 +190,13 @@ fn execute(
         json,
         quiet,
         verbose,
+        offline,
         config,
         command,
         ..
     } = cli;
     let Command::Convert(request) = command;
+    reject_offline_unc_paths(offline, config.as_deref(), &request)?;
     let (format, repertoire) = request.validate(json)?;
 
     if config.is_some() {
@@ -481,6 +517,8 @@ mod tests {
     use ascii_core::CancellationToken;
 
     use super::{publish_error, publish_stdout, run_with_cancellation_to, write_success_status};
+    #[cfg(windows)]
+    use super::{is_unc_path, reject_offline_unc_paths};
 
     #[allow(dead_code)]
     mod synthetic_font {
@@ -488,6 +526,73 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../crates/ascii-convert/tests/support/synthetic_font.rs"
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn offline_unc_paths_are_rejected_lexically_for_every_cli_path() {
+        use std::path::{Path, PathBuf};
+
+        use super::arguments::{Color, ConvertArgs, Format, Matcher};
+
+        let local_image = PathBuf::from(r"C:\local\source.png");
+        let local_font = PathBuf::from(r"C:\local\font.ttf");
+        let local_output = PathBuf::from(r"C:\local\output.txt");
+        let mut request = ConvertArgs {
+            image: local_image.clone(),
+            output: local_output.clone(),
+            font: Some(local_font.clone()),
+            columns: 80,
+            matcher: Matcher::Density,
+            charset: " .".to_owned(),
+            color: Color::Mono,
+            format: Some(Format::Txt),
+            overwrite: false,
+        };
+
+        for unc_path in [
+            r"\\server\share\source.png",
+            "//server/share/font.ttf",
+            r"\\?\UNC\server\share\output.txt",
+        ] {
+            assert!(is_unc_path(Path::new(unc_path)));
+
+            request.image = PathBuf::from(unc_path);
+            assert_eq!(
+                reject_offline_unc_paths(true, None, &request)
+                    .unwrap_err()
+                    .exit,
+                2
+            );
+
+            request.image = local_image.clone();
+            request.font = Some(PathBuf::from(unc_path));
+            assert_eq!(
+                reject_offline_unc_paths(true, None, &request)
+                    .unwrap_err()
+                    .exit,
+                2
+            );
+
+            request.font = Some(local_font.clone());
+            request.output = PathBuf::from(unc_path);
+            assert_eq!(
+                reject_offline_unc_paths(true, None, &request)
+                    .unwrap_err()
+                    .exit,
+                2
+            );
+
+            request.output = local_output.clone();
+            assert_eq!(
+                reject_offline_unc_paths(true, Some(Path::new(unc_path)), &request)
+                    .unwrap_err()
+                    .exit,
+                2
+            );
+        }
+
+        assert!(reject_offline_unc_paths(false, None, &request).is_ok());
     }
 
     struct FailAfterPartialSuccessStatus {
