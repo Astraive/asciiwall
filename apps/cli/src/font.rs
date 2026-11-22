@@ -65,7 +65,8 @@ fn io_or_cancel(error: io::Error, cancellation: &CancellationToken) -> FontLoadE
 /// Opens an explicit regular local input without blocking on Unix FIFOs.
 ///
 /// The opened handle is authoritative: symlinks to regular files are supported, while pipes and
-/// device handles are rejected before any caller reads from them.
+/// device handles are rejected before reads. Windows device and volume namespaces are also
+/// rejected before opening and verified again against the resolved handle path.
 pub(crate) fn open_regular_input_file(
     path: &Path,
     cancellation: &CancellationToken,
@@ -73,6 +74,9 @@ pub(crate) fn open_regular_input_file(
     // OpenOptions follows symlinks intentionally. Unix O_NONBLOCK makes FIFO targets swapped
     // after path preflight safe; the resulting handle is authoritative before any read.
     check_cancelled(cancellation)?;
+    if !is_windows_filesystem_file_path(path) {
+        return Err(FontLoadError::NotRegularFile);
+    }
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -98,8 +102,8 @@ pub(crate) fn open_regular_input_file(
 fn is_regular_file_handle(file: &File) -> bool {
     use std::os::windows::io::AsRawHandle;
 
-    // On Windows, std::fs::FileType also calls nondirectory, non-symlink handles files. Inspect
-    // the native handle so pipes and character devices are rejected before synchronous reads.
+    // GetFileType alone accepts raw disk and volume handles as disk files. Resolve the opened
+    // handle as well and require a filesystem path with a file name before allowing reads.
     const FILE_TYPE_DISK: u32 = 0x0001;
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -108,6 +112,195 @@ fn is_regular_file_handle(file: &File) -> bool {
 
     // SAFETY: `file` owns a valid open handle for the duration of this call.
     unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_DISK }
+        && handle_has_filesystem_file_path(file)
+}
+
+#[cfg(windows)]
+fn handle_has_filesystem_file_path(file: &File) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+
+    const FILE_NAME_NORMALIZED: u32 = 0;
+    const VOLUME_NAME_DOS: u32 = 0;
+    const PATH_FLAGS: u32 = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFinalPathNameByHandleW(
+            handle: *mut std::ffi::c_void,
+            file_path: *mut u16,
+            file_path_size: u32,
+            flags: u32,
+        ) -> u32;
+    }
+
+    let handle = file.as_raw_handle();
+    // SAFETY: A null buffer with zero capacity asks for the required buffer length.
+    let required = unsafe {
+        GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, PATH_FLAGS)
+    };
+    let Some(capacity) = usize::try_from(required)
+        .ok()
+        .and_then(|required| required.checked_add(1))
+    else {
+        return false;
+    };
+    let Ok(capacity_u32) = u32::try_from(capacity) else {
+        return false;
+    };
+    if required == 0 {
+        return false;
+    }
+    let mut final_path = Vec::new();
+    if final_path.try_reserve_exact(capacity).is_err() {
+        return false;
+    }
+    final_path.resize(capacity, 0);
+    // SAFETY: `final_path` has `capacity_u32` writable UTF-16 code units and `handle` remains
+    // valid for this call.
+    let written = unsafe {
+        GetFinalPathNameByHandleW(handle, final_path.as_mut_ptr(), capacity_u32, PATH_FLAGS)
+    };
+    if written == 0 || written as usize >= final_path.len() {
+        return false;
+    }
+    final_path.truncate(written as usize);
+    is_windows_filesystem_file_path(Path::new(std::ffi::OsStr::from_wide(&final_path)))
+}
+
+#[cfg(windows)]
+fn is_windows_filesystem_file_path(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+
+    let mut units = path.as_os_str().encode_wide();
+    let first = units.next();
+    let second = units.next();
+    let third = units.next();
+    let fourth = units.next();
+    let is_separator = |unit| unit == b'\\' as u16 || unit == b'/' as u16;
+    if matches!((first, second, third, fourth),
+        (Some(a), Some(b), Some(c), Some(d))
+            if is_separator(a) && b == b'?' as u16 && c == b'?' as u16 && is_separator(d)
+    ) {
+        return false;
+    }
+
+    let mut units = path.as_os_str().encode_wide();
+    let first = units.next();
+    let second = units.next();
+    let third = units.next();
+    let fourth = units.next();
+    if matches!((first, second, third, fourth),
+        (Some(a), Some(b), Some(c), Some(d))
+            if is_separator(a) && is_separator(b) && c == b'.' as u16 && is_separator(d)
+    ) {
+        return false;
+    }
+
+    let is_filesystem_prefix = match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::DeviceNS(_) => false,
+            Prefix::Verbatim(value) => is_volume_guid_prefix(value),
+            Prefix::VerbatimDisk(_)
+            | Prefix::VerbatimUNC(_, _)
+            | Prefix::Disk(_)
+            | Prefix::UNC(_, _) => true,
+        },
+        _ => true,
+    };
+    is_filesystem_prefix && path.file_name().is_some()
+}
+
+#[cfg(windows)]
+fn is_volume_guid_prefix(prefix: &std::ffi::OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut units = prefix.encode_wide();
+    for expected in "Volume{".encode_utf16() {
+        let Some(actual) = units.next() else {
+            return false;
+        };
+        let ascii_lower = |unit: u16| {
+            if (b'A' as u16..=b'Z' as u16).contains(&unit) {
+                unit + (b'a' - b'A') as u16
+            } else {
+                unit
+            }
+        };
+        if ascii_lower(actual) != ascii_lower(expected) {
+            return false;
+        }
+    }
+    for index in 0..36 {
+        let Some(actual) = units.next() else {
+            return false;
+        };
+        if matches!(index, 8 | 13 | 18 | 23) {
+            if actual != b'-' as u16 {
+                return false;
+            }
+        } else if !matches!(actual, 48..=57 | 65..=70 | 97..=102) {
+            return false;
+        }
+    }
+    units.next() == Some(b'}' as u16) && units.next().is_none()
+}
+
+#[cfg(not(windows))]
+fn is_windows_filesystem_file_path(_path: &Path) -> bool {
+    true
+}
+
+#[cfg(all(test, windows))]
+mod windows_path_tests {
+    use std::path::Path;
+
+    use super::is_windows_filesystem_file_path;
+
+    #[test]
+    fn rejects_windows_device_and_volume_namespace_paths() {
+        for path in [
+            r"\\.\PhysicalDrive0",
+            r"\\.\C:",
+            r"\\?\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+            r"\??\C:",
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}",
+        ] {
+            assert!(
+                !is_windows_filesystem_file_path(Path::new(path)),
+                "accepted device namespace path: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_device_paths_before_opening() {
+        use ascii_core::CancellationToken;
+
+        for path in [r"\\.\PhysicalDrive0", r"\\.\C:"] {
+            assert!(matches!(
+                super::open_regular_input_file(Path::new(path), &CancellationToken::new()),
+                Err(super::FontLoadError::NotRegularFile)
+            ));
+        }
+    }
+
+    #[test]
+    fn accepts_ordinary_unc_and_extended_length_filesystem_paths() {
+        for path in [
+            r"C:\fonts\font.ttf",
+            r"\\server\share\fonts\font.ttf",
+            r"\\?\C:\fonts\font.ttf",
+            r"\\?\UNC\server\share\fonts\font.ttf",
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\fonts\font.ttf",
+        ] {
+            assert!(
+                is_windows_filesystem_file_path(Path::new(path)),
+                "rejected filesystem path: {path}"
+            );
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -149,6 +342,9 @@ pub fn load_glyph_table_with_repertoire(
     cancellation: &CancellationToken,
 ) -> Result<GlyphTable, FontLoadError> {
     check_cancelled(cancellation)?;
+    if !is_windows_filesystem_file_path(path) {
+        return Err(FontLoadError::NotRegularFile);
+    }
     let path_metadata = fs::metadata(path).map_err(|error| io_or_cancel(error, cancellation))?;
     check_cancelled(cancellation)?;
     if !path_metadata.is_file() {
