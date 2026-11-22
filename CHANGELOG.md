@@ -92,6 +92,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [COR-008] Redact dotted filenames beneath recognized local roots even when their suffixes are
   Unicode or otherwise not ASCII extensions, while preserving harmless version text such as
   `Supported versions v1.0/v2.0`.
+- [COR-008] Protect schema downgrade checks for oversized current configs; redact Windows
+  drive-relative paths in portable exports and logs; reject colliding install-registry paths.
 - [COR-008] Restore prior registry bytes when an update fails at the parent-directory sync
   boundary; expose the write hook for deterministic rollback coverage.
 - [COR-008] Bound diagnostic logs to 16 files of at most 16 MiB each and 64 KiB per record; bound
