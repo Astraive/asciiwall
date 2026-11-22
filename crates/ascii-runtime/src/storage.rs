@@ -35,7 +35,7 @@ use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::error::Error;
 use std::fmt;
@@ -583,6 +583,7 @@ impl InstallRegistry {
                 version: self.schema_version,
             });
         }
+        let mut relative_paths = HashSet::with_capacity(self.packages.len());
         for (package_id, entry) in &self.packages {
             validate_application_id(package_id)?;
             if entry.package_version.is_empty()
@@ -609,6 +610,16 @@ impl InstallRegistry {
                     "package path must be normalized and relative",
                 ));
             }
+            #[cfg(windows)]
+            let unique_path =
+                relative_paths.insert(windows_path_collision_key(&entry.relative_path));
+            #[cfg(not(windows))]
+            let unique_path = relative_paths.insert(entry.relative_path.as_str());
+            if !unique_path {
+                return Err(StorageError::InvalidRegistry(
+                    "package paths must be unique",
+                ));
+            }
         }
         Ok(())
     }
@@ -622,6 +633,23 @@ fn is_safe_relative_path(value: &str) -> bool {
         && value.split('/').all(|part| {
             !part.is_empty() && part != "." && part != ".." && !part.chars().any(char::is_control)
         })
+}
+
+#[cfg(windows)]
+fn windows_path_collision_key(path: &str) -> String {
+    let mut key = String::with_capacity(path.len());
+    for (index, component) in path.split('/').enumerate() {
+        if index > 0 {
+            key.push('/');
+        }
+        key.extend(
+            component
+                .trim_end_matches(['.', ' '])
+                .chars()
+                .flat_map(char::to_lowercase),
+        );
+    }
+    key
 }
 
 /// Bounded TOML syntax tree; this type does not imply that application settings passed schema validation.
@@ -946,6 +974,7 @@ impl Storage {
             Some(bytes) => CurrentExpectation::Bytes(bytes),
             None => CurrentExpectation::Missing,
         };
+        let mut oversized_current_schema_version = None;
         let current_bytes = match read_optional_bounded(&destination, CONFIG_MAX_BYTES) {
             Ok(bytes) => {
                 if !expected_current_matches(bytes.as_deref(), expected_current) {
@@ -957,6 +986,7 @@ impl Storage {
                 if !current_matches_revision(&destination, expected_current)? {
                     return Err(StorageError::StaleConfiguration);
                 }
+                oversized_current_schema_version = oversized_config_schema_version(&destination)?;
                 None
             }
             Err(error) => return Err(error),
@@ -979,6 +1009,27 @@ impl Storage {
         validate(&value).map_err(|error| StorageError::InvalidConfiguration(error.to_string()))?;
         let current_version = current.as_ref().and_then(config_schema_version);
         let backup_version = config_schema_version(&value);
+        if let Some(current_version) = oversized_current_schema_version {
+            match backup_version {
+                Some(backup_version) if current_version > backup_version => {
+                    let version = u32::try_from(current_version).map_err(|_| {
+                        StorageError::InvalidConfiguration(format!(
+                            "current settings schema version {current_version} is newer than last-good version {backup_version}"
+                        ))
+                    })?;
+                    return Err(StorageError::UnsupportedVersion {
+                        kind: "settings configuration",
+                        version,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    return Err(StorageError::InvalidConfiguration(
+                        "cannot compare versioned and versionless settings during recovery".into(),
+                    ));
+                }
+            }
+        }
         match (current.as_ref(), current_version, backup_version) {
             (Some(_), Some(current_version), Some(backup_version))
                 if current_version > backup_version =>
@@ -1126,6 +1177,94 @@ fn current_matches_revision(
         }
         offset = end;
     }
+}
+
+fn oversized_config_schema_version(path: &Path) -> Result<Option<i64>, StorageError> {
+    const MAX_SCHEMA_LINE_BYTES: usize = 64 * 1024;
+    let mut file = File::open(path)?;
+    let mut buffer = [0; 8192];
+    let mut line = Vec::with_capacity(256);
+    let mut line_too_large = false;
+    let mut root_table = true;
+    let mut uncertain_root_line = false;
+
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        for byte in &buffer[..read] {
+            if *byte == b'\n' {
+                if root_table {
+                    if line_too_large {
+                        if line.starts_with(b"[") {
+                            root_table = false;
+                        } else if root_line_might_declare_schema_version(&line) {
+                            uncertain_root_line = true;
+                        }
+                    } else if let Some(version) =
+                        config_schema_version_from_root_line(&line, &mut root_table)
+                    {
+                        return Ok(Some(version));
+                    }
+                }
+                line.clear();
+                line_too_large = false;
+            } else if !line_too_large {
+                if line.is_empty() && byte.is_ascii_whitespace() {
+                    continue;
+                }
+                if line.len() < MAX_SCHEMA_LINE_BYTES {
+                    line.push(*byte);
+                } else {
+                    line_too_large = true;
+                }
+            }
+        }
+    }
+    if root_table {
+        if line_too_large {
+            if !line.starts_with(b"[") && root_line_might_declare_schema_version(&line) {
+                uncertain_root_line = true;
+            }
+        } else if let Some(version) = config_schema_version_from_root_line(&line, &mut root_table) {
+            return Ok(Some(version));
+        }
+    }
+    if uncertain_root_line {
+        Err(StorageError::DocumentTooLarge)
+    } else {
+        Ok(None)
+    }
+}
+
+fn root_line_might_declare_schema_version(line: &[u8]) -> bool {
+    let Ok(line) = std::str::from_utf8(line) else {
+        return false;
+    };
+    let line = line.trim_start();
+    let rest = line
+        .strip_prefix("schema_version")
+        .or_else(|| line.strip_prefix("\"schema_version\""))
+        .or_else(|| line.strip_prefix("'schema_version'"));
+    rest.is_some_and(|rest| {
+        rest.is_empty()
+            || rest.starts_with('=')
+            || rest.chars().next().is_some_and(char::is_whitespace)
+    })
+}
+
+fn config_schema_version_from_root_line(line: &[u8], root_table: &mut bool) -> Option<i64> {
+    let line = std::str::from_utf8(line).ok()?.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    if line.starts_with('[') {
+        *root_table = false;
+        return None;
+    }
+    let value = toml::from_str::<TomlValue>(line).ok()?;
+    config_schema_version(&value)
 }
 
 type ExistingValidator<'a> = (u64, &'a dyn Fn(&[u8]) -> Result<(), StorageError>);
@@ -2001,15 +2140,34 @@ fn is_machine_local_string(value: &str) -> bool {
     }
     value.split_whitespace().any(|token| {
         let token = trim_export_punctuation(token);
-        token.split([':', '=']).any(|part| {
-            let part = trim_export_punctuation(part);
-            part.starts_with("~/")
-                || looks_like_user_home_path(part)
-                || part.starts_with('/')
-                || part.starts_with("\\\\")
-                || part.contains('\\')
-                || looks_like_relative_local_path(part)
-        }) || looks_like_network_endpoint(token)
+        contains_windows_drive_relative_path(token)
+            || token.split([':', '=']).any(|part| {
+                let part = trim_export_punctuation(part);
+                part.starts_with("~/")
+                    || looks_like_user_home_path(part)
+                    || part.starts_with('/')
+                    || part.starts_with("\\\\")
+                    || part.contains('\\')
+                    || looks_like_relative_local_path(part)
+            })
+            || looks_like_network_endpoint(token)
+    })
+}
+
+fn contains_windows_drive_relative_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.windows(3).enumerate().any(|(index, candidate)| {
+        candidate[0].is_ascii_alphabetic()
+            && candidate[1] == b':'
+            && candidate[2] != b'/'
+            && candidate[2] != b'\\'
+            && candidate[2] != b':'
+            && !candidate[2].is_ascii_whitespace()
+            && (index == 0
+                || matches!(
+                    bytes[index - 1],
+                    b'=' | b':' | b'"' | b'\'' | b'(' | b'[' | b'{' | b','
+                ))
     })
 }
 
@@ -2317,7 +2475,10 @@ fn redact_log_message(message: &str, home: &Path) -> String {
             .map(|offset| cursor + offset)
             .unwrap_or(redacted.len());
         let token = &redacted[cursor..next_space];
-        if token.contains('/') || token.contains('\\') {
+        if token.contains('/')
+            || token.contains('\\')
+            || contains_windows_drive_relative_path(token)
+        {
             output.push_str("[REDACTED_PATH]");
         } else {
             output.push_str(token);
@@ -2398,5 +2559,14 @@ mod tests {
             redact_log_message(input, Path::new("/home/user"))
         };
         assert!(!redacted.contains("private"));
+    }
+
+    #[test]
+    fn diagnostic_redaction_hides_windows_drive_relative_paths() {
+        for input in ["C:private.txt", "note=C:private.txt"] {
+            let redacted = redact_log_message(input, Path::new("/home/user"));
+            assert!(redacted.contains("[REDACTED_PATH]"));
+            assert!(!redacted.contains("private.txt"));
+        }
     }
 }

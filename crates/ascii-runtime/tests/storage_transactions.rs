@@ -964,6 +964,58 @@ fn registry_write_rejects_newer_and_invalid_current_bytes() {
 }
 
 #[test]
+fn registry_validation_rejects_shared_package_paths() {
+    let mut shared = registry("1.0.0");
+    let shared_path = shared
+        .packages
+        .get("org.example.sample")
+        .expect("first package")
+        .relative_path
+        .clone();
+    shared.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: shared_path,
+        },
+    );
+
+    assert!(matches!(
+        shared.validate(),
+        Err(StorageError::InvalidRegistry(
+            "package paths must be unique"
+        ))
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn registry_validation_rejects_windows_path_aliases() {
+    let mut shared = registry("1.0.0");
+    shared
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/Shared/path.".to_owned();
+    shared.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: "PACKAGES/shared/path".to_owned(),
+        },
+    );
+
+    assert!(matches!(
+        shared.validate(),
+        Err(StorageError::InvalidRegistry(
+            "package paths must be unique"
+        ))
+    ));
+}
+
+#[test]
 fn duplicate_registry_package_keys_are_rejected_on_load_and_save() {
     let temp = TempDir::new();
     let roots = linux_roots(temp.path());
@@ -1759,6 +1811,53 @@ fn newer_settings_schema_is_not_replaced_by_older_writer_or_explicit_recovery() 
 }
 
 #[test]
+fn oversized_newer_settings_schema_is_not_replaced_by_older_backup() {
+    const CONFIG_MAX_BYTES: usize = 8 * 1024 * 1024;
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let validate_schema_v1 = |value: &TomlValue| {
+        (value.get("schema_version").and_then(TomlValue::as_integer) == Some(1))
+            .then_some(())
+            .ok_or("unsupported settings schema")
+    };
+    let supported = ParsedToml::from_toml(
+        b"schema_version = 1\nrevision = 1\n[settings]\ntheme = \"known-good\"\n",
+    )
+    .expect("parse supported TOML");
+    save_current_config(&storage, &supported, validate_schema_v1).expect("save supported schema");
+    let current_supported = ParsedToml::from_toml(
+        b"schema_version = 1\nrevision = 2\n[settings]\ntheme = \"current\"\n",
+    )
+    .expect("parse current supported TOML");
+    save_current_config(&storage, &current_supported, validate_schema_v1)
+        .expect("save current supported schema and establish last-good backup");
+    let backup_path = storage.config_backup_path();
+    let known_good_backup = fs::read(&backup_path).expect("read supported last-good");
+
+    let payload = "x".repeat(CONFIG_MAX_BYTES);
+    let oversized_newer = format!("schema_version = 2\npayload = \"{payload}\"\n").into_bytes();
+    assert!(oversized_newer.len() > CONFIG_MAX_BYTES);
+    let config_path = storage.config_path();
+    fs::write(&config_path, &oversized_newer).expect("write oversized newer schema");
+
+    assert!(matches!(
+        storage.restore_config_from_backup(Some(&oversized_newer), validate_schema_v1),
+        Err(StorageError::UnsupportedVersion {
+            kind: "settings configuration",
+            version: 2
+        })
+    ));
+    assert_eq!(
+        fs::read(&config_path).expect("oversized newer schema remains untouched"),
+        oversized_newer
+    );
+    assert_eq!(
+        fs::read(&backup_path).expect("last-good backup remains untouched"),
+        known_good_backup
+    );
+}
+
+#[test]
 fn restore_rejects_versioned_versionless_comparisons() {
     let temp = TempDir::new();
     let roots = linux_roots(temp.path());
@@ -2521,25 +2620,42 @@ fn portable_export_redacts_machine_paths_after_colon_delimiters() {
         "first_note": "note:~alice/Documents/private.txt",
         "second_note": "note:/home/alice/private.txt",
         "third_note": "note:~bob\\Documents\\private.txt",
-        "benign_colon_text": "status:"
+        "drive_relative": "C:drive-private.txt",
+        "prefixed_drive_relative": "note=C:drive-private.txt",
+        "benign_colon_text": "status:",
+        "ordinary_text": "A: status"
     });
     let portable =
         ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
             .expect("portable export");
     let encoded = String::from_utf8(portable.to_json().unwrap()).unwrap();
-    for private_key in ["first_note", "second_note", "third_note"] {
+    for private_key in [
+        "first_note",
+        "second_note",
+        "third_note",
+        "drive_relative",
+        "prefixed_drive_relative",
+    ] {
         assert!(
             portable.content().get(private_key).is_none(),
             "portable export retained {private_key}"
         );
     }
-    for private_value in ["alice", "bob", "Documents", "private.txt", "/home/"] {
+    for private_value in [
+        "alice",
+        "bob",
+        "Documents",
+        "private.txt",
+        "drive-private.txt",
+        "/home/",
+    ] {
         assert!(
             !encoded.contains(private_value),
             "portable export retained {private_value}"
         );
     }
     assert_eq!(portable.content()["benign_colon_text"], json!("status:"));
+    assert_eq!(portable.content()["ordinary_text"], json!("A: status"));
 }
 
 #[test]
