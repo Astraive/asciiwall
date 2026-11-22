@@ -1539,11 +1539,7 @@ impl DirectoryLock {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Keep a stable hidden file so separate processes serialize the same directory operations.
         let mut options = OpenOptions::new();
-        options
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false);
+        options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -1810,8 +1806,8 @@ impl PortableExport {
         };
         let mut budget = ExportBudget::new();
         let mut key_path = String::new();
-        let content = filter_export(value, mode, &mut budget, 0, &mut key_path)?
-            .unwrap_or(Value::Null);
+        let content =
+            filter_export(value, mode, &mut budget, 0, &mut key_path)?.unwrap_or(Value::Null);
         Ok(Self {
             schema_version: 1,
             mode: label,
