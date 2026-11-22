@@ -112,7 +112,7 @@ fn is_regular_file_handle(file: &File) -> bool {
 
     // SAFETY: `file` owns a valid open handle for the duration of this call.
     unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_DISK }
-        && handle_has_filesystem_file_path(file)
+    &&handle_has_filesystem_file_path(file)
 }
 
 #[cfg(windows)]
