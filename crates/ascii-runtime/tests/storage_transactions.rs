@@ -2588,12 +2588,44 @@ fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
 }
 
 #[test]
-fn portable_export_filters_bare_host_field_but_preserves_local_backup() {
-    let source = json!({"host": "buildhost"});
+fn portable_export_filters_host_components_but_preserves_local_backup() {
+    let source = json!({
+        "host": "buildhost",
+        "service_host": "buildhost",
+        "upstream_host": "upstreamhost",
+        "ghost_count": 7,
+        "supported_versions": "Supported versions v1.0/v2.0"
+    });
     let portable =
         ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
             .expect("bounded portable export");
-    assert_eq!(portable.content(), &json!({}));
+    for private_field in ["host", "service_host", "upstream_host"] {
+        assert!(
+            portable.content().get(private_field).is_none(),
+            "portable export retained {private_field}"
+        );
+    }
+    assert_eq!(portable.content()["ghost_count"], json!(7));
+    assert_eq!(
+        portable.content()["supported_versions"],
+        json!("Supported versions v1.0/v2.0")
+    );
+
+    let encoded = String::from_utf8(portable.to_json().unwrap()).unwrap();
+    for private_field in ["\"host\"", "\"service_host\"", "\"upstream_host\""] {
+        assert!(
+            !encoded.contains(private_field),
+            "portable JSON retained {private_field}"
+        );
+    }
+    for hostname in ["buildhost", "upstreamhost"] {
+        assert!(
+            !encoded.contains(hostname),
+            "portable JSON retained hostname {hostname}"
+        );
+    }
+    assert!(encoded.contains("\"ghost_count\": 7"));
+    assert!(encoded.contains("Supported versions v1.0/v2.0"));
 
     let local_backup = ascii_runtime::storage::PortableExport::from_value(
         &source,
