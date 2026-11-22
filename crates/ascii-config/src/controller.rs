@@ -387,10 +387,9 @@ fn recovery_metadata_from_parsed(
         let toml::Value::Table(settings) = settings else {
             return None;
         };
-        if settings
-            .keys()
-            .any(|key| !known_setting_name(registry, key))
-        {
+        if settings.iter().any(|(key, value)| {
+            !known_setting_name(registry, key) || recovery_value_contains_table(value)
+        }) {
             return None;
         }
     }
@@ -398,6 +397,14 @@ fn recovery_metadata_from_parsed(
         return None;
     }
     Some(RecoveryMetadata { revision })
+}
+
+fn recovery_value_contains_table(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Table(_) => true,
+        toml::Value::Array(values) => values.iter().any(recovery_value_contains_table),
+        _ => false,
+    }
 }
 
 fn recovery_metadata_from_prefix(text: &str) -> Option<RecoveryMetadata> {

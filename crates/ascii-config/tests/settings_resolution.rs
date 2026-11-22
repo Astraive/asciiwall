@@ -669,6 +669,49 @@ fn unquoted_dotted_setting_path_without_revision_remains_read_only() {
 }
 
 #[test]
+fn dotted_setting_path_matching_single_segment_key_without_revision_is_read_only() {
+    let directory = TestDirectory::new();
+    let path = directory.config();
+    let original = b"schema_version = 2\n[settings]\ngrid.columns = 240\n";
+    let single_segment_registry = Arc::new(
+        Registry::new([descriptor(
+            "grid",
+            SettingValue::Integer(240),
+            SettingType::Integer { min: 32, max: 1024 },
+            SettingScope::P,
+            None,
+            InvalidationClass::Conversion,
+            SemanticValidator::None,
+        )])
+        .unwrap(),
+    );
+    fs::write(&path, original).unwrap();
+    let controller = SettingsController::open(&path, single_segment_registry).unwrap();
+
+    assert!(matches!(
+        controller.status().unwrap(),
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+            DocumentError::InvalidField("revision")
+        ))
+    ));
+    assert_eq!(controller.snapshot().unwrap().revision(), 0);
+    assert!(matches!(
+        controller.repair(0),
+        Err(ConfigError::ReadOnlyUnclassifiableDocument)
+    ));
+    assert_eq!(fs::read(&path).unwrap().as_slice(), &original[..]);
+    assert!(
+        !fs::read_dir(&directory.0)
+            .unwrap()
+            .map(Result::unwrap)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("settings.toml.corrupt-"))
+    );
+}
+
+#[test]
 fn unknown_setting_keeps_mixed_invalid_document_read_only() {
     let directory = TestDirectory::new();
     let path = directory.config();
