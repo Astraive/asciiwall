@@ -306,6 +306,7 @@ fn synthetic_migration_preserves_defaults_absence_and_backup() {
         fs::read(path.with_file_name("settings.toml.bak")).unwrap(),
         OLD
     );
+    assert_eq!(fs::read(&path).unwrap().as_slice(), GOLDEN);
     let golden_path = directory.0.join("golden.toml");
     fs::write(&golden_path, GOLDEN).unwrap();
     let golden = SettingsController::open(&golden_path, registry())

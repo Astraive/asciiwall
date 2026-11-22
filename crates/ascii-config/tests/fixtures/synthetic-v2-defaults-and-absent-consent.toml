@@ -1,7 +1,4 @@
-# Golden current representation of the synthetic v1 fixture.
-schema_version = 2
+# Golden canonical output produced by migrating the synthetic v1 fixture.
 revision = 5
-
-[settings]
-"conversion.brightness" = 0.0
-"conversion.gamma" = 1.0
+schema_version = 2
+settings = { "conversion.brightness" = 0.0, "conversion.gamma" = 1.0 }
