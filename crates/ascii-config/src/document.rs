@@ -358,7 +358,6 @@ fn table_header_terminator(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
-
 fn is_line_prefix_whitespace(bytes: &[u8], index: usize) -> bool {
     let line_start = bytes[..index]
         .iter()
@@ -438,7 +437,6 @@ mod tests {
     };
     use crate::model::{SettingKey, SettingType, SettingValue};
     use std::{cell::Cell, collections::BTreeMap, fmt::Write as _};
-
 
     #[test]
     fn inline_table_dotted_key_depth_accepts_limit_and_rejects_over_limit() {
@@ -538,7 +536,6 @@ mod tests {
             ));
         }
     }
-
 
     #[test]
     fn preflight_detects_nesting_after_multiline_basic_closing_quote_run() {
