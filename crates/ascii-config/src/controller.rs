@@ -240,9 +240,9 @@ impl SettingsController {
         Ok(snapshot)
     }
 
-    /// Replaces invalid data in a fully parsed, supported-schema document with
-    /// registry defaults only after explicit caller action. The file store
-    /// preserves the last-good backup and archives the replaced document.
+    /// Replaces invalid data only after recognizing a supported-schema
+    /// document. This is an explicit operation that preserves the last-good
+    /// backup and archives the replaced bytes.
     pub fn repair(&self, expected_revision: u64) -> Result<Arc<SettingsSnapshot>, ConfigError> {
         let mut state = self.lock()?;
         if !matches!(&state.status, ControllerStatus::RepairRequired(_)) {
@@ -321,11 +321,22 @@ fn decode_and_validate(
     registry: &Registry,
     bytes: &[u8],
 ) -> Result<DecodedDocument, OpenDocumentError> {
-    let document = decode(bytes).map_err(|error| OpenDocumentError {
-        error: ConfigError::Document(error),
-        can_repair: false,
-        revision: None,
-    })?;
+    let document = match decode(bytes) {
+        Ok(document) => document,
+        Err(error) => {
+            let recovery = match &error {
+                DocumentError::InvalidToml | DocumentError::InvalidField("revision") => {
+                    recovery_metadata(registry, bytes)
+                }
+                _ => None,
+            };
+            return Err(OpenDocumentError {
+                error: ConfigError::Document(error),
+                can_repair: recovery.is_some(),
+                revision: recovery.and_then(|metadata| metadata.revision),
+            });
+        }
+    };
     if document.schema_version > CURRENT_SCHEMA_VERSION {
         return Ok(document);
     }
@@ -342,6 +353,258 @@ fn decode_and_validate(
     Ok(document)
 }
 
+#[derive(Clone, Copy)]
+struct RecoveryMetadata {
+    revision: Option<u64>,
+}
+
+fn recovery_metadata(registry: &Registry, bytes: &[u8]) -> Option<RecoveryMetadata> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    if let Ok(toml::Value::Table(root)) = toml::from_str::<toml::Value>(text) {
+        return recovery_metadata_from_parsed(registry, root);
+    }
+    if !settings_keys_are_known(text, registry) {
+        return None;
+    }
+    recovery_metadata_from_prefix(text)
+}
+
+fn recovery_metadata_from_parsed(
+    registry: &Registry,
+    mut root: toml::map::Map<String, toml::Value>,
+) -> Option<RecoveryMetadata> {
+    let schema_version = root
+        .remove("schema_version")
+        .and_then(|value| value.as_integer())?;
+    if schema_version != CURRENT_SCHEMA_VERSION {
+        return None;
+    }
+    let revision = root
+        .remove("revision")
+        .and_then(|value| value.as_integer())
+        .and_then(|value| u64::try_from(value).ok());
+    if let Some(settings) = root.remove("settings") {
+        let toml::Value::Table(settings) = settings else {
+            return None;
+        };
+        if settings
+            .keys()
+            .any(|key| !known_setting_name(registry, key))
+        {
+            return None;
+        }
+    }
+    if !root.is_empty() {
+        return None;
+    }
+    Some(RecoveryMetadata { revision })
+}
+
+fn recovery_metadata_from_prefix(text: &str) -> Option<RecoveryMetadata> {
+    let mut schema_version = None;
+    let mut saw_schema_version = false;
+    let mut revision = None;
+    let mut saw_revision = false;
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line == "[settings]" || is_settings_assignment(line) {
+            break;
+        }
+        if line.starts_with('[') {
+            return None;
+        }
+        let parsed = toml::from_str::<toml::Value>(line);
+        let (key, value) = match parsed {
+            Ok(toml::Value::Table(mut entries)) if entries.len() == 1 => {
+                let key = entries.keys().next()?.clone();
+                let value = entries.remove(&key)?;
+                (key, value)
+            }
+            _ if !saw_revision && is_revision_assignment(line) => {
+                saw_revision = true;
+                continue;
+            }
+            _ => return None,
+        };
+        match key.as_str() {
+            "schema_version" if !saw_schema_version => {
+                saw_schema_version = true;
+                schema_version = Some(value.as_integer()?);
+                if schema_version != Some(CURRENT_SCHEMA_VERSION) {
+                    return None;
+                }
+            }
+            "revision" if !saw_revision => {
+                saw_revision = true;
+                revision = value
+                    .as_integer()
+                    .and_then(|value| u64::try_from(value).ok());
+            }
+            _ => return None,
+        }
+    }
+    (schema_version == Some(CURRENT_SCHEMA_VERSION))
+        .then_some(RecoveryMetadata { revision })
+}
+
+fn is_revision_assignment(line: &str) -> bool {
+    matches!(assignment_key(line), Some(key) if key.trim() == "revision")
+}
+
+fn is_settings_assignment(line: &str) -> bool {
+    matches!(assignment_key(line), Some(key) if key.trim() == "settings")
+}
+
+fn assignment_key(line: &str) -> Option<&str> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in line.bytes().enumerate() {
+        if let Some(quote_byte) = quote {
+            if quote_byte == b'"' {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == quote_byte {
+                    quote = None;
+                }
+            } else if byte == quote_byte {
+                quote = None;
+            }
+        } else {
+            match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'#' => return None,
+                b'=' => return Some(&line[..index]),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn settings_keys_are_known(text: &str, registry: &Registry) -> bool {
+    let mut in_settings_table = false;
+    let mut settings_seen = false;
+    let mut inline_settings_seen = false;
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if inline_settings_seen {
+            return false;
+        }
+        if line.starts_with('[') {
+            if line == "[settings]" && !settings_seen {
+                settings_seen = true;
+                in_settings_table = true;
+                continue;
+            }
+            return false;
+        }
+        if !in_settings_table && is_settings_assignment(line) {
+            if settings_seen || !inline_settings_keys_are_known(line, registry) {
+                return false;
+            }
+            settings_seen = true;
+            inline_settings_seen = true;
+            continue;
+        }
+        if in_settings_table {
+            let Some(key) = assignment_key(line) else {
+                return false;
+            };
+            if !known_setting_syntax(registry, key) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn inline_settings_keys_are_known(line: &str, registry: &Registry) -> bool {
+    let Some((_, value)) = line.split_once('=') else {
+        return false;
+    };
+    let value = value.trim_start();
+    let Some(open_brace) = value.find('{') else {
+        return false;
+    };
+    let bytes = value.as_bytes();
+    let mut segment_start = open_brace + 1;
+    let mut assignment = None;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().copied().enumerate().skip(segment_start) {
+        if let Some(quote_byte) = quote {
+            if quote_byte == b'"' {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == quote_byte {
+                    quote = None;
+                }
+            } else if byte == quote_byte {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' => quote = Some(byte),
+            b'[' | b'{' => return false,
+            b'=' if assignment.is_none() => {
+                if !known_setting_syntax(registry, &value[segment_start..index]) {
+                    return false;
+                }
+                assignment = Some(index);
+            }
+            b',' => {
+                if assignment.is_none() {
+                    return false;
+                }
+                segment_start = index + 1;
+                assignment = None;
+            }
+            b'}' => {
+                let segment = value[segment_start..index].trim();
+                if !segment.is_empty() && assignment.is_none() {
+                    return false;
+                }
+                let trailing = value[index + 1..].trim();
+                return trailing.is_empty() || trailing.starts_with('#');
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn known_setting_syntax(registry: &Registry, raw_key: &str) -> bool {
+    let raw_key = raw_key.trim();
+    let key = match raw_key.strip_prefix('"').and_then(|key| key.strip_suffix('"')) {
+        Some(key) => key,
+        None => match raw_key
+            .strip_prefix('\'')
+            .and_then(|key| key.strip_suffix('\''))
+        {
+            Some(key) => key,
+            None => raw_key,
+        },
+    };
+    known_setting_name(registry, key)
+}
+
+fn known_setting_name(registry: &Registry, raw_key: &str) -> bool {
+    let Ok(key) = SettingKey::new(raw_key) else {
+        return false;
+    };
+    registry.get(&key).is_some()
+}
 fn build_snapshot(
     registry: &Registry,
     revision: u64,

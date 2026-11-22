@@ -495,11 +495,8 @@ fn independent_controllers_cannot_overwrite_the_same_revision() {
 fn future_schema_and_unclassifiable_documents_are_read_only() {
     let directory = TestDirectory::new();
     let path = directory.config();
-    fs::write(
-        &path,
-        b"schema_version = 99\nrevision = 17\nfuture_field = true\n",
-    )
-    .unwrap();
+    let future_original = b"schema_version = 99\nrevision = 17\nfuture_field = true\n";
+    fs::write(&path, future_original).unwrap();
     let future = SettingsController::open(&path, registry()).unwrap();
     assert!(matches!(
         future.status().unwrap(),
@@ -509,6 +506,15 @@ fn future_schema_and_unclassifiable_documents_are_read_only() {
         future.apply_batch(17, &[]),
         Err(ConfigError::ReadOnlyFutureSchema { schema_version: 99 })
     ));
+    assert!(matches!(
+        future.repair(17),
+        Err(ConfigError::ReadOnlyFutureSchema { schema_version: 99 })
+    ));
+    assert!(matches!(
+        future.restore_backup(17),
+        Err(ConfigError::ReadOnlyFutureSchema { schema_version: 99 })
+    ));
+    assert_eq!(fs::read(&path).unwrap().as_slice(), &future_original[..]);
 
     let library_file = directory.0.join("library").join("keep.bin");
     fs::create_dir_all(library_file.parent().unwrap()).unwrap();
@@ -568,6 +574,77 @@ fn explicit_repair_remains_available_for_known_current_schema_data() {
 }
 
 #[test]
+fn explicit_repair_recovers_recognized_current_schema_decode_errors() {
+    type RepairableCase<'a> = (
+        &'a str,
+        &'a [u8],
+        u64,
+        fn(&DocumentError) -> bool,
+    );
+
+    let cases: &[RepairableCase<'_>] = &[
+        (
+            "malformed",
+            b"schema_version = 2\nrevision = 17\n[settings]\n\"grid.columns\" = \n",
+            17,
+            |error| matches!(error, DocumentError::InvalidToml),
+        ),
+        (
+            "missing-revision",
+            b"schema_version = 2\n[settings]\n\"application.enabled\" = true\n",
+            0,
+            |error| matches!(error, DocumentError::InvalidField("revision")),
+        ),
+        (
+            "invalid-revision",
+            b"schema_version = 2\nrevision = \"invalid\"\n[settings]\n\"application.enabled\" = true\n",
+            0,
+            |error| matches!(error, DocumentError::InvalidField("revision")),
+        ),
+        (
+            "overflow-revision",
+            b"schema_version = 2\nrevision = 9223372036854775808\n[settings]\n\"application.enabled\" = true\n",
+            0,
+            |error| matches!(error, DocumentError::InvalidToml),
+        ),
+    ];
+    for (name, original, expected_revision, expected_error) in cases {
+        let directory = TestDirectory::new();
+        let path = directory.config();
+        let backup_path = directory.0.join("settings.toml.bak");
+        let backup = b"schema_version = 2\nrevision = 16\n[settings]\n";
+        fs::write(&path, original).unwrap();
+        fs::write(&backup_path, backup).unwrap();
+        let controller = SettingsController::open(&path, registry()).unwrap();
+
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::RepairRequired(ConfigError::Document(error))
+                if expected_error(&error)
+        ), "{name}");
+        assert_eq!(controller.snapshot().unwrap().revision(), *expected_revision);
+        assert_eq!(fs::read(&path).unwrap().as_slice(), *original);
+        assert_eq!(fs::read(&backup_path).unwrap().as_slice(), backup);
+
+        let repaired = controller.repair(*expected_revision).unwrap();
+        assert_eq!(repaired.revision(), *expected_revision + 1);
+        assert!(repaired.overrides().is_empty());
+        assert_eq!(fs::read(&backup_path).unwrap().as_slice(), backup);
+        let archive = fs::read_dir(&directory.0)
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.corrupt-")
+            })
+            .unwrap_or_else(|| panic!("missing {name} recovery archive"));
+        assert_eq!(fs::read(archive.path()).unwrap().as_slice(), *original);
+    }
+}
+
+#[test]
 fn unknown_setting_keeps_mixed_invalid_document_read_only() {
     let directory = TestDirectory::new();
     let path = directory.config();
@@ -588,6 +665,25 @@ fn unknown_setting_keeps_mixed_invalid_document_read_only() {
         Err(ConfigError::ReadOnlyUnclassifiableDocument)
     ));
     assert_eq!(fs::read(&path).unwrap().as_slice(), &original[..]);
+    let malformed_path = directory.0.join("unknown-malformed.toml");
+    let malformed_original =
+        b"schema_version = 2\nrevision = 17\n[settings]\n\"z.unknown\" = \n";
+    fs::write(&malformed_path, malformed_original).unwrap();
+    let malformed = SettingsController::open(&malformed_path, registry()).unwrap();
+    assert!(matches!(
+        malformed.status().unwrap(),
+        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+            DocumentError::InvalidToml
+        ))
+    ));
+    assert!(matches!(
+        malformed.repair(17),
+        Err(ConfigError::ReadOnlyUnclassifiableDocument)
+    ));
+    assert_eq!(
+        fs::read(&malformed_path).unwrap().as_slice(),
+        &malformed_original[..]
+    );
 }
 
 #[test]
@@ -606,10 +702,6 @@ fn malformed_document_classes_are_rejected_before_snapshot_publication() {
         (
             b"schema_version = 0\nrevision = 0\n[settings]\n",
             |error| matches!(error, DocumentError::UnsupportedVersion(0)),
-        ),
-        (
-            b"schema_version = 2\nrevision = 9223372036854775808\n[settings]\n",
-            |error| matches!(error, DocumentError::InvalidToml),
         ),
     ];
     for (index, (bytes, expected)) in cases.iter().enumerate() {

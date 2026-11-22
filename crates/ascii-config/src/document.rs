@@ -19,7 +19,8 @@ pub(crate) struct DecodedDocument {
 }
 
 /// Parses under limits that may reject input before its schema is known.
-/// Callers must not turn any decode error into an overwrite-capable repair path.
+/// Recovery eligibility is decided by the caller only after independently
+/// recognizing the supported schema and checking its setting keys.
 pub(crate) fn decode(bytes: &[u8]) -> Result<DecodedDocument, DocumentError> {
     if bytes.len() > MAX_CONFIG_BYTES {
         return Err(DocumentError::TooLarge {
