@@ -111,13 +111,13 @@ fn is_regular_file_handle(file: &File) -> bool {
     }
 
     // SAFETY: `file` owns a valid open handle for the duration of this call.
-    unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_DISK }
-    &&handle_has_filesystem_file_path(file)
+    let is_disk_file = unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_DISK };
+    is_disk_file && handle_has_filesystem_file_path(file)
 }
 
 #[cfg(windows)]
 fn handle_has_filesystem_file_path(file: &File) -> bool {
-    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
 
     const FILE_NAME_NORMALIZED: u32 = 0;
@@ -162,8 +162,8 @@ fn handle_has_filesystem_file_path(file: &File) -> bool {
     if written == 0 || written as usize >= final_path.len() {
         return false;
     }
-    final_path.truncate(written as usize);
-    is_windows_filesystem_file_path(Path::new(std::ffi::OsStr::from_wide(&final_path)))
+    let final_path = std::ffi::OsString::from_wide(&final_path);
+    is_windows_filesystem_file_path(Path::new(&final_path))
 }
 
 #[cfg(windows)]
