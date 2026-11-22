@@ -519,7 +519,9 @@ mod tests {
                     self.success_status = Some(response);
                     self.bytes.extend_from_slice(&self.pending_json[..4]);
                     self.pending_json.clear();
-                    return Err(io::Error::other("simulated partial success status write failure"));
+                    return Err(io::Error::other(
+                        "simulated partial success status write failure",
+                    ));
                 }
                 if response["schema_version"] == 1
                     && response["command"] == "convert"
@@ -717,7 +719,10 @@ mod tests {
             stdout.error_response_attempts, 0,
             "a failed success response must not trigger an error JSON response"
         );
-        assert!(stdout.pending_json.is_empty(), "no incomplete JSON response");
+        assert!(
+            stdout.pending_json.is_empty(),
+            "no incomplete JSON response"
+        );
         let success_status = stdout
             .success_status
             .as_ref()
