@@ -41,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Keep the selected `.bak` unchanged when an explicit restore fails to replace the main document, so the restore can be retried ([CFG-001]).
 - Allow explicit repair of malformed current-schema documents only when the schema and all setting keys are safely recognized; keep unknown and future-schema documents read-only ([CFG-001]).
 - Fixed inline settings-table assignment preflight so exactly 4,096 entries pass and 4,097 fail in both inline and table forms ([CFG-001]).
+- Keep TOML assignment preflight linear by tracking line starts and rejecting repeated same-line root assignments before rescanning prefixes ([CFG-001]).
 - Corrected preflight scanning after legal extra quote/apostrophe runs at multiline string terminators and covered subsequent nesting-limit checks ([CFG-001]).
 - Count quoted basic and literal table-header key components when enforcing dotted-key nesting limits, including keys with escaped quotes and closing brackets ([CFG-001]).
 - Preflight encoded TOML document size before copying strings into serializer values, rejecting escape-expanded overflow (including NUL strings) while preserving exact-limit output ([CFG-001]).

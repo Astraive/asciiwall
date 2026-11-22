@@ -388,6 +388,9 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
     let mut depth = 0usize;
     let mut assignments = 0usize;
     let mut index = 0usize;
+    let mut line_start = 0usize;
+    let mut line_prefix_whitespace = true;
+    let mut root_assignment_seen_on_line = false;
     while index < bytes.len() {
         let byte = bytes[index];
         if let Some(state) = quote {
@@ -433,6 +436,13 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
                     }
                 }
             }
+            if index < bytes.len() && bytes[index] == b'\n' {
+                line_start = index + 1;
+                line_prefix_whitespace = true;
+                root_assignment_seen_on_line = false;
+            } else if !matches!(byte, b' ' | b'\t' | b'\r') {
+                line_prefix_whitespace = false;
+            }
             index += 1;
             continue;
         }
@@ -454,7 +464,7 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
             b'"' => quote = Some(Quote::Basic),
             b'\'' => quote = Some(Quote::Literal),
             b'[' | b'{' => {
-                if byte == b'[' && depth == 0 && is_line_prefix_whitespace(bytes, index) {
+                if byte == b'[' && depth == 0 && line_prefix_whitespace {
                     let open_count = if bytes.get(index + 1) == Some(&b'[') {
                         2
                     } else {
@@ -496,16 +506,23 @@ fn preflight(text: &str) -> Result<(), DocumentError> {
                     });
                 }
                 if depth == 0 {
-                    let line_start = bytes[..index]
-                        .iter()
-                        .rposition(|byte| *byte == b'\n')
-                        .map_or(0, |position| position + 1);
+                    if root_assignment_seen_on_line {
+                        return Err(DocumentError::InvalidToml);
+                    }
+                    root_assignment_seen_on_line = true;
                     enforce_path_depth(&bytes[line_start..index])?;
                 } else if containers[depth - 1] == Container::InlineTable {
                     enforce_path_depth(&bytes[inline_key_starts[depth - 1]..index])?;
                 }
             }
             _ => {}
+        }
+        if index < bytes.len() && bytes[index] == b'\n' {
+            line_start = index + 1;
+            line_prefix_whitespace = true;
+            root_assignment_seen_on_line = false;
+        } else if !matches!(byte, b' ' | b'\t' | b'\r') {
+            line_prefix_whitespace = false;
         }
         index += 1;
     }
@@ -540,16 +557,6 @@ fn table_header_terminator(bytes: &[u8], start: usize) -> Option<usize> {
         }
     }
     None
-}
-
-fn is_line_prefix_whitespace(bytes: &[u8], index: usize) -> bool {
-    let line_start = bytes[..index]
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |position| position + 1);
-    bytes[line_start..index]
-        .iter()
-        .all(|byte| matches!(*byte, b' ' | b'\t' | b'\r'))
 }
 
 fn enforce_path_depth(path: &[u8]) -> Result<(), DocumentError> {
@@ -647,6 +654,17 @@ mod tests {
             Err(DocumentError::ExcessiveNesting {
                 limit: MAX_NESTING_DEPTH
             })
+        ));
+    }
+
+    #[test]
+    fn preflight_rejects_repeated_root_assignments_on_one_line() {
+        let assignments = "revision = 0 ".repeat(MAX_SETTING_ENTRIES);
+        let document = format!("schema_version = 2 {assignments}");
+        assert!(document.len() <= MAX_CONFIG_BYTES);
+        assert!(matches!(
+            decode(document.as_bytes()),
+            Err(DocumentError::InvalidToml)
         ));
     }
 
