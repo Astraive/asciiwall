@@ -377,18 +377,27 @@ impl StorageRoots {
 
     /// Creates each app-owned storage root with owner-only Unix permissions.
     pub fn create_all(&self) -> Result<(), StorageError> {
-        for path in [
-            &self.config,
-            &self.data,
-            &self.library,
-            &self.projects,
-            &self.catalog,
-            &self.cache,
-            &self.staging,
-            &self.logs,
-            &self.runtime,
-        ] {
+        let paths = [
+            self.config.as_path(),
+            self.data.as_path(),
+            self.library.as_path(),
+            self.projects.as_path(),
+            self.catalog.as_path(),
+            self.cache.as_path(),
+            self.staging.as_path(),
+            self.logs.as_path(),
+            self.runtime.as_path(),
+        ];
+        for path in paths.iter().copied() {
             create_directory_durable(path)?;
+            let identities = paths.map(normalized_path_identity);
+            for later in 1..identities.len() {
+                if identities[..later].contains(&identities[later]) {
+                    return Err(StorageError::InvalidDirectories(
+                        "storage classes resolve to the same path",
+                    ));
+                }
+            }
         }
         Ok(())
     }

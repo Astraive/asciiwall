@@ -528,6 +528,47 @@ fn root_resolution_separates_lexical_and_symlink_aliases() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn create_all_rejects_roots_aliased_by_dangling_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let app_id = "org.example.wall";
+    let data_home = temp.path().join("data-home");
+    let cache_home = temp.path().join("cache-home");
+    symlink(&data_home, &cache_home).expect("create dangling cache-home symlink");
+
+    let roots = StorageRoots::resolve(
+        app_id,
+        &DirectoryInputs::Linux {
+            home: temp.path().join("home"),
+            config_home: Some(temp.path().join("config-home")),
+            data_home: Some(data_home.clone()),
+            cache_home: Some(cache_home),
+            runtime_dir: Some(temp.path().join("runtime-home")),
+        },
+    )
+    .expect("resolve roots before dangling symlink target exists");
+    assert_ne!(roots.data, roots.cache);
+    assert!(!data_home.exists());
+
+    assert!(matches!(
+        roots.create_all(),
+        Err(StorageError::InvalidDirectories(
+            "storage classes resolve to the same path"
+        ))
+    ));
+    assert_eq!(
+        fs::canonicalize(&roots.data).expect("created data root"),
+        fs::canonicalize(&roots.cache).expect("cache root resolves through dangling symlink"),
+    );
+    assert!(
+        !roots.library.exists(),
+        "root creation stops after detecting the newly resolved alias"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_roots_separate_case_aliases_when_final_directories_are_missing() {
