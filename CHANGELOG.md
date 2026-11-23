@@ -49,6 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reopen a current-schema settings document after a stale migration CAS by rereading under the writer lock; keep corrupt or unreadable replacements classified rather than retrying indefinitely (`[CFG-001]`).
 - Allow explicit repair of recognized settings with unsupported structures, including canonical inline values and quoted table/array headers, while unknown and ambiguous dotted/implicit keys remain read-only (`[CFG-001]`).
 - Preserve existing Windows target DACLs on replacement with `ReplaceFileW`; on partial replacement errors, avoid path-based backup restoration and report `CommitIndeterminate` rather than risk moving a substituted source or overwriting a raced target (`[CFG-001]`).
+- Preserve the replacement and displaced-original recovery artifacts after an indeterminate Windows replacement failure ([CFG-001]).
 - Keep TOML assignment preflight linear by tracking line starts and rejecting repeated same-line root assignments before rescanning prefixes ([CFG-001]).
 - Document canonical inline settings serialization and assert migration persists that exact current representation ([CFG-001]).
 - Corrected preflight scanning after legal extra quote/apostrophe runs at multiline string terminators and covered subsequent nesting-limit checks ([CFG-001]).

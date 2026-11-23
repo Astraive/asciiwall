@@ -36,6 +36,10 @@ pub(crate) struct FileStore {
     fail_at: Option<PersistStage>,
     #[cfg(test)]
     fail_disk_full_after_temp_writes: Option<usize>,
+    #[cfg(test)]
+    fail_indeterminate_replace_at: Option<PersistStage>,
+    #[cfg(test)]
+    fail_rollback_indeterminate_replace: std::cell::Cell<bool>,
 }
 
 impl FileStore {
@@ -46,6 +50,10 @@ impl FileStore {
             fail_at: None,
             #[cfg(test)]
             fail_disk_full_after_temp_writes: None,
+            #[cfg(test)]
+            fail_indeterminate_replace_at: None,
+            #[cfg(test)]
+            fail_rollback_indeterminate_replace: std::cell::Cell::new(false),
         }
     }
 
@@ -215,20 +223,25 @@ impl FileStore {
             return Err(WriteFailure::before_replace(error));
         }
 
-        let replace_result = if replace_stage == PersistStage::ArchiveReplace {
-            fs::hard_link(temporary.path(), target).map_err(|error| ReplaceFailure {
-                error,
-                replaced: false,
-                indeterminate: false,
-            })
-        } else {
-            replace_file(temporary.path(), target)
-        };
+        let replace_result = self.replace_temporary(temporary.path(), target, replace_stage);
         if let Err(failure) = replace_result {
-            let error = StoreError::io(StoreOperation::Replace, failure.error);
-            return Err(if failure.indeterminate {
-                WriteFailure::indeterminate(error)
-            } else if failure.replaced {
+            let ReplaceFailure {
+                error: replace_error,
+                replaced,
+                indeterminate,
+                displaced_path,
+            } = failure;
+            let error = StoreError::io(StoreOperation::Replace, replace_error);
+            if indeterminate {
+                let replacement_path = temporary.path().to_path_buf();
+                temporary.disarm();
+                return Err(WriteFailure::indeterminate(
+                    error,
+                    replacement_path,
+                    displaced_path,
+                ));
+            }
+            return Err(if replaced {
                 WriteFailure::after_replace(error)
             } else {
                 WriteFailure::before_replace(error)
@@ -253,6 +266,35 @@ impl FileStore {
             )));
         }
         Ok(())
+    }
+
+    fn replace_temporary(
+        &mut self,
+        temporary: &Path,
+        target: &Path,
+        replace_stage: PersistStage,
+    ) -> Result<(), ReplaceFailure> {
+        #[cfg(test)]
+        if self.fail_indeterminate_replace_at == Some(replace_stage) {
+            self.fail_indeterminate_replace_at = None;
+            return simulated_indeterminate_replace(target);
+        }
+
+        if replace_stage == PersistStage::ArchiveReplace {
+            fs::hard_link(temporary, target).map_err(|error| ReplaceFailure {
+                error,
+                replaced: false,
+                indeterminate: false,
+                displaced_path: None,
+            })
+        } else {
+            replace_file(temporary, target)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_indeterminate_replace(&mut self, stage: PersistStage) {
+        self.fail_indeterminate_replace_at = Some(stage);
     }
 
     fn create_temp(&mut self, target: &Path, mode: u32) -> Result<(PathBuf, File), StoreError> {
@@ -289,9 +331,7 @@ impl FileStore {
                 .map_err(|error| StoreError::io(StoreOperation::Rollback, error));
         }
         match previous {
-            Some(bytes) => self
-                .atomic_write_uninjected(&self.path, bytes)
-                .map_err(|error| StoreError::io(StoreOperation::Rollback, error)),
+            Some(bytes) => self.atomic_write_uninjected(&self.path, bytes),
             None => {
                 match fs::remove_file(&self.path) {
                     Ok(()) => {}
@@ -306,28 +346,58 @@ impl FileStore {
         }
     }
 
-    fn atomic_write_uninjected(&self, target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    fn atomic_write_uninjected(&self, target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
         let parent = parent_directory(target);
-        fs::create_dir_all(&parent)?;
-        let mode = restrictive_mode(target)?;
-        let (path, mut file) = create_temp_uninjected(target, mode)?;
+        fs::create_dir_all(&parent)
+            .map_err(|error| StoreError::io(StoreOperation::Rollback, error))?;
+        let mode = restrictive_mode(target)
+            .map_err(|error| StoreError::io(StoreOperation::Rollback, error))?;
+        let (path, mut file) = create_temp_uninjected(target, mode)
+            .map_err(|error| StoreError::io(StoreOperation::Rollback, error))?;
         let mut temporary = TempFile::new(path);
         if let Err(error) = preserve_target_dacl(target, &file) {
             drop(file);
-            return Err(error);
+            return Err(StoreError::io(StoreOperation::Rollback, error));
         }
         if let Err(error) = file.write_all(bytes) {
             drop(file);
-            return Err(error);
+            return Err(StoreError::io(StoreOperation::Rollback, error));
         }
         if let Err(error) = file.sync_all() {
             drop(file);
-            return Err(error);
+            return Err(StoreError::io(StoreOperation::Rollback, error));
         }
         drop(file);
-        replace_file(temporary.path(), target).map_err(|failure| failure.error)?;
+
+        #[cfg(test)]
+        let replace_result = if self.fail_rollback_indeterminate_replace.replace(false) {
+            simulated_indeterminate_replace(target)
+        } else {
+            replace_file(temporary.path(), target)
+        };
+        #[cfg(not(test))]
+        let replace_result = replace_file(temporary.path(), target);
+
+        if let Err(failure) = replace_result {
+            let ReplaceFailure {
+                error,
+                indeterminate,
+                displaced_path,
+                ..
+            } = failure;
+            if indeterminate {
+                let replacement_path = temporary.path().to_path_buf();
+                temporary.disarm();
+                return Err(indeterminate_with_artifacts(
+                    StoreError::io(StoreOperation::Rollback, error),
+                    &replacement_path,
+                    displaced_path.as_deref(),
+                ));
+            }
+            return Err(StoreError::io(StoreOperation::Rollback, error));
+        }
         temporary.disarm();
-        sync_parent(&parent)
+        sync_parent(&parent).map_err(|error| StoreError::io(StoreOperation::Rollback, error))
     }
 
     #[cfg(test)]
@@ -337,6 +407,11 @@ impl FileStore {
     #[cfg(test)]
     pub(crate) fn inject_disk_full_after_temp_writes(&mut self, writes: usize) {
         self.fail_disk_full_after_temp_writes = Some(writes);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_rollback_indeterminate_replace(&mut self) {
+        self.fail_rollback_indeterminate_replace.set(true);
     }
 }
 
@@ -385,7 +460,7 @@ impl ConfigStore for FileStore {
             {
                 Ok(()) => Ok(()),
                 Err(failure) if failure.indeterminate => {
-                    Err(indeterminate_without_rollback(failure.error))
+                    Err(indeterminate_without_rollback(failure))
                 }
                 Err(failure) => {
                     if let Err(rollback) = self.restore_previous(None, Some(&archive)) {
@@ -407,7 +482,11 @@ impl ConfigStore for FileStore {
                     if let Err(failure) =
                         self.atomic_write(&backup, previous_bytes, PersistStage::BackupReplace)
                     {
-                        return Err(failure.error);
+                        return Err(if failure.indeterminate {
+                            indeterminate_without_rollback(failure)
+                        } else {
+                            failure.error
+                        });
                     }
                 }
             }
@@ -417,7 +496,11 @@ impl ConfigStore for FileStore {
                     if let Err(failure) =
                         self.atomic_write(&archive, previous_bytes, PersistStage::ArchiveReplace)
                     {
-                        return Err(failure.error);
+                        return Err(if failure.indeterminate {
+                            indeterminate_without_rollback(failure)
+                        } else {
+                            failure.error
+                        });
                     }
                 }
             }
@@ -425,9 +508,7 @@ impl ConfigStore for FileStore {
 
         match self.atomic_write(&self.path.clone(), contents, PersistStage::MainReplace) {
             Ok(()) => Ok(()),
-            Err(failure) if failure.indeterminate => {
-                Err(indeterminate_without_rollback(failure.error))
-            }
+            Err(failure) if failure.indeterminate => Err(indeterminate_without_rollback(failure)),
             Err(failure) if failure.replaced => {
                 if let Err(rollback) = self.restore_previous(previous.as_deref(), None) {
                     Err(StoreError::CommitIndeterminate {
@@ -469,6 +550,8 @@ struct WriteFailure {
     error: StoreError,
     replaced: bool,
     indeterminate: bool,
+    replacement_path: Option<PathBuf>,
+    displaced_path: Option<PathBuf>,
 }
 
 impl WriteFailure {
@@ -477,6 +560,8 @@ impl WriteFailure {
             error,
             replaced: false,
             indeterminate: false,
+            replacement_path: None,
+            displaced_path: None,
         }
     }
 
@@ -485,22 +570,54 @@ impl WriteFailure {
             error,
             replaced: true,
             indeterminate: false,
+            replacement_path: None,
+            displaced_path: None,
         }
     }
 
-    fn indeterminate(error: StoreError) -> Self {
+    fn indeterminate(
+        error: StoreError,
+        replacement_path: PathBuf,
+        displaced_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             error,
             replaced: false,
             indeterminate: true,
+            replacement_path: Some(replacement_path),
+            displaced_path,
         }
     }
 }
 
-fn indeterminate_without_rollback(error: StoreError) -> StoreError {
+fn indeterminate_without_rollback(failure: WriteFailure) -> StoreError {
+    let WriteFailure {
+        error,
+        replacement_path,
+        displaced_path,
+        ..
+    } = failure;
+    indeterminate_with_artifacts(
+        error,
+        replacement_path
+            .as_deref()
+            .expect("indeterminate writes retain their replacement path"),
+        displaced_path.as_deref(),
+    )
+}
+
+fn indeterminate_with_artifacts(
+    error: StoreError,
+    replacement_path: &Path,
+    displaced_path: Option<&Path>,
+) -> StoreError {
     StoreError::CommitIndeterminate {
         cause: error.to_string(),
-        rollback: "not attempted to avoid overwriting a potentially raced target".to_owned(),
+        rollback: format!(
+            "not attempted to avoid overwriting a potentially raced target; \
+             retained replacement artifact at {:?}; displaced-original backup candidate at {:?}",
+            replacement_path, displaced_path,
+        ),
     }
 }
 
@@ -613,7 +730,13 @@ impl std::fmt::Debug for StoreError {
 
 impl std::fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "settings storage error: {self:?}")
+        match self {
+            Self::CommitIndeterminate { cause, rollback } => write!(
+                formatter,
+                "settings storage commit outcome is indeterminate: {cause}; {rollback}"
+            ),
+            _ => write!(formatter, "settings storage error: {self:?}"),
+        }
     }
 }
 
@@ -725,6 +848,26 @@ struct ReplaceFailure {
     error: std::io::Error,
     replaced: bool,
     indeterminate: bool,
+    displaced_path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+fn simulated_indeterminate_replace(target: &Path) -> Result<(), ReplaceFailure> {
+    let displaced_path = unique_sibling(target, "replaced");
+    match fs::rename(target, &displaced_path) {
+        Ok(()) => Err(ReplaceFailure {
+            error: std::io::Error::from_raw_os_error(1177),
+            replaced: false,
+            indeterminate: true,
+            displaced_path: Some(displaced_path),
+        }),
+        Err(error) => Err(ReplaceFailure {
+            error,
+            replaced: false,
+            indeterminate: false,
+            displaced_path: None,
+        }),
+    }
 }
 
 #[cfg(windows)]
@@ -734,6 +877,7 @@ fn replace_file(temporary: &Path, target: &Path) -> Result<(), ReplaceFailure> {
         error: failure.error,
         replaced: failure.replaced,
         indeterminate: failure.indeterminate,
+        displaced_path: failure.indeterminate.then(|| backup.clone()),
     })
 }
 
@@ -743,6 +887,7 @@ fn replace_file(temporary: &Path, target: &Path) -> Result<(), ReplaceFailure> {
         error,
         replaced: false,
         indeterminate: false,
+        displaced_path: None,
     })
 }
 
@@ -861,6 +1006,164 @@ mod tests {
             );
             assert_eq!(fs::read(&path).unwrap(), b"last-valid-main");
         }
+    }
+
+    #[test]
+    fn indeterminate_replace_preserves_and_reports_replacement_and_displaced_original() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        fs::write(&path, b"last-valid-main").unwrap();
+
+        let mut store = FileStore::new(&path);
+        store.inject_indeterminate_replace(PersistStage::MainReplace);
+        let error = store
+            .commit(
+                Some(b"last-valid-main"),
+                b"candidate-settings",
+                BackupMode::ReplaceWithPrevious,
+            )
+            .unwrap_err();
+        assert!(matches!(&error, StoreError::CommitIndeterminate { .. }));
+
+        assert!(!path.exists());
+        let entries = fs::read_dir(&directory.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        let replacement = entries
+            .iter()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.tmp-")
+            })
+            .expect("indeterminate replacement retained at temporary path");
+        assert_eq!(fs::read(replacement.path()).unwrap(), b"candidate-settings");
+        let displaced_original = entries
+            .iter()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.replaced-")
+            })
+            .expect("displaced original retained at replacement backup path");
+        assert_eq!(
+            fs::read(displaced_original.path()).unwrap(),
+            b"last-valid-main"
+        );
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(&format!("{:?}", replacement.path())));
+        assert!(diagnostic.contains(&format!("{:?}", displaced_original.path())));
+        let public_diagnostic = crate::ConfigError::from(error.clone()).to_string();
+        assert_eq!(
+            public_diagnostic,
+            format!("configuration error: {diagnostic}")
+        );
+        assert!(public_diagnostic.contains(&format!("{:?}", replacement.path())));
+        assert!(public_diagnostic.contains(&format!("{:?}", displaced_original.path())));
+    }
+
+    #[test]
+    fn indeterminate_backup_replace_reports_and_preserves_both_artifacts() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let backup = directory.0.join("settings.toml.bak");
+        fs::write(&path, b"last-valid-main").unwrap();
+        fs::write(&backup, b"prior-backup").unwrap();
+
+        let mut store = FileStore::new(&path);
+        store.inject_indeterminate_replace(PersistStage::BackupReplace);
+        let error = store
+            .commit(
+                Some(b"last-valid-main"),
+                b"candidate-settings",
+                BackupMode::ReplaceWithPrevious,
+            )
+            .unwrap_err();
+        assert!(matches!(&error, StoreError::CommitIndeterminate { .. }));
+
+        assert_eq!(fs::read(&path).unwrap(), b"last-valid-main");
+        assert!(!backup.exists());
+        let entries = fs::read_dir(&directory.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        let replacement = entries
+            .iter()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.bak.tmp-")
+            })
+            .expect("indeterminate backup replacement retained at temporary path");
+        assert_eq!(fs::read(replacement.path()).unwrap(), b"last-valid-main");
+        let displaced_backup = entries
+            .iter()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.bak.replaced-")
+            })
+            .expect("displaced backup retained at replacement backup path");
+        assert_eq!(fs::read(displaced_backup.path()).unwrap(), b"prior-backup");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(&format!("{:?}", replacement.path())));
+        assert!(diagnostic.contains(&format!("{:?}", displaced_backup.path())));
+    }
+
+    #[test]
+    fn rollback_indeterminate_replace_preserves_and_reports_both_artifacts() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        fs::write(&path, b"last-valid-main").unwrap();
+
+        let mut store = FileStore::new(&path);
+        store.inject_failure(PersistStage::MainDirectorySync);
+        store.inject_rollback_indeterminate_replace();
+        let error = store
+            .commit(
+                Some(b"last-valid-main"),
+                b"candidate-settings",
+                BackupMode::ReplaceWithPrevious,
+            )
+            .unwrap_err();
+        assert!(matches!(&error, StoreError::CommitIndeterminate { .. }));
+
+        assert!(!path.exists());
+        let entries = fs::read_dir(&directory.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        let replacement = entries
+            .iter()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.rollback-")
+            })
+            .expect("indeterminate rollback replacement retained at temporary path");
+        assert_eq!(fs::read(replacement.path()).unwrap(), b"last-valid-main");
+        let displaced_main = entries
+            .iter()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.replaced-")
+            })
+            .expect("current main retained at replacement backup path");
+        assert_eq!(
+            fs::read(displaced_main.path()).unwrap(),
+            b"candidate-settings"
+        );
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains(&format!("{:?}", replacement.path())));
+        assert!(diagnostic.contains(&format!("{:?}", displaced_main.path())));
     }
 
     #[test]

@@ -41,7 +41,12 @@ pub enum ConfigError {
 
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "configuration error: {self:?}")
+        match self {
+            Self::Storage(error) if matches!(error, StoreError::CommitIndeterminate { .. }) => {
+                write!(formatter, "configuration error: {error}")
+            }
+            _ => write!(formatter, "configuration error: {self:?}"),
+        }
     }
 }
 
