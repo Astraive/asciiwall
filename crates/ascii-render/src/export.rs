@@ -205,7 +205,8 @@ pub fn export(
 fn validate_export_glyph(character: char, index: usize) -> Result<(), ExportError> {
     if !ascii_convert::is_supported_single_cell_scalar(character) {
         return Err(ExportError::UnsupportedGlyph {
-            glyph_index: u32::try_from(index).map_err(|_| ExportError::Core(Error::SizeOverflow))?,
+            glyph_index: u32::try_from(index)
+                .map_err(|_| ExportError::Core(Error::SizeOverflow))?,
         });
     }
     Ok(())
