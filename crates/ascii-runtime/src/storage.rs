@@ -35,7 +35,9 @@ use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+#[cfg(not(windows))]
+use std::collections::HashSet;
 use std::env;
 use std::error::Error;
 use std::fmt;
@@ -583,6 +585,9 @@ impl InstallRegistry {
                 version: self.schema_version,
             });
         }
+        #[cfg(windows)]
+        let mut relative_paths: Vec<Vec<u16>> = Vec::with_capacity(self.packages.len());
+        #[cfg(not(windows))]
         let mut relative_paths = HashSet::with_capacity(self.packages.len());
         for (package_id, entry) in &self.packages {
             validate_application_id(package_id)?;
@@ -611,16 +616,46 @@ impl InstallRegistry {
                 ));
             }
             #[cfg(windows)]
-            let unique_path =
-                relative_paths.insert(windows_path_collision_key(&entry.relative_path));
+            relative_paths.push(windows_path_collision_key(&entry.relative_path).ok_or(
+                StorageError::InvalidRegistry("package paths must be unique"),
+            )?);
             #[cfg(not(windows))]
-            let unique_path = relative_paths.insert(entry.relative_path.as_str());
-            if !unique_path {
+            if !relative_paths.insert(entry.relative_path.as_str()) {
                 return Err(StorageError::InvalidRegistry(
                     "package paths must be unique",
                 ));
             }
         }
+        #[cfg(windows)]
+        {
+            let mut comparison_failed = false;
+            relative_paths.sort_unstable_by(|left, right| {
+                match windows_path_collision_cmp(left, right) {
+                    Some(ordering) => ordering,
+                    None => {
+                        comparison_failed = true;
+                        std::cmp::Ordering::Equal
+                    }
+                }
+            });
+            let duplicate =
+                relative_paths.windows(2).any(|paths| {
+                    match windows_path_collision_cmp(&paths[0], &paths[1]) {
+                        Some(std::cmp::Ordering::Equal) => true,
+                        Some(_) => false,
+                        None => {
+                            comparison_failed = true;
+                            false
+                        }
+                    }
+                });
+            if comparison_failed || duplicate {
+                return Err(StorageError::InvalidRegistry(
+                    "package paths must be unique",
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -636,20 +671,55 @@ fn is_safe_relative_path(value: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn windows_path_collision_key(path: &str) -> String {
-    let mut key = String::with_capacity(path.len());
+fn windows_path_collision_key(path: &str) -> Option<Vec<u16>> {
+    let mut key = Vec::new();
     for (index, component) in path.split('/').enumerate() {
-        if index > 0 {
-            key.push('/');
+        let component = component.trim_end_matches(['.', ' ']);
+        if component.is_empty() {
+            return None;
         }
-        key.extend(
-            component
-                .trim_end_matches(['.', ' '])
-                .chars()
-                .flat_map(char::to_lowercase),
-        );
+        let separator_units = if index > 0 { 1 } else { 0 };
+        let key_units = key
+            .len()
+            .checked_add(separator_units)?
+            .checked_add(component.encode_utf16().count())?;
+        if key_units > i32::MAX as usize {
+            return None;
+        }
+        if index > 0 {
+            key.push(b'/' as u16);
+        }
+        key.extend(component.encode_utf16());
     }
-    key
+    Some(key)
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "CompareStringOrdinal"]
+    fn compare_string_ordinal(
+        left: *const u16,
+        left_length: i32,
+        right: *const u16,
+        right_length: i32,
+        ignore_case: i32,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+fn windows_path_collision_cmp(left: &[u16], right: &[u16]) -> Option<std::cmp::Ordering> {
+    let left_length = i32::try_from(left.len()).ok()?;
+    let right_length = i32::try_from(right.len()).ok()?;
+    let result = unsafe {
+        compare_string_ordinal(left.as_ptr(), left_length, right.as_ptr(), right_length, 1)
+    };
+    match result {
+        1 => Some(std::cmp::Ordering::Less),
+        2 => Some(std::cmp::Ordering::Equal),
+        3 => Some(std::cmp::Ordering::Greater),
+        _ => None,
+    }
 }
 
 /// Bounded TOML syntax tree; this type does not imply that application settings passed schema validation.
@@ -1179,6 +1249,21 @@ fn current_matches_revision(
     }
 }
 
+#[derive(Clone, Copy)]
+enum OversizedConfigLexState {
+    Normal,
+    Comment,
+    BasicQuoteStart,
+    BasicQuoteStartTwo,
+    BasicString,
+    BasicEscape,
+    LiteralQuoteStart,
+    LiteralQuoteStartTwo,
+    LiteralString,
+    MultilineBasic { escaped: bool, quotes: u8 },
+    MultilineLiteral { quotes: u8 },
+}
+
 fn oversized_config_schema_version(path: &Path) -> Result<Option<i64>, StorageError> {
     const MAX_SCHEMA_LINE_BYTES: usize = 64 * 1024;
     let mut file = File::open(path)?;
@@ -1186,7 +1271,10 @@ fn oversized_config_schema_version(path: &Path) -> Result<Option<i64>, StorageEr
     let mut line = Vec::with_capacity(256);
     let mut line_too_large = false;
     let mut root_table = true;
-    let mut uncertain_root_line = false;
+    let mut lex_state = OversizedConfigLexState::Normal;
+    let mut containers = Vec::with_capacity(16);
+    let mut line_is_root = true;
+    let mut schema_version = None;
 
     loop {
         let read = file.read(&mut buffer)?;
@@ -1195,76 +1283,319 @@ fn oversized_config_schema_version(path: &Path) -> Result<Option<i64>, StorageEr
         }
         for byte in &buffer[..read] {
             if *byte == b'\n' {
-                if root_table {
-                    if line_too_large {
-                        if line.starts_with(b"[") {
-                            root_table = false;
-                        } else if root_line_might_declare_schema_version(&line) {
-                            uncertain_root_line = true;
-                        }
-                    } else if let Some(version) =
-                        config_schema_version_from_root_line(&line, &mut root_table)
-                    {
-                        return Ok(Some(version));
+                advance_oversized_config_lexer(&mut lex_state, &mut containers, *byte)?;
+                if line_is_root
+                    && let Some(version) =
+                        finish_oversized_config_line(&line, line_too_large, &mut root_table)?
+                {
+                    if schema_version.is_some() {
+                        return Err(StorageError::DocumentTooLarge);
                     }
+                    schema_version = Some(version);
                 }
                 line.clear();
                 line_too_large = false;
-            } else if !line_too_large {
-                if line.is_empty() && byte.is_ascii_whitespace() {
-                    continue;
+                line_is_root = oversized_config_line_is_root(root_table, lex_state, &containers);
+            } else {
+                advance_oversized_config_lexer(&mut lex_state, &mut containers, *byte)?;
+                if !line_too_large {
+                    if line.is_empty() && byte.is_ascii_whitespace() {
+                        continue;
+                    }
+                    if line.len() < MAX_SCHEMA_LINE_BYTES {
+                        line.push(*byte);
+                    } else {
+                        line_too_large = true;
+                    }
                 }
-                if line.len() < MAX_SCHEMA_LINE_BYTES {
-                    line.push(*byte);
+            }
+        }
+    }
+
+    finish_oversized_config_lexing(&mut lex_state, &containers)?;
+    if line_is_root
+        && let Some(version) = finish_oversized_config_line(&line, line_too_large, &mut root_table)?
+    {
+        if schema_version.is_some() {
+            return Err(StorageError::DocumentTooLarge);
+        }
+        schema_version = Some(version);
+    }
+    Ok(schema_version)
+}
+
+fn oversized_config_line_is_root(
+    root_table: bool,
+    lex_state: OversizedConfigLexState,
+    containers: &[u8],
+) -> bool {
+    root_table && containers.is_empty() && matches!(lex_state, OversizedConfigLexState::Normal)
+}
+
+fn finish_oversized_config_line(
+    line: &[u8],
+    line_too_large: bool,
+    root_table: &mut bool,
+) -> Result<Option<i64>, StorageError> {
+    if !*root_table {
+        return Ok(None);
+    }
+    if line_too_large {
+        if line.starts_with(b"[") {
+            *root_table = false;
+        } else if root_line_might_declare_schema_version(line) {
+            return Err(StorageError::DocumentTooLarge);
+        }
+        return Ok(None);
+    }
+    config_schema_version_from_root_line(line, root_table)
+}
+
+fn advance_oversized_config_lexer(
+    state: &mut OversizedConfigLexState,
+    containers: &mut Vec<u8>,
+    byte: u8,
+) -> Result<(), StorageError> {
+    let mut pending_byte = Some(byte);
+    while let Some(byte) = pending_byte.take() {
+        match *state {
+            OversizedConfigLexState::Normal => match byte {
+                b'\n' => {}
+                b'#' => *state = OversizedConfigLexState::Comment,
+                b'"' => *state = OversizedConfigLexState::BasicQuoteStart,
+                b'\'' => *state = OversizedConfigLexState::LiteralQuoteStart,
+                b'[' | b'{' => {
+                    if containers.len() >= 64 {
+                        return Err(StorageError::DocumentTooLarge);
+                    }
+                    containers.push(byte);
+                }
+                b']' | b'}' => {
+                    let expected = if byte == b']' { b'[' } else { b'{' };
+                    if containers.pop() != Some(expected) {
+                        return Err(StorageError::DocumentTooLarge);
+                    }
+                }
+                _ => {}
+            },
+            OversizedConfigLexState::Comment => {
+                if byte == b'\n' {
+                    *state = OversizedConfigLexState::Normal;
+                }
+            }
+            OversizedConfigLexState::BasicQuoteStart => {
+                if byte == b'"' {
+                    *state = OversizedConfigLexState::BasicQuoteStartTwo;
                 } else {
-                    line_too_large = true;
+                    *state = OversizedConfigLexState::BasicString;
+                    pending_byte = Some(byte);
+                }
+            }
+            OversizedConfigLexState::BasicQuoteStartTwo => {
+                if byte == b'"' {
+                    *state = OversizedConfigLexState::MultilineBasic {
+                        escaped: false,
+                        quotes: 0,
+                    };
+                } else {
+                    *state = OversizedConfigLexState::Normal;
+                    pending_byte = Some(byte);
+                }
+            }
+            OversizedConfigLexState::BasicString => match byte {
+                b'\n' => return Err(StorageError::DocumentTooLarge),
+                b'\\' => *state = OversizedConfigLexState::BasicEscape,
+                b'"' => *state = OversizedConfigLexState::Normal,
+                _ => {}
+            },
+            OversizedConfigLexState::BasicEscape => {
+                if byte == b'\n' {
+                    return Err(StorageError::DocumentTooLarge);
+                }
+                *state = OversizedConfigLexState::BasicString;
+            }
+            OversizedConfigLexState::LiteralQuoteStart => {
+                if byte == b'\'' {
+                    *state = OversizedConfigLexState::LiteralQuoteStartTwo;
+                } else {
+                    *state = OversizedConfigLexState::LiteralString;
+                    pending_byte = Some(byte);
+                }
+            }
+            OversizedConfigLexState::LiteralQuoteStartTwo => {
+                if byte == b'\'' {
+                    *state = OversizedConfigLexState::MultilineLiteral { quotes: 0 };
+                } else {
+                    *state = OversizedConfigLexState::Normal;
+                    pending_byte = Some(byte);
+                }
+            }
+            OversizedConfigLexState::LiteralString => match byte {
+                b'\n' => return Err(StorageError::DocumentTooLarge),
+                b'\'' => *state = OversizedConfigLexState::Normal,
+                _ => {}
+            },
+            OversizedConfigLexState::MultilineBasic { escaped, quotes } => {
+                if escaped {
+                    *state = OversizedConfigLexState::MultilineBasic {
+                        escaped: false,
+                        quotes: 0,
+                    };
+                } else if byte == b'\\' {
+                    *state = OversizedConfigLexState::MultilineBasic {
+                        escaped: true,
+                        quotes: 0,
+                    };
+                } else if byte == b'"' {
+                    let next_quotes = quotes + 1;
+                    if next_quotes > 5 {
+                        return Err(StorageError::DocumentTooLarge);
+                    }
+                    *state = OversizedConfigLexState::MultilineBasic {
+                        escaped: false,
+                        quotes: next_quotes,
+                    };
+                } else if quotes >= 3 {
+                    *state = OversizedConfigLexState::Normal;
+                    pending_byte = Some(byte);
+                } else {
+                    *state = OversizedConfigLexState::MultilineBasic {
+                        escaped: false,
+                        quotes: 0,
+                    };
+                }
+            }
+            OversizedConfigLexState::MultilineLiteral { quotes } => {
+                if byte == b'\'' {
+                    let next_quotes = quotes + 1;
+                    if next_quotes > 5 {
+                        return Err(StorageError::DocumentTooLarge);
+                    }
+                    *state = OversizedConfigLexState::MultilineLiteral {
+                        quotes: next_quotes,
+                    };
+                } else if quotes >= 3 {
+                    *state = OversizedConfigLexState::Normal;
+                    pending_byte = Some(byte);
+                } else {
+                    *state = OversizedConfigLexState::MultilineLiteral { quotes: 0 };
                 }
             }
         }
     }
-    if root_table {
-        if line_too_large {
-            if !line.starts_with(b"[") && root_line_might_declare_schema_version(&line) {
-                uncertain_root_line = true;
-            }
-        } else if let Some(version) = config_schema_version_from_root_line(&line, &mut root_table) {
-            return Ok(Some(version));
+    Ok(())
+}
+
+fn finish_oversized_config_lexing(
+    state: &mut OversizedConfigLexState,
+    containers: &[u8],
+) -> Result<(), StorageError> {
+    match *state {
+        OversizedConfigLexState::Comment
+        | OversizedConfigLexState::BasicQuoteStartTwo
+        | OversizedConfigLexState::LiteralQuoteStartTwo => {
+            *state = OversizedConfigLexState::Normal;
         }
+        OversizedConfigLexState::MultilineBasic { quotes, .. } if quotes >= 3 => {
+            *state = OversizedConfigLexState::Normal;
+        }
+        OversizedConfigLexState::MultilineLiteral { quotes } if quotes >= 3 => {
+            *state = OversizedConfigLexState::Normal;
+        }
+        OversizedConfigLexState::Normal if containers.is_empty() => return Ok(()),
+        _ => return Err(StorageError::DocumentTooLarge),
     }
-    if uncertain_root_line {
-        Err(StorageError::DocumentTooLarge)
+    if containers.is_empty() {
+        Ok(())
     } else {
-        Ok(None)
+        Err(StorageError::DocumentTooLarge)
     }
 }
 
 fn root_line_might_declare_schema_version(line: &[u8]) -> bool {
-    let Ok(line) = std::str::from_utf8(line) else {
+    let Some(first_non_whitespace) = line.iter().position(|byte| !byte.is_ascii_whitespace())
+    else {
         return false;
     };
-    let line = line.trim_start();
-    let rest = line
-        .strip_prefix("schema_version")
-        .or_else(|| line.strip_prefix("\"schema_version\""))
-        .or_else(|| line.strip_prefix("'schema_version'"));
-    rest.is_some_and(|rest| {
-        rest.is_empty()
-            || rest.starts_with('=')
-            || rest.chars().next().is_some_and(char::is_whitespace)
-    })
+    let line = &line[first_non_whitespace..];
+    if line
+        .first()
+        .is_some_and(|byte| matches!(*byte, b'#' | b'['))
+    {
+        return false;
+    }
+    let key_end = toml_key_assignment_end(line).unwrap_or_else(|| {
+        line.iter()
+            .rposition(|byte| !byte.is_ascii_whitespace())
+            .map_or(0, |index| index + 1)
+    });
+    let key = &line[..key_end];
+    let Ok(key) = std::str::from_utf8(key) else {
+        return false;
+    };
+    let mut assignment = String::with_capacity(key.len() + 2);
+    assignment.push_str(key.trim_end());
+    assignment.push_str("=0");
+    toml::from_str::<TomlValue>(&assignment)
+        .is_ok_and(|value| value.get("schema_version").is_some())
 }
 
-fn config_schema_version_from_root_line(line: &[u8], root_table: &mut bool) -> Option<i64> {
-    let line = std::str::from_utf8(line).ok()?.trim();
+fn toml_key_assignment_end(line: &[u8]) -> Option<usize> {
+    let mut quoted = None;
+    let mut escaped = false;
+    for (index, byte) in line.iter().copied().enumerate() {
+        if let Some(quote) = quoted {
+            if quote == b'"' && escaped {
+                escaped = false;
+            } else if quote == b'"' && byte == b'\\' {
+                escaped = true;
+            } else if byte == quote {
+                quoted = None;
+            }
+        } else {
+            match byte {
+                b'"' | b'\'' => quoted = Some(byte),
+                b'=' => return Some(index),
+                b'#' => return None,
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn config_schema_version_from_root_line(
+    line: &[u8],
+    root_table: &mut bool,
+) -> Result<Option<i64>, StorageError> {
+    let line = match std::str::from_utf8(line) {
+        Ok(line) => line,
+        Err(_) if root_line_might_declare_schema_version(line) => {
+            return Err(StorageError::DocumentTooLarge);
+        }
+        Err(_) => return Ok(None),
+    };
+    let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
-        return None;
+        return Ok(None);
     }
     if line.starts_with('[') {
         *root_table = false;
-        return None;
+        return Ok(None);
     }
-    let value = toml::from_str::<TomlValue>(line).ok()?;
-    config_schema_version(&value)
+    match toml::from_str::<TomlValue>(line) {
+        Ok(value) => match value.get("schema_version") {
+            Some(version) => version
+                .as_integer()
+                .map(Some)
+                .ok_or(StorageError::DocumentTooLarge),
+            None => Ok(None),
+        },
+        Err(_) if root_line_might_declare_schema_version(line.as_bytes()) => {
+            Err(StorageError::DocumentTooLarge)
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 type ExistingValidator<'a> = (u64, &'a dyn Fn(&[u8]) -> Result<(), StorageError>);
@@ -2156,19 +2487,23 @@ fn is_machine_local_string(value: &str) -> bool {
 
 fn contains_windows_drive_relative_path(value: &str) -> bool {
     let bytes = value.as_bytes();
-    bytes.windows(3).enumerate().any(|(index, candidate)| {
-        candidate[0].is_ascii_alphabetic()
-            && candidate[1] == b':'
-            && candidate[2] != b'/'
-            && candidate[2] != b'\\'
-            && candidate[2] != b':'
-            && !candidate[2].is_ascii_whitespace()
-            && (index == 0
-                || matches!(
-                    bytes[index - 1],
-                    b'=' | b':' | b'"' | b'\'' | b'(' | b'[' | b'{' | b','
-                ))
-    })
+    let mut previous_character = None;
+    for (index, character) in value.char_indices() {
+        let next_byte = bytes.get(index + 1);
+        let path_byte = bytes.get(index + 2);
+        if character.is_ascii_alphabetic()
+            && next_byte == Some(&b':')
+            && path_byte.is_some_and(|byte| {
+                *byte != b'/' && *byte != b'\\' && *byte != b':' && !byte.is_ascii_whitespace()
+            })
+            && previous_character
+                .is_none_or(|previous: char| !previous.is_alphanumeric() && previous != '_')
+        {
+            return true;
+        }
+        previous_character = Some(character);
+    }
+    false
 }
 
 fn looks_like_relative_local_path(value: &str) -> bool {
