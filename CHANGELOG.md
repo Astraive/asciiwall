@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Bound inline-table dotted-key nesting and setting-entry counts, retained restore failure counts through activation, redacted stale settings bytes from errors, and enforced owner-only Unix modes for existing settings, backups, and oversized repair archives with deterministic regressions ([CFG-001]).
 - Keep restore failures suppressed when the wall clock moves backward, preserving the failure window until elapsed time is known ([CFG-001]).
+- Keep restore failures suppressed when wall-clock time or elapsed time is unknown, preserving retries until a known window expires ([CFG-001]).
 - Keep documents with unknown settings read-only even when a known invalid value sorts first, preserving the original bytes through rejected repair ([CFG-001]).
 - Keep the selected `.bak` unchanged when an explicit restore fails to replace the main document, so the restore can be retried ([CFG-001]).
 - Allow explicit repair of malformed current-schema documents only when the schema and all setting keys are safely recognized; keep unknown and future-schema documents read-only ([CFG-001]).
