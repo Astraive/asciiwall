@@ -270,8 +270,9 @@ impl ControlQueue {
 /// Coordinated latest-frame handoff with separate urgent control and fixed buffer slots.
 ///
 /// The coordinator publishes a valid replacement before discarding older queued frames whenever
-/// a free slot exists. If all slots are occupied by queued frames, it validates the replacement
-/// before reclaiming the oldest queued frame to make room; consumed slots retain output permits
+/// a free slot exists. With no free slot, it stages replacement bytes in a fixed-size buffer
+/// before reclaiming queued descriptors, so cancellation during staging leaves them intact. The
+/// staging buffer is charged to the shared memory budget. Consumed slots retain output permits
 /// until acknowledgement, generation invalidation, or pool destruction, without the slot pinning
 /// the pool.
 #[derive(Debug)]
@@ -279,6 +280,8 @@ pub struct BoundedHandoff {
     operation: Mutex<()>,
     resource_budget: ResourceBudget,
     pool: BufferPool,
+    replacement_staging: Mutex<Vec<u8>>,
+    _replacement_staging_permit: MemoryPermit,
     frames: FrameQueue,
     controls: ControlQueue,
     #[cfg(test)]
@@ -286,7 +289,8 @@ pub struct BoundedHandoff {
 }
 
 impl BoundedHandoff {
-    /// Creates fixed slot, frame-queue, and ordinary-control capacities using a shared budget.
+    /// Creates fixed slot, replacement-staging, frame-queue, and ordinary-control capacities
+    /// using a shared budget.
     pub fn new(
         resource_budget: &ResourceBudget,
         generation: u64,
@@ -295,10 +299,23 @@ impl BoundedHandoff {
         frame_queue_capacity: usize,
         control_queue_capacity: usize,
     ) -> Result<Self, RuntimeError> {
+        let pool = BufferPool::new(resource_budget, generation, slot_count, bytes_per_slot)?;
+        let staging_bytes =
+            u64::try_from(bytes_per_slot).map_err(|_| RuntimeError::SizeOverflow)?;
+        let replacement_staging_permit =
+            resource_budget.try_reserve_memory(MemoryUsage::new(staging_bytes, 0))?;
+        let mut replacement_staging = Vec::new();
+        replacement_staging
+            .try_reserve_exact(bytes_per_slot)
+            .map_err(|_| RuntimeError::AllocationFailed)?;
+        replacement_staging.resize(bytes_per_slot, 0);
+
         Ok(Self {
             operation: Mutex::new(()),
             resource_budget: resource_budget.clone(),
-            pool: BufferPool::new(resource_budget, generation, slot_count, bytes_per_slot)?,
+            pool,
+            replacement_staging: Mutex::new(replacement_staging),
+            _replacement_staging_permit: replacement_staging_permit,
             frames: FrameQueue::new(resource_budget, frame_queue_capacity)?,
             controls: ControlQueue::new(resource_budget, control_queue_capacity)?,
             #[cfg(test)]
@@ -341,7 +358,9 @@ impl BoundedHandoff {
         }
     }
 
-    /// Publishes the newest valid frame before releasing older queued frames.
+    /// Publishes the newest valid frame before releasing older queued frames when a free slot
+    /// exists. With no free slot, it stages replacement bytes before reclaiming queued descriptors;
+    /// cancellation during staging leaves the queued frames intact.
     pub fn submit_frame(
         &self,
         metadata: RasterDescriptorMetadata,
@@ -390,6 +409,13 @@ impl BoundedHandoff {
                 if cancellation.is_cancelled() {
                     return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
                 }
+                let mut staging = lock_unpoisoned(&self.replacement_staging);
+                staging[..pixels.len()].copy_from_slice(pixels);
+                #[cfg(test)]
+                self.apply_test_copy_cancellation(cancellation);
+                if cancellation.is_cancelled() {
+                    return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
+                }
                 loop {
                     let Some(stale) = self.frames.try_recv() else {
                         return Err(RuntimeError::NoFreeSlots);
@@ -399,12 +425,7 @@ impl BoundedHandoff {
                     }
                     match self.pool.begin_fill() {
                         Ok(mut fill) => {
-                            fill.write_with_cpu_permit(pixels)?;
-                            #[cfg(test)]
-                            self.apply_test_copy_cancellation(cancellation);
-                            if cancellation.is_cancelled() {
-                                return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
-                            }
+                            fill.write_with_cpu_permit(&staging[..pixels.len()])?;
                             break fill;
                         }
                         Err(RuntimeError::NoFreeSlots) => {}
@@ -599,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_during_one_slot_replacement_copy_is_not_published() {
+    fn cancellation_during_one_slot_replacement_copy_preserves_previous_frame() {
         let resource_budget = resource_budget();
         let handoff = BoundedHandoff::new(&resource_budget, 1, 1, 3, 1, 1).unwrap();
         let limits = budget();
@@ -614,14 +635,18 @@ mod tests {
             Err(RuntimeError::CoreValidation(ascii_core::Error::Cancelled))
         );
         assert!(cancellation.is_cancelled());
-        assert_eq!(handoff.queued_frames(), 0);
-        assert_eq!(handoff.slot_state(0).unwrap(), SlotState::Free);
-        assert!(
-            handoff
-                .receive_frame(&limits, &CancellationToken::new())
-                .unwrap()
-                .is_none()
-        );
+        assert_eq!(handoff.queued_frames(), 1);
+        assert_eq!(handoff.slot_state(0).unwrap(), SlotState::Published);
+        let mut lease = handoff
+            .receive_frame(&limits, &CancellationToken::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.descriptor().media_timestamp_ns, 1);
+        lease
+            .with_pixels(|pixels| assert_eq!(pixels, &[1, 2, 3]))
+            .unwrap();
+        lease.completion_token().unwrap().acknowledge();
+        lease.release().unwrap();
     }
     #[test]
     fn pending_stop_before_fifo_commit_wins_the_dequeue_race() {
