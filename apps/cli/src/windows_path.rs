@@ -200,6 +200,15 @@ struct ObjectAttributes {
     security_quality_of_service: *mut c_void,
 }
 
+struct RelativeOpenOptions<'a> {
+    desired_access: u32,
+    create_options: u32,
+    disposition: u32,
+    share_access: u32,
+    file_attributes: u32,
+    security_descriptor: Option<&'a LocalAllocation>,
+}
+
 #[allow(dead_code)]
 #[repr(C)]
 #[derive(Default)]
@@ -1509,27 +1518,24 @@ fn open_relative_with_share_and_attributes(
     share_access: u32,
     file_attributes: u32,
 ) -> io::Result<File> {
-    open_relative_with_share_attributes_and_security(
+    open_relative_with_options(
         parent,
         name,
-        desired_access,
-        create_options,
-        disposition,
-        share_access,
-        file_attributes,
-        ptr::null_mut(),
+        RelativeOpenOptions {
+            desired_access,
+            create_options,
+            disposition,
+            share_access,
+            file_attributes,
+            security_descriptor: None,
+        },
     )
 }
 
-fn open_relative_with_share_attributes_and_security(
+fn open_relative_with_options(
     parent: &File,
     name: &[u16],
-    desired_access: u32,
-    create_options: u32,
-    disposition: u32,
-    share_access: u32,
-    file_attributes: u32,
-    security_descriptor: *mut c_void,
+    options: RelativeOpenOptions<'_>,
 ) -> io::Result<File> {
     let byte_length = name
         .len()
@@ -1546,7 +1552,9 @@ fn open_relative_with_share_attributes_and_security(
         root_directory: parent.as_raw_handle(),
         object_name: &mut name,
         attributes: OBJ_CASE_INSENSITIVE,
-        security_descriptor,
+        security_descriptor: options
+            .security_descriptor
+            .map_or(ptr::null_mut(), |descriptor| descriptor.as_ptr()),
         security_quality_of_service: ptr::null_mut(),
     };
     let mut io_status = IoStatusBlock::default();
@@ -1554,14 +1562,14 @@ fn open_relative_with_share_attributes_and_security(
     let status = unsafe {
         NtCreateFile(
             &mut handle,
-            desired_access,
+            options.desired_access,
             &mut attributes,
             &mut io_status,
             ptr::null_mut(),
-            file_attributes,
-            share_access,
-            disposition,
-            create_options,
+            options.file_attributes,
+            options.share_access,
+            options.disposition,
+            options.create_options,
             ptr::null_mut(),
             0,
         )
@@ -1785,21 +1793,23 @@ fn create_staging_directory(
     let mut name = [0_u16; 64];
     for _ in 0..ATTEMPTS {
         let length = random_temp_name(&mut name, PREFIX, "")?;
-        match open_relative_with_share_attributes_and_security(
+        match open_relative_with_options(
             parent,
             &name[..length],
-            FILE_LIST_DIRECTORY
-                | FILE_TRAVERSE
-                | FILE_READ_ATTRIBUTES
-                | READ_CONTROL
-                | FILE_WRITE_DATA
-                | DELETE
-                | SYNCHRONIZE,
-            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
-            FILE_CREATE,
-            SHARE_ALL,
-            FILE_ATTRIBUTE_DIRECTORY,
-            security_descriptor.as_ptr(),
+            RelativeOpenOptions {
+                desired_access: FILE_LIST_DIRECTORY
+                    | FILE_TRAVERSE
+                    | FILE_READ_ATTRIBUTES
+                    | READ_CONTROL
+                    | FILE_WRITE_DATA
+                    | DELETE
+                    | SYNCHRONIZE,
+                create_options: FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                disposition: FILE_CREATE,
+                share_access: SHARE_ALL,
+                file_attributes: FILE_ATTRIBUTE_DIRECTORY,
+                security_descriptor: Some(&security_descriptor),
+            },
         ) {
             Ok(file) => {
                 let directory = StagingDirectory { file };
@@ -1838,15 +1848,23 @@ fn create_staging(parent: &File, root_volume_identity: VolumeIdentity) -> io::Re
     let mut name = [0_u16; 47];
     for _ in 0..ATTEMPTS {
         let length = random_temp_name(&mut name, PREFIX, SUFFIX)?;
-        match open_relative_with_share_attributes_and_security(
+        match open_relative_with_options(
             directory.file(),
             &name[..length],
-            GENERIC_READ | GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
-            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
-            FILE_CREATE,
-            FILE_SHARE_READ | FILE_SHARE_DELETE,
-            FILE_ATTRIBUTE_NORMAL,
-            security_descriptor.as_ptr(),
+            RelativeOpenOptions {
+                desired_access: GENERIC_READ
+                    | GENERIC_WRITE
+                    | FILE_READ_ATTRIBUTES
+                    | DELETE
+                    | SYNCHRONIZE,
+                create_options: FILE_NON_DIRECTORY_FILE
+                    | FILE_OPEN_REPARSE_POINT
+                    | FILE_SYNCHRONOUS_IO_NONALERT,
+                disposition: FILE_CREATE,
+                share_access: FILE_SHARE_READ | FILE_SHARE_DELETE,
+                file_attributes: FILE_ATTRIBUTE_NORMAL,
+                security_descriptor: Some(&security_descriptor),
+            },
         ) {
             Ok(file) => {
                 return Ok(StagingFile {
