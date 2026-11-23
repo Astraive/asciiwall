@@ -602,19 +602,14 @@ impl FillLease {
         cancellation: &CancellationToken,
     ) -> Result<FrameDescriptor, RuntimeError> {
         let _cpu_permit = self.resource_budget.try_acquire_cpu()?;
-        self.publish_inner(
-            metadata,
-            Some((budget, cancellation)),
-            Some(cancellation),
-            || {},
-        )
+        self.publish_inner(metadata, Some((budget, cancellation)), Some(cancellation))
     }
 
     pub(crate) fn publish_prevalidated(
         self,
         metadata: RasterDescriptorMetadata,
     ) -> Result<FrameDescriptor, RuntimeError> {
-        self.publish_inner(metadata, None, None, || {})
+        self.publish_inner(metadata, None, None)
     }
 
     pub(crate) fn publish_prevalidated_if_not_cancelled(
@@ -622,32 +617,15 @@ impl FillLease {
         metadata: RasterDescriptorMetadata,
         cancellation: &CancellationToken,
     ) -> Result<FrameDescriptor, RuntimeError> {
-        self.publish_inner(metadata, None, Some(cancellation), || {})
+        self.publish_inner(metadata, None, Some(cancellation))
     }
 
-    #[cfg(test)]
-    pub(crate) fn publish_prevalidated_if_not_cancelled_with_hook<F>(
-        self,
-        metadata: RasterDescriptorMetadata,
-        cancellation: &CancellationToken,
-        before_commit: F,
-    ) -> Result<FrameDescriptor, RuntimeError>
-    where
-        F: FnOnce(),
-    {
-        self.publish_inner(metadata, None, Some(cancellation), before_commit)
-    }
-
-    fn publish_inner<F>(
+    fn publish_inner(
         mut self,
         metadata: RasterDescriptorMetadata,
         validation: Option<(&Budget, &CancellationToken)>,
         publication_cancellation: Option<&CancellationToken>,
-        before_commit: F,
-    ) -> Result<FrameDescriptor, RuntimeError>
-    where
-        F: FnOnce(),
-    {
+    ) -> Result<FrameDescriptor, RuntimeError> {
         let mut inner = lock_unpoisoned(&self.inner);
         if inner.generation != self.generation {
             return Err(RuntimeError::StaleGeneration);
@@ -701,8 +679,6 @@ impl FillLease {
             slot.lease_attached = false;
             descriptor
         };
-        // The test hook follows the handoff precheck and immediately precedes the atomic gate.
-        before_commit();
         let descriptor = match publication_cancellation {
             Some(cancellation) => cancellation
                 .commit_if_not_cancelled(publish)
