@@ -6,6 +6,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
 use crate::document::MAX_CONFIG_BYTES;
 use fs2::FileExt;
 
@@ -30,7 +33,7 @@ pub(crate) trait ConfigStore: Send {
     ) -> Result<(), StoreError>;
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 type TargetRaceHook = Box<dyn FnOnce(&Path) + Send>;
 #[cfg(all(test, windows))]
 type TemporaryDaclHook = Box<dyn FnOnce(&File) + Send>;
@@ -45,10 +48,12 @@ pub(crate) struct FileStore {
     fail_indeterminate_replace_at: Option<PersistStage>,
     #[cfg(test)]
     fail_rollback_indeterminate_replace: std::cell::Cell<bool>,
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     inject_after_absent_check: Option<TargetRaceHook>,
     #[cfg(all(test, windows))]
     inspect_temporary_dacl: Option<TemporaryDaclHook>,
+    #[cfg(all(test, not(windows)))]
+    fail_no_replace_unsupported: bool,
 }
 
 impl FileStore {
@@ -63,10 +68,12 @@ impl FileStore {
             fail_indeterminate_replace_at: None,
             #[cfg(test)]
             fail_rollback_indeterminate_replace: std::cell::Cell::new(false),
-            #[cfg(all(test, windows))]
+            #[cfg(test)]
             inject_after_absent_check: None,
             #[cfg(all(test, windows))]
             inspect_temporary_dacl: None,
+            #[cfg(all(test, not(windows)))]
+            fail_no_replace_unsupported: false,
         }
     }
 
@@ -194,7 +201,7 @@ impl FileStore {
             Err(error) => return Err(WriteFailure::before_replace(error)),
         };
         let mut temporary = TempFile::new(temporary_path);
-        #[cfg(all(test, windows))]
+        #[cfg(test)]
         if target_expectation == TargetExpectation::Absent
             && let Some(inject) = self.inject_after_absent_check.take()
         {
@@ -314,6 +321,15 @@ impl FileStore {
                 displaced_path: None,
             })
         } else if target_expectation == TargetExpectation::Absent {
+            #[cfg(all(test, not(windows)))]
+            if std::mem::take(&mut self.fail_no_replace_unsupported) {
+                return publish_new_file_with(
+                    temporary,
+                    target,
+                    |_, _| Err(no_replace_unsupported_error()),
+                    |_, _| Err(no_replace_unsupported_error()),
+                );
+            }
             publish_new_file(temporary, target)
         } else {
             replace_file(temporary, target)
@@ -448,12 +464,16 @@ impl FileStore {
     pub(crate) fn inject_rollback_indeterminate_replace(&mut self) {
         self.fail_rollback_indeterminate_replace.set(true);
     }
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub(crate) fn inject_after_absent_check(
         &mut self,
         inject: impl FnOnce(&Path) + Send + 'static,
     ) {
         self.inject_after_absent_check = Some(Box::new(inject));
+    }
+    #[cfg(all(test, not(windows)))]
+    pub(crate) fn inject_no_replace_unsupported(&mut self) {
+        self.fail_no_replace_unsupported = true;
     }
 
     #[cfg(all(test, windows))]
@@ -1015,10 +1035,166 @@ fn publish_new_file(temporary: &Path, target: &Path) -> Result<(), ReplaceFailur
     })
 }
 
+#[cfg(target_os = "linux")]
+const RENAME_NOREPLACE: libc::c_uint = 1;
+
+#[cfg(target_os = "linux")]
+fn exclusive_rename_new_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    let temporary = c_path(temporary)?;
+    let target = c_path(target)?;
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD as libc::c_long,
+            temporary.as_ptr(),
+            libc::AT_FDCWD as libc::c_long,
+            target.as_ptr(),
+            RENAME_NOREPLACE as libc::c_long,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        let error = std::io::Error::last_os_error();
+        Err(if exclusive_rename_is_unsupported(&error) {
+            no_replace_unsupported_error()
+        } else {
+            error
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+const RENAME_EXCL: libc::c_uint = 0x0000_0004;
+
+#[cfg(target_os = "macos")]
+#[link(name = "System")]
+unsafe extern "C" {
+    fn renamex_np(
+        old_path: *const libc::c_char,
+        new_path: *const libc::c_char,
+        flags: libc::c_uint,
+    ) -> libc::c_int;
+}
+
+#[cfg(target_os = "macos")]
+fn exclusive_rename_new_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    let temporary = c_path(temporary)?;
+    let target = c_path(target)?;
+    let result = unsafe { renamex_np(temporary.as_ptr(), target.as_ptr(), RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        let error = std::io::Error::last_os_error();
+        Err(if exclusive_rename_is_unsupported(&error) {
+            no_replace_unsupported_error()
+        } else {
+            error
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn c_path(path: &Path) -> std::io::Result<CString> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn exclusive_rename_is_unsupported(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    let Some(code) = error.raw_os_error() else {
+        return false;
+    };
+    #[cfg(target_os = "linux")]
+    {
+        code == libc::EINVAL
+            || code == libc::ENOSYS
+            || code == libc::EOPNOTSUPP
+            || code == libc::EPERM
+    }
+    #[cfg(target_os = "macos")]
+    {
+        code == libc::ENOTSUP
+    }
+}
+
+#[cfg(all(
+    not(windows),
+    not(any(target_os = "linux", target_os = "macos"))
+))]
+fn exclusive_rename_new_file(_temporary: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(no_replace_unsupported_error())
+}
+
+#[cfg(not(windows))]
+fn no_replace_unsupported_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no safe atomic no-replace publication primitive is available for this filesystem",
+    )
+}
+
+#[cfg(all(not(windows), unix))]
+fn hard_link_is_unsupported(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    matches!(
+        error.raw_os_error(),
+        Some(code)
+            if code == libc::EINVAL
+                || code == libc::ENOSYS
+                || code == libc::ENOTSUP
+                || code == libc::EPERM
+    )
+}
+
+#[cfg(all(not(windows), not(unix)))]
+fn hard_link_is_unsupported(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::Unsupported
+}
+
 #[cfg(not(windows))]
 fn publish_new_file(temporary: &Path, target: &Path) -> Result<(), ReplaceFailure> {
-    fs::hard_link(temporary, target).map_err(|error| ReplaceFailure {
-        error,
+    publish_new_file_with(
+        temporary,
+        target,
+        exclusive_rename_new_file,
+        |temporary, target| fs::hard_link(temporary, target),
+    )
+}
+
+// Exclusive rename may be filesystem-dependent; the fallback is also no-replace.
+
+#[cfg(not(windows))]
+fn publish_new_file_with(
+    temporary: &Path,
+    target: &Path,
+    exclusive_rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    hard_link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), ReplaceFailure> {
+    match exclusive_rename(temporary, target) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {}
+        Err(error) => {
+            return Err(ReplaceFailure {
+                error,
+                replaced: false,
+                indeterminate: false,
+                displaced_path: None,
+            });
+        }
+    }
+
+    hard_link(temporary, target).map_err(|error| ReplaceFailure {
+        error: if hard_link_is_unsupported(&error) {
+            no_replace_unsupported_error()
+        } else {
+            error
+        },
         replaced: false,
         indeterminate: false,
         displaced_path: None,
@@ -1608,6 +1784,44 @@ mod tests {
         assert!(failure.indeterminate);
         assert_eq!(fs::read(&target).unwrap(), b"raced-target");
         assert_eq!(fs::read(&backup).unwrap(), b"original-target");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unsupported_no_replace_publication_preserves_raced_target() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let target_path = path.clone();
+        let mut store = FileStore::new(&path);
+        store.inject_after_absent_check(move |target| {
+            assert_eq!(target, target_path.as_path());
+            fs::write(target, b"raced-main").unwrap();
+        });
+        store.inject_no_replace_unsupported();
+
+        let error = store
+            .commit(None, b"candidate-settings", BackupMode::ReplaceWithPrevious)
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            StoreError::Io {
+                operation: StoreOperation::Replace,
+                kind: std::io::ErrorKind::Unsupported,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("no-replace publication"));
+        assert_eq!(fs::read(&path).unwrap(), b"raced-main");
+        assert!(
+            !fs::read_dir(&directory.0)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.tmp-"))
+        );
     }
     #[cfg(windows)]
     #[test]

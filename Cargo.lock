@@ -25,6 +25,7 @@ name = "ascii-config"
 version = "0.1.0"
 dependencies = [
  "fs2",
+ "libc",
  "proptest",
  "toml",
  "toml_edit",
