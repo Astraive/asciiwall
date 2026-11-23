@@ -997,7 +997,7 @@ fn registry_validation_rejects_windows_path_aliases() {
         .packages
         .get_mut("org.example.sample")
         .expect("first package")
-        .relative_path = "packages/Shared/path.".to_owned();
+        .relative_path = "packages./Shared /path.".to_owned();
     shared.packages.insert(
         "org.example.second".to_owned(),
         InstallEntry {
@@ -1013,6 +1013,88 @@ fn registry_validation_rejects_windows_path_aliases() {
             "package paths must be unique"
         ))
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn registry_validation_rejects_windows_ordinal_case_aliases() {
+    let mut aliases = registry("1.0.0");
+    aliases
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/I/shared".to_owned();
+    aliases.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: "packages/i/SHARED".to_owned(),
+        },
+    );
+
+    assert!(matches!(
+        aliases.validate(),
+        Err(StorageError::InvalidRegistry(
+            "package paths must be unique"
+        ))
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn registry_validation_accepts_unicode_and_distinguishes_dotless_i_paths() {
+    let mut distinct = registry("1.0.0");
+    distinct
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/I/shared".to_owned();
+    distinct.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: "packages/ı/shared".to_owned(),
+        },
+    );
+    distinct.packages.insert(
+        "org.example.third".to_owned(),
+        InstallEntry {
+            package_version: "3.0.0".to_owned(),
+            sha256: "c".repeat(64),
+            relative_path: "packages/秘密/shared".to_owned(),
+        },
+    );
+
+    assert!(
+        distinct.validate().is_ok(),
+        "Windows ordinal comparison accepts distinct Unicode paths"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn registry_validation_accepts_ascii_k_and_kelvin_sign_as_distinct_paths() {
+    let mut distinct = registry("1.0.0");
+    distinct
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/K".to_owned();
+    distinct.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: "packages/K".to_owned(),
+        },
+    );
+
+    assert!(
+        distinct.validate().is_ok(),
+        "NTFS ordinal comparison keeps the Kelvin sign distinct from ASCII K"
+    );
 }
 
 #[test]
@@ -1858,6 +1940,58 @@ fn oversized_newer_settings_schema_is_not_replaced_by_older_backup() {
 }
 
 #[test]
+fn oversized_schema_scan_ignores_fake_versions_in_multiline_strings() {
+    const CONFIG_MAX_BYTES: usize = 8 * 1024 * 1024;
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let validate_schema_v1 = |value: &TomlValue| {
+        (value.get("schema_version").and_then(TomlValue::as_integer) == Some(1))
+            .then_some(())
+            .ok_or("unsupported settings schema")
+    };
+    let supported = ParsedToml::from_toml(
+        b"schema_version = 1\nrevision = 1\n[settings]\ntheme = \"known-good\"\n",
+    )
+    .expect("parse supported TOML");
+    save_current_config(&storage, &supported, validate_schema_v1).expect("save supported schema");
+    let current_supported = ParsedToml::from_toml(
+        b"schema_version = 1\nrevision = 2\n[settings]\ntheme = \"current\"\n",
+    )
+    .expect("parse current supported TOML");
+    save_current_config(&storage, &current_supported, validate_schema_v1)
+        .expect("establish schema-1 last-good backup");
+    let backup_path = storage.config_backup_path();
+    let known_good_backup = fs::read(&backup_path).expect("read schema-1 last-good backup");
+
+    let payload = "x".repeat(CONFIG_MAX_BYTES);
+    let oversized_current = format!(
+        "basic_note = \"\"\"\nschema_version = 1\n\"\"\"\n\
+         literal_note = '''\nschema_version = 1\n'''\n\
+         schema_version = 2\nrevision = 3\npayload = \"{payload}\"\n"
+    )
+    .into_bytes();
+    assert!(oversized_current.len() > CONFIG_MAX_BYTES);
+    let config_path = storage.config_path();
+    fs::write(&config_path, &oversized_current).expect("write oversized schema-2 config");
+
+    assert!(matches!(
+        storage.restore_config_from_backup(Some(&oversized_current), validate_schema_v1),
+        Err(StorageError::UnsupportedVersion {
+            kind: "settings configuration",
+            version: 2
+        })
+    ));
+    assert_eq!(
+        fs::read(&config_path).expect("schema-2 config remains untouched"),
+        oversized_current
+    );
+    assert_eq!(
+        fs::read(&backup_path).expect("schema-1 backup remains untouched"),
+        known_good_backup
+    );
+}
+
+#[test]
 fn restore_rejects_versioned_versionless_comparisons() {
     let temp = TempDir::new();
     let roots = linux_roots(temp.path());
@@ -2238,6 +2372,24 @@ fn diagnostic_log_rotates_within_bounds_and_redacts_local_media_paths() {
     assert!(!contents.contains(&home.to_string_lossy().to_string()));
     assert!(!contents.contains("secret-frame.png"));
     assert!(!contents.contains("private-clip.mov"));
+}
+
+#[test]
+fn diagnostic_log_redacts_drive_relative_paths_after_unicode_punctuation() {
+    let temp = TempDir::new();
+    let log = DiagnosticLog::new(
+        temp.path().join("unicode-drive-logs"),
+        temp.path().join("home"),
+        LogLimits::new(1024, 2, 512).expect("valid bounds"),
+    );
+    log.append("opened “C:private.txt” but AC:private and A: status are harmless")
+        .expect("append diagnostic event");
+
+    let record = fs::read_to_string(log.current_path()).expect("read diagnostic record");
+    assert!(record.contains("[REDACTED_PATH]"));
+    assert!(!record.contains("private.txt"));
+    assert!(record.contains("AC:private"));
+    assert!(record.contains("A: status"));
 }
 
 #[test]
@@ -2656,6 +2808,30 @@ fn portable_export_redacts_machine_paths_after_colon_delimiters() {
     }
     assert_eq!(portable.content()["benign_colon_text"], json!("status:"));
     assert_eq!(portable.content()["ordinary_text"], json!("A: status"));
+}
+
+#[test]
+fn portable_export_redacts_drive_relative_paths_after_unicode_punctuation() {
+    let source = json!({
+        "curly_quoted_drive_relative": "opened “C:private.txt” before import",
+        "harmless_identifier": "AC:private.txt is a harmless identifier",
+        "harmless_status": "A: status"
+    });
+    let portable =
+        ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
+            .expect("portable export");
+
+    assert!(
+        portable
+            .content()
+            .get("curly_quoted_drive_relative")
+            .is_none()
+    );
+    assert_eq!(
+        portable.content()["harmless_identifier"],
+        json!("AC:private.txt is a harmless identifier")
+    );
+    assert_eq!(portable.content()["harmless_status"], json!("A: status"));
 }
 
 #[test]
