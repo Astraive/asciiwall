@@ -49,6 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Poll cancellation inside JPEG marker/entropy fill-byte runs and stop charging the owned PNG snapshot again as codec scratch; bound PNG scratch by row/inflater buffers and the largest non-IDAT chunk buffer, with large ancillary and IDAT regressions (`[IMG-001]`).
 - Preflight premultiplied raster channels before allocating normalized output, charge the cancellable validation pass to work budgets, and test cancellation within that pass ([CNV-002]).
 - Made `NormalizedRaster` intentionally non-`Clone` to prevent unbudgeted pixel-buffer copies, and clarified that `ascii-media` decoding is outside this PR's scope ([CNV-002]).
+- Keep the published frame intact when a one-slot replacement is cancelled by staging within bounded, budget-charged resources (`[COR-005]`).
 - Assign checked, non-reused process-unique identities to public COR-005 frame descriptors so same-generation metadata from different pools cannot alias; add deterministic public-path regression coverage ([COR-005]).
 - Replace deprecated `AtomicU64::fetch_update` with `try_update` for COR-005 pool identities, preserving checked non-wrapping allocation and relaxed ordering (`[COR-005]`).
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
