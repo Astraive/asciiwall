@@ -280,7 +280,7 @@ fn restrictive_creation_dacl() -> std::io::Result<(OwnedWindowsSecurityDescripto
 }
 
 #[cfg(windows)]
-fn set_restrictive_dacl(file: &File) -> std::io::Result<()> {
+pub(super) fn set_restrictive_dacl(file: &File) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use winapi::um::{
         accctrl::SE_FILE_OBJECT,
@@ -391,6 +391,121 @@ fn snapshot_windows_dacl(dacl: WindowsDacl) -> std::io::Result<WindowsDaclSnapsh
 pub(super) fn windows_dacl_snapshot(path: &Path) -> std::io::Result<WindowsDaclSnapshot> {
     let (_descriptor, dacl) = read_windows_dacl(path)?;
     snapshot_windows_dacl(dacl)
+}
+#[cfg(all(windows, test))]
+pub(super) fn windows_dacl_snapshot_handle(file: &File) -> std::io::Result<WindowsDaclSnapshot> {
+    let (_descriptor, dacl) = read_windows_dacl_handle(file)?;
+    snapshot_windows_dacl(dacl)
+}
+
+#[cfg(all(windows, test))]
+pub(super) fn set_permissive_windows_dacl(path: &Path) -> std::io::Result<()> {
+    use winapi::{
+        shared::{
+            minwindef::BOOL,
+            sddl::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
+        },
+        um::{
+            aclapi::SetNamedSecurityInfoW,
+            securitybaseapi::GetSecurityDescriptorDacl,
+            winnt::{
+                DACL_SECURITY_INFORMATION, PACL, PSECURITY_DESCRIPTOR,
+                PROTECTED_DACL_SECURITY_INFORMATION,
+            },
+        },
+    };
+
+    let mut sddl = "D:P(A;;GA;;;WD)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_mut_ptr(),
+            u32::from(SDDL_REVISION_1),
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let descriptor = OwnedWindowsSecurityDescriptor(descriptor);
+    if descriptor.0.is_null() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Windows returned no permissive security descriptor",
+        ));
+    }
+    let mut present: BOOL = 0;
+    let mut acl: PACL = std::ptr::null_mut();
+    let mut defaulted: BOOL = 0;
+    if unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut acl, &mut defaulted) }
+        == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    if present == 0 || acl.is_null() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Windows returned no permissive DACL",
+        ));
+    }
+
+    let mut path = windows_path(path)?;
+    let status = unsafe {
+        SetNamedSecurityInfoW(
+            path.as_mut_ptr(),
+            winapi::um::accctrl::SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl,
+            std::ptr::null_mut(),
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(status as i32))
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn publish_new_file(replacement: &Path, target: &Path) -> Result<(), ReplaceFailure> {
+    use winapi::um::winbase::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    let mut replacement_name = windows_path(replacement).map_err(|error| ReplaceFailure {
+        error,
+        replaced: false,
+        indeterminate: false,
+    })?;
+    let mut target_name = windows_path(target).map_err(|error| ReplaceFailure {
+        error,
+        replaced: false,
+        indeterminate: false,
+    })?;
+
+    // Without MOVEFILE_REPLACE_EXISTING, MoveFileExW atomically fails if the
+    // destination already exists; no path check can turn a raced target into
+    // a replacement.
+    let status = unsafe {
+        MoveFileExW(
+            replacement_name.as_mut_ptr(),
+            target_name.as_mut_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if status != 0 {
+        Ok(())
+    } else {
+        Err(ReplaceFailure {
+            error: std::io::Error::last_os_error(),
+            replaced: false,
+            indeterminate: false,
+        })
+    }
 }
 
 #[cfg(all(windows, test))]
@@ -544,3 +659,4 @@ pub(super) fn replace_file(
         }
     }
 }
+

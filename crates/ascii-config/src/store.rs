@@ -40,6 +40,10 @@ pub(crate) struct FileStore {
     fail_indeterminate_replace_at: Option<PersistStage>,
     #[cfg(test)]
     fail_rollback_indeterminate_replace: std::cell::Cell<bool>,
+    #[cfg(all(test, windows))]
+    inject_after_absent_check: Option<Box<dyn FnOnce(&Path) + Send>>,
+    #[cfg(all(test, windows))]
+    inspect_temporary_dacl: Option<Box<dyn FnOnce(&File) + Send>>,
 }
 
 impl FileStore {
@@ -54,6 +58,10 @@ impl FileStore {
             fail_indeterminate_replace_at: None,
             #[cfg(test)]
             fail_rollback_indeterminate_replace: std::cell::Cell::new(false),
+            #[cfg(all(test, windows))]
+            inject_after_absent_check: None,
+            #[cfg(all(test, windows))]
+            inspect_temporary_dacl: None,
         }
     }
 
@@ -158,6 +166,7 @@ impl FileStore {
         target: &Path,
         bytes: &[u8],
         replace_stage: PersistStage,
+        target_expectation: TargetExpectation,
     ) -> Result<(), WriteFailure> {
         let parent = parent_directory(target);
         if let Err(error) = fs::create_dir_all(&parent) {
@@ -180,12 +189,22 @@ impl FileStore {
             Err(error) => return Err(WriteFailure::before_replace(error)),
         };
         let mut temporary = TempFile::new(temporary_path);
-        if let Err(error) = preserve_target_dacl(target, &temporary_file) {
+        #[cfg(all(test, windows))]
+        if target_expectation == TargetExpectation::Absent
+            && let Some(inject) = self.inject_after_absent_check.take()
+        {
+            inject(target);
+        }
+        if let Err(error) = prepare_target_dacl(target, &temporary_file, target_expectation) {
             drop(temporary_file);
             return Err(WriteFailure::before_replace(StoreError::io(
                 StoreOperation::CreateTemporary,
                 error,
             )));
+        }
+        #[cfg(all(test, windows))]
+        if let Some(inspect) = self.inspect_temporary_dacl.take() {
+            inspect(&temporary_file);
         }
 
         if let Err(error) = self.fail(PersistStage::TempWrite) {
@@ -223,7 +242,12 @@ impl FileStore {
             return Err(WriteFailure::before_replace(error));
         }
 
-        let replace_result = self.replace_temporary(temporary.path(), target, replace_stage);
+        let replace_result = self.replace_temporary(
+            temporary.path(),
+            target,
+            replace_stage,
+            target_expectation,
+        );
         if let Err(failure) = replace_result {
             let ReplaceFailure {
                 error: replace_error,
@@ -273,6 +297,7 @@ impl FileStore {
         temporary: &Path,
         target: &Path,
         replace_stage: PersistStage,
+        target_expectation: TargetExpectation,
     ) -> Result<(), ReplaceFailure> {
         #[cfg(test)]
         if self.fail_indeterminate_replace_at == Some(replace_stage) {
@@ -287,6 +312,8 @@ impl FileStore {
                 indeterminate: false,
                 displaced_path: None,
             })
+        } else if target_expectation == TargetExpectation::Absent {
+            publish_new_file(temporary, target)
         } else {
             replace_file(temporary, target)
         }
@@ -346,6 +373,13 @@ impl FileStore {
         }
     }
 
+    fn restore_archived_if_absent(&self, archive: &Path) -> Result<(), StoreError> {
+        publish_new_file(archive, &self.path)
+            .map_err(|failure| StoreError::io(StoreOperation::Rollback, failure.error))?;
+        sync_parent(&parent_directory(&self.path))
+            .map_err(|error| StoreError::io(StoreOperation::Rollback, error))
+    }
+
     fn atomic_write_uninjected(&self, target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
         let parent = parent_directory(target);
         fs::create_dir_all(&parent)
@@ -355,7 +389,7 @@ impl FileStore {
         let (path, mut file) = create_temp_uninjected(target, mode)
             .map_err(|error| StoreError::io(StoreOperation::Rollback, error))?;
         let mut temporary = TempFile::new(path);
-        if let Err(error) = preserve_target_dacl(target, &file) {
+        if let Err(error) = prepare_target_dacl(target, &file, TargetExpectation::Present) {
             drop(file);
             return Err(StoreError::io(StoreOperation::Rollback, error));
         }
@@ -413,6 +447,21 @@ impl FileStore {
     pub(crate) fn inject_rollback_indeterminate_replace(&mut self) {
         self.fail_rollback_indeterminate_replace.set(true);
     }
+    #[cfg(all(test, windows))]
+    pub(crate) fn inject_after_absent_check(
+        &mut self,
+        inject: impl FnOnce(&Path) + Send + 'static,
+    ) {
+        self.inject_after_absent_check = Some(Box::new(inject));
+    }
+
+    #[cfg(all(test, windows))]
+    pub(crate) fn inspect_temporary_dacl(
+        &mut self,
+        inspect: impl FnOnce(&File) + Send + 'static,
+    ) {
+        self.inspect_temporary_dacl = Some(Box::new(inspect));
+    }
 }
 
 impl ConfigStore for FileStore {
@@ -456,14 +505,23 @@ impl ConfigStore for FileStore {
             self.fail(PersistStage::ArchiveReplace)?;
             archive_without_replace(&self.path, &archive)
                 .map_err(|error| StoreError::io(StoreOperation::ArchiveCorrupt, error))?;
-            return match self.atomic_write(&self.path.clone(), contents, PersistStage::MainReplace)
-            {
+            return match self.atomic_write(
+                &self.path.clone(),
+                contents,
+                PersistStage::MainReplace,
+                TargetExpectation::Absent,
+            ) {
                 Ok(()) => Ok(()),
                 Err(failure) if failure.indeterminate => {
                     Err(indeterminate_without_rollback(failure))
                 }
                 Err(failure) => {
-                    if let Err(rollback) = self.restore_previous(None, Some(&archive)) {
+                    let rollback = if failure.replaced {
+                        self.restore_previous(None, Some(&archive))
+                    } else {
+                        self.restore_archived_if_absent(&archive)
+                    };
+                    if let Err(rollback) = rollback {
                         Err(StoreError::CommitIndeterminate {
                             cause: failure.error.to_string(),
                             rollback: rollback.to_string(),
@@ -479,9 +537,14 @@ impl ConfigStore for FileStore {
             BackupMode::ReplaceWithPrevious => {
                 if let Some(previous_bytes) = previous.as_deref() {
                     let backup = self.backup_path();
-                    if let Err(failure) =
-                        self.atomic_write(&backup, previous_bytes, PersistStage::BackupReplace)
-                    {
+                    let target_expectation = initial_target_expectation(&backup)
+                        .map_err(|error| StoreError::io(StoreOperation::ReadPermissions, error))?;
+                    if let Err(failure) = self.atomic_write(
+                        &backup,
+                        previous_bytes,
+                        PersistStage::BackupReplace,
+                        target_expectation,
+                    ) {
                         return Err(if failure.indeterminate {
                             indeterminate_without_rollback(failure)
                         } else {
@@ -493,9 +556,12 @@ impl ConfigStore for FileStore {
             BackupMode::PreserveLastGood => {
                 if let Some(previous_bytes) = previous.as_deref() {
                     let archive = self.unique_corrupt_path();
-                    if let Err(failure) =
-                        self.atomic_write(&archive, previous_bytes, PersistStage::ArchiveReplace)
-                    {
+                    if let Err(failure) = self.atomic_write(
+                        &archive,
+                        previous_bytes,
+                        PersistStage::ArchiveReplace,
+                        TargetExpectation::Absent,
+                    ) {
                         return Err(if failure.indeterminate {
                             indeterminate_without_rollback(failure)
                         } else {
@@ -506,7 +572,17 @@ impl ConfigStore for FileStore {
             }
         }
 
-        match self.atomic_write(&self.path.clone(), contents, PersistStage::MainReplace) {
+        let target_expectation = if previous.is_some() {
+            TargetExpectation::Present
+        } else {
+            TargetExpectation::Absent
+        };
+        match self.atomic_write(
+            &self.path.clone(),
+            contents,
+            PersistStage::MainReplace,
+            target_expectation,
+        ) {
             Ok(()) => Ok(()),
             Err(failure) if failure.indeterminate => Err(indeterminate_without_rollback(failure)),
             Err(failure) if failure.replaced => {
@@ -522,6 +598,12 @@ impl ConfigStore for FileStore {
             Err(failure) => Err(failure.error),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TargetExpectation {
+    Absent,
+    Present,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -789,6 +871,16 @@ fn parent_directory(path: &Path) -> PathBuf {
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
+fn initial_target_expectation(path: &Path) -> std::io::Result<TargetExpectation> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(TargetExpectation::Present),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(TargetExpectation::Absent)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn restrictive_mode(path: &Path) -> std::io::Result<u32> {
     #[cfg(unix)]
     {
@@ -896,9 +988,51 @@ fn preserve_target_dacl(target: &Path, temporary: &File) -> std::io::Result<()> 
     crate::windows_acl::preserve_target_dacl(target, temporary)
 }
 
+#[cfg(windows)]
+fn prepare_target_dacl(
+    target: &Path,
+    temporary: &File,
+    target_expectation: TargetExpectation,
+) -> std::io::Result<()> {
+    match target_expectation {
+        TargetExpectation::Absent => crate::windows_acl::set_restrictive_dacl(temporary),
+        TargetExpectation::Present => preserve_target_dacl(target, temporary),
+    }
+}
+
 #[cfg(not(windows))]
-fn preserve_target_dacl(_target: &Path, _temporary: &File) -> std::io::Result<()> {
+fn prepare_target_dacl(
+    _target: &Path,
+    _temporary: &File,
+    _target_expectation: TargetExpectation,
+) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(windows)]
+fn publish_new_file(temporary: &Path, target: &Path) -> Result<(), ReplaceFailure> {
+    crate::windows_acl::publish_new_file(temporary, target).map_err(|failure| ReplaceFailure {
+        error: failure.error,
+        replaced: failure.replaced,
+        indeterminate: failure.indeterminate,
+        displaced_path: None,
+    })
+}
+
+#[cfg(not(windows))]
+fn publish_new_file(temporary: &Path, target: &Path) -> Result<(), ReplaceFailure> {
+    fs::hard_link(temporary, target).map_err(|error| ReplaceFailure {
+        error,
+        replaced: false,
+        indeterminate: false,
+        displaced_path: None,
+    })?;
+    fs::remove_file(temporary).map_err(|error| ReplaceFailure {
+        error,
+        replaced: true,
+        indeterminate: false,
+        displaced_path: None,
+    })
 }
 
 fn create_temp_uninjected(target: &Path, mode: u32) -> std::io::Result<(PathBuf, File)> {
@@ -938,6 +1072,8 @@ mod tests {
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
+    #[cfg(windows)]
+    use std::sync::{Arc, Mutex};
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1476,5 +1612,121 @@ mod tests {
         assert!(failure.indeterminate);
         assert_eq!(fs::read(&target).unwrap(), b"raced-target");
         assert_eq!(fs::read(&backup).unwrap(), b"original-target");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn raced_first_main_creation_keeps_target_and_temp_dacls_separate() {
+        use winapi::um::winnt::SE_DACL_PROTECTED;
+
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let raced_dacl = Arc::new(Mutex::new(None));
+        let raced_dacl_slot = Arc::clone(&raced_dacl);
+        let target_path = path.clone();
+        let mut store = FileStore::new(&path);
+        store.inject_after_absent_check(move |target| {
+            assert_eq!(target, target_path.as_path());
+            fs::write(target, b"raced-main").unwrap();
+            crate::windows_acl::set_permissive_windows_dacl(target).unwrap();
+            *raced_dacl_slot.lock().unwrap() =
+                Some(crate::windows_acl::windows_dacl_snapshot(target).unwrap());
+        });
+        let temporary_dacl = Arc::new(Mutex::new(None));
+        let temporary_dacl_slot = Arc::clone(&temporary_dacl);
+        store.inspect_temporary_dacl(move |file| {
+            *temporary_dacl_slot.lock().unwrap() =
+                Some(crate::windows_acl::windows_dacl_snapshot_handle(file).unwrap());
+        });
+
+        assert!(matches!(
+            store.commit(None, b"candidate-settings", BackupMode::ReplaceWithPrevious),
+            Err(StoreError::Io {
+                operation: StoreOperation::Replace,
+                ..
+            })
+        ));
+
+        assert_eq!(fs::read(&path).unwrap(), b"raced-main");
+        let raced_dacl = raced_dacl.lock().unwrap().take().unwrap();
+        let temporary_dacl = temporary_dacl.lock().unwrap().take().unwrap();
+        let restrictive_dacl = crate::windows_acl::restrictive_windows_dacl_snapshot().unwrap();
+        assert_ne!(raced_dacl.control & SE_DACL_PROTECTED, 0);
+        assert_ne!(raced_dacl, restrictive_dacl);
+        assert_eq!(temporary_dacl, restrictive_dacl);
+        assert_eq!(
+            crate::windows_acl::windows_dacl_snapshot(&path).unwrap(),
+            raced_dacl
+        );
+        assert!(
+            !fs::read_dir(&directory.0)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.tmp-"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn raced_first_backup_creation_keeps_target_and_temp_dacls_separate() {
+        use winapi::um::winnt::SE_DACL_PROTECTED;
+
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let backup = directory.0.join("settings.toml.bak");
+        fs::write(&path, b"last-valid-main").unwrap();
+        let raced_dacl = Arc::new(Mutex::new(None));
+        let raced_dacl_slot = Arc::clone(&raced_dacl);
+        let backup_path = backup.clone();
+        let mut store = FileStore::new(&path);
+        store.inject_after_absent_check(move |target| {
+            assert_eq!(target, backup_path.as_path());
+            fs::write(target, b"raced-backup").unwrap();
+            crate::windows_acl::set_permissive_windows_dacl(target).unwrap();
+            *raced_dacl_slot.lock().unwrap() =
+                Some(crate::windows_acl::windows_dacl_snapshot(target).unwrap());
+        });
+        let temporary_dacl = Arc::new(Mutex::new(None));
+        let temporary_dacl_slot = Arc::clone(&temporary_dacl);
+        store.inspect_temporary_dacl(move |file| {
+            *temporary_dacl_slot.lock().unwrap() =
+                Some(crate::windows_acl::windows_dacl_snapshot_handle(file).unwrap());
+        });
+
+        assert!(matches!(
+            store.commit(
+                Some(b"last-valid-main"),
+                b"candidate-settings",
+                BackupMode::ReplaceWithPrevious,
+            ),
+            Err(StoreError::Io {
+                operation: StoreOperation::Replace,
+                ..
+            })
+        ));
+
+        assert_eq!(fs::read(&path).unwrap(), b"last-valid-main");
+        assert_eq!(fs::read(&backup).unwrap(), b"raced-backup");
+        let raced_dacl = raced_dacl.lock().unwrap().take().unwrap();
+        let temporary_dacl = temporary_dacl.lock().unwrap().take().unwrap();
+        let restrictive_dacl = crate::windows_acl::restrictive_windows_dacl_snapshot().unwrap();
+        assert_ne!(raced_dacl.control & SE_DACL_PROTECTED, 0);
+        assert_ne!(raced_dacl, restrictive_dacl);
+        assert_eq!(temporary_dacl, restrictive_dacl);
+        assert_eq!(
+            crate::windows_acl::windows_dacl_snapshot(&backup).unwrap(),
+            raced_dacl
+        );
+        assert!(
+            !fs::read_dir(&directory.0)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.bak.tmp-"))
+        );
     }
 }
