@@ -988,6 +988,83 @@ fn registry_validation_rejects_shared_package_paths() {
         ))
     ));
 }
+#[cfg(target_os = "macos")]
+#[test]
+fn registry_validation_rejects_macos_case_aliases() {
+    let mut aliases = registry("1.0.0");
+    aliases
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/I/shared".to_owned();
+    aliases.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: "packages/i/SHARED".to_owned(),
+        },
+    );
+
+    assert!(matches!(
+        aliases.validate(),
+        Err(StorageError::InvalidRegistry(
+            "package paths must be unique"
+        ))
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn registry_validation_rejects_macos_canonical_unicode_aliases() {
+    let mut aliases = registry("1.0.0");
+    aliases
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/café/shared".to_owned();
+    aliases.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: "packages/cafe\u{301}/shared".to_owned(),
+        },
+    );
+
+    assert!(matches!(
+        aliases.validate(),
+        Err(StorageError::InvalidRegistry(
+            "package paths must be unique"
+        ))
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn registry_validation_rejects_macos_unicode_casefold_aliases() {
+    let mut aliases = registry("1.0.0");
+    aliases
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/straße/shared".to_owned();
+    aliases.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: "packages/STRASSE/shared".to_owned(),
+        },
+    );
+
+    assert!(matches!(
+        aliases.validate(),
+        Err(StorageError::InvalidRegistry(
+            "package paths must be unique"
+        ))
+    ));
+}
 
 #[cfg(windows)]
 #[test]
@@ -2749,6 +2826,8 @@ fn portable_export_redacts_user_qualified_home_paths_in_generic_strings() {
         },
         "prefixed_posix": "note=~alice/Documents/private.mov",
         "prefixed_windows": "note=~bob\\Documents\\private.mp4",
+        "curly_quoted": "see “~alice/Documents/private.mov”",
+        "curly_quoted_prose": "see “~visitor without a path”",
         "ordinary": "ordinary note about ~visitor without a path"
     });
     let portable =
@@ -2760,6 +2839,11 @@ fn portable_export_redacts_user_qualified_home_paths_in_generic_strings() {
             "portable export retained {private_value}"
         );
     }
+    assert!(portable.content().get("curly_quoted").is_none());
+    assert_eq!(
+        portable.content()["curly_quoted_prose"],
+        json!("see “~visitor without a path”")
+    );
     assert_eq!(
         portable.content()["ordinary"],
         json!("ordinary note about ~visitor without a path")
@@ -2884,39 +2968,76 @@ fn portable_export_filters_host_components_but_preserves_local_backup() {
     let source = json!({
         "host": "buildhost",
         "service_host": "buildhost",
+        "serviceHost": "servicehostsecret",
+        "ipv6Host": "ipv6hostsecret",
+        "serviceHostname": "upstreamhost",
+        "remoteHost2": "remotehostsecret",
+        "ipv6Host2": "ipv6host2secret",
+        "hostname2": "hostname2secret",
         "upstream_host": "upstreamhost",
         "ghost_count": 7,
+        "ghostCount": 8,
         "supported_versions": "Supported versions v1.0/v2.0"
     });
     let portable =
         ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
             .expect("bounded portable export");
-    for private_field in ["host", "service_host", "upstream_host"] {
+    for private_field in [
+        "host",
+        "service_host",
+        "serviceHost",
+        "serviceHostname",
+        "ipv6Host",
+        "remoteHost2",
+        "ipv6Host2",
+        "hostname2",
+        "upstream_host",
+    ] {
         assert!(
             portable.content().get(private_field).is_none(),
             "portable export retained {private_field}"
         );
     }
     assert_eq!(portable.content()["ghost_count"], json!(7));
+    assert_eq!(portable.content()["ghostCount"], json!(8));
     assert_eq!(
         portable.content()["supported_versions"],
         json!("Supported versions v1.0/v2.0")
     );
 
     let encoded = String::from_utf8(portable.to_json().unwrap()).unwrap();
-    for private_field in ["\"host\"", "\"service_host\"", "\"upstream_host\""] {
+    for private_field in [
+        "\"host\"",
+        "\"service_host\"",
+        "\"serviceHost\"",
+        "\"serviceHostname\"",
+        "\"ipv6Host\"",
+        "\"remoteHost2\"",
+        "\"ipv6Host2\"",
+        "\"hostname2\"",
+        "\"upstream_host\"",
+    ] {
         assert!(
             !encoded.contains(private_field),
             "portable JSON retained {private_field}"
         );
     }
-    for hostname in ["buildhost", "upstreamhost"] {
+    for hostname in [
+        "buildhost",
+        "upstreamhost",
+        "ipv6hostsecret",
+        "remotehostsecret",
+        "ipv6host2secret",
+        "hostname2secret",
+        "servicehostsecret",
+    ] {
         assert!(
             !encoded.contains(hostname),
             "portable JSON retained hostname {hostname}"
         );
     }
     assert!(encoded.contains("\"ghost_count\": 7"));
+    assert!(encoded.contains("\"ghostCount\": 8"));
     assert!(encoded.contains("Supported versions v1.0/v2.0"));
 
     let local_backup = ascii_runtime::storage::PortableExport::from_value(

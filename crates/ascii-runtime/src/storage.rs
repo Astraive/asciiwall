@@ -31,6 +31,11 @@
 //! rotates within [`LogLimits`], coordinates writers targeting the same directory, and redacts home
 //! paths, media-bearing and clipped messages by default.
 
+#[cfg(target_os = "macos")]
+use icu_casemap::CaseMapper;
+#[cfg(target_os = "macos")]
+use icu_normalizer::DecomposingNormalizer;
+
 use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -587,7 +592,9 @@ impl InstallRegistry {
         }
         #[cfg(windows)]
         let mut relative_paths: Vec<Vec<u16>> = Vec::with_capacity(self.packages.len());
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        let mut relative_paths: HashSet<String> = HashSet::with_capacity(self.packages.len());
+        #[cfg(all(not(windows), not(target_os = "macos")))]
         let mut relative_paths = HashSet::with_capacity(self.packages.len());
         for (package_id, entry) in &self.packages {
             validate_application_id(package_id)?;
@@ -619,7 +626,13 @@ impl InstallRegistry {
             relative_paths.push(windows_path_collision_key(&entry.relative_path).ok_or(
                 StorageError::InvalidRegistry("package paths must be unique"),
             )?);
-            #[cfg(not(windows))]
+            #[cfg(target_os = "macos")]
+            if !relative_paths.insert(macos_path_collision_key(&entry.relative_path)) {
+                return Err(StorageError::InvalidRegistry(
+                    "package paths must be unique",
+                ));
+            }
+            #[cfg(all(not(windows), not(target_os = "macos")))]
             if !relative_paths.insert(entry.relative_path.as_str()) {
                 return Err(StorageError::InvalidRegistry(
                     "package paths must be unique",
@@ -658,6 +671,14 @@ impl InstallRegistry {
 
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_path_collision_key(path: &str) -> String {
+    let normalizer = DecomposingNormalizer::new_nfd();
+    let normalized = normalizer.normalize(path);
+    let folded = CaseMapper::new().fold_string(&normalized);
+    normalizer.normalize(&folded).into_owned()
 }
 
 fn is_safe_relative_path(value: &str) -> bool {
@@ -2438,12 +2459,52 @@ fn is_normalized_history_key(key: &str) -> bool {
         || (key.contains("window") && key.contains("geometry") && key.contains("history"))
 }
 
-fn is_nonportable_key(key: &str) -> bool {
-    let has_host_component = key
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .any(|component| {
-            component.eq_ignore_ascii_case("host") || component.eq_ignore_ascii_case("hostname")
+fn has_host_component(key: &str) -> bool {
+    let mut component_start = None;
+    let mut previous = None;
+    let mut characters = key.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        if !character.is_ascii_alphanumeric() {
+            if let Some(start) = component_start.take()
+                && matches_host_component(&key[start..index])
+            {
+                return true;
+            }
+            previous = None;
+            continue;
+        }
+
+        let next_character = characters.peek().map(|(_, character)| *character);
+        let camel_case_boundary = previous.is_some_and(|previous: char| {
+            ((previous.is_ascii_lowercase() || previous.is_ascii_digit())
+                && character.is_ascii_uppercase())
+                || (previous.is_ascii_alphabetic() && character.is_ascii_digit())
+                || (previous.is_ascii_uppercase()
+                    && character.is_ascii_uppercase()
+                    && next_character.is_some_and(|character| character.is_ascii_lowercase()))
         });
+        if camel_case_boundary {
+            if let Some(start) = component_start
+                && matches_host_component(&key[start..index])
+            {
+                return true;
+            }
+            component_start = Some(index);
+        } else if component_start.is_none() {
+            component_start = Some(index);
+        }
+        previous = Some(character);
+    }
+
+    component_start.is_some_and(|start| matches_host_component(&key[start..]))
+}
+
+fn matches_host_component(component: &str) -> bool {
+    component.eq_ignore_ascii_case("host") || component.eq_ignore_ascii_case("hostname")
+}
+
+fn is_nonportable_key(key: &str) -> bool {
+    let has_host_component = has_host_component(key);
     let key = normalize_key(key);
     key.contains("path")
         || key.contains("monitor")
@@ -2567,6 +2628,16 @@ fn trim_export_punctuation(value: &str) -> &str {
                 | '!'
                 | '<'
                 | '>'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '„'
+                | '‟'
+                | '«'
+                | '»'
+                | '‹'
+                | '›'
         )
     })
 }
