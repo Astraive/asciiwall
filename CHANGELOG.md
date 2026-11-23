@@ -53,7 +53,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Keep the active old-scene COR-005 memory permit borrowed while a transition is staged; abort releases only the candidate charge, while completion releases the old charge once and deactivates the original permit.
 - Linearize urgent Stop/revocation publication against the final ordinary FIFO dequeue with an atomic dequeue-commit bit; a pending urgent event wins the commit race (`[COR-005]`).
 - Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
-- Reject a queued-frame replacement cancelled during its buffer copy before publication, with public `submit_frame` regression coverage (`[COR-005]`).
+- Preserve queued COR-005 frames when replacement is cancelled during staging, before publication, with public `submit_frame` regression coverage (`[COR-005]`).
+- Linearize one-slot replacement cancellation against fill-lease acquisition: cancellation before acquisition restores the prior `Published` frame; after acquisition, copying and publication finish despite cancellation (`[COR-005]`).
 - [COR-008] Serialize atomic writes, importer journal transitions, and diagnostic-log rotation by
   storage directory; clean owned interrupted-write temporaries, sync newly created directory
   entries where supported, preserve only schema-valid last-good configs, and redact clipped

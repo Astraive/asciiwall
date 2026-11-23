@@ -18,8 +18,10 @@
 //! invalidation takes per-slot output permits under the pool lock, then drops them after unlocking;
 //! budget code never acquires a pool lock. Other cross-component operations release each lock
 //! before acquiring the next. Urgent control flags are atomic; completion acknowledgements update
-//! slot ownership under the pool lock. A [`FrameLease::with_pixels`] callback runs while the pool
-//! ownership lock is held under a shared CPU-work permit, and therefore MUST be short CPU-only
+//! slot ownership under the pool lock. The no-free-slot replacement path also takes the
+//! cancellation token's short commit gate while holding the pool lock; cancellation never acquires a
+//! runtime lock. A [`FrameLease::with_pixels`] callback runs while the pool ownership lock is held
+//! under a shared CPU-work permit, and therefore MUST be short CPU-only
 //! work. It MUST NOT call UI/native APIs, re-enter this pool, or wait for decode, presentation, or
 //! a settings lock. Never hold a settings lock while waiting for decode or present. Native owners
 //! must arrange their own thread affinity and completion callbacks outside this crate.
