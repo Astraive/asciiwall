@@ -30,6 +30,11 @@ pub(crate) trait ConfigStore: Send {
     ) -> Result<(), StoreError>;
 }
 
+#[cfg(all(test, windows))]
+type TargetRaceHook = Box<dyn FnOnce(&Path) + Send>;
+#[cfg(all(test, windows))]
+type TemporaryDaclHook = Box<dyn FnOnce(&File) + Send>;
+
 pub(crate) struct FileStore {
     path: PathBuf,
     #[cfg(test)]
@@ -41,9 +46,9 @@ pub(crate) struct FileStore {
     #[cfg(test)]
     fail_rollback_indeterminate_replace: std::cell::Cell<bool>,
     #[cfg(all(test, windows))]
-    inject_after_absent_check: Option<Box<dyn FnOnce(&Path) + Send>>,
+    inject_after_absent_check: Option<TargetRaceHook>,
     #[cfg(all(test, windows))]
-    inspect_temporary_dacl: Option<Box<dyn FnOnce(&File) + Send>>,
+    inspect_temporary_dacl: Option<TemporaryDaclHook>,
 }
 
 impl FileStore {
