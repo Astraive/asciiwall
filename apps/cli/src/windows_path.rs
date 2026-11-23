@@ -116,6 +116,71 @@ const ERROR_ALREADY_EXISTS: i32 = 183;
 pub(crate) const ERROR_SHARING_VIOLATION: i32 = 32;
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+const SDDL_REVISION_1: u32 = 1;
+// Pass protected DACLs to NtCreateFile so parent ACEs never expose incomplete staging data.
+// The owner-only file DACL follows the staged handle through rename, constraining overwrites.
+const STAGING_DIRECTORY_SDDL: &[u16] = &widen_ascii(b"D:P(A;OICI;FA;;;OW)\0");
+const STAGING_FILE_SDDL: &[u16] = &widen_ascii(b"D:P(A;;FA;;;OW)\0");
+
+const fn widen_ascii<const N: usize>(value: &[u8; N]) -> [u16; N] {
+    let mut wide = [0; N];
+    let mut index = 0;
+    while index < N {
+        wide[index] = value[index] as u16;
+        index += 1;
+    }
+    wide
+}
+
+struct LocalAllocation(*mut c_void);
+
+impl LocalAllocation {
+    fn from_sddl(sddl: &[u16]) -> io::Result<Self> {
+        let mut descriptor = ptr::null_mut();
+        let succeeded = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        if succeeded == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if descriptor.is_null() {
+            return Err(io::Error::other(
+                "security descriptor conversion returned a null pointer",
+            ));
+        }
+        Ok(Self(descriptor))
+    }
+
+    fn as_ptr(&self) -> *mut c_void {
+        self.0
+    }
+}
+
+impl Drop for LocalAllocation {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+const SE_FILE_OBJECT: u32 = 1;
+#[cfg(test)]
+const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+#[cfg(test)]
+const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+#[cfg(test)]
+const TEST_PERMISSIVE_PARENT_SDDL: &[u16] =
+    &widen_ascii(b"D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;BU)\0");
+#[cfg(test)]
+const TEST_PERMISSIVE_DESTINATION_SDDL: &[u16] = &widen_ascii(b"D:P(A;;FA;;;BU)\0");
+
 
 #[allow(dead_code)]
 #[repr(C)]
@@ -1445,6 +1510,28 @@ fn open_relative_with_share_and_attributes(
     share_access: u32,
     file_attributes: u32,
 ) -> io::Result<File> {
+    open_relative_with_share_attributes_and_security(
+        parent,
+        name,
+        desired_access,
+        create_options,
+        disposition,
+        share_access,
+        file_attributes,
+        ptr::null_mut(),
+    )
+}
+
+fn open_relative_with_share_attributes_and_security(
+    parent: &File,
+    name: &[u16],
+    desired_access: u32,
+    create_options: u32,
+    disposition: u32,
+    share_access: u32,
+    file_attributes: u32,
+    security_descriptor: *mut c_void,
+) -> io::Result<File> {
     let byte_length = name
         .len()
         .checked_mul(size_of::<u16>())
@@ -1460,7 +1547,7 @@ fn open_relative_with_share_and_attributes(
         root_directory: parent.as_raw_handle(),
         object_name: &mut name,
         attributes: OBJ_CASE_INSENSITIVE,
-        security_descriptor: ptr::null_mut(),
+        security_descriptor,
         security_quality_of_service: ptr::null_mut(),
     };
     let mut io_status = IoStatusBlock::default();
@@ -1695,10 +1782,11 @@ fn create_staging_directory(
 ) -> io::Result<StagingDirectory> {
     const PREFIX: &str = ".asciiwall-stage-";
     const ATTEMPTS: usize = 32;
+    let security_descriptor = LocalAllocation::from_sddl(STAGING_DIRECTORY_SDDL)?;
     let mut name = [0_u16; 64];
     for _ in 0..ATTEMPTS {
         let length = random_temp_name(&mut name, PREFIX, "")?;
-        match open_relative_with_share_and_attributes(
+        match open_relative_with_share_attributes_and_security(
             parent,
             &name[..length],
             FILE_LIST_DIRECTORY
@@ -1711,6 +1799,7 @@ fn create_staging_directory(
             FILE_CREATE,
             SHARE_ALL,
             FILE_ATTRIBUTE_DIRECTORY,
+            security_descriptor.as_ptr(),
         ) {
             Ok(file) => {
                 let directory = StagingDirectory { file };
@@ -1745,16 +1834,19 @@ fn create_staging(parent: &File, root_volume_identity: VolumeIdentity) -> io::Re
     const SUFFIX: &str = ".tmp";
     const ATTEMPTS: usize = 32;
     let directory = create_staging_directory(parent, root_volume_identity)?;
+    let security_descriptor = LocalAllocation::from_sddl(STAGING_FILE_SDDL)?;
     let mut name = [0_u16; 47];
     for _ in 0..ATTEMPTS {
         let length = random_temp_name(&mut name, PREFIX, SUFFIX)?;
-        match open_relative_with_share(
+        match open_relative_with_share_attributes_and_security(
             directory.file(),
             &name[..length],
             GENERIC_READ | GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
             FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
             FILE_CREATE,
             FILE_SHARE_READ | FILE_SHARE_DELETE,
+            FILE_ATTRIBUTE_NORMAL,
+            security_descriptor.as_ptr(),
         ) {
             Ok(file) => {
                 return Ok(StagingFile {
@@ -1919,6 +2011,7 @@ unsafe extern "system" {
         flags_and_attributes: u32,
         template_file: *mut c_void,
     ) -> *mut c_void;
+    fn LocalFree(memory: *mut c_void) -> *mut c_void;
     fn QueryDosDeviceW(device_name: *const u16, target_path: *mut u16, max: u32) -> u32;
     fn GetFullPathNameW(
         file_name: *const u16,
@@ -1953,6 +2046,53 @@ unsafe extern "system" {
         information: *const c_void,
         buffer_size: u32,
     ) -> i32;
+}
+
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string_security_descriptor: *const u16,
+        revision: u32,
+        security_descriptor: *mut *mut c_void,
+        security_descriptor_size: *mut u32,
+    ) -> i32;
+}
+
+#[cfg(test)]
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        security_descriptor: *mut c_void,
+        revision: u32,
+        security_information: u32,
+        string_security_descriptor: *mut *mut u16,
+        string_security_descriptor_len: *mut u32,
+    ) -> i32;
+    fn GetSecurityInfo(
+        handle: *mut c_void,
+        object_type: u32,
+        security_info: u32,
+        owner: *mut *mut c_void,
+        group: *mut *mut c_void,
+        dacl: *mut *mut c_void,
+        sacl: *mut *mut c_void,
+        security_descriptor: *mut *mut c_void,
+    ) -> u32;
+    fn GetSecurityDescriptorDacl(
+        security_descriptor: *mut c_void,
+        dacl_present: *mut i32,
+        dacl: *mut *mut c_void,
+        dacl_defaulted: *mut i32,
+    ) -> i32;
+    fn SetSecurityInfo(
+        handle: *mut c_void,
+        object_type: u32,
+        security_info: u32,
+        owner: *mut c_void,
+        group: *mut c_void,
+        dacl: *mut c_void,
+        sacl: *mut c_void,
+    ) -> u32;
 }
 
 #[link(name = "ntdll")]
@@ -2059,6 +2199,249 @@ mod tests {
         path_spec, resolve_path_spec, verify_local_volume_provider_handle, verify_same_volume,
         volume_file_system_name, volume_identity, volume_identity_matches, windows_error_code,
     };
+    use std::fs::{self, File};
+    use std::io::{self, Write};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
+    use std::path::Path;
+    use std::ptr;
+
+    use ascii_core::CancellationToken;
+
+    use super::{
+        CreateFileW, DACL_SECURITY_INFORMATION, DELETE, FILE_ADD_SUBDIRECTORY,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_READ_DATA, FILE_SYNCHRONOUS_IO_NONALERT, FILE_TRAVERSE, GetSecurityDescriptorDacl,
+        GetSecurityInfo, LocalAllocation, OPEN_EXISTING, PROTECTED_DACL_SECURITY_INFORMATION,
+        SE_FILE_OBJECT, SetSecurityInfo, SHARE_ALL, SYNCHRONIZE, TEST_PERMISSIVE_DESTINATION_SDDL,
+        TEST_PERMISSIVE_PARENT_SDDL, create_staging, open_relative, publish_relative,
+    };
+
+    const TEST_READ_CONTROL: u32 = 0x0002_0000;
+    const TEST_WRITE_DAC: u32 = 0x0004_0000;
+
+    fn open_acl_path(path: &Path, desired_access: u32) -> File {
+        let mut path: Vec<u16> = path.as_os_str().encode_wide().collect();
+        path.push(0);
+        let handle = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                desired_access,
+                SHARE_ALL,
+                ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                ptr::null_mut(),
+            )
+        };
+        assert!(
+            !handle.is_null() && handle != super::INVALID_HANDLE_VALUE,
+            "test fixture path opens with requested ACL access"
+        );
+        unsafe { File::from_raw_handle(handle as RawHandle) }
+    }
+
+    fn set_handle_dacl(handle: &File, sddl: &[u16]) {
+        let descriptor = LocalAllocation::from_sddl(sddl).expect("test SDDL parses");
+        let mut dacl_present = 0;
+        let mut dacl = ptr::null_mut();
+        let mut dacl_defaulted = 0;
+        assert_ne!(
+            unsafe {
+                GetSecurityDescriptorDacl(
+                    descriptor.as_ptr(),
+                    &mut dacl_present,
+                    &mut dacl,
+                    &mut dacl_defaulted,
+                )
+            },
+            0,
+            "parsed security descriptor exposes its DACL"
+        );
+        assert_ne!(dacl_present, 0);
+        assert!(!dacl.is_null());
+        let error = unsafe {
+            SetSecurityInfo(
+                handle.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                dacl,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(error, 0, "test DACL applies through the pinned handle");
+    }
+
+    fn handle_dacl_sddl(handle: &File) -> io::Result<String> {
+        let mut owner = ptr::null_mut();
+        let mut group = ptr::null_mut();
+        let mut dacl = ptr::null_mut();
+        let mut sacl = ptr::null_mut();
+        let mut descriptor = ptr::null_mut();
+        let error = unsafe {
+            GetSecurityInfo(
+                handle.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                &mut owner,
+                &mut group,
+                &mut dacl,
+                &mut sacl,
+                &mut descriptor,
+            )
+        };
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
+        if descriptor.is_null() {
+            return Err(io::Error::other(
+                "test ACL query returned a null security descriptor",
+            ));
+        }
+        let descriptor = LocalAllocation(descriptor);
+        let mut string = ptr::null_mut();
+        let mut string_length = 0;
+        let succeeded = unsafe {
+            super::ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor.as_ptr(),
+                super::SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut string,
+                &mut string_length,
+            )
+        };
+        if succeeded == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if string.is_null() {
+            return Err(io::Error::other(
+                "test ACL string conversion returned a null pointer",
+            ));
+        }
+        let string = LocalAllocation(string.cast());
+        let units = unsafe {
+            std::slice::from_raw_parts(string.as_ptr().cast::<u16>(), string_length as usize)
+        };
+        let end = units.iter().position(|unit| *unit == 0).unwrap_or(units.len());
+        Ok(String::from_utf16_lossy(&units[..end]))
+    }
+
+    fn permissive_parent() -> (tempfile::TempDir, File, super::VolumeIdentity) {
+        let fixture = offline_test_tempdir();
+        let parent_access = FILE_LIST_DIRECTORY
+            | FILE_ADD_SUBDIRECTORY
+            | FILE_TRAVERSE
+            | FILE_READ_ATTRIBUTES
+            | DELETE
+            | SYNCHRONIZE
+            | TEST_READ_CONTROL
+            | TEST_WRITE_DAC;
+        let parent = open_acl_path(fixture.path(), parent_access);
+        set_handle_dacl(&parent, TEST_PERMISSIVE_PARENT_SDDL);
+        let parent_dacl = handle_dacl_sddl(&parent).expect("parent DACL reads by handle");
+        assert!(parent_dacl.contains("D:P"));
+        assert!(parent_dacl.contains(";;;BU)"));
+        let identity = volume_identity(&parent).expect("test parent volume identity is available");
+        (fixture, parent, identity)
+    }
+
+    fn assert_restrictive_staging_dacl(dacl: &str) {
+        assert!(dacl.contains("D:P"), "staging DACL is protected: {dacl}");
+        assert!(dacl.contains(";;;OW)"), "staging DACL grants only its owner: {dacl}");
+        assert!(!dacl.contains(";;;SY)"), "staging DACL excludes SYSTEM: {dacl}");
+        assert!(!dacl.contains(";;;BA)"), "staging DACL excludes local admins: {dacl}");
+        assert!(!dacl.contains(";;;BU)"), "staging DACL excludes Users: {dacl}");
+        assert!(!dacl.contains(";;;WD)"), "staging DACL excludes Everyone: {dacl}");
+    }
+
+    #[test]
+    fn staging_and_published_files_ignore_permissive_parent_dacl() {
+        let (_fixture, parent, identity) = permissive_parent();
+        let mut staging = create_staging(&parent, identity).expect("staging object is created");
+        staging
+            .file_mut()
+            .write_all(b"staged secret")
+            .expect("staging file accepts artifact bytes");
+        let staging_file_dacl =
+            handle_dacl_sddl(staging.file()).expect("staging file DACL reads by handle");
+        let staging_directory_dacl = handle_dacl_sddl(staging._directory.file())
+            .expect("staging directory DACL reads by handle");
+        assert_restrictive_staging_dacl(&staging_file_dacl);
+        assert_restrictive_staging_dacl(&staging_directory_dacl);
+        drop(staging);
+
+        let destination = "protected-output.txt";
+        let leaf: Vec<u16> = destination.encode_utf16().collect();
+        publish_relative(
+            &parent,
+            &leaf,
+            identity,
+            false,
+            &CancellationToken::new(),
+            |file| file.write_all(b"published secret"),
+        )
+        .expect("protected staged output publishes");
+        let output = open_relative(
+            &parent,
+            &leaf,
+            FILE_READ_DATA | FILE_READ_ATTRIBUTES | TEST_READ_CONTROL | SYNCHRONIZE,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            FILE_OPEN,
+        )
+        .expect("published output opens through pinned parent");
+        let output_dacl = handle_dacl_sddl(&output).expect("published output DACL reads by handle");
+        assert_restrictive_staging_dacl(&output_dacl);
+        assert_eq!(
+            fs::read(_fixture.path().join(destination)).expect("published output reads"),
+            b"published secret"
+        );
+    }
+
+    #[test]
+    fn overwrite_restricts_explicitly_protected_destination_dacl() {
+        let (_fixture, parent, identity) = permissive_parent();
+        let destination = "protected-existing.txt";
+        let destination_path = _fixture.path().join(destination);
+        fs::write(&destination_path, b"original").expect("existing output is created");
+        let existing = open_acl_path(
+            &destination_path,
+            FILE_READ_ATTRIBUTES | TEST_READ_CONTROL | TEST_WRITE_DAC | SYNCHRONIZE,
+        );
+        set_handle_dacl(&existing, TEST_PERMISSIVE_DESTINATION_SDDL);
+        let original_dacl = handle_dacl_sddl(&existing).expect("existing output DACL reads");
+        assert!(original_dacl.contains("D:P"));
+        assert!(original_dacl.contains(";;;BU)"));
+        drop(existing);
+
+        let leaf: Vec<u16> = destination.encode_utf16().collect();
+        publish_relative(
+            &parent,
+            &leaf,
+            identity,
+            true,
+            &CancellationToken::new(),
+            |file| file.write_all(b"updated secret"),
+        )
+        .expect("overwrite publishes with the documented restrictive DACL");
+        let output = open_relative(
+            &parent,
+            &leaf,
+            FILE_READ_DATA | FILE_READ_ATTRIBUTES | TEST_READ_CONTROL | SYNCHRONIZE,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            FILE_OPEN,
+        )
+        .expect("overwritten output opens through pinned parent");
+        let output_dacl = handle_dacl_sddl(&output).expect("overwritten output DACL reads");
+        assert_restrictive_staging_dacl(&output_dacl);
+        assert_eq!(
+            fs::read(destination_path).expect("overwritten output reads"),
+            b"updated secret"
+        );
+    }
+
 
     #[test]
     fn offline_accepts_a_direct_local_ntfs_root_and_rejects_volume_mismatch() {
