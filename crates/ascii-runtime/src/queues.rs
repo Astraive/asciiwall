@@ -447,8 +447,18 @@ impl BoundedHandoff {
                 if cancellation.is_cancelled() {
                     return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
                 }
-                before_publish();
-                fill.publish_prevalidated_if_not_cancelled(metadata, cancellation)?
+                #[cfg(test)]
+                let descriptor = fill.publish_prevalidated_if_not_cancelled_with_hook(
+                    metadata,
+                    cancellation,
+                    before_publish,
+                )?;
+                #[cfg(not(test))]
+                let descriptor = {
+                    drop(before_publish);
+                    fill.publish_prevalidated_if_not_cancelled(metadata, cancellation)?
+                };
+                descriptor
             }
             Err(RuntimeError::NoFreeSlots) => {
                 before_publish();
