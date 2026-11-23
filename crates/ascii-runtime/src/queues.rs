@@ -441,13 +441,14 @@ impl BoundedHandoff {
         self.pool
             .validate_frame_input(metadata, pixels, budget, cancellation)?;
         self.pool.reclaim_released();
-        let (fill, commit_publication_with_cancellation) = match self.pool.begin_fill() {
+        let descriptor = match self.pool.begin_fill() {
             Ok(mut fill) => {
                 fill.write_with_cpu_permit(pixels)?;
                 if cancellation.is_cancelled() {
                     return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
                 }
-                (fill, true)
+                before_publish();
+                fill.publish_prevalidated_if_not_cancelled(metadata, cancellation)?
             }
             Err(RuntimeError::NoFreeSlots) => {
                 before_publish();
@@ -476,15 +477,9 @@ impl BoundedHandoff {
                 #[cfg(test)]
                 self.apply_test_cancellation_after_replacement_fill_acquire(cancellation);
                 fill.write_with_cpu_permit(&staging[..pixels.len()])?;
-                (fill, false)
+                fill.publish_prevalidated(metadata)?
             }
             Err(error) => return Err(error),
-        };
-        let descriptor = if commit_publication_with_cancellation {
-            before_publish();
-            fill.publish_prevalidated_if_not_cancelled(metadata, cancellation)?
-        } else {
-            fill.publish_prevalidated(metadata)?
         };
         while let Some(stale) = self.frames.try_recv() {
             let _ = self.pool.discard(&stale)?;
