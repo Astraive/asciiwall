@@ -2011,14 +2011,17 @@ pub enum OutputFailureKind {
     Commit,
 }
 
-/// Failed output transaction. Before replacement, the staged path is retained and returned for
-/// caller-directed cleanup or recovery. If parent sync fails after replacement, the committed
-/// destination is returned instead; failed transactions are never registered as valid output.
+/// Failed output transaction. Before replacement, staged bytes remain at `partial_temp_path`.
+/// After publication, a parent-sync failure triggers rollback to the previous destination (or
+/// removal of a newly created destination). `recovery_path` identifies data retained when that
+/// rollback cannot complete or its durability cannot be confirmed.
 #[derive(Debug)]
 pub struct OutputWriteError {
     pub kind: OutputFailureKind,
-    /// The staged path before replacement, or the committed destination after a parent-sync failure.
+    /// The staged output file before publication; never the committed destination.
     pub partial_temp_path: Option<PathBuf>,
+    /// A retained path that may need caller-directed recovery after rollback could not complete.
+    pub recovery_path: Option<PathBuf>,
     source: Option<io::Error>,
 }
 
@@ -2031,6 +2034,7 @@ impl OutputWriteError {
         Self {
             kind,
             partial_temp_path,
+            recovery_path: None,
             source,
         }
     }
@@ -2093,11 +2097,12 @@ impl OutputRegistry {
 
     /// Writes into a unique sibling temporary file. Unix and Windows atomically replace an
     /// existing destination; other targets commit with no-clobber creation and reject replacement.
-    /// Relative destinations are resolved to an absolute path once at transaction start, and that
-    /// captured path is used for staging, verification, commit, errors, and registration.
-    /// Registration follows parent-directory sync. Pre-commit failures preserve the destination
-    /// and report the staged temporary; a sync failure after replacement reports the committed
-    /// destination, which remains unregistered.
+    /// Existing destinations are backed up by a same-directory hard link, which is synced before
+    /// replacement. Relative destinations are resolved to an absolute path once at transaction
+    /// start, and that captured path is used for staging, verification, commit, errors, and
+    /// registration. Registration follows parent-directory sync and backup cleanup. If sync fails
+    /// after publication, the previous destination is restored (or a new destination is removed);
+    /// `partial_temp_path` never points at the published destination.
     ///
     /// The stage handle stays open and its file identity is checked before the path-based commit.
     /// Unix/Windows use stable file identifiers; other targets compare available file metadata.
@@ -2138,13 +2143,13 @@ impl OutputRegistry {
     where
         F: FnOnce(&mut dyn Write) -> io::Result<()>,
         S: FnOnce(&File) -> io::Result<()>,
-        R: FnOnce(&Path, &Path) -> io::Result<()>,
-        D: FnOnce(&Path) -> io::Result<()>,
+        R: FnMut(&Path, &Path) -> io::Result<()>,
+        D: FnMut(&Path) -> io::Result<()>,
     {
         let OutputTransactionHooks {
             sync_file,
-            replace,
-            sync_parent_directory,
+            mut replace,
+            mut sync_parent_directory,
         } = hooks;
         let mut registry = lock_unpoisoned(&self.state);
         let destination = absolute_output_destination(destination).map_err(|error| {
@@ -2218,39 +2223,145 @@ impl OutputRegistry {
             ));
         }
         let previous_destination_identity = existing_output_file_identity(&destination);
+        let destination_parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let backup_path = match create_output_backup(&destination) {
+            Ok(backup_path) => backup_path,
+            Err(error) => {
+                let kind = if is_disk_full(&error) {
+                    OutputFailureKind::DiskFull
+                } else {
+                    OutputFailureKind::Commit
+                };
+                return Err(OutputWriteError::new(kind, Some(temp_path), Some(error)));
+            }
+        };
+        if let Some(backup_path) = backup_path.as_ref() {
+            if let Err(error) = sync_parent_directory(destination_parent) {
+                let kind = if is_disk_full(&error) {
+                    OutputFailureKind::DiskFull
+                } else {
+                    OutputFailureKind::Sync
+                };
+                let recovery_path = if fs::remove_file(backup_path).is_err()
+                    && backup_path.exists()
+                {
+                    Some(backup_path.clone())
+                } else {
+                    None
+                };
+                let mut output_error =
+                    OutputWriteError::new(kind, Some(temp_path), Some(error));
+                output_error.recovery_path = recovery_path;
+                return Err(output_error);
+            }
+        }
         if let Err(error) = replace(&temp_path, &destination) {
             let kind = if is_disk_full(&error) {
                 OutputFailureKind::DiskFull
             } else {
                 OutputFailureKind::Commit
             };
-            return Err(OutputWriteError::new(kind, Some(temp_path), Some(error)));
+            let recovery_path = backup_path.as_ref().and_then(|backup_path| {
+                if fs::remove_file(backup_path).is_err() && backup_path.exists() {
+                    Some(backup_path.clone())
+                } else {
+                    None
+                }
+            });
+            let mut output_error =
+                OutputWriteError::new(kind, Some(temp_path), Some(error));
+            output_error.recovery_path = recovery_path;
+            return Err(output_error);
         }
         let committed_file_identity = output_file_identity_from_file(&file).ok().flatten();
         drop(file);
         let committed_path = destination.clone();
         let committed_canonical_destination = canonical_destination;
-        registry.valid.retain(|_, output| {
-            !same_output_destination(&output.canonical_path, &committed_canonical_destination)
-                && !previous_destination_identity
-                    .is_some_and(|file_identity| output.file_identity == Some(file_identity))
-        });
-        let destination_parent = destination
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
         if let Err(error) = sync_parent_directory(destination_parent) {
             let kind = if is_disk_full(&error) {
                 OutputFailureKind::DiskFull
             } else {
                 OutputFailureKind::Sync
             };
-            return Err(OutputWriteError::new(
-                kind,
-                Some(destination.clone()),
-                Some(error),
-            ));
+            if let Err((rollback_error, destination_restored)) = rollback_published_output(
+                &destination,
+                destination_parent,
+                backup_path.as_deref(),
+                &mut replace,
+                &mut sync_parent_directory,
+            ) {
+                if !destination_restored {
+                    registry.valid.retain(|_, output| {
+                        !same_output_destination(
+                            &output.canonical_path,
+                            &committed_canonical_destination,
+                        ) && !previous_destination_identity
+                            .is_some_and(|file_identity| {
+                                output.file_identity == Some(file_identity)
+                            })
+                    });
+                }
+                let recovery_path =
+                    output_recovery_path(backup_path.as_deref(), &destination);
+                let source = io::Error::new(
+                    error.kind(),
+                    format!("parent-directory sync failed: {error}; rollback failed: {rollback_error}"),
+                );
+                let mut output_error = OutputWriteError::new(kind, None, Some(source));
+                output_error.recovery_path = recovery_path;
+                return Err(output_error);
+            }
+            return Err(OutputWriteError::new(kind, None, Some(error)));
         }
+        if let Some(backup_path) = backup_path.as_ref() {
+            if let Err(error) = fs::remove_file(backup_path) {
+                let kind = if is_disk_full(&error) {
+                    OutputFailureKind::DiskFull
+                } else {
+                    OutputFailureKind::Commit
+                };
+                if let Err((rollback_error, destination_restored)) = rollback_published_output(
+                    &destination,
+                    destination_parent,
+                    Some(backup_path),
+                    &mut replace,
+                    &mut sync_parent_directory,
+                ) {
+                    if !destination_restored {
+                        registry.valid.retain(|_, output| {
+                            !same_output_destination(
+                                &output.canonical_path,
+                                &committed_canonical_destination,
+                            ) && !previous_destination_identity
+                                .is_some_and(|file_identity| {
+                                    output.file_identity == Some(file_identity)
+                                })
+                        });
+                    }
+                    let recovery_path =
+                        output_recovery_path(Some(backup_path), &destination);
+                    let source = io::Error::new(
+                        error.kind(),
+                        format!(
+                            "output backup cleanup failed: {error}; rollback failed: {rollback_error}"
+                        ),
+                    );
+                    let mut output_error = OutputWriteError::new(kind, None, Some(source));
+                    output_error.recovery_path = recovery_path;
+                    return Err(output_error);
+                }
+                return Err(OutputWriteError::new(kind, None, Some(error)));
+            }
+            let _ = sync_parent_directory(destination_parent);
+        }
+        registry.valid.retain(|_, output| {
+            !same_output_destination(&output.canonical_path, &committed_canonical_destination)
+                && !previous_destination_identity
+                    .is_some_and(|file_identity| output.file_identity == Some(file_identity))
+        });
         registry.valid.insert(
             identity,
             RegisteredOutput {
@@ -2261,6 +2372,37 @@ impl OutputRegistry {
         );
         Ok(committed_path)
     }
+}
+
+fn rollback_published_output<R, D>(
+    destination: &Path,
+    destination_parent: &Path,
+    backup_path: Option<&Path>,
+    replace: &mut R,
+    sync_parent_directory: &mut D,
+) -> Result<(), (io::Error, bool)>
+where
+    R: FnMut(&Path, &Path) -> io::Result<()>,
+    D: FnMut(&Path) -> io::Result<()>,
+{
+    let restore_result = match backup_path {
+        Some(backup_path) => replace(backup_path, destination),
+        None => fs::remove_file(destination),
+    };
+    if let Err(error) = restore_result {
+        return Err((error, false));
+    }
+    if let Err(error) = sync_parent_directory(destination_parent) {
+        return Err((error, true));
+    }
+    Ok(())
+}
+
+fn output_recovery_path(backup_path: Option<&Path>, destination: &Path) -> Option<PathBuf> {
+    backup_path
+        .filter(|path| path.exists())
+        .or_else(|| destination.exists().then_some(destination))
+        .map(Path::to_path_buf)
 }
 
 struct LimitedWriter<'a, W: Write + ?Sized> {
@@ -2879,6 +3021,39 @@ fn create_output_temp(destination: &Path) -> io::Result<(PathBuf, File)> {
         }
     }
 }
+fn create_output_backup(destination: &Path) -> io::Result<Option<PathBuf>> {
+    match fs::symlink_metadata(destination) {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    for _ in 0..256 {
+        let id = OUTPUT_TEMP_ID
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| io::Error::other("temporary output identifier exhausted"))?;
+        let backup_name = format!(".asciiwall-output-{}-{id:016x}.backup", std::process::id());
+        if destination.file_name() == Some(OsStr::new(&backup_name)) {
+            continue;
+        }
+        let backup_path = parent.join(backup_name);
+        match fs::hard_link(destination, &backup_path) {
+            Ok(()) => return Ok(Some(backup_path)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        ErrorKind::AlreadyExists,
+        "temporary output backup name exhausted",
+    ))
+}
+
 
 #[cfg(unix)]
 fn replace_destination(temp_path: &Path, destination: &Path) -> io::Result<()> {
@@ -3524,7 +3699,7 @@ mod tests {
 
     #[test]
     fn transactional_output_syncs_parent_after_publish_before_registration() {
-        use std::cell::RefCell;
+        use std::cell::{Cell, RefCell};
 
         #[derive(Debug, Eq, PartialEq)]
         enum CommitEvent {
@@ -3619,7 +3794,8 @@ mod tests {
             Some(destination.clone())
         );
 
-        let failed_events = RefCell::new(Vec::with_capacity(3));
+        let failed_events = RefCell::new(Vec::with_capacity(4));
+        let failed_sync_calls = Cell::new(0usize);
         let error = registry
             .write_transactional_with_sync(
                 failed_identity.clone(),
@@ -3637,37 +3813,130 @@ mod tests {
                     },
                     sync_parent_directory: |parent: &Path| {
                         assert_eq!(parent, output_dir.as_path());
-                        assert_eq!(fs::read(&failed_destination)?, b"not registered");
+                        let sync_call = failed_sync_calls.get();
+                        failed_sync_calls.set(sync_call + 1);
                         failed_events
                             .borrow_mut()
                             .push(CommitEvent::ParentDirectorySync);
-                        Err(io::Error::other(
-                            "injected output parent-directory sync failure",
-                        ))
+                        if sync_call == 0 {
+                            assert_eq!(fs::read(&failed_destination)?, b"not registered");
+                            Err(io::Error::other(
+                                "injected output parent-directory sync failure",
+                            ))
+                        } else {
+                            assert!(!failed_destination.exists());
+                            Ok(())
+                        }
                     },
                 },
             )
             .unwrap_err();
         assert_eq!(error.kind, OutputFailureKind::Sync);
-        assert_eq!(
-            error.partial_temp_path.as_deref(),
-            Some(failed_destination.as_path())
-        );
+        assert_eq!(error.partial_temp_path, None);
+        assert_eq!(error.recovery_path, None);
         assert_eq!(
             failed_events.into_inner(),
             vec![
                 CommitEvent::FileSync,
                 CommitEvent::Replace,
+                CommitEvent::ParentDirectorySync,
                 CommitEvent::ParentDirectorySync
             ]
         );
-        assert_eq!(fs::read(&failed_destination).unwrap(), b"not registered");
+        assert_eq!(failed_sync_calls.get(), 2);
+        assert!(!failed_destination.exists());
         assert_eq!(registry.registered_path(&failed_identity), None);
         assert_eq!(
             registry.registered_path(&committed_identity),
             Some(destination)
         );
     }
+    #[test]
+    fn transactional_output_parent_sync_failure_restores_existing_destination() {
+        use std::cell::Cell;
+
+        let directory = TempManagedDirectory::new();
+        let output_dir = fs::canonicalize(&directory.0).unwrap();
+        let destination = output_dir.join("existing-output");
+        let existing_identity = cache_test_identity(200);
+        let failed_identity = cache_test_identity(201);
+        let registry = OutputRegistry::default();
+        let budget = DiskBudget::new(128, 0);
+        let reservation = budget
+            .reserve(DiskRequirements {
+                output_bytes: 64,
+                ..DiskRequirements::default()
+            })
+            .unwrap();
+        registry
+            .write_transactional(
+                existing_identity.clone(),
+                &destination,
+                &reservation,
+                |output| output.write_all(b"original bytes"),
+            )
+            .unwrap();
+
+        let sync_calls = Cell::new(0usize);
+        let error = registry
+            .write_transactional_with_sync(
+                failed_identity.clone(),
+                &destination,
+                &reservation,
+                |output| output.write_all(b"replacement bytes"),
+                OutputTransactionHooks {
+                    sync_file: |_: &File| Ok(()),
+                    replace: replace_destination,
+                    sync_parent_directory: |parent: &Path| {
+                        assert_eq!(parent, output_dir.as_path());
+                        let sync_call = sync_calls.get();
+                        sync_calls.set(sync_call + 1);
+                        match sync_call {
+                            0 => {
+                                assert_eq!(fs::read(&destination)?, b"original bytes");
+                                Ok(())
+                            }
+                            1 => {
+                                assert_eq!(fs::read(&destination)?, b"replacement bytes");
+                                Err(io::Error::new(
+                                    ErrorKind::StorageFull,
+                                    "injected post-publish parent sync failure",
+                                ))
+                            }
+                            2 => {
+                                assert_eq!(fs::read(&destination)?, b"original bytes");
+                                Ok(())
+                            }
+                            _ => panic!("unexpected parent-directory sync"),
+                        }
+                    },
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind, OutputFailureKind::DiskFull);
+        assert_eq!(error.partial_temp_path, None);
+        assert_eq!(error.recovery_path, None);
+        assert_eq!(sync_calls.get(), 3);
+        assert_eq!(fs::read(&destination).unwrap(), b"original bytes");
+        assert_eq!(
+            registry.registered_path(&existing_identity),
+            Some(destination.clone())
+        );
+        assert_eq!(registry.registered_path(&failed_identity), None);
+        let transaction_temps = fs::read_dir(&output_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".asciiwall-output-")
+            })
+            .count();
+        assert_eq!(transaction_temps, 0);
+    }
+
 
     struct DiskFullAfterPrefix {
         remaining_bytes: usize,
