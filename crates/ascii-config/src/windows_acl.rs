@@ -224,6 +224,100 @@ fn windows_dacls_equal(left: WindowsDacl, right: WindowsDacl) -> std::io::Result
 }
 
 #[cfg(windows)]
+fn restrictive_creation_dacl() -> std::io::Result<(OwnedWindowsSecurityDescriptor, WindowsDacl)> {
+    use winapi::{
+        shared::{
+            minwindef::BOOL,
+            sddl::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
+        },
+        um::{
+            securitybaseapi::GetSecurityDescriptorDacl,
+            winnt::{PACL, PSECURITY_DESCRIPTOR},
+        },
+    };
+
+    // OWNER RIGHTS grants full access only to the file owner. Protecting the
+    // DACL prevents inheriting any broader entries from the parent directory.
+    let mut sddl = "D:P(A;;FA;;;OW)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_mut_ptr(),
+            u32::from(SDDL_REVISION_1),
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let descriptor = OwnedWindowsSecurityDescriptor(descriptor);
+    if descriptor.0.is_null() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Windows returned no restrictive security descriptor",
+        ));
+    }
+    let mut present: BOOL = 0;
+    let mut acl: PACL = std::ptr::null_mut();
+    let mut defaulted: BOOL = 0;
+    if unsafe {
+        GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut acl, &mut defaulted)
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    if present == 0 || acl.is_null() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Windows returned no restrictive DACL",
+        ));
+    }
+    let control = windows_dacl_control(descriptor.0)?;
+    Ok((descriptor, WindowsDacl { control, acl }))
+}
+
+#[cfg(windows)]
+fn set_restrictive_dacl(file: &File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use winapi::um::{
+        accctrl::SE_FILE_OBJECT,
+        aclapi::SetSecurityInfo,
+        winnt::{
+            DACL_SECURITY_INFORMATION, HANDLE, PROTECTED_DACL_SECURITY_INFORMATION,
+        },
+    };
+
+    let (_descriptor, desired_dacl) = restrictive_creation_dacl()?;
+    let status = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle() as HANDLE,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            desired_dacl.acl,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::from_raw_os_error(status as i32));
+    }
+
+    let (_descriptor, actual_dacl) = read_windows_dacl_handle(file)?;
+    if !windows_dacls_equal(desired_dacl, actual_dacl)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Windows creation DACL did not match the restrictive DACL",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 pub(super) fn preserve_target_dacl(target: &Path, temporary: &File) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use winapi::um::{
@@ -237,7 +331,9 @@ pub(super) fn preserve_target_dacl(target: &Path, temporary: &File) -> std::io::
 
     match fs::symlink_metadata(target) {
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return set_restrictive_dacl(temporary);
+        }
         Err(error) => return Err(error),
     }
 
@@ -273,10 +369,9 @@ pub(super) fn preserve_target_dacl(target: &Path, temporary: &File) -> std::io::
 }
 
 #[cfg(all(windows, test))]
-pub(super) fn windows_dacl_snapshot(path: &Path) -> std::io::Result<WindowsDaclSnapshot> {
+fn snapshot_windows_dacl(dacl: WindowsDacl) -> std::io::Result<WindowsDaclSnapshot> {
     use winapi::um::winnt::ACL;
 
-    let (_descriptor, dacl) = read_windows_dacl(path)?;
     let acl = if dacl.acl.is_null() {
         None
     } else {
@@ -294,6 +389,19 @@ pub(super) fn windows_dacl_snapshot(path: &Path) -> std::io::Result<WindowsDaclS
         acl,
     })
 }
+
+#[cfg(all(windows, test))]
+pub(super) fn windows_dacl_snapshot(path: &Path) -> std::io::Result<WindowsDaclSnapshot> {
+    let (_descriptor, dacl) = read_windows_dacl(path)?;
+    snapshot_windows_dacl(dacl)
+}
+
+#[cfg(all(windows, test))]
+pub(super) fn restrictive_windows_dacl_snapshot() -> std::io::Result<WindowsDaclSnapshot> {
+    let (_descriptor, dacl) = restrictive_creation_dacl()?;
+    snapshot_windows_dacl(dacl)
+}
+
 
 #[cfg(all(windows, test))]
 pub(super) fn protect_windows_dacl(path: &Path) -> std::io::Result<()> {

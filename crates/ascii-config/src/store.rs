@@ -1365,6 +1365,43 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn first_creation_restricts_main_and_backup_windows_dacls() {
+        use winapi::um::winnt::SE_DACL_PROTECTED;
+
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let backup = directory.0.join("settings.toml.bak");
+        let expected_dacl = crate::windows_acl::restrictive_windows_dacl_snapshot().unwrap();
+        let mut store = FileStore::new(&path);
+
+        store
+            .commit(None, b"first-settings", BackupMode::ReplaceWithPrevious)
+            .unwrap();
+        let main_dacl = crate::windows_acl::windows_dacl_snapshot(&path).unwrap();
+        assert_eq!(main_dacl, expected_dacl);
+        assert_ne!(main_dacl.control & SE_DACL_PROTECTED, 0);
+
+        store
+            .commit(
+                Some(b"first-settings"),
+                b"second-settings",
+                BackupMode::ReplaceWithPrevious,
+            )
+            .unwrap();
+
+        assert_eq!(fs::read(&backup).unwrap(), b"first-settings");
+        assert_eq!(
+            crate::windows_acl::windows_dacl_snapshot(&path).unwrap(),
+            expected_dacl
+        );
+        assert_eq!(
+            crate::windows_acl::windows_dacl_snapshot(&backup).unwrap(),
+            expected_dacl
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn replacement_uses_dacl_from_atomic_target() {
         use std::io::Write;
         use winapi::um::winnt::SE_DACL_PROTECTED;
