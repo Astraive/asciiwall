@@ -51,12 +51,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reject prefixed synthetic evidence with Unicode-escaped markers regardless of prefix quoting in both manifest and direct-artifact inspection ([QA-004]).
 - Visibly escape bidi formatting controls in sanitized evidence metadata and logs before canonical JSON output ([QA-004]).
 - Classify streamed JSON primitives across chunk boundaries, rejecting oversized UTF-16 and long-number JSON while preserving numeric-leading and NUL-padded binary artifacts ([QA-004]).
-- Reject oversized UTF-16/UTF-32 JSON native evidence, including primitive scalars, before it can bypass the 1 MiB inspection limit; fail closed on POSIX archive deletion because compare-inode-and-unlink is unavailable, preserving entries and reporting the limitation ([QA-004]).
+- Reject oversized UTF-16/UTF-32 JSON native evidence, including primitive scalars, before it can bypass the 1 MiB inspection limit ([QA-004]).
 - Exercise UTF-32 scalar carry-over across a short 64 KiB stream read, BOM-less LE/BE synthetic JSON detection, and invalid scalar rejection in both byte orders while retaining ordinary-binary controls ([QA-004]).
 - Detect UTF-16 LE/BE synthetic markers in oversized native manifest artifacts after non-JSON prefixes, without narrowing the binary artifact size contract ([QA-004]).
 - Detect Unicode-escaped synthetic marker keys in oversized UTF-16LE/BE native artifacts after non-JSON prefixes and across 64 KiB stream boundaries ([QA-004]).
-- Recheck expired-entry snapshots before reporting incomplete POSIX pruning so same-name replacements are preserved and reported as changed; portable bounded retention cannot be guaranteed against hostile concurrent writers without atomic compare-and-unlink ([QA-004]).
-- Exercise the POSIX post-stat removal boundary with a same-directory replacement and verify pruning reports incomplete without deleting the replacement; portable POSIX unlink cannot condition deletion on the checked inode ([QA-004]).
+- Prune expired POSIX artifacts through a same-filesystem mode-0700 quarantine, verify the moved inode before deletion, and restore replacements with a no-clobber link; serialize cooperating recorder writes and pruning with a persistent advisory lock, while documenting the uncooperative-writer limit ([QA-004]).
+- Inject same-directory replacements after the final POSIX pre-move snapshot and verify the replacement is restored, the prune reports incomplete, and normal quiescent archives still meet their retention bound ([QA-004]).
 - Surface Windows archive file-handle close failures during pruning even alongside scan, type, or read errors; preserve the primary failure in the cause chain instead of silently skipping the candidate ([QA-004]).
 - Propagate Windows native manifest/artifact handle-close failures through record validation and abort pruning instead of skipping candidates ([QA-004]).
 - Preserve completed Windows archive deletions and the primary partial-prune error if directory cleanup also fails, keeping cleanup failures secondary and observable ([QA-004]).

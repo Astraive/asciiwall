@@ -17,6 +17,11 @@ import stat
 import sys
 from typing import Any, Callable
 
+if os.name == "posix":
+    import fcntl as _fcntl
+else:
+    _fcntl = None
+
 if os.name == "nt":
     if __package__:
         from . import evidence_windows
@@ -36,6 +41,9 @@ MAX_NATIVE_ARTIFACTS = 16
 MAX_ARCHIVE_KEEP = 1000
 MAX_ARCHIVE_ENTRIES = 8192
 MAX_PRUNE_VERIFICATION_BYTES = 268_435_456
+_ARCHIVE_LOCK_NAME = ".qa-evidence.lock"
+_PRUNE_QUARANTINE_NAME = ".qa-evidence-prune"
+_QUARANTINE_ENTRY_PREFIX = "candidate-"
 _SAFE_DIRECTORY_ACCESS = (
     os.name == "posix"
     and all(function in os.supports_dir_fd for function in (os.open, os.stat, os.unlink))
@@ -423,6 +431,42 @@ def _open_directory(path: Path) -> int:
         return descriptor
     except BaseException:
         os.close(descriptor)
+        raise
+
+def _lock_archive_posix(directory_fd: int) -> int:
+    flock = getattr(_fcntl, "flock", None)
+    if flock is None:
+        raise EvidenceError("safe POSIX archive coordination is unsupported on this platform")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            _ARCHIVE_LOCK_NAME,
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or opened.st_nlink != 1
+        ):
+            raise EvidenceError("archive coordination lock must be a private regular file")
+        if stat.S_IMODE(opened.st_mode) != 0o600:
+            os.fchmod(descriptor, 0o600)
+            opened = os.fstat(descriptor)
+        flock(descriptor, _fcntl.LOCK_EX)
+        entry = os.stat(
+            _ARCHIVE_LOCK_NAME,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(entry.st_mode) or not _same_file_identity(opened, entry):
+            raise EvidenceError("archive coordination lock changed while acquiring it")
+        return descriptor
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
         raise
 
 
@@ -1403,6 +1447,21 @@ def write_new(path: Path, content: bytes) -> None:
     except OSError as exc:
         raise EvidenceError("cannot write output") from exc
 
+def _write_new_at(directory_fd: int, name: str, content: bytes) -> None:
+    try:
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+    except FileExistsError as exc:
+        raise EvidenceError("refusing to overwrite an existing output") from exc
+    except OSError as exc:
+        raise EvidenceError("cannot write output") from exc
+
 
 def emit(value: Any) -> None:
     sys.stdout.buffer.write(canonical_json(value))
@@ -1783,10 +1842,30 @@ def store_artifact(report: dict[str, Any], prefix: str, output: Path | None, arc
         return
     if archive is None or archive.is_symlink() or not archive.is_dir():
         raise EvidenceError("archive must be an existing non-symlink directory")
-    write_new(archive / f"{prefix}-{report['artifact_id']}.json", canonical_json(report))
+    name = f"{prefix}-{report['artifact_id']}.json"
+    content = canonical_json(report)
+    if os.name == "nt":
+        write_new(archive / name, content)
+        return
+    try:
+        directory_fd = _open_directory(archive)
+    except OSError as exc:
+        raise EvidenceError("archive must be an existing non-symlink directory") from exc
+    lock_fd: int | None = None
+    try:
+        lock_fd = _lock_archive_posix(directory_fd)
+        _write_new_at(directory_fd, name, content)
+    except OSError as exc:
+        raise EvidenceError("cannot safely write to the evidence archive") from exc
+    finally:
+        try:
+            if lock_fd is not None:
+                os.close(lock_fd)
+        finally:
+            os.close(directory_fd)
 
 
-def _archive_names(directory_fd: Any) -> list[str]:
+def _archive_names(directory_fd: Any, *, archive_root: bool = False) -> list[str]:
     if os.name == "nt":
         try:
             names = directory_fd.names(MAX_ARCHIVE_ENTRIES)
@@ -1798,10 +1877,271 @@ def _archive_names(directory_fd: Any) -> list[str]:
     names: list[str] = []
     with os.scandir(directory_fd) as entries:
         for entry in entries:
+            if archive_root and entry.name in {_ARCHIVE_LOCK_NAME, _PRUNE_QUARANTINE_NAME}:
+                continue
             if len(names) >= MAX_ARCHIVE_ENTRIES:
                 raise EvidenceError("archive contains too many entries to prune safely")
             names.append(entry.name)
     return names
+
+def _open_prune_quarantine(directory_fd: int, *, create: bool) -> int | None:
+    if create:
+        try:
+            if os.mkdir not in os.supports_dir_fd:
+                raise EvidenceError("safe POSIX quarantine directory creation is unsupported")
+            os.mkdir(_PRUNE_QUARANTINE_NAME, 0o700, dir_fd=directory_fd)
+        except FileExistsError:
+            pass
+        except (OSError, NotImplementedError, TypeError) as exc:
+            raise EvidenceError("cannot create the private same-filesystem prune quarantine") from exc
+    try:
+        entry = os.stat(
+            _PRUNE_QUARANTINE_NAME,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        if not create:
+            return None
+        raise EvidenceError("private prune quarantine disappeared during creation")
+    except OSError as exc:
+        raise EvidenceError("cannot inspect the private prune quarantine") from exc
+    try:
+        descriptor = os.open(
+            _PRUNE_QUARANTINE_NAME,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        raise EvidenceError("private prune quarantine must be a non-symlink directory") from exc
+    try:
+        opened = os.fstat(descriptor)
+        archive = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or opened.st_dev != archive.st_dev
+            or not _same_file_identity(opened, entry)
+        ):
+            raise EvidenceError("private prune quarantine is not owned or on the archive filesystem")
+        if stat.S_IMODE(opened.st_mode) != 0o700:
+            os.fchmod(descriptor, 0o700)
+            opened = os.fstat(descriptor)
+        current = os.stat(
+            _PRUNE_QUARANTINE_NAME,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if (
+            stat.S_IMODE(opened.st_mode) != 0o700
+            or not _same_file_identity(opened, current)
+        ):
+            raise EvidenceError("private prune quarantine changed while opening it")
+        return descriptor
+    except OSError as exc:
+        os.close(descriptor)
+        raise EvidenceError("cannot secure the private prune quarantine") from exc
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _restore_quarantined_entry(
+    directory_fd: int,
+    quarantine_fd: int,
+    source_name: str,
+    quarantine_entry: str,
+) -> None:
+    if os.link not in os.supports_dir_fd or os.link not in os.supports_follow_symlinks:
+        raise EvidenceError(
+            f"no-clobber restoration is unsupported; preserved in "
+            f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}"
+        )
+    try:
+        quarantined = os.stat(
+            quarantine_entry,
+            dir_fd=quarantine_fd,
+            follow_symlinks=False,
+        )
+        os.link(
+            quarantine_entry,
+            source_name,
+            src_dir_fd=quarantine_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except FileExistsError as exc:
+        raise EvidenceError(
+            f"replacement occupies {source_name}; preserved candidate in "
+            f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}"
+        ) from exc
+    except (OSError, NotImplementedError, TypeError) as exc:
+        raise EvidenceError(
+            f"cannot restore {source_name} without replacement; preserved candidate in "
+            f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}"
+        ) from exc
+    try:
+        restored = os.stat(source_name, dir_fd=directory_fd, follow_symlinks=False)
+        remaining = os.stat(
+            quarantine_entry,
+            dir_fd=quarantine_fd,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise EvidenceError(
+            f"cannot verify restored {source_name}; preserved candidate in "
+            f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}"
+        ) from exc
+    if not _same_file_identity(quarantined, restored) or not _same_file_identity(quarantined, remaining):
+        raise EvidenceError(
+            f"archive changed while restoring {source_name}; preserved candidate in "
+            f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}"
+        )
+    try:
+        os.unlink(quarantine_entry, dir_fd=quarantine_fd)
+    except OSError as exc:
+        raise EvidenceError(
+            f"restored {source_name} but could not clear its quarantine link "
+            f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}"
+        ) from exc
+
+
+def _recover_prune_quarantine(directory_fd: int, quarantine_fd: int) -> None:
+    patterns = (
+        ARCHIVE_RECORD_RE,
+        ARCHIVE_CONTROL_RE,
+        ARCHIVE_DIFF_RE,
+        ARCHIVE_LOG_RE,
+    )
+    for quarantine_entry in _archive_names(quarantine_fd):
+        if not quarantine_entry.startswith(_QUARANTINE_ENTRY_PREFIX):
+            raise EvidenceError(
+                f"unrecognized entry in private prune quarantine "
+                f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}"
+            )
+        source_name = quarantine_entry[len(_QUARANTINE_ENTRY_PREFIX):]
+        if not any(pattern.fullmatch(source_name) for pattern in patterns):
+            raise EvidenceError(
+                f"unrecognized entry in private prune quarantine "
+                f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}"
+            )
+        try:
+            quarantined = os.stat(
+                quarantine_entry,
+                dir_fd=quarantine_fd,
+                follow_symlinks=False,
+            )
+            source = os.stat(
+                source_name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            _restore_quarantined_entry(
+                directory_fd,
+                quarantine_fd,
+                source_name,
+                quarantine_entry,
+            )
+            continue
+        except OSError as exc:
+            raise EvidenceError(
+                f"cannot recover private prune quarantine entry "
+                f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}"
+            ) from exc
+        if not _same_file_identity(quarantined, source):
+            raise EvidenceError(
+                f"archive prune incomplete: both {source_name} and "
+                f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry} must be preserved"
+            )
+        try:
+            os.unlink(quarantine_entry, dir_fd=quarantine_fd)
+        except OSError as exc:
+            raise EvidenceError(
+                f"cannot clear recovered quarantine link "
+                f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}"
+            ) from exc
+
+
+def _quarantine_expired_posix(
+    directory_fd: int,
+    quarantine_fd: int,
+    name: str,
+    snapshot: os.stat_result,
+) -> None:
+    if os.rename not in os.supports_dir_fd:
+        raise EvidenceError("safe POSIX archive quarantine rename is unsupported on this platform")
+    quarantine_entry = _QUARANTINE_ENTRY_PREFIX + name
+    try:
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise EvidenceError(f"expired artifact disappeared during pruning: {name}") from exc
+    except OSError as exc:
+        raise EvidenceError("cannot verify an expired evidence artifact") from exc
+    if not _same_file_snapshot(snapshot, current):
+        raise EvidenceError(f"archive changed during pruning of expired artifact {name}")
+    try:
+        os.rename(
+            name,
+            quarantine_entry,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=quarantine_fd,
+        )
+    except FileNotFoundError as exc:
+        raise EvidenceError(f"expired artifact disappeared during pruning: {name}") from exc
+    except (OSError, NotImplementedError, TypeError) as exc:
+        raise EvidenceError("cannot move an expired artifact into private quarantine") from exc
+    try:
+        moved = os.stat(
+            quarantine_entry,
+            dir_fd=quarantine_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(moved.st_mode) or not _same_file_identity(snapshot, moved):
+            raise EvidenceError(f"archive changed during pruning of expired artifact {name}")
+        descriptor = os.open(
+            quarantine_entry,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=quarantine_fd,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or not _same_file_identity(snapshot, opened):
+                raise EvidenceError(f"archive changed during pruning of expired artifact {name}")
+            _verify_regular_entry_at(
+                quarantine_fd,
+                quarantine_entry,
+                opened,
+                f"archive changed during pruning of expired artifact {name}",
+            )
+        finally:
+            os.close(descriptor)
+    except BaseException as exc:
+        try:
+            _restore_quarantined_entry(directory_fd, quarantine_fd, name, quarantine_entry)
+        except EvidenceError as restore_error:
+            raise EvidenceError(
+                f"archive prune incomplete for {name}; preserved in "
+                f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}: {restore_error}"
+            ) from exc
+        if isinstance(exc, EvidenceError):
+            raise
+        raise EvidenceError(
+            f"cannot verify quarantined expired artifact {name}; restored it to the archive"
+        ) from exc
+    try:
+        os.unlink(quarantine_entry, dir_fd=quarantine_fd)
+    except OSError as exc:
+        try:
+            _restore_quarantined_entry(directory_fd, quarantine_fd, name, quarantine_entry)
+        except EvidenceError as restore_error:
+            raise EvidenceError(
+                f"archive prune incomplete for {name}; preserved in "
+                f"{_PRUNE_QUARANTINE_NAME}/{quarantine_entry}: {restore_error}"
+            ) from exc
+        raise EvidenceError(
+            f"cannot remove expired artifact {name}; restored it to the archive"
+        ) from exc
 
 
 def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
@@ -1817,7 +2157,17 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
             ) from exc
         raise EvidenceError("archive must be an existing non-symlink directory") from exc
     operation_error: BaseException | None = None
+    lock_fd: int | None = None
+    quarantine_fd: int | None = None
     try:
+        if os.name == "posix":
+            try:
+                lock_fd = _lock_archive_posix(directory_fd)
+            except OSError as exc:
+                raise EvidenceError("cannot safely coordinate POSIX archive pruning") from exc
+            quarantine_fd = _open_prune_quarantine(directory_fd, create=False)
+            if quarantine_fd is not None:
+                _recover_prune_quarantine(directory_fd, quarantine_fd)
         patterns = (
             ("evidence", ARCHIVE_RECORD_RE),
             ("control", ARCHIVE_CONTROL_RE),
@@ -1833,7 +2183,7 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
         valid: dict[str, list[tuple[tuple[int, str | int], str, str, Any, str]]] = {
             name: [] for name, _ in patterns
         }
-        for name in _archive_names(directory_fd):
+        for name in _archive_names(directory_fd, archive_root=os.name == "posix"):
             for kind, pattern in patterns:
                 match = pattern.fullmatch(name)
                 if match is None:
@@ -1908,6 +2258,12 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                         raise EvidenceError(
                             "cannot verify archive candidates before pruning"
                         ) from exc
+        if os.name == "posix" and any(len(candidates) > keep for candidates in valid.values()):
+            if quarantine_fd is None:
+                quarantine_fd = _open_prune_quarantine(directory_fd, create=True)
+            if quarantine_fd is None:
+                raise EvidenceError("cannot safely open the private POSIX prune quarantine")
+            _recover_prune_quarantine(directory_fd, quarantine_fd)
         removed: list[str] = []
         kept: dict[str, int] = {}
         try:
@@ -1939,26 +2295,18 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                                     )
                                 removed.append(name)
                         else:
-                            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-                            if not _same_file_snapshot(snapshot, current):
+                            if quarantine_fd is None:
+                                raise EvidenceError("private POSIX prune quarantine is unavailable")
+                            _quarantine_expired_posix(directory_fd, quarantine_fd, name, snapshot)
+                            removed.append(name)
+                            try:
+                                os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                            except FileNotFoundError:
+                                pass
+                            else:
                                 raise EvidenceError(
                                     f"archive changed during pruning of expired artifact {name}"
                                 )
-                            # Recheck before reporting the POSIX limitation so replacements
-                            # installed after the initial snapshot check produce an explicit
-                            # incomplete-prune error.
-                            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-                            if not _same_file_snapshot(snapshot, current):
-                                raise EvidenceError(
-                                    f"archive changed during pruning of expired artifact {name}"
-                                )
-                            # POSIX cannot unlink an entry conditional on its inode.
-                            # Refuse the deletion rather than risk removing a same-name
-                            # replacement installed after the snapshot check.
-                            raise EvidenceError(
-                                "archive prune incomplete: cannot safely prune expired artifacts "
-                                "on POSIX: atomic compare-and-unlink is unavailable"
-                            )
                     except FileNotFoundError as exc:
                         raise EvidenceError(
                             f"expired artifact disappeared during pruning: {name}"
@@ -2018,7 +2366,20 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                     type(operation_error), operation_error, operation_error.__traceback__
                 )
         else:
-            os.close(directory_fd)
+            cleanup_error: OSError | None = None
+            for descriptor in (quarantine_fd, lock_fd, directory_fd):
+                if descriptor is None:
+                    continue
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    cleanup_error = cleanup_error or exc
+            if cleanup_error is not None:
+                if operation_error is not None:
+                    raise EvidenceError(
+                        f"{operation_error}; cannot close POSIX archive descriptors"
+                    ) from operation_error
+                raise EvidenceError("cannot close POSIX archive descriptors") from cleanup_error
 
 
 def add_store_options(parser: argparse.ArgumentParser, *, required: bool = False) -> None:

@@ -1345,7 +1345,7 @@ class EvidenceRecordTests(unittest.TestCase):
                 cwd=ROOT, input=payload, capture_output=True, text=True, check=False,
             )
             self.assertEqual(repeated.returncode, 2)
-            self.assertEqual(len(list(archive.iterdir())), 1)
+            self.assertEqual(len(list(archive.iterdir())), 2 if os.name == "posix" else 1)
 
 
 class SyntheticControlsTests(unittest.TestCase):
@@ -1669,15 +1669,12 @@ class RetentionTests(unittest.TestCase):
             try:
                 if old_int_limit is not None:
                     int_limit_setter(4300)
+                result = evidence.prune_archive(archive, keep=1)
+                self.assertEqual(result["removed"], 1)
+                self.assertEqual(result["removed_names"], [f"qa-evidence-{old['record_id']}.json"])
+                self.assertFalse(old_path.exists())
                 if os.name == "posix":
-                    with self.assertRaisesRegex(evidence.EvidenceError, "atomic compare-and-unlink"):
-                        evidence.prune_archive(archive, keep=1)
-                    self.assertEqual(old_path.read_bytes(), evidence.canonical_json(old))
-                else:
-                    result = evidence.prune_archive(archive, keep=1)
-                    self.assertEqual(result["removed"], 1)
-                    self.assertEqual(result["removed_names"], [f"qa-evidence-{old['record_id']}.json"])
-                    self.assertFalse(old_path.exists())
+                    self.assertEqual(list((archive / ".qa-evidence-prune").iterdir()), [])
                 self.assertTrue((archive / f"qa-evidence-{recent['record_id']}.json").exists())
                 self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me")
                 self.assertTrue(malformed.exists())
@@ -1732,7 +1729,7 @@ class RetentionTests(unittest.TestCase):
         os.name == "posix" and _supports_safe_directory_access(),
         "same-directory replacement injection requires POSIX directory-relative access",
     )
-    def test_prune_reports_replacement_after_snapshot_check_before_posix_fallback(self):
+    def test_prune_restores_replacement_installed_after_inode_comparison(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
             old = evidence.finalize_record(base_record(date="2026-11-12"))
@@ -1776,7 +1773,7 @@ class RetentionTests(unittest.TestCase):
         os.name == "posix" and _supports_safe_directory_access(),
         "same-directory replacement injection requires POSIX directory-relative access",
     )
-    def test_prune_fails_closed_for_same_directory_replacement_before_snapshot_recheck(self):
+    def test_prune_reports_replacement_installed_before_inode_recheck(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
             old = evidence.finalize_record(base_record(date="2026-11-12"))
@@ -1853,8 +1850,8 @@ class RetentionTests(unittest.TestCase):
                     and kwargs.get("follow_symlinks") is False
                 ):
                     matching_stat_calls += 1
-                    if matching_stat_calls == 3:
-                        # Replace only after the final pre-removal stat has captured the old inode.
+                    if matching_stat_calls == 2:
+                        # Replace after the final pre-move stat captured the old inode.
                         old_path.rename(displaced_path)
                         replacement_path.rename(old_path)
                 return result
@@ -1862,11 +1859,12 @@ class RetentionTests(unittest.TestCase):
             with patch.object(evidence.os, "stat", side_effect=replace_after_final_snapshot_stat):
                 with self.assertRaisesRegex(
                     evidence.EvidenceError,
-                    "archive prune incomplete:.*atomic compare-and-unlink",
+                    "archive changed during pruning of expired artifact",
                 ):
                     evidence.prune_archive(archive, keep=1)
 
             self.assertEqual(matching_stat_calls, 3)
+            self.assertEqual(list((archive / ".qa-evidence-prune").iterdir()), [])
             self.assertEqual(old_path.read_bytes(), replacement_bytes)
             self.assertEqual(displaced_path.read_bytes(), old_bytes)
             self.assertEqual(recent_path.read_bytes(), recent_bytes)
@@ -2478,21 +2476,12 @@ class RetentionTests(unittest.TestCase):
             os.utime(reviewed_path, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
             os.utime(unreviewed_path, ns=(1_800_000_000_000_000_000, 1_800_000_000_000_000_000))
 
-            if os.name == "posix":
-                with self.assertRaisesRegex(evidence.EvidenceError, "atomic compare-and-unlink"):
-                    evidence.prune_archive(archive, keep=1)
-                self.assertTrue(reviewed_path.is_file())
-            else:
-                result = evidence.prune_archive(archive, keep=1)
-                self.assertEqual(result["removed"], 1)
-                self.assertFalse(reviewed_path.exists())
+            result = evidence.prune_archive(archive, keep=1)
+            self.assertEqual(result["removed"], 1)
+            self.assertFalse(reviewed_path.exists())
             self.assertTrue(unreviewed_path.exists())
 
 
-    @unittest.skipUnless(
-        os.name == "nt",
-        "successful pruning is unavailable on POSIX, which intentionally fails closed",
-    )
     def test_grid_diff_retention_orders_negative_modification_times_numerically(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
@@ -2540,17 +2529,11 @@ class RetentionTests(unittest.TestCase):
             unrelated = archive / "unrelated.bin"
             unrelated.write_bytes(b"keep")
 
-            if os.name == "posix":
-                with self.assertRaisesRegex(evidence.EvidenceError, "atomic compare-and-unlink"):
-                    evidence.prune_archive(archive, keep=1)
-                for prefix in ("qa-control-", "qa-grid-diff-", "qa-log-"):
-                    self.assertEqual(len(list(archive.glob(f"{prefix}*.json"))), 2)
-            else:
-                result = evidence.prune_archive(archive, keep=1)
-                self.assertEqual(result["removed"], 3)
-                self.assertEqual(set(result["kept_by_type"]), {"evidence", "control", "grid-diff", "log"})
-                for prefix in ("qa-control-", "qa-grid-diff-", "qa-log-"):
-                    self.assertEqual(len(list(archive.glob(f"{prefix}*.json"))), 1)
+            result = evidence.prune_archive(archive, keep=1)
+            self.assertEqual(result["removed"], 3)
+            self.assertEqual(set(result["kept_by_type"]), {"evidence", "control", "grid-diff", "log"})
+            for prefix in ("qa-control-", "qa-grid-diff-", "qa-log-"):
+                self.assertEqual(len(list(archive.glob(f"{prefix}*.json"))), 1)
             self.assertTrue(unrelated.is_file())
             self.assertEqual(unrelated.read_bytes(), b"keep")
 
