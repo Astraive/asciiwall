@@ -1691,6 +1691,57 @@ class RetentionTests(unittest.TestCase):
                 if old_int_limit is not None:
                     int_limit_setter(old_int_limit)
 
+    @unittest.skipUnless(
+        os.name == "posix" and _supports_safe_directory_access(),
+        "descriptor close injection requires POSIX directory-relative access",
+    )
+    def test_prune_reports_completed_removals_when_descriptor_close_fails(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            old = evidence.finalize_record(base_record(date="2026-11-12"))
+            recent = evidence.finalize_record(base_record(date="2026-11-14"))
+            old_name = f"qa-evidence-{old['record_id']}.json"
+            old_path = archive / old_name
+            recent_path = archive / f"qa-evidence-{recent['record_id']}.json"
+            old_path.write_bytes(evidence.canonical_json(old))
+            recent_path.write_bytes(evidence.canonical_json(recent))
+
+            original_open_quarantine = evidence._open_prune_quarantine
+            original_close = os.close
+            quarantine_fd = None
+
+            def remember_quarantine_fd(directory_fd, *, create):
+                nonlocal quarantine_fd
+                descriptor = original_open_quarantine(directory_fd, create=create)
+                if descriptor is not None:
+                    quarantine_fd = descriptor
+                return descriptor
+
+            def close_quarantine_then_fail(descriptor):
+                original_close(descriptor)
+                if descriptor == quarantine_fd:
+                    raise OSError("injected quarantine descriptor close failure")
+
+            with patch.object(
+                evidence,
+                "_open_prune_quarantine",
+                side_effect=remember_quarantine_fd,
+            ):
+                with patch.object(evidence.os, "close", side_effect=close_quarantine_then_fail):
+                    with self.assertRaises(evidence.EvidenceError) as raised:
+                        evidence.prune_archive(archive, keep=1)
+
+            message = str(raised.exception)
+            self.assertIn(
+                "cannot close POSIX archive descriptors: injected quarantine descriptor close failure",
+                message,
+            )
+            self.assertIn(
+                f"completed removals: 1 expired archive artifact(s): {old_name}",
+                message,
+            )
+            self.assertFalse(old_path.exists())
+            self.assertTrue(recent_path.exists())
 
     def test_prune_rejects_a_reparse_archive_directory_without_deleting_entries(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:

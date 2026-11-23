@@ -2166,6 +2166,7 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
     operation_error: BaseException | None = None
     lock_fd: int | None = None
     quarantine_fd: int | None = None
+    removed: list[str] = []
     try:
         if os.name == "posix":
             try:
@@ -2271,7 +2272,6 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
             if quarantine_fd is None:
                 raise EvidenceError("cannot safely open the private POSIX prune quarantine")
             _recover_prune_quarantine(directory_fd, quarantine_fd)
-        removed: list[str] = []
         kept: dict[str, int] = {}
         try:
             for kind, _ in patterns:
@@ -2382,11 +2382,22 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                 except OSError as exc:
                     cleanup_error = cleanup_error or exc
             if cleanup_error is not None:
-                if operation_error is not None:
-                    raise EvidenceError(
-                        f"{operation_error}; cannot close POSIX archive descriptors"
-                    ) from operation_error
-                raise EvidenceError("cannot close POSIX archive descriptors") from cleanup_error
+                cleanup_message = (
+                    f"cannot close POSIX archive descriptors: {cleanup_error}"
+                )
+                message = (
+                    f"{operation_error}; {cleanup_message}"
+                    if operation_error is not None
+                    else cleanup_message
+                )
+                if removed:
+                    removed_names = ", ".join(sorted(removed))
+                    removal_summary = (
+                        f"{len(removed)} expired archive artifact(s): {removed_names}"
+                    )
+                    if removal_summary not in message:
+                        message += f"; completed removals: {removal_summary}"
+                raise EvidenceError(message) from (operation_error or cleanup_error)
 
 
 def add_store_options(parser: argparse.ArgumentParser, *, required: bool = False) -> None:

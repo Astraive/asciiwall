@@ -58,6 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Prune expired POSIX artifacts through a same-filesystem mode-0700 quarantine, verify the moved inode before deletion, and restore replacements with a no-clobber link; serialize cooperating recorder writes and pruning with a persistent advisory lock, while documenting the uncooperative-writer limit ([QA-004]).
 - Inject same-directory replacements after the final POSIX pre-move snapshot and verify the replacement is restored, the prune reports incomplete, and normal quiescent archives still meet their retention bound ([QA-004]).
 - Route `record --archive` through the persistent POSIX lock used by other archive writes, and assert its inode remains stable across duplicate writer processes ([QA-004]).
+- Include completed POSIX archive removals in descriptor-close errors and inject the failure after deletion ([QA-004]).
 - Surface Windows archive file-handle close failures during pruning even alongside scan, type, or read errors; preserve the primary failure in the cause chain instead of silently skipping the candidate ([QA-004]).
 - Propagate Windows native manifest/artifact handle-close failures through record validation and abort pruning instead of skipping candidates ([QA-004]).
 - Preserve completed Windows archive deletions and the primary partial-prune error if directory cleanup also fails, keeping cleanup failures secondary and observable ([QA-004]).
