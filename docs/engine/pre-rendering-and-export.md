@@ -44,6 +44,22 @@ ANSI emits only engine-generated SGR color sequences (`ESC [` … `m`), begins w
 
 Each export checks the complete output length against `Budget::max_frame_bytes`, checks work against `Budget::max_work_units`, polls the shared cancellation token, and returns typed errors without exposing partial bytes. For `n` cells and `g` glyph entries, estimated work is `3n + g` for text and truecolor, `67n + g` for ANSI16, and `75n + g` for ANSI256. These bounds include a frame-validation cell scan, a size-pass scan, a serialization scan, glyph validation, and palette candidate-distance evaluations in both ANSI encoding passes (16 candidates per ANSI16 color and 18 per ANSI256 color). Destination transactions and CLI request wiring are not included: VID-014 owns the former, while this workspace has no `apps/cli` consumer for CLI-001. This serializer therefore provides no end-to-end CLI export path.
 
+### Focused export-boundary guard verification
+
+Command:
+
+```sh
+CARGO_HOME='D:/.worktrees/asciiwall/cargo-home-vid010' CARGO_TARGET_DIR='D:/.worktrees/asciiwall/target-vid010-export-guard-tests' cargo +1.100.0 test --locked -p ascii-render --lib export::tests::invalid_export_glyphs_return_indexed_errors -- --exact
+```
+
+Result: 1 passed (1 suite, 2 filtered, 0.01s).
+
+Environment: Windows 11 build 10.0.26300.9974, x86_64; `rustc 1.100.0 (0ef1bc386 2026-11-09)`, host `x86_64-pc-windows-msvc`; Cargo `1.100.0 (3acc79c0c 2026-11-05)`.
+
+SHA-256:
+- `crates/ascii-render/src/export.rs` (validator and focused test): `f70ad4cafdc3234c550ddc1583a63e822721cac1e6ec20ee148d16aaa8f03bfb`
+- `crates/ascii-render/tests/support/synthetic_font.rs` (included unit-test fixture source): `4a1baa8158dee1addcae7a7edafeee1c5bdecc3e1ad51e07cee0b597717fd34f`
+
 ## Package export
 
 Portable export embeds every required redistributable asset and attribution. It does not merely rename a project folder or a video. Relink/replace missing or restricted assets before packing. The package exporter and importer share the same schema and validation rules, and every export should pass a fresh import validation test.
