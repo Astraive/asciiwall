@@ -308,7 +308,9 @@ impl StagingFile<'_> {
         let file_metadata = self.file.metadata()?;
         #[cfg(target_os = "linux")]
         let (entry_device, entry_inode) = (entry.st_dev, entry.st_ino);
-        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        #[cfg(target_os = "macos")]
+        let (entry_device, entry_inode) = (entry.st_dev as u64, entry.st_ino);
+        #[cfg(target_os = "freebsd")]
         let (entry_device, entry_inode) = (entry.st_dev as u64, entry.st_ino as u64);
         if entry_device != file_metadata.dev()
             || entry_inode != file_metadata.ino()
