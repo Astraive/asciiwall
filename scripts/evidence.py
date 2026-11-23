@@ -585,10 +585,17 @@ class _NativeJsonPrefixScanner:
             and probe[2] < 0x80 and probe[2] != 0 and probe[3] == 0
         ):
             self._encoding = "utf-16-le"
+        # UTF-16BE strings allow any non-NUL first content code unit.
         elif (
             len(probe) >= 4
-            and probe[0] == 0 and probe[1] < 0x80 and probe[1] != 0
-            and probe[2] == 0 and probe[3] < 0x80 and probe[3] != 0
+            and probe[0] == 0 and 0 < probe[1] < 0x80
+            and (
+                (probe[2] == 0 and probe[3] != 0)
+                or (
+                    probe[1] == ord('"')
+                    and (probe[2] != 0 or probe[3] != 0)
+                )
+            )
         ):
             self._encoding = "utf-16-be"
         else:
