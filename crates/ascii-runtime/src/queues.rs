@@ -270,13 +270,15 @@ impl ControlQueue {
 /// Coordinated latest-frame handoff with separate urgent control and fixed buffer slots.
 ///
 /// The coordinator publishes a valid replacement before discarding older queued frames whenever
-/// a free slot exists. With no free slot, it stages replacement bytes before taking over the oldest
-/// queued publication as a replacement fill lease. Cancellation that wins before that acquisition
-/// leaves the prior publication intact. This replacement lease acquisition is the point of no
-/// return: cancellation during or after copying no longer aborts replacement publication. The
-/// staging buffer is charged to the shared memory budget. Consumed slots retain output permits
-/// until acknowledgement, generation invalidation, or pool destruction, without the slot pinning
-/// the pool.
+/// a free slot exists. Publication into a free slot commits atomically against cancellation: if
+/// cancellation wins before the `Published` transition, the previous queued frame remains intact;
+/// if publication wins, it completes. With no free slot, it stages replacement bytes before taking
+/// over the oldest queued publication as a replacement fill lease. Cancellation that wins before
+/// that acquisition leaves the prior publication intact. This replacement lease acquisition is
+/// the point of no return: cancellation during or after copying no longer aborts replacement
+/// publication. The staging buffer is charged to the shared memory budget. Consumed slots retain
+/// output permits until acknowledgement, generation invalidation, or pool destruction, without the
+/// slot pinning the pool.
 #[derive(Debug)]
 pub struct BoundedHandoff {
     operation: Mutex<()>,
@@ -401,10 +403,12 @@ impl BoundedHandoff {
     }
 
     /// Publishes the newest valid frame before releasing older queued frames when a free slot
-    /// exists. With no free slot, it stages replacement bytes before taking over the oldest queued
-    /// publication as a replacement fill lease. If cancellation wins before that acquisition, the
-    /// prior publication is preserved. This replacement lease acquisition is the point of no return:
-    /// cancellation during or after copying no longer aborts replacement publication.
+    /// exists. Cancellation and the free-slot `Published` transition are linearized: cancellation
+    /// that wins first preserves the old queue; publication that wins first completes. With no free
+    /// slot, it stages replacement bytes before taking over the oldest queued publication. If
+    /// cancellation wins before that acquisition, the prior publication is preserved. Replacement
+    /// lease acquisition is the no-return point: cancellation during or after copying no longer
+    /// aborts publication.
     pub fn submit_frame(
         &self,
         metadata: RasterDescriptorMetadata,
@@ -437,14 +441,14 @@ impl BoundedHandoff {
         self.pool
             .validate_frame_input(metadata, pixels, budget, cancellation)?;
         self.pool.reclaim_released();
-        let fill = match self.pool.begin_fill() {
+        let (fill, commit_publication_with_cancellation) = match self.pool.begin_fill() {
             Ok(mut fill) => {
                 fill.write_with_cpu_permit(pixels)?;
-                before_publish();
                 if cancellation.is_cancelled() {
                     return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
                 }
-                fill
+                before_publish();
+                (fill, true)
             }
             Err(RuntimeError::NoFreeSlots) => {
                 before_publish();
@@ -473,11 +477,15 @@ impl BoundedHandoff {
                 #[cfg(test)]
                 self.apply_test_cancellation_after_replacement_fill_acquire(cancellation);
                 fill.write_with_cpu_permit(&staging[..pixels.len()])?;
-                fill
+                (fill, false)
             }
             Err(error) => return Err(error),
         };
-        let descriptor = fill.publish_prevalidated(metadata)?;
+        let descriptor = if commit_publication_with_cancellation {
+            fill.publish_prevalidated_if_not_cancelled(metadata, cancellation)?
+        } else {
+            fill.publish_prevalidated(metadata)?
+        };
         while let Some(stale) = self.frames.try_recv() {
             let _ = self.pool.discard(&stale)?;
         }
@@ -597,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_replacement_keeps_the_previous_queued_frame() {
+    fn cancellation_winning_at_free_slot_publication_keeps_previous_frame() {
         let resource_budget = resource_budget();
         let handoff = BoundedHandoff::new(&resource_budget, 1, 2, 3, 1, 1).unwrap();
         let limits = budget();
@@ -621,11 +629,15 @@ mod tests {
             handoff.slot_state(first.slot_id).unwrap(),
             SlotState::Published
         );
+        assert_eq!(handoff.slot_state(1).unwrap(), SlotState::Free);
         let mut lease = handoff
             .receive_frame(&limits, &CancellationToken::new())
             .unwrap()
             .unwrap();
-        assert_eq!(lease.descriptor().media_timestamp_ns, 1);
+        assert_eq!(*lease.descriptor(), first);
+        lease
+            .with_pixels(|pixels| assert_eq!(pixels, &[1, 2, 3]))
+            .unwrap();
         lease.completion_token().unwrap().acknowledge();
         lease.release().unwrap();
     }
