@@ -24,6 +24,10 @@ const CACHE_FILE_ID_HIGH_WATER_MARKER: &str = ".file-id-high-water-v1";
 
 const CACHE_INITIALIZATION_LOCK: &str = ".asciiwall-cache-v1.init.lock";
 
+// Bound managed-file metadata independently of payload size so zero-byte entries also remain
+// bounded while preserving their validity under a zero-byte payload budget.
+const MAX_CACHE_FILES: usize = 1024;
+
 static CACHE_INITIALIZATION_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 static CACHE_FILE_ID_HIGH_WATER_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 /// Retains one shared file lock per path until every issued lease is explicitly acknowledged.
@@ -430,6 +434,14 @@ pub enum CacheError {
         budget_bytes: u64,
         requested_bytes: u64,
     },
+    FileCountPinned {
+        /// Managed files remaining after attempting eligible LRU evictions.
+        current_files: usize,
+        /// Per-root managed-file cap.
+        max_files: usize,
+        /// Additional files needed by the pending insert, or zero during trimming.
+        requested_files: usize,
+    },
     NotFound,
     UnsafeDerivedPath(PathBuf),
     InvalidLease,
@@ -461,6 +473,31 @@ impl core::fmt::Display for CacheError {
                 f,
                 "cache budget {budget_bytes} bytes cannot fit {requested_bytes} requested bytes while {used_bytes} bytes are pinned"
             ),
+            Self::FileCountPinned {
+                current_files,
+                max_files,
+                requested_files,
+            } => {
+                if *requested_files == 0 {
+                    write!(
+                        f,
+                        "cache file-count limit {max_files} cannot be met: \
+                         {current_files} managed files remain; exceeding the limit because files are \
+                         pinned or locked"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "cache file-count limit {max_files} blocks {requested_files} additional {} \
+                         while {current_files} managed files are pinned or locked",
+                        if *requested_files == 1 {
+                            "file"
+                        } else {
+                            "files"
+                        }
+                    )
+                }
+            }
             Self::NotFound => f.write_str("cache identity is not present"),
             Self::UnsafeDerivedPath(path) => write!(
                 f,
@@ -555,7 +592,7 @@ struct CacheState {
     lru_clock: u64,
     entries: HashMap<CacheIdentity, CacheEntry>,
     entries_by_file_id: HashMap<u64, CacheIdentity>,
-    orphaned_files: Vec<OrphanedFile>,
+    orphaned_files: HashMap<u64, OrphanedFile>,
 }
 
 #[derive(Debug)]
@@ -566,11 +603,12 @@ struct CacheInner {
     state: Mutex<CacheState>,
 }
 
-/// Thread-safe byte-bounded cache of generated files beneath a private root. Each instance keeps
-/// LRU identity state for entries it knows; files known only through root reconciliation remain
-/// accounted and are selected as orphaned eviction candidates by generated file ID. Operations
-/// that account for root-wide byte usage serialize with a process-local per-root mutex and an OS
-/// lock; instances sharing a root must use the same budget.
+/// Thread-safe byte- and file-bounded cache of generated files beneath a private root. It retains
+/// at most 1,024 managed files, including recovered orphans, so zero-byte entries remain bounded.
+/// Each instance keeps LRU identity state for entries it knows; files known only through root
+/// reconciliation remain accounted and are selected as orphaned eviction candidates by generated
+/// file ID. Operations that account for root-wide byte usage serialize with a process-local
+/// per-root mutex and an OS lock; instances sharing a root must use the same budget.
 /// Active leases keep process-wide portable OS shared file locks until explicit acknowledgement;
 /// deletion obtains an exclusive file lock and fails closed while any process holds a lease. The
 /// caller must keep the root private and stable; portable path APIs cannot defend against a hostile
@@ -605,7 +643,10 @@ impl DerivedCache {
             lru_clock,
             entries: HashMap::new(),
             entries_by_file_id: HashMap::new(),
-            orphaned_files,
+            orphaned_files: orphaned_files
+                .into_iter()
+                .map(|file| (file.file_id, file))
+                .collect(),
         };
         trim_to_budget(&root, &mut state)?;
         Ok(Self {
@@ -978,106 +1019,122 @@ fn reconcile_cache_state(root: &Path, state: &mut CacheState) -> Result<(), Cach
         .entries_by_file_id
         .retain(|_, identity| entries.contains_key(identity));
     discovered.retain(|file| !state.entries_by_file_id.contains_key(&file.file_id));
-    state.orphaned_files = discovered;
+    state.orphaned_files = discovered
+        .into_iter()
+        .map(|file| (file.file_id, file))
+        .collect();
     state.used_bytes = used_bytes;
     state.next_file_id = state.next_file_id.max(next_file_id);
     state.lru_clock = state.lru_clock.max(lru_clock);
     Ok(())
 }
 
+fn cache_file_count(state: &CacheState) -> usize {
+    state
+        .entries
+        .len()
+        .saturating_add(state.orphaned_files.len())
+}
+
 fn evict_for(root: &Path, state: &mut CacheState, requested_bytes: u64) -> Result<(), CacheError> {
-    let target = state
+    let target_bytes = state
         .budget_bytes
         .checked_sub(requested_bytes)
         .ok_or(CacheError::ArithmeticOverflow)?;
-    while state.used_bytes > target {
-        if !evict_oldest_file(root, state)? {
-            return Err(CacheError::BudgetPinned {
-                used_bytes: state.used_bytes,
-                budget_bytes: state.budget_bytes,
-                requested_bytes,
-            });
-        }
-    }
-    Ok(())
+    evict_to_limits(root, state, target_bytes, 1, requested_bytes)
 }
 
 fn trim_to_budget(root: &Path, state: &mut CacheState) -> Result<(), CacheError> {
-    while state.used_bytes > state.budget_bytes {
-        if !evict_oldest_file(root, state)? {
-            return Err(CacheError::BudgetPinned {
-                used_bytes: state.used_bytes,
-                budget_bytes: state.budget_bytes,
-                requested_bytes: 0,
-            });
-        }
-    }
-    Ok(())
+    let target_bytes = state.budget_bytes;
+    evict_to_limits(root, state, target_bytes, 0, 0)
 }
 
-fn evict_oldest_file(root: &Path, state: &mut CacheState) -> Result<bool, CacheError> {
-    // Failed deletions leave state unchanged, so stable ranks let us continue after one.
-    // Rank by tick, then entries before orphans, then stable file ID.
-    let mut last_examined: Option<(u64, bool, u64)> = None;
-    loop {
-        let entry_victim = state
+struct EvictionCandidate {
+    rank: (u64, bool, u64),
+}
+
+fn evict_to_limits(
+    root: &Path,
+    state: &mut CacheState,
+    target_bytes: u64,
+    requested_files: usize,
+    requested_bytes: u64,
+) -> Result<(), CacheError> {
+    let target_files = MAX_CACHE_FILES.saturating_sub(requested_files);
+    if state.used_bytes <= target_bytes && cache_file_count(state) <= target_files {
+        return Ok(());
+    }
+    // Build one stable LRU snapshot so blocked candidates are skipped in linear traversal rather
+    // than rescanning the complete entry/orphan sets after every deletion attempt.
+    let mut candidates = Vec::with_capacity(cache_file_count(state));
+    candidates.extend(
+        state
             .entries
-            .iter()
-            .filter(|(_, entry)| {
-                entry.active_leases == 0
-                    && last_examined
-                        .is_none_or(|last| (entry.last_used, false, entry.file_id) > last)
-            })
-            .min_by_key(|(_, entry)| (entry.last_used, entry.file_id))
-            .map(|(identity, entry)| ((entry.last_used, false, entry.file_id), identity));
-        let orphan_victim = state
-            .orphaned_files
-            .iter()
-            .enumerate()
-            .filter(|(_, file)| {
-                last_examined.is_none_or(|last| (file.last_used, true, file.file_id) > last)
-            })
-            .min_by_key(|(_, file)| (file.last_used, file.file_id))
-            .map(|(index, file)| ((file.last_used, true, file.file_id), index));
-        match (entry_victim, orphan_victim) {
-            (Some((entry_rank, identity)), Some((orphan_rank, _))) if entry_rank <= orphan_rank => {
-                let identity = identity.clone();
-                if remove_entry(root, state, &identity)? {
-                    return Ok(true);
-                }
-                last_examined = Some(entry_rank);
-            }
-            (Some((rank, identity)), None) => {
-                let identity = identity.clone();
-                if remove_entry(root, state, &identity)? {
-                    return Ok(true);
-                }
-                last_examined = Some(rank);
-            }
-            (_, Some((rank, index))) => {
-                if remove_orphaned_file(root, state, index)? {
-                    return Ok(true);
-                }
-                last_examined = Some(rank);
-            }
-            (None, None) => return Ok(false),
+            .values()
+            .filter(|entry| entry.active_leases == 0)
+            .map(|entry| EvictionCandidate {
+                rank: (entry.last_used, false, entry.file_id),
+            }),
+    );
+    candidates.extend(state.orphaned_files.values().map(|file| EvictionCandidate {
+        rank: (file.last_used, true, file.file_id),
+    }));
+    candidates.sort_unstable_by_key(|candidate| candidate.rank);
+    #[cfg(test)]
+    notify_eviction_test_hook(EvictionTestPoint::CandidatesSnapshotted(candidates.len()));
+
+    let mut remaining_files = cache_file_count(state);
+    for candidate in candidates {
+        if state.used_bytes <= target_bytes && remaining_files <= target_files {
+            return Ok(());
+        }
+        #[cfg(test)]
+        notify_eviction_test_hook(EvictionTestPoint::CandidateExamined);
+        let (_, is_orphan, file_id) = candidate.rank;
+        let removed = if is_orphan {
+            remove_orphaned_file(root, state, file_id)?
+        } else {
+            remove_entry_by_file_id(root, state, file_id)?
+        };
+        if removed {
+            remaining_files = remaining_files
+                .checked_sub(1)
+                .ok_or(CacheError::ArithmeticOverflow)?;
         }
     }
+    if remaining_files > target_files {
+        return Err(CacheError::FileCountPinned {
+            current_files: remaining_files,
+            max_files: MAX_CACHE_FILES,
+            requested_files,
+        });
+    }
+    if state.used_bytes > target_bytes {
+        return Err(CacheError::BudgetPinned {
+            used_bytes: state.used_bytes,
+            budget_bytes: state.budget_bytes,
+            requested_bytes,
+        });
+    }
+    Ok(())
 }
 
 fn remove_orphaned_file(
     root: &Path,
     state: &mut CacheState,
-    index: usize,
+    file_id: u64,
 ) -> Result<bool, CacheError> {
     let orphan = state
         .orphaned_files
-        .get(index)
+        .get(&file_id)
         .ok_or(CacheError::NotFound)?;
     if !delete_managed_file(root, &orphan.path)? {
         return Ok(false);
     }
-    let removed = state.orphaned_files.remove(index);
+    let removed = state
+        .orphaned_files
+        .remove(&file_id)
+        .ok_or(CacheError::NotFound)?;
     state.used_bytes = state
         .used_bytes
         .checked_sub(removed.bytes)
@@ -1085,20 +1142,33 @@ fn remove_orphaned_file(
     Ok(true)
 }
 
-fn remove_entry(
+fn remove_entry_by_file_id(
     root: &Path,
     state: &mut CacheState,
-    identity: &CacheIdentity,
+    file_id: u64,
 ) -> Result<bool, CacheError> {
-    let entry = state.entries.get(identity).ok_or(CacheError::NotFound)?;
-    if entry.active_leases != 0 {
-        return Err(CacheError::InvalidLease);
-    }
-    if !delete_managed_file(root, &entry.path)? {
+    let deleted = {
+        let identity = state
+            .entries_by_file_id
+            .get(&file_id)
+            .ok_or(CacheError::NotFound)?;
+        let entry = state.entries.get(identity).ok_or(CacheError::NotFound)?;
+        if entry.active_leases != 0 {
+            return Err(CacheError::InvalidLease);
+        }
+        delete_managed_file(root, &entry.path)?
+    };
+    if !deleted {
         return Ok(false);
     }
-    let removed = state.entries.remove(identity).ok_or(CacheError::NotFound)?;
-    state.entries_by_file_id.remove(&removed.file_id);
+    let identity = state
+        .entries_by_file_id
+        .remove(&file_id)
+        .ok_or(CacheError::NotFound)?;
+    let removed = state
+        .entries
+        .remove(&identity)
+        .ok_or(CacheError::NotFound)?;
     state.used_bytes = state
         .used_bytes
         .checked_sub(removed.bytes)
@@ -1436,10 +1506,15 @@ where
     }
 
     if create_new {
-        if let Err(error) = fs::hard_link(&temp_path, &path) {
+        #[cfg(windows)]
+        let publish_result = move_file_write_through(&temp_path, &path, false);
+        #[cfg(not(windows))]
+        let publish_result = fs::hard_link(&temp_path, &path);
+        if let Err(error) = publish_result {
             let _ = fs::remove_file(&temp_path);
             return Err(CacheError::Io(error));
         }
+        #[cfg(not(windows))]
         let _ = fs::remove_file(&temp_path);
         sync_parent_directory(managed_dir)?;
         return Ok(());
@@ -1711,7 +1786,7 @@ struct DiskBudgetState {
     available_bytes: u64,
     reserved_bytes: u64,
     consumed_bytes_since_refresh: u64,
-    total_output_bytes_written: u128,
+    total_consumed_bytes: u128,
     next_probe_id: u64,
     applied_probe_id: u64,
 }
@@ -1722,18 +1797,18 @@ struct DiskBudgetInner {
     state: Mutex<DiskBudgetState>,
 }
 
-/// Snapshot token captured before probing host disk space. Applying a token charges output bytes
-/// written since it was created and ignores readings from older or unrelated probes.
+/// Snapshot token captured before probing host disk space. Applying a token charges disk bytes
+/// accounted after it was created and ignores readings from older or unrelated probes.
 #[derive(Clone, Debug)]
 pub struct DiskBudgetProbe {
     inner: Arc<DiskBudgetInner>,
     probe_id: u64,
-    total_output_bytes_written: u128,
+    total_consumed_bytes: u128,
 }
 
 /// Shared reservation ledger. The host supplies available bytes from its platform disk-space
-/// probe; every reservation holds back the configured safety reserve. Output bytes written after
-/// a probe token is captured remain charged against the reading applied with that token.
+/// probe; every reservation holds back the configured safety reserve. Bytes recorded as consumed
+/// after a probe token is captured remain charged against the reading applied with that token.
 #[derive(Clone, Debug)]
 pub struct DiskBudget {
     inner: Arc<DiskBudgetInner>,
@@ -1748,7 +1823,7 @@ impl DiskBudget {
                     available_bytes,
                     reserved_bytes: 0,
                     consumed_bytes_since_refresh: 0,
-                    total_output_bytes_written: 0,
+                    total_consumed_bytes: 0,
                     next_probe_id: 0,
                     applied_probe_id: 0,
                 }),
@@ -1757,7 +1832,7 @@ impl DiskBudget {
     }
 
     /// Starts a host-space probe. Capture this token before invoking the host probe, then apply it
-    /// with `refresh_available_bytes`; writes after this point remain charged against that reading.
+    /// with `refresh_available_bytes`; bytes consumed after this point remain charged to it.
     pub fn begin_available_bytes_probe(&self) -> Result<DiskBudgetProbe, DiskReservationError> {
         let mut state = lock_unpoisoned(&self.inner.state);
         let probe_id = state
@@ -1768,12 +1843,12 @@ impl DiskBudget {
         Ok(DiskBudgetProbe {
             inner: Arc::clone(&self.inner),
             probe_id,
-            total_output_bytes_written: state.total_output_bytes_written,
+            total_consumed_bytes: state.total_consumed_bytes,
         })
     }
 
     /// Applies a host-probed free-space estimate. Returns false for a stale token or a token from
-    /// another ledger. Writes recorded after the token was captured remain charged to the reading.
+    /// another ledger. Bytes accounted as consumed after capture remain charged to the reading.
     pub fn refresh_available_bytes(&self, probe: DiskBudgetProbe, available_bytes: u64) -> bool {
         if !Arc::ptr_eq(&probe.inner, &self.inner) {
             return false;
@@ -1782,15 +1857,15 @@ impl DiskBudget {
         if probe.probe_id <= state.applied_probe_id {
             return false;
         }
-        let Some(bytes_written_after_probe) = state
-            .total_output_bytes_written
-            .checked_sub(probe.total_output_bytes_written)
+        let Some(bytes_consumed_after_probe) = state
+            .total_consumed_bytes
+            .checked_sub(probe.total_consumed_bytes)
         else {
             return false;
         };
         state.available_bytes = available_bytes;
         state.consumed_bytes_since_refresh =
-            u64::try_from(bytes_written_after_probe).unwrap_or(u64::MAX);
+            u64::try_from(bytes_consumed_after_probe).unwrap_or(u64::MAX);
         state.applied_probe_id = probe.probe_id;
         true
     }
@@ -1850,8 +1925,9 @@ pub struct DiskBudgetSnapshot {
     pub consumed_bytes_since_refresh: u64,
 }
 
-/// RAII accounting for expanded input, scratch, and output capacity. Dropping it releases
-/// unwritten capacity; bytes already written remain charged until a host-space refresh.
+/// RAII accounting for expanded input, scratch, and output capacity. Dropping releases unwritten
+/// output capacity; written output remains charged, while non-output capacity is conservatively
+/// charged until refresh because temporary files may survive cancellation or errors.
 #[derive(Debug)]
 pub struct DiskReservation {
     inner: Arc<DiskBudgetInner>,
@@ -1882,13 +1958,13 @@ impl DiskReservation {
             .consumed_bytes_since_refresh
             .checked_add(written_bytes)
             .ok_or_else(|| io::Error::other("consumed output byte accounting overflowed"))?;
-        let next_total_output_bytes_written = state
-            .total_output_bytes_written
+        let next_total_consumed_bytes = state
+            .total_consumed_bytes
             .checked_add(u128::from(written_bytes))
-            .ok_or_else(|| io::Error::other("total output byte accounting overflowed"))?;
+            .ok_or_else(|| io::Error::other("total disk consumption accounting overflowed"))?;
         state.reserved_bytes = next_reserved;
         state.consumed_bytes_since_refresh = next_consumed;
-        state.total_output_bytes_written = next_total_output_bytes_written;
+        state.total_consumed_bytes = next_total_consumed_bytes;
         *output_written_bytes = next_output_written;
         Ok(())
     }
@@ -1901,11 +1977,26 @@ impl Drop for DiskReservation {
             .reserved_bytes
             .checked_sub(*output_written_bytes)
             .expect("disk reservation output accounting invariant violated");
+        let non_output_bytes = self
+            .requirements
+            .expanded_input_bytes
+            .checked_add(self.requirements.scratch_bytes)
+            .expect("disk reservation non-output accounting invariant violated");
         let mut state = lock_unpoisoned(&self.inner.state);
-        state.reserved_bytes = state
+        let next_reserved = state
             .reserved_bytes
             .checked_sub(unwritten_reserved_bytes)
             .expect("disk reservation accounting invariant violated");
+        let next_consumed = state
+            .consumed_bytes_since_refresh
+            .saturating_add(non_output_bytes);
+        let next_total_consumed = state
+            .total_consumed_bytes
+            .checked_add(u128::from(non_output_bytes))
+            .expect("total disk consumption accounting invariant violated");
+        state.reserved_bytes = next_reserved;
+        state.consumed_bytes_since_refresh = next_consumed;
+        state.total_consumed_bytes = next_total_consumed;
     }
 }
 
@@ -2795,7 +2886,11 @@ fn replace_destination(temp_path: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn replace_destination(temp_path: &Path, destination: &Path) -> io::Result<()> {
+fn move_file_write_through(
+    existing_path: &Path,
+    new_path: &Path,
+    replace_existing: bool,
+) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
     #[link(name = "kernel32")]
@@ -2803,23 +2898,29 @@ fn replace_destination(temp_path: &Path, destination: &Path) -> io::Result<()> {
         fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
     }
 
-    let existing: Vec<u16> = temp_path
+    let existing: Vec<u16> = existing_path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let new: Vec<u16> = destination
+    let new: Vec<u16> = new_path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH.
-    let success = unsafe { MoveFileExW(existing.as_ptr(), new.as_ptr(), 0x1 | 0x8) };
+    // MOVEFILE_WRITE_THROUGH, with optional MOVEFILE_REPLACE_EXISTING.
+    let flags = 0x8 | if replace_existing { 0x1 } else { 0 };
+    let success = unsafe { MoveFileExW(existing.as_ptr(), new.as_ptr(), flags) };
     if success == 0 {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn replace_destination(temp_path: &Path, destination: &Path) -> io::Result<()> {
+    move_file_write_through(temp_path, destination, true)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2852,7 +2953,7 @@ fn replace_file_id_high_water_portable(temp_path: &Path, destination: &Path) -> 
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    recover_file_id_high_water_backup(parent)?;
+    recover_file_id_high_water_backup_portable(parent)?;
 
     let backup_path = parent.join(CACHE_FILE_ID_HIGH_WATER_BACKUP);
     match fs::rename(destination, &backup_path) {
@@ -2883,17 +2984,70 @@ fn restore_file_id_high_water_backup(
     backup_path: &Path,
     remove_counter: bool,
 ) -> io::Result<()> {
-    if remove_counter {
-        fs::remove_file(counter_path)?;
-        crate::storage::sync_parent_directory(managed_dir)?;
+    #[cfg(windows)]
+    {
+        let _ = (managed_dir, remove_counter);
+        replace_destination(backup_path, counter_path)
     }
-    fs::hard_link(backup_path, counter_path)?;
-    crate::storage::sync_parent_directory(managed_dir)?;
-    fs::remove_file(backup_path)?;
-    crate::storage::sync_parent_directory(managed_dir)
+
+    #[cfg(not(windows))]
+    {
+        if remove_counter {
+            fs::remove_file(counter_path)?;
+            crate::storage::sync_parent_directory(managed_dir)?;
+        }
+        fs::hard_link(backup_path, counter_path)?;
+        crate::storage::sync_parent_directory(managed_dir)?;
+        fs::remove_file(backup_path)?;
+        crate::storage::sync_parent_directory(managed_dir)
+    }
+}
+fn recover_file_id_high_water_backup(managed_dir: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        recover_file_id_high_water_backup_windows(managed_dir)
+    }
+
+    #[cfg(not(windows))]
+    {
+        recover_file_id_high_water_backup_portable(managed_dir)
+    }
 }
 
-fn recover_file_id_high_water_backup(managed_dir: &Path) -> io::Result<()> {
+#[cfg(windows)]
+fn recover_file_id_high_water_backup_windows(managed_dir: &Path) -> io::Result<()> {
+    let backup_path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER_BACKUP);
+    let counter_path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
+    let backup = high_water_file_state(&backup_path)?;
+    if backup == HighWaterFileState::Missing {
+        return Ok(());
+    }
+    let counter = high_water_file_state(&counter_path)?;
+
+    match (counter, backup) {
+        (_, HighWaterFileState::Missing) => Ok(()),
+        (HighWaterFileState::Valid(current), HighWaterFileState::Valid(previous))
+            if current >= previous =>
+        {
+            // The counter is authoritative; leave a stale backup rather than perform a
+            // non-write-through deletion. This single reserved path cannot accumulate files.
+            Ok(())
+        }
+        (HighWaterFileState::Valid(_), HighWaterFileState::Corrupt) => Ok(()),
+        (HighWaterFileState::Missing, HighWaterFileState::Valid(_))
+        | (HighWaterFileState::Corrupt, HighWaterFileState::Valid(_))
+        | (HighWaterFileState::Valid(_), HighWaterFileState::Valid(_)) => {
+            restore_file_id_high_water_backup(managed_dir, &counter_path, &backup_path, true)
+        }
+        (HighWaterFileState::Missing, HighWaterFileState::Corrupt)
+        | (HighWaterFileState::Corrupt, HighWaterFileState::Corrupt) => {
+            Err(invalid_file_id_high_water_data())
+        }
+    }
+}
+
+#[cfg(any(not(windows), test))]
+fn recover_file_id_high_water_backup_portable(managed_dir: &Path) -> io::Result<()> {
     let backup_path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER_BACKUP);
     let counter_path = managed_dir.join(CACHE_FILE_ID_HIGH_WATER);
     let backup = high_water_file_state(&backup_path)?;
@@ -2966,6 +3120,53 @@ fn notify_root_operation_test_hook(point: RootOperationTestPoint, lock: &Mutex<(
     ROOT_OPERATION_TEST_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow_mut().as_mut() {
             hook(point, lock);
+        }
+    });
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EvictionTestPoint {
+    CandidatesSnapshotted(usize),
+    CandidateExamined,
+}
+
+#[cfg(test)]
+type EvictionTestHook = Box<dyn FnMut(EvictionTestPoint) + Send>;
+
+#[cfg(test)]
+thread_local! {
+    static EVICTION_TEST_HOOK: std::cell::RefCell<Option<EvictionTestHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct EvictionTestHookReset;
+
+#[cfg(test)]
+impl Drop for EvictionTestHookReset {
+    fn drop(&mut self) {
+        EVICTION_TEST_HOOK.with(|slot| {
+            drop(slot.borrow_mut().take());
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_eviction_test_hook(
+    hook: impl FnMut(EvictionTestPoint) + Send + 'static,
+) -> EvictionTestHookReset {
+    EVICTION_TEST_HOOK.with(|slot| {
+        assert!(slot.borrow_mut().replace(Box::new(hook)).is_none());
+    });
+    EvictionTestHookReset
+}
+
+#[cfg(test)]
+fn notify_eviction_test_hook(point: EvictionTestPoint) {
+    EVICTION_TEST_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(point);
         }
     });
 }
@@ -3088,29 +3289,29 @@ mod tests {
 
         let backup = managed_dir.0.join(CACHE_FILE_ID_HIGH_WATER_BACKUP);
         fs::rename(&destination, &backup).unwrap();
-        recover_file_id_high_water_backup(&managed_dir.0).unwrap();
+        recover_file_id_high_water_backup_portable(&managed_dir.0).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"0000000000000008\n");
         assert!(!backup.exists());
 
         fs::write(&backup, b"0000000000000007\n").unwrap();
-        recover_file_id_high_water_backup(&managed_dir.0).unwrap();
+        recover_file_id_high_water_backup_portable(&managed_dir.0).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"0000000000000008\n");
         assert!(!backup.exists());
 
         fs::write(&backup, b"0000000000000009\n").unwrap();
-        recover_file_id_high_water_backup(&managed_dir.0).unwrap();
+        recover_file_id_high_water_backup_portable(&managed_dir.0).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"0000000000000009\n");
         assert!(!backup.exists());
 
         fs::write(&backup, b"000000000000000a\n").unwrap();
         fs::write(&destination, b"partial").unwrap();
-        recover_file_id_high_water_backup(&managed_dir.0).unwrap();
+        recover_file_id_high_water_backup_portable(&managed_dir.0).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"000000000000000a\n");
         assert!(!backup.exists());
 
         fs::write(&backup, b"corrupt").unwrap();
         fs::write(&destination, b"also-corrupt").unwrap();
-        let error = recover_file_id_high_water_backup(&managed_dir.0).unwrap_err();
+        let error = recover_file_id_high_water_backup_portable(&managed_dir.0).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert!(destination.exists());
         assert!(backup.exists());
@@ -3651,5 +3852,191 @@ mod tests {
 
         assert_eq!(first_cache.snapshot().unwrap().used_bytes, 5);
         assert_eq!(second_cache.snapshot().unwrap().used_bytes, 5);
+    }
+
+    #[test]
+    fn empty_entries_remain_valid_under_a_zero_byte_budget_and_file_count_is_bounded() {
+        let directory = TempManagedDirectory::new();
+        let cache_root = directory.0.join("cache");
+        let _setup_cache = DerivedCache::open(&cache_root, u64::MAX).unwrap();
+        let managed_dir = cache_root.join(CACHE_INSTANCE_DIR);
+
+        for file_id in 0..=MAX_CACHE_FILES as u64 {
+            fs::write(managed_dir.join(format!("derived-{file_id:016x}.bin")), b"").unwrap();
+        }
+
+        let cache = DerivedCache::open(&cache_root, 0).unwrap();
+        let count_generated_files = || {
+            fs::read_dir(&managed_dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("derived-"))
+                .count()
+        };
+        assert_eq!(count_generated_files(), MAX_CACHE_FILES);
+
+        let identity = cache_test_identity(42);
+        assert_eq!(
+            cache.store(identity.clone(), b"").unwrap(),
+            StoreOutcome::Inserted
+        );
+        assert_eq!(cache.snapshot().unwrap().used_bytes, 0);
+        assert_eq!(cache.snapshot().unwrap().entries, 1);
+        let mut lease = cache.lease(&identity).unwrap();
+        assert_eq!(fs::read(lease.path()).unwrap(), b"");
+        lease.acknowledge().unwrap();
+        assert_eq!(count_generated_files(), MAX_CACHE_FILES);
+
+        let locked_files: Vec<_> = fs::read_dir(&managed_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("derived-"))
+            .map(|entry| {
+                let file = File::open(entry.path()).unwrap();
+                file.try_lock().unwrap();
+                file
+            })
+            .collect();
+        let error = cache.store(cache_test_identity(43), b"").unwrap_err();
+        assert!(matches!(
+            &error,
+            CacheError::FileCountPinned {
+                current_files,
+                max_files,
+                requested_files,
+            } if *current_files == MAX_CACHE_FILES
+                && *max_files == MAX_CACHE_FILES
+                && *requested_files == 1
+        ));
+        assert_eq!(
+            error.to_string(),
+            "cache file-count limit 1024 blocks 1 additional file while 1024 managed files are pinned or locked"
+        );
+        assert_eq!(locked_files.len(), MAX_CACHE_FILES);
+        assert_eq!(count_generated_files(), MAX_CACHE_FILES);
+        drop(locked_files);
+    }
+
+    #[test]
+    fn opening_over_cap_locked_orphans_reports_file_count_trim_error() {
+        let expected_files = MAX_CACHE_FILES + 1;
+        let directory = TempManagedDirectory::new();
+        let cache_root = directory.0.join("cache");
+        let setup_cache = DerivedCache::open(&cache_root, u64::MAX).unwrap();
+        let managed_dir = cache_root.join(CACHE_INSTANCE_DIR);
+        drop(setup_cache);
+
+        for file_id in 0..expected_files as u64 {
+            fs::write(managed_dir.join(format!("derived-{file_id:016x}.bin")), b"").unwrap();
+        }
+        let locked_files: Vec<_> = (0..expected_files)
+            .map(|file_id| {
+                let path = managed_dir.join(format!("derived-{file_id:016x}.bin"));
+                let file = File::open(path).unwrap();
+                file.try_lock().unwrap();
+                file
+            })
+            .collect();
+
+        let error = match DerivedCache::open(&cache_root, u64::MAX) {
+            Err(error) => error,
+            Ok(_) => panic!("opening an over-cap cache with locked files must fail to trim"),
+        };
+        assert!(matches!(
+            &error,
+            CacheError::FileCountPinned {
+                current_files,
+                max_files,
+                requested_files,
+            } if *current_files == expected_files
+                && *max_files == MAX_CACHE_FILES
+                && *requested_files == 0
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "cache file-count limit {MAX_CACHE_FILES} cannot be met: \
+                 {expected_files} managed files remain; exceeding the limit because files are pinned or locked"
+            )
+        );
+        assert_eq!(locked_files.len(), expected_files);
+        assert_eq!(
+            fs::read_dir(&managed_dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("derived-"))
+                .count(),
+            expected_files
+        );
+        drop(locked_files);
+    }
+
+    #[test]
+    fn eviction_snapshots_candidates_once_and_traverses_lock_blocked_entries_linearly() {
+        const FILES: usize = 16;
+
+        let directory = TempManagedDirectory::new();
+        let cache_root = directory.0.join("cache");
+        let cache = DerivedCache::open(&cache_root, FILES as u64).unwrap();
+        assert_eq!(
+            cache.store(cache_test_identity(0), b"x").unwrap(),
+            StoreOutcome::Inserted
+        );
+        let managed_dir = cache.root().join(CACHE_INSTANCE_DIR);
+        for file_id in 1..FILES as u64 {
+            fs::write(
+                managed_dir.join(format!("derived-{file_id:016x}.bin")),
+                b"x",
+            )
+            .unwrap();
+        }
+        let paths: Vec<_> = (0..FILES)
+            .map(|file_id| managed_dir.join(format!("derived-{file_id:016x}.bin")))
+            .collect();
+        let locked_files: Vec<_> = paths[..FILES - 1]
+            .iter()
+            .map(|path| {
+                let file = File::open(path).unwrap();
+                file.try_lock().unwrap();
+                file
+            })
+            .collect();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let hook_events = Arc::clone(&events);
+        let hook_reset = set_eviction_test_hook(move |point| {
+            lock_unpoisoned(&hook_events).push(point);
+        });
+        let result = cache.set_budget_bytes(1);
+        drop(hook_reset);
+
+        assert!(
+            matches!(
+                &result,
+                Err(CacheError::BudgetPinned {
+                    used_bytes,
+                    budget_bytes: 1,
+                    requested_bytes: 0,
+                }) if *used_bytes == (FILES - 1) as u64
+            ),
+            "unexpected budget trim result: {result:?}"
+        );
+        assert!(!paths[FILES - 1].exists());
+        assert!(paths[..FILES - 1].iter().all(|path| path.exists()));
+
+        let events = lock_unpoisoned(&events);
+        assert_eq!(
+            events.first(),
+            Some(&EvictionTestPoint::CandidatesSnapshotted(FILES))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|point| **point == EvictionTestPoint::CandidateExamined)
+                .count(),
+            FILES
+        );
+        assert_eq!(events.len(), FILES + 1);
+        drop(locked_files);
     }
 }

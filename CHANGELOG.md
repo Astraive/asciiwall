@@ -43,6 +43,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [COR-009] Continue cache eviction past lock-blocked entries sharing an LRU tick; test identity
   changes for every GPU uniform independently.
 
+- [COR-009] Keep expanded-input and scratch capacity charged after reservation drop until a fresh
+  host-space probe reconciles files that can survive cancellation or errors.
+- [COR-009] Bound managed cache files during store, reopen, and trim while preserving empty entries
+  under a zero-byte payload budget; report current-count/limit errors when pinned or locked files
+  prevent satisfying the cap.
+- [COR-009] Snapshot and sort LRU eviction candidates once per trim, preserving stable entry/orphan
+  tie-breaks and continuing past lock-blocked files without rescanning the whole cache.
+
 - [COR-009] Deterministically verify that overlapping stores from independently opened caches contend on the shared-root mutex and preserve the shared byte budget.
 
 - [COR-009] Query `FILE_CASE_SENSITIVE_INFO.Flags` through `GetFileInformationByHandleEx` when

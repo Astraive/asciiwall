@@ -1224,6 +1224,64 @@ fn disk_reservations_count_expanded_input_scratch_output_and_safety_reserve() {
 }
 
 #[test]
+fn non_output_reservations_stay_charged_across_cancellation_and_stale_probes() {
+    let temp = TempDir::new();
+    let budget = DiskBudget::new(100, 0);
+    let stale_probe = budget.begin_available_bytes_probe().unwrap();
+
+    let operation: io::Result<()> = {
+        let _reservation = budget
+            .reserve(DiskRequirements {
+                expanded_input_bytes: 20,
+                scratch_bytes: 30,
+                ..DiskRequirements::default()
+            })
+            .unwrap();
+        fs::write(temp.path().join("expanded-input.bin"), [b'i'; 20]).unwrap();
+        fs::write(temp.path().join("scratch.bin"), [b's'; 30]).unwrap();
+        Err(io::Error::other(
+            "injected cancellation with temporary files retained",
+        ))
+    };
+    assert_eq!(operation.unwrap_err().kind(), ErrorKind::Other);
+    assert_eq!(budget.snapshot().reserved_bytes, 0);
+    assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 50);
+
+    assert!(budget.refresh_available_bytes(stale_probe, 100));
+    assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 50);
+    assert!(
+        budget
+            .reserve(DiskRequirements {
+                output_bytes: 51,
+                ..DiskRequirements::default()
+            })
+            .is_err(),
+        "the stale host reading must not make the released non-output bytes available"
+    );
+    drop(
+        budget
+            .reserve(DiskRequirements {
+                output_bytes: 50,
+                ..DiskRequirements::default()
+            })
+            .expect("the exact unconsumed capacity remains available"),
+    );
+
+    let fresh_probe = budget.begin_available_bytes_probe().unwrap();
+    assert!(budget.refresh_available_bytes(fresh_probe, 50));
+    assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 0);
+    assert!(
+        budget
+            .reserve(DiskRequirements {
+                output_bytes: 51,
+                ..DiskRequirements::default()
+            })
+            .is_err(),
+        "a fresh host reading reconciles retained non-output files"
+    );
+}
+
+#[test]
 fn stale_disk_probe_keeps_writes_charged_until_a_fresh_probe() {
     let temp = TempDir::new();
     let registry = OutputRegistry::default();
