@@ -1116,7 +1116,7 @@ class EvidenceRecordTests(unittest.TestCase):
 
             with patch.object(evidence, "_hash_native_stream", side_effect=replace_after_stream):
                 with self.assertRaisesRegex(
-                    evidence.EvidenceError, "native evidence artifact path changed"
+                    evidence.EvidenceError, r"native evidence artifact (?:changed while being read|path changed)"
                 ):
                     evidence.finalize_record(record)
 
@@ -1795,19 +1795,21 @@ class RetentionTests(unittest.TestCase):
             displaced_path = archive / "displaced-original.json"
             original_stat = os.stat
             replaced = False
+            matching_stat_calls = 0
 
             def replace_before_snapshot_recheck(name, *args, **kwargs):
-                nonlocal replaced
+                nonlocal replaced, matching_stat_calls
                 if (
-                    not replaced
-                    and name == old_name
+                    name == old_name
                     and kwargs.get("dir_fd") is not None
                     and kwargs.get("follow_symlinks") is False
                 ):
-                    # Inject before lstat; this does not test the later stat/unlink window.
-                    old_path.rename(displaced_path)
-                    replacement_path.rename(old_path)
-                    replaced = True
+                    matching_stat_calls += 1
+                    if not replaced and matching_stat_calls == 2:
+                        # The first call verifies scan-time identity; inject at pre-delete.
+                        old_path.rename(displaced_path)
+                        replacement_path.rename(old_path)
+                        replaced = True
                 return original_stat(name, *args, **kwargs)
 
             with patch.object(evidence.os, "stat", side_effect=replace_before_snapshot_recheck):
@@ -2098,17 +2100,20 @@ class RetentionTests(unittest.TestCase):
             recent_path.write_bytes(recent_bytes)
             original_stat = os.stat
             disappeared = False
+            matching_stat_calls = 0
 
             def disappear_before_snapshot_recheck(name, *args, **kwargs):
-                nonlocal disappeared
+                nonlocal disappeared, matching_stat_calls
                 if (
-                    not disappeared
-                    and name == old_name
+                    name == old_name
                     and kwargs.get("dir_fd") is not None
                     and kwargs.get("follow_symlinks") is False
                 ):
-                    old_path.unlink()
-                    disappeared = True
+                    matching_stat_calls += 1
+                    if not disappeared and matching_stat_calls == 2:
+                        # The first call verifies scan-time identity; inject at pre-delete.
+                        old_path.unlink()
+                        disappeared = True
                 return original_stat(name, *args, **kwargs)
 
             with patch.object(evidence.os, "stat", side_effect=disappear_before_snapshot_recheck):
