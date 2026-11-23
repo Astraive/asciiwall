@@ -53,6 +53,20 @@ pub fn diagonal_font(alias_b: bool) -> Vec<u8> {
     )
 }
 
+/// A source-built pair of mirrored diagonal masks; A has the lower glyph index.
+#[allow(dead_code)]
+pub fn diagonal_orientation_font() -> Vec<u8> {
+    font_with_glyphs(
+        vec![
+            rectangle(600, 800),
+            Vec::new(),
+            polygon([(320, 0), (500, 0), (180, 700), (0, 700)]),
+            polygon([(0, 0), (180, 0), (500, 700), (320, 700)]),
+        ],
+        false,
+    )
+}
+
 /// A source-generated font whose outline contains many quadratic curves.
 pub fn quadratic_font() -> Vec<u8> {
     font_with_glyphs(
@@ -186,6 +200,31 @@ fn rectangle(width: u16, height: u16) -> Vec<u8> {
     }
     for delta in [0, 0, i16::try_from(height).expect("fixture height fits"), 0] {
         push_i16(&mut glyph, delta);
+    }
+    glyph
+}
+
+#[allow(dead_code)]
+fn polygon(points: [(i16, i16); 4]) -> Vec<u8> {
+    let min_x = points.iter().map(|(x, _)| *x).min().expect("four points");
+    let min_y = points.iter().map(|(_, y)| *y).min().expect("four points");
+    let max_x = points.iter().map(|(x, _)| *x).max().expect("four points");
+    let max_y = points.iter().map(|(_, y)| *y).max().expect("four points");
+    let mut glyph = Vec::new();
+    push_i16(&mut glyph, 1); // one contour
+    for bound in [min_x, min_y, max_x, max_y] {
+        push_i16(&mut glyph, bound);
+    }
+    push_u16(&mut glyph, 3); // four points, indexed from zero
+    push_u16(&mut glyph, 0); // no instructions
+    glyph.extend_from_slice(&[1; 4]); // on-curve points, signed 16-bit deltas
+    for axis in 0..2 {
+        let mut previous = 0;
+        for &(x, y) in &points {
+            let coordinate = if axis == 0 { x } else { y };
+            push_i16(&mut glyph, coordinate - previous);
+            previous = coordinate;
+        }
     }
     glyph
 }

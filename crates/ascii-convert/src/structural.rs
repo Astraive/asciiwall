@@ -20,6 +20,8 @@ pub const MAX_STRUCTURAL_CANDIDATES: usize = 4096;
 
 const DESCRIPTOR_VERSION: u32 = 2;
 const CANCELLATION_TILE: u64 = 256;
+// Per sample: one mean read, up to three gradient reads, and five orientation reads.
+const FEATURE_WORK_UNITS_PER_SAMPLE: u64 = 9;
 
 /// Normalized weights for tone, shape-gradient, and edge-orientation distances.
 ///
@@ -153,7 +155,7 @@ impl<'a> StructuralDescriptor<'a> {
         }
         let work_bound = u64::try_from(sample_count)
             .map_err(|_| Error::SizeOverflow)?
-            .checked_mul(3)
+            .checked_mul(FEATURE_WORK_UNITS_PER_SAMPLE)
             .ok_or(Error::SizeOverflow)?;
         if work_bound > budget.max_work_units() {
             return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
@@ -539,7 +541,7 @@ fn common_feature_work_bound(width: usize, height: usize) -> Result<u64, Error> 
     let sample_count = width.checked_mul(height).ok_or(Error::SizeOverflow)?;
     u64::try_from(sample_count)
         .map_err(|_| Error::SizeOverflow)?
-        .checked_mul(9)
+        .checked_mul(FEATURE_WORK_UNITS_PER_SAMPLE)
         .ok_or(Error::SizeOverflow)
 }
 
@@ -1017,6 +1019,37 @@ mod tests {
         )
         .expect("sampling identity is produced by density conversion")
         .sampling_identity()
+    }
+
+    #[test]
+    fn descriptor_feature_budget_is_checked_at_a_conservative_boundary() {
+        let dimensions = PatchDimensions::new(2, 2).expect("valid 2x2 patch dimensions");
+        let samples = [0.0, 1.0, 0.0, 1.0];
+        let descriptor = StructuralDescriptor::from_luminance(
+            &samples,
+            dimensions,
+            1.0,
+            0.0,
+            &Budget::new(0, 0, 36),
+            &CancellationToken::new(),
+        )
+        .expect("the 36-unit conservative feature bound is sufficient for four samples");
+        assert_eq!(descriptor.mean_coverage(), 0.5);
+
+        // If extraction started, this invalid sample would produce InvalidConfiguration.
+        let invalid_samples = [f32::NAN; 4];
+        assert_eq!(
+            StructuralDescriptor::from_luminance(
+                &invalid_samples,
+                dimensions,
+                1.0,
+                0.0,
+                &Budget::new(0, 0, 35),
+                &CancellationToken::new(),
+            )
+            .err(),
+            Some(Error::BudgetExceeded(BudgetKind::WorkUnits))
+        );
     }
 
     #[test]

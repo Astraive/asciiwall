@@ -11,7 +11,9 @@ use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, Error,
     FrameMetadata, GlyphTableId, PixelFormat, RasterFrameView, RasterOrientation, TransferFunction,
 };
-use support::synthetic_font::{equal_area_orientation_font, synthetic_font};
+use support::synthetic_font::{
+    diagonal_font, diagonal_orientation_font, equal_area_orientation_font, synthetic_font,
+};
 
 const CELL_WIDTH: u32 = 8;
 const CELL_HEIGHT: u32 = 12;
@@ -159,6 +161,145 @@ fn equal_density_orientation_masks_survive_a_one_candidate_shortlist() {
         assert_eq!(shortlist.candidates().len(), 1);
         assert_eq!(shortlist.candidates()[0].character(), expected.character());
         assert!(shortlist.candidates()[0].score() <= 1.0e-6);
+    }
+}
+
+#[test]
+fn diagonal_orientation_alias_survives_one_candidate_shortlist_with_stable_ties() {
+    let table = build_table(&diagonal_font(true), "BA");
+    let diagonal_a = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'A')
+        .expect("fixture includes the diagonal A mask");
+    let diagonal_b = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'B')
+        .expect("fixture includes the aliased diagonal B mask");
+    assert_eq!(diagonal_a.glyph_index(), diagonal_b.glyph_index());
+    assert_eq!(diagonal_a.mask(), diagonal_b.mask());
+    let orientation = diagonal_a.edge_orientation();
+    assert!(
+        orientation.diagonal_positive() + orientation.diagonal_negative() > 0.0,
+        "fixture mask has diagonal edge energy: {orientation:?}"
+    );
+
+    let dimensions = PatchDimensions::new(CELL_WIDTH, CELL_HEIGHT).expect("valid patch dimensions");
+    let identity = sampling_identity(&table, dimensions);
+    let weights = StructuralWeights::new(0.0, 0.0, 1.0).expect("edge-only weights are normalized");
+    let options = ShortlistOptions::new(1, weights).expect("one candidate is within the limit");
+    let coverage = diagonal_a
+        .mask()
+        .iter()
+        .map(|&value| f32::from(value) / 255.0)
+        .collect::<Vec<_>>();
+    let luminance = luminance_for_coverage(&coverage, 1.0, 0.0);
+    let target = descriptor(&luminance, dimensions, 1.0, 0.0);
+    let mut scratch = StructuralScratch::default();
+    let mut previous = None;
+
+    for _ in 0..2 {
+        let shortlist = scratch
+            .shortlist(
+                &target,
+                &table,
+                identity,
+                options,
+                &BUDGET,
+                &CancellationToken::new(),
+            )
+            .expect("bounded diagonal shortlist completes");
+        assert_eq!(shortlist.candidates().len(), 1);
+        let candidate = shortlist.candidates()[0];
+        assert_eq!(candidate.character(), 'A');
+        assert!(candidate.score() <= 1.0e-6);
+        if let Some(previous) = previous {
+            assert_eq!(candidate, previous);
+        }
+        previous = Some(candidate);
+    }
+}
+
+#[test]
+fn diagonal_orientation_bins_distinguish_a_competitor_at_k_one() {
+    let table = build_table(&diagonal_orientation_font(), "BA");
+    let diagonal = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'B')
+        .expect("fixture includes the diagonal target");
+    let competitor = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'A')
+        .expect("fixture includes the opposite diagonal competitor");
+    assert_ne!(diagonal.mask(), competitor.mask());
+    assert!(
+        diagonal.glyph_index() > competitor.glyph_index(),
+        "the lower-index A competitor must win a diagonal-blind score tie"
+    );
+
+    let diagonal_edges = diagonal.edge_orientation();
+    let competitor_edges = competitor.edge_orientation();
+    assert!(
+        diagonal_edges.diagonal_positive() + diagonal_edges.diagonal_negative() > 0.0,
+        "target mask has diagonal edge energy: {diagonal_edges:?}"
+    );
+    assert!(
+        competitor_edges.diagonal_positive() + competitor_edges.diagonal_negative() > 0.0,
+        "competitor mask has diagonal edge energy: {competitor_edges:?}"
+    );
+
+    assert!(
+        (
+            diagonal_edges.diagonal_positive(),
+            diagonal_edges.diagonal_negative()
+        ) != (
+            competitor_edges.diagonal_positive(),
+            competitor_edges.diagonal_negative()
+        ),
+        "mirrored masks have different diagonal orientation bins"
+    );
+    close(diagonal_edges.horizontal(), competitor_edges.horizontal());
+    close(diagonal_edges.vertical(), competitor_edges.vertical());
+
+    let dimensions = PatchDimensions::new(CELL_WIDTH, CELL_HEIGHT).expect("valid patch dimensions");
+    let identity = sampling_identity(&table, dimensions);
+    let weights = StructuralWeights::new(0.0, 0.0, 1.0).expect("edge-only weights are normalized");
+    let options = ShortlistOptions::new(1, weights).expect("one candidate is within the limit");
+    let mut scratch = StructuralScratch::default();
+
+    for expected in [diagonal, competitor] {
+        let coverage = expected
+            .mask()
+            .iter()
+            .map(|&value| f32::from(value) / 255.0)
+            .collect::<Vec<_>>();
+        let luminance = luminance_for_coverage(&coverage, 1.0, 0.0);
+        let target = descriptor(&luminance, dimensions, 1.0, 0.0);
+        let mut previous = None;
+
+        for _ in 0..2 {
+            let shortlist = scratch
+                .shortlist(
+                    &target,
+                    &table,
+                    identity,
+                    options,
+                    &BUDGET,
+                    &CancellationToken::new(),
+                )
+                .expect("bounded orientation shortlist completes");
+            assert_eq!(shortlist.candidates().len(), 1);
+            let candidate = shortlist.candidates()[0];
+            assert_eq!(candidate.character(), expected.character());
+            assert!(candidate.score() <= 1.0e-6);
+            if let Some(previous) = previous {
+                assert_eq!(candidate, previous);
+            }
+            previous = Some(candidate);
+        }
     }
 }
 
@@ -383,6 +524,59 @@ fn semantic_identity_covers_masks_dimensions_features_and_candidate_controls() {
     assert_ne!(
         same,
         shortlist_identity(&other_table, &patch_2, other_sampling, options)
+    );
+}
+
+#[test]
+fn shortlist_work_preflight_accepts_exact_combined_bound_and_rejects_one_less() {
+    let table = build_table(&synthetic_font(false), "BA");
+    let dimensions = PatchDimensions::new(2, 2).expect("valid 2x2 patch");
+    let target_luminance = [0.0, 1.0, 0.0, 1.0];
+    let target = descriptor(&target_luminance, dimensions, 1.0, 0.0);
+    let identity = sampling_identity(&table, dimensions);
+    let weights = StructuralWeights::new(1.0, 0.0, 0.0).expect("tone-only weights are normalized");
+    let options = ShortlistOptions::new(1, weights).expect("one candidate is within the limit");
+
+    // K=1 uses one heap level: four ranking units per glyph plus two sort units.
+    // Feature extraction is bounded at the 8x12 glyph-cell geometry, not the 2x2 source patch.
+    let glyph_count = u64::try_from(table.glyphs().len()).expect("fixture glyph count fits");
+    let feature_work_bound = u64::from(CELL_WIDTH * CELL_HEIGHT) * 9;
+    let ranking_work_bound = glyph_count * 4 + 2;
+    let combined_work_bound = feature_work_bound + ranking_work_bound;
+    let exact_budget = Budget::new(1_000_000, 2_000_000, combined_work_bound);
+    let mut exact_scratch = StructuralScratch::default();
+    assert_eq!(
+        exact_scratch
+            .shortlist(
+                &target,
+                &table,
+                identity,
+                options,
+                &exact_budget,
+                &CancellationToken::new(),
+            )
+            .expect("the exact combined preflight budget succeeds")
+            .candidates()
+            .len(),
+        1
+    );
+
+    // The public descriptor is already validated and scratch capacity is private, so the typed
+    // error is the deterministic observable for this one-unit-short preflight boundary.
+    let below_budget = Budget::new(1_000_000, 2_000_000, combined_work_bound - 1);
+    let mut below_scratch = StructuralScratch::default();
+    assert_eq!(
+        below_scratch
+            .shortlist(
+                &target,
+                &table,
+                identity,
+                options,
+                &below_budget,
+                &CancellationToken::new(),
+            )
+            .err(),
+        Some(Error::BudgetExceeded(BudgetKind::WorkUnits))
     );
 }
 

@@ -57,3 +57,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
 - Add CNV-003 regressions for exact-boundary sampling geometry, cache identity, padded strides, crop mapping, patch budgets, 64-wide extreme/collapsed crops, and public cancellation conversion ([CNV-003]).
 - Restrict collapsed Box-sampling scans to each sample's orthogonal source footprint, preserving area coverage without traversing unrelated crop rows ([CNV-003]).
+- Correct CNV-007 feature-extraction work preflight to cover up to nine normalized-coverage evaluations per patch sample before extraction.
