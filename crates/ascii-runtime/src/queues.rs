@@ -13,9 +13,9 @@
 use std::collections::VecDeque;
 use std::mem::size_of;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(test)]
 use std::sync::{Arc, Barrier};
-use std::sync::atomic::{AtomicU8, Ordering};
 
 use ascii_core::{Budget, CancellationToken, Error as CoreError};
 
@@ -626,9 +626,8 @@ mod tests {
     #[test]
     fn cancellation_winning_at_free_slot_publication_keeps_previous_frame() {
         let resource_budget = resource_budget();
-        let handoff = std::sync::Arc::new(
-            BoundedHandoff::new(&resource_budget, 1, 2, 3, 1, 1).unwrap(),
-        );
+        let handoff =
+            std::sync::Arc::new(BoundedHandoff::new(&resource_budget, 1, 2, 3, 1, 1).unwrap());
         let limits = budget();
         let first = handoff
             .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
