@@ -6,7 +6,7 @@
 //! not invent settings or defaults. Applications should construct their
 //! platform-specific `settings.toml` path and prepare resources only from a
 //! validated immutable [`SettingsSnapshot`].
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod controller;
 mod document;
@@ -17,6 +17,9 @@ mod registry;
 mod resolve;
 mod startup;
 mod store;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_acl;
 
 #[cfg(test)]
 mod property_tests;

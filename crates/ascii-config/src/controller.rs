@@ -90,74 +90,94 @@ impl SettingsController {
         mut store: Box<dyn ConfigStore>,
     ) -> Result<Self, ConfigError> {
         let defaults = build_snapshot(&registry, 0, BTreeMap::new())?;
-        let (status, snapshot, disk_bytes) = match store.read_main() {
-            Ok(None) => (ControllerStatus::Ready, defaults, None),
-            Ok(Some(bytes)) => match decode_and_validate(&registry, &bytes) {
-                Ok(document) if document.schema_version > CURRENT_SCHEMA_VERSION => {
-                    let snapshot = build_snapshot(&registry, document.revision, BTreeMap::new())?;
-                    (
-                        ControllerStatus::ReadOnlyFutureSchema {
-                            schema_version: document.schema_version,
-                        },
-                        snapshot,
-                        Some(bytes),
-                    )
+        let mut next_read = store.read_main();
+        let mut migration_retry_used = false;
+        let (status, snapshot, disk_bytes) = loop {
+            match next_read {
+                Ok(None) => break (ControllerStatus::Ready, defaults.clone(), None),
+                Ok(Some(bytes)) => match decode_and_validate(&registry, &bytes) {
+                    Ok(document) if document.schema_version > CURRENT_SCHEMA_VERSION => {
+                        let snapshot =
+                            build_snapshot(&registry, document.revision, BTreeMap::new())?;
+                        break (
+                            ControllerStatus::ReadOnlyFutureSchema {
+                                schema_version: document.schema_version,
+                            },
+                            snapshot,
+                            Some(bytes),
+                        );
+                    }
+                    Ok(document) if document.schema_version < CURRENT_SCHEMA_VERSION => {
+                        let migrated = migrate(document).map_err(map_migration_error)?;
+                        validate_overrides(&registry, &migrated.overrides)?;
+                        let effective = resolve_overrides(&registry, &migrated.overrides)?;
+                        let revision = migrated
+                            .revision
+                            .checked_add(1)
+                            .filter(|revision| *revision <= i64::MAX as u64)
+                            .ok_or(ConfigError::RevisionOverflow)?;
+                        let serialized = encode(revision, &migrated.overrides)?;
+                        match store.commit(
+                            Some(&bytes),
+                            &serialized,
+                            BackupMode::ReplaceWithPrevious,
+                        ) {
+                            Ok(()) => {
+                                break (
+                                    ControllerStatus::Ready,
+                                    Arc::new(SettingsSnapshot {
+                                        revision,
+                                        effective,
+                                        overrides: Arc::new(migrated.overrides),
+                                    }),
+                                    Some(serialized),
+                                );
+                            }
+                            Err(StoreError::Stale { .. }) if !migration_retry_used => {
+                                migration_retry_used = true;
+                                next_read = store.read_main_locked();
+                                continue;
+                            }
+                            Err(error) => return Err(ConfigError::Storage(error)),
+                        }
+                    }
+                    Ok(document) => {
+                        validate_overrides(&registry, &document.overrides)?;
+                        let effective = resolve_overrides(&registry, &document.overrides)?;
+                        break (
+                            ControllerStatus::Ready,
+                            Arc::new(SettingsSnapshot {
+                                revision: document.revision,
+                                effective,
+                                overrides: Arc::new(document.overrides),
+                            }),
+                            Some(bytes),
+                        );
+                    }
+                    Err(failure) => {
+                        let snapshot = match failure.revision {
+                            Some(revision) => build_snapshot(&registry, revision, BTreeMap::new())?,
+                            None => defaults.clone(),
+                        };
+                        let status = if failure.can_repair {
+                            ControllerStatus::RepairRequired(failure.error)
+                        } else {
+                            ControllerStatus::ReadOnlyUnclassifiableDocument(failure.error)
+                        };
+                        break (status, snapshot, Some(bytes));
+                    }
+                },
+                Err(StoreError::TooLarge { limit, .. }) => {
+                    break (
+                        ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
+                            DocumentError::TooLarge { limit },
+                        )),
+                        defaults.clone(),
+                        None,
+                    );
                 }
-                Ok(document) if document.schema_version < CURRENT_SCHEMA_VERSION => {
-                    let migrated = migrate(document).map_err(map_migration_error)?;
-                    validate_overrides(&registry, &migrated.overrides)?;
-                    let effective = resolve_overrides(&registry, &migrated.overrides)?;
-                    let revision = migrated
-                        .revision
-                        .checked_add(1)
-                        .filter(|revision| *revision <= i64::MAX as u64)
-                        .ok_or(ConfigError::RevisionOverflow)?;
-                    let serialized = encode(revision, &migrated.overrides)?;
-                    store.commit(Some(&bytes), &serialized, BackupMode::ReplaceWithPrevious)?;
-                    (
-                        ControllerStatus::Ready,
-                        Arc::new(SettingsSnapshot {
-                            revision,
-                            effective,
-                            overrides: Arc::new(migrated.overrides),
-                        }),
-                        Some(serialized),
-                    )
-                }
-                Ok(document) => {
-                    validate_overrides(&registry, &document.overrides)?;
-                    let effective = resolve_overrides(&registry, &document.overrides)?;
-                    (
-                        ControllerStatus::Ready,
-                        Arc::new(SettingsSnapshot {
-                            revision: document.revision,
-                            effective,
-                            overrides: Arc::new(document.overrides),
-                        }),
-                        Some(bytes),
-                    )
-                }
-                Err(failure) => {
-                    let snapshot = match failure.revision {
-                        Some(revision) => build_snapshot(&registry, revision, BTreeMap::new())?,
-                        None => defaults,
-                    };
-                    let status = if failure.can_repair {
-                        ControllerStatus::RepairRequired(failure.error)
-                    } else {
-                        ControllerStatus::ReadOnlyUnclassifiableDocument(failure.error)
-                    };
-                    (status, snapshot, Some(bytes))
-                }
-            },
-            Err(StoreError::TooLarge { limit, .. }) => (
-                ControllerStatus::ReadOnlyUnclassifiableDocument(ConfigError::Document(
-                    DocumentError::TooLarge { limit },
-                )),
-                defaults,
-                None,
-            ),
-            Err(error) => return Err(ConfigError::Storage(error)),
+                Err(error) => return Err(ConfigError::Storage(error)),
+            }
         };
         Ok(Self {
             registry,
@@ -325,9 +345,9 @@ fn decode_and_validate(
         Ok(document) => document,
         Err(error) => {
             let recovery = match &error {
-                DocumentError::InvalidToml | DocumentError::InvalidField("revision") => {
-                    recovery_metadata(registry, bytes)
-                }
+                DocumentError::InvalidToml
+                | DocumentError::InvalidField("revision")
+                | DocumentError::UnsupportedStructure => recovery_metadata(registry, bytes),
                 _ => None,
             };
             return Err(OpenDocumentError {
@@ -361,7 +381,7 @@ struct RecoveryMetadata {
 fn recovery_metadata(registry: &Registry, bytes: &[u8]) -> Option<RecoveryMetadata> {
     let text = std::str::from_utf8(bytes).ok()?;
     if let Ok(toml::Value::Table(root)) = toml::from_str::<toml::Value>(text) {
-        return recovery_metadata_from_parsed(registry, root);
+        return recovery_metadata_from_parsed(registry, text, root);
     }
     if !settings_keys_are_known(text, registry) {
         return None;
@@ -371,6 +391,7 @@ fn recovery_metadata(registry: &Registry, bytes: &[u8]) -> Option<RecoveryMetada
 
 fn recovery_metadata_from_parsed(
     registry: &Registry,
+    text: &str,
     mut root: toml::map::Map<String, toml::Value>,
 ) -> Option<RecoveryMetadata> {
     let schema_version = root
@@ -387,8 +408,17 @@ fn recovery_metadata_from_parsed(
         let toml::Value::Table(settings) = settings else {
             return None;
         };
+        let parsed_syntax = if settings.values().any(recovery_value_contains_table) {
+            Some(text.parse::<toml_edit::DocumentMut>().ok()?)
+        } else {
+            None
+        };
         if settings.iter().any(|(key, value)| {
-            !known_setting_name(registry, key) || recovery_value_contains_table(value)
+            !known_setting_name(registry, key)
+                || (recovery_value_contains_table(value)
+                    && !parsed_syntax.as_ref().is_some_and(|document| {
+                        structured_setting_assignment_matches(document, key)
+                    }))
         }) {
             return None;
         }
@@ -403,6 +433,54 @@ fn recovery_value_contains_table(value: &toml::Value) -> bool {
     match value {
         toml::Value::Table(_) => true,
         toml::Value::Array(values) => values.iter().any(recovery_value_contains_table),
+        _ => false,
+    }
+}
+
+// Read the TOML tree so strings/comments cannot masquerade as assignments;
+// direct-child lookup also rejects ambiguous dotted-key paths.
+fn structured_setting_assignment_matches(
+    document: &toml_edit::DocumentMut,
+    expected_key: &str,
+) -> bool {
+    let Some(settings) = document.get("settings") else {
+        return false;
+    };
+    match settings {
+        toml_edit::Item::Table(settings) => {
+            let key_is_quoted = table_key_is_quoted(settings, expected_key);
+            settings.get(expected_key).is_some_and(|item| match item {
+                toml_edit::Item::Table(table) => {
+                    key_is_quoted && !table.is_implicit() && !table.is_dotted()
+                }
+                toml_edit::Item::ArrayOfTables(_) => key_is_quoted,
+                _ => item
+                    .as_value()
+                    .is_some_and(structured_toml_value_is_unambiguous),
+            })
+        }
+        toml_edit::Item::Value(toml_edit::Value::InlineTable(settings)) => {
+            !settings.is_dotted()
+                && settings
+                    .get(expected_key)
+                    .is_some_and(structured_toml_value_is_unambiguous)
+        }
+        _ => false,
+    }
+}
+
+fn table_key_is_quoted(table: &toml_edit::Table, expected_key: &str) -> bool {
+    table
+        .key(expected_key)
+        .and_then(|key| key.as_repr())
+        .and_then(|repr| repr.as_raw().as_str())
+        .is_some_and(|repr| repr.starts_with('"') || repr.starts_with('\''))
+}
+
+fn structured_toml_value_is_unambiguous(value: &toml_edit::Value) -> bool {
+    match value {
+        toml_edit::Value::Array(_) => true,
+        toml_edit::Value::InlineTable(table) => !table.is_dotted(),
         _ => false,
     }
 }
@@ -653,6 +731,10 @@ fn inline_settings_keys_are_known(line: &str, registry: &Registry) -> bool {
 }
 
 fn known_setting_syntax(registry: &Registry, raw_key: &str) -> bool {
+    setting_key_from_syntax(registry, raw_key).is_some()
+}
+
+fn setting_key_from_syntax<'a>(registry: &Registry, raw_key: &'a str) -> Option<&'a str> {
     let raw_key = raw_key.trim();
     let (key, quoted) = match raw_key
         .strip_prefix('"')
@@ -668,9 +750,9 @@ fn known_setting_syntax(registry: &Registry, raw_key: &str) -> bool {
         },
     };
     if !quoted && key.contains('.') {
-        return false;
+        return None;
     }
-    known_setting_name(registry, key)
+    known_setting_name(registry, key).then_some(key)
 }
 
 fn known_setting_name(registry: &Registry, raw_key: &str) -> bool {
@@ -854,7 +936,7 @@ impl SettingsController {
 }
 #[cfg(test)]
 mod persistence_tests {
-    use super::{SettingChange, SettingsController};
+    use super::{ControllerStatus, SettingChange, SettingsController};
     use crate::{
         error::ConfigError,
         model::{
@@ -862,12 +944,15 @@ mod persistence_tests {
             SettingScope, SettingType, SettingValue,
         },
         registry::Registry,
-        store::{FileStore, PersistStage, StoreError},
+        store::{BackupMode, ConfigStore, FileStore, PersistStage, StoreError},
     };
     use std::{
         fs,
         path::PathBuf,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -906,6 +991,337 @@ mod persistence_tests {
         )
         .unwrap();
         std::sync::Arc::new(Registry::new([descriptor]).unwrap())
+    }
+
+    fn registry_with_parent_and_note() -> Arc<Registry> {
+        let boolean_descriptor = |name: &str| {
+            SettingDescriptor::new(
+                SettingKey::new(name).unwrap(),
+                SettingValue::Boolean(false),
+                SettingType::Boolean,
+                SettingScope::A,
+                SettingPhase::V1,
+                None,
+                InvalidationClass::Controller,
+                SemanticValidator::None,
+            )
+            .unwrap()
+        };
+        let note = SettingDescriptor::new(
+            SettingKey::new("note").unwrap(),
+            SettingValue::text(""),
+            SettingType::String { max_chars: 128 },
+            SettingScope::A,
+            SettingPhase::V1,
+            None,
+            InvalidationClass::Controller,
+            SemanticValidator::None,
+        )
+        .unwrap();
+        Arc::new(
+            Registry::new([
+                boolean_descriptor("application"),
+                boolean_descriptor("application.enabled"),
+                note,
+            ])
+            .unwrap(),
+        )
+    }
+    struct ConcurrentMigrationStore {
+        primary: FileStore,
+        competitor: FileStore,
+        concurrent_document: Vec<u8>,
+        interleaved: bool,
+        locked_rechecks: Arc<AtomicU64>,
+    }
+
+    impl ConfigStore for ConcurrentMigrationStore {
+        fn read_main(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+            self.primary.read_main()
+        }
+
+        fn read_main_locked(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+            self.locked_rechecks.fetch_add(1, Ordering::SeqCst);
+            self.primary.read_main_locked()
+        }
+
+        fn read_backup(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+            self.primary.read_backup()
+        }
+
+        fn commit(
+            &mut self,
+            expected_current: Option<&[u8]>,
+            contents: &[u8],
+            backup_mode: BackupMode,
+        ) -> Result<(), StoreError> {
+            if !self.interleaved {
+                self.interleaved = true;
+                self.competitor.commit(
+                    expected_current,
+                    &self.concurrent_document,
+                    BackupMode::ReplaceWithPrevious,
+                )?;
+            }
+            self.primary.commit(expected_current, contents, backup_mode)
+        }
+    }
+
+    #[test]
+    fn stale_migration_cas_reopens_a_competing_current_schema_document() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let legacy =
+            b"schema_version = 1\nrevision = 3\n[settings]\n\"application.enabled\" = true\n";
+        let concurrent =
+            b"schema_version = 2\nrevision = 4\n[settings]\n\"application.enabled\" = true\n";
+        fs::write(&path, legacy).unwrap();
+        let locked_rechecks = Arc::new(AtomicU64::new(0));
+        let store = ConcurrentMigrationStore {
+            primary: FileStore::new(path.clone()),
+            competitor: FileStore::new(path.clone()),
+            concurrent_document: concurrent.to_vec(),
+            interleaved: false,
+            locked_rechecks: locked_rechecks.clone(),
+        };
+
+        let controller = SettingsController::open_for_test(registry(), Box::new(store)).unwrap();
+
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::Ready
+        ));
+        let snapshot = controller.snapshot().unwrap();
+        assert_eq!(snapshot.revision(), 4);
+        assert_eq!(
+            snapshot
+                .overrides()
+                .get(&SettingKey::new("application.enabled").unwrap()),
+            Some(&SettingValue::Boolean(true))
+        );
+        assert_eq!(fs::read(path).unwrap(), concurrent);
+        assert_eq!(locked_rechecks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn recognized_structured_setting_requires_explicit_repair() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let original =
+            b"schema_version = 2\nrevision = 5\n[settings]\n\"application.enabled\" = [240]\n";
+        fs::write(&path, original).unwrap();
+
+        let controller =
+            SettingsController::open_for_test(registry(), Box::new(FileStore::new(&path))).unwrap();
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::RepairRequired(_)
+        ));
+        assert_eq!(controller.snapshot().unwrap().revision(), 5);
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        let repaired = controller.repair(5).unwrap();
+        assert_eq!(repaired.revision(), 6);
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::Ready
+        ));
+        assert!(repaired.overrides().is_empty());
+        let archived = fs::read_dir(&directory.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.corrupt-")
+            })
+            .expect("repaired bytes archived");
+        assert_eq!(fs::read(archived.path()).unwrap(), original);
+    }
+
+    #[test]
+    fn recognized_inline_table_setting_requires_explicit_repair() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let original =
+            b"schema_version = 2\nrevision = 5\n[settings]\n\"application.enabled\" = { extra = 1 }\n";
+        fs::write(&path, original).unwrap();
+
+        let controller =
+            SettingsController::open_for_test(registry(), Box::new(FileStore::new(&path))).unwrap();
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::RepairRequired(_)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        let repaired = controller.repair(5).unwrap();
+        assert_eq!(repaired.revision(), 6);
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::Ready
+        ));
+        assert!(repaired.overrides().is_empty());
+        let archived = fs::read_dir(&directory.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.corrupt-")
+            })
+            .expect("repaired bytes archived");
+        assert_eq!(fs::read(archived.path()).unwrap(), original);
+    }
+
+    #[test]
+    fn recognized_canonical_inline_table_setting_requires_explicit_repair() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let original = b"schema_version = 2\nrevision = 5\nsettings = { \"application.enabled\" = { extra = 1 } }\n";
+        fs::write(&path, original).unwrap();
+
+        let controller =
+            SettingsController::open_for_test(registry(), Box::new(FileStore::new(&path))).unwrap();
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::RepairRequired(_)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        let repaired = controller.repair(5).unwrap();
+        assert_eq!(repaired.revision(), 6);
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::Ready
+        ));
+        assert!(repaired.overrides().is_empty());
+        let archived = fs::read_dir(&directory.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.corrupt-")
+            })
+            .expect("repaired bytes archived");
+        assert_eq!(fs::read(archived.path()).unwrap(), original);
+    }
+
+    #[test]
+    fn recognized_quoted_table_and_array_headers_require_explicit_repair() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let original = b"schema_version = 2\nrevision = 5\n[settings.\"application.enabled\"]\nextra = 1\n[[settings.\"note\"]]\nextra = 2\n";
+        fs::write(&path, original).unwrap();
+
+        let controller = SettingsController::open_for_test(
+            registry_with_parent_and_note(),
+            Box::new(FileStore::new(&path)),
+        )
+        .unwrap();
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::RepairRequired(_)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        let repaired = controller.repair(5).unwrap();
+        assert_eq!(repaired.revision(), 6);
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::Ready
+        ));
+        let archived = fs::read_dir(&directory.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.corrupt-")
+            })
+            .expect("repaired bytes archived");
+        assert_eq!(fs::read(archived.path()).unwrap(), original);
+    }
+
+    #[test]
+    fn unquoted_dotted_inline_prefix_with_registered_child_remains_read_only() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let original = b"schema_version = 2\nrevision = 5\nsettings = { application.enabled = { extra = 1 } }\n";
+        fs::write(&path, original).unwrap();
+
+        let controller = SettingsController::open_for_test(
+            registry_with_parent_and_note(),
+            Box::new(FileStore::new(&path)),
+        )
+        .unwrap();
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::ReadOnlyUnclassifiableDocument(_)
+        ));
+        assert!(matches!(
+            controller.repair(5),
+            Err(ConfigError::ReadOnlyUnclassifiableDocument)
+        ));
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn unknown_and_unquoted_dotted_structures_remain_read_only() {
+        let documents: [&[u8]; 6] = [
+            b"schema_version = 2\nrevision = 5\n[settings]\n\"unknown.setting\" = [240]\n",
+            b"schema_version = 2\nrevision = 5\n[settings]\napplication.enabled = [240]\n",
+            b"schema_version = 2\nrevision = 5\n[settings]\n\"unknown.setting\" = { extra = 1 }\n",
+            b"schema_version = 2\nrevision = 5\n[settings]\napplication.enabled = { extra = 1 }\n",
+            b"schema_version = 2\nrevision = 5\nsettings = { \"unknown.setting\" = { extra = 1 } }\n",
+            b"schema_version = 2\nrevision = 5\nsettings = { application.enabled = { extra = 1 } }\n",
+        ];
+        for (index, original) in documents.into_iter().enumerate() {
+            let directory = TestDirectory::new();
+            let path = directory.0.join(format!("settings-{index}.toml"));
+            fs::write(&path, original).unwrap();
+
+            let controller =
+                SettingsController::open_for_test(registry(), Box::new(FileStore::new(&path)))
+                    .unwrap();
+            assert!(matches!(
+                controller.status().unwrap(),
+                ControllerStatus::ReadOnlyUnclassifiableDocument(_)
+            ));
+            assert!(matches!(
+                controller.repair(0),
+                Err(ConfigError::ReadOnlyUnclassifiableDocument)
+            ));
+            assert_eq!(fs::read(path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn multiline_string_assignments_cannot_classify_dotted_tables_as_repairable() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let original = b"schema_version = 2\nrevision = 5\n[settings]\nnote = \"\"\"\napplication = { nested = 1 }\n\"\"\"\napplication.enabled = { extra = 1 }\n";
+        fs::write(&path, original).unwrap();
+
+        let controller = SettingsController::open_for_test(
+            registry_with_parent_and_note(),
+            Box::new(FileStore::new(&path)),
+        )
+        .unwrap();
+        assert!(matches!(
+            controller.status().unwrap(),
+            ControllerStatus::ReadOnlyUnclassifiableDocument(_)
+        ));
+        assert!(matches!(
+            controller.repair(5),
+            Err(ConfigError::ReadOnlyUnclassifiableDocument)
+        ));
+        assert_eq!(fs::read(path).unwrap(), original);
     }
 
     #[test]

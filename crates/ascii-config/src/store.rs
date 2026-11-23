@@ -19,6 +19,8 @@ pub(crate) enum BackupMode {
 
 pub(crate) trait ConfigStore: Send {
     fn read_main(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
+    /// Re-reads the main document while holding the writer lock after a stale migration CAS.
+    fn read_main_locked(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
     fn read_backup(&mut self) -> Result<Option<Vec<u8>>, StoreError>;
     fn commit(
         &mut self,
@@ -170,6 +172,13 @@ impl FileStore {
             Err(error) => return Err(WriteFailure::before_replace(error)),
         };
         let mut temporary = TempFile::new(temporary_path);
+        if let Err(error) = preserve_target_dacl(target, &temporary_file) {
+            drop(temporary_file);
+            return Err(WriteFailure::before_replace(StoreError::io(
+                StoreOperation::CreateTemporary,
+                error,
+            )));
+        }
 
         if let Err(error) = self.fail(PersistStage::TempWrite) {
             let prefix = bytes.len() / 2;
@@ -207,15 +216,23 @@ impl FileStore {
         }
 
         let replace_result = if replace_stage == PersistStage::ArchiveReplace {
-            fs::hard_link(temporary.path(), target)
-        } else {
-            fs::rename(temporary.path(), target)
-        };
-        if let Err(error) = replace_result {
-            return Err(WriteFailure::before_replace(StoreError::io(
-                StoreOperation::Replace,
+            fs::hard_link(temporary.path(), target).map_err(|error| ReplaceFailure {
                 error,
-            )));
+                replaced: false,
+                indeterminate: false,
+            })
+        } else {
+            replace_file(temporary.path(), target)
+        };
+        if let Err(failure) = replace_result {
+            let error = StoreError::io(StoreOperation::Replace, failure.error);
+            return Err(if failure.indeterminate {
+                WriteFailure::indeterminate(error)
+            } else if failure.replaced {
+                WriteFailure::after_replace(error)
+            } else {
+                WriteFailure::before_replace(error)
+            });
         }
         if replace_stage == PersistStage::ArchiveReplace
             && let Err(error) = fs::remove_file(temporary.path())
@@ -295,10 +312,20 @@ impl FileStore {
         let mode = restrictive_mode(target)?;
         let (path, mut file) = create_temp_uninjected(target, mode)?;
         let mut temporary = TempFile::new(path);
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        if let Err(error) = preserve_target_dacl(target, &file) {
+            drop(file);
+            return Err(error);
+        }
+        if let Err(error) = file.write_all(bytes) {
+            drop(file);
+            return Err(error);
+        }
+        if let Err(error) = file.sync_all() {
+            drop(file);
+            return Err(error);
+        }
         drop(file);
-        fs::rename(temporary.path(), target)?;
+        replace_file(temporary.path(), target).map_err(|failure| failure.error)?;
         temporary.disarm();
         sync_parent(&parent)
     }
@@ -315,6 +342,10 @@ impl FileStore {
 
 impl ConfigStore for FileStore {
     fn read_main(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        self.read_path(&self.path)
+    }
+    fn read_main_locked(&mut self) -> Result<Option<Vec<u8>>, StoreError> {
+        let _writer_lock = self.writer_lock()?;
         self.read_path(&self.path)
     }
 
@@ -353,6 +384,9 @@ impl ConfigStore for FileStore {
             return match self.atomic_write(&self.path.clone(), contents, PersistStage::MainReplace)
             {
                 Ok(()) => Ok(()),
+                Err(failure) if failure.indeterminate => {
+                    Err(indeterminate_without_rollback(failure.error))
+                }
                 Err(failure) => {
                     if let Err(rollback) = self.restore_previous(None, Some(&archive)) {
                         Err(StoreError::CommitIndeterminate {
@@ -391,6 +425,9 @@ impl ConfigStore for FileStore {
 
         match self.atomic_write(&self.path.clone(), contents, PersistStage::MainReplace) {
             Ok(()) => Ok(()),
+            Err(failure) if failure.indeterminate => {
+                Err(indeterminate_without_rollback(failure.error))
+            }
             Err(failure) if failure.replaced => {
                 if let Err(rollback) = self.restore_previous(previous.as_deref(), None) {
                     Err(StoreError::CommitIndeterminate {
@@ -431,6 +468,7 @@ fn directory_sync_stage(replace_stage: PersistStage) -> PersistStage {
 struct WriteFailure {
     error: StoreError,
     replaced: bool,
+    indeterminate: bool,
 }
 
 impl WriteFailure {
@@ -438,6 +476,7 @@ impl WriteFailure {
         Self {
             error,
             replaced: false,
+            indeterminate: false,
         }
     }
 
@@ -445,7 +484,23 @@ impl WriteFailure {
         Self {
             error,
             replaced: true,
+            indeterminate: false,
         }
+    }
+
+    fn indeterminate(error: StoreError) -> Self {
+        Self {
+            error,
+            replaced: false,
+            indeterminate: true,
+        }
+    }
+}
+
+fn indeterminate_without_rollback(error: StoreError) -> StoreError {
+    StoreError::CommitIndeterminate {
+        cause: error.to_string(),
+        rollback: "not attempted to avoid overwriting a potentially raced target".to_owned(),
     }
 }
 
@@ -641,6 +696,16 @@ fn open_restrictive(path: &Path, mode: u32) -> std::io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use winapi::um::winnt::{GENERIC_WRITE, READ_CONTROL, WRITE_DAC};
+
+        // Block other opens until the inherited DACL has been replaced and checked.
+        options
+            .access_mode(GENERIC_WRITE | READ_CONTROL | WRITE_DAC)
+            .share_mode(0);
+    }
     let file = options.open(path)?;
     #[cfg(unix)]
     {
@@ -654,6 +719,41 @@ fn open_restrictive(path: &Path, mode: u32) -> std::io::Result<File> {
     #[cfg(not(unix))]
     let _ = mode;
     Ok(file)
+}
+#[derive(Debug)]
+struct ReplaceFailure {
+    error: std::io::Error,
+    replaced: bool,
+    indeterminate: bool,
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &Path, target: &Path) -> Result<(), ReplaceFailure> {
+    let backup = unique_sibling(target, "replaced");
+    crate::windows_acl::replace_file(temporary, target, &backup).map_err(|failure| ReplaceFailure {
+        error: failure.error,
+        replaced: failure.replaced,
+        indeterminate: failure.indeterminate,
+    })
+}
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &Path, target: &Path) -> Result<(), ReplaceFailure> {
+    fs::rename(temporary, target).map_err(|error| ReplaceFailure {
+        error,
+        replaced: false,
+        indeterminate: false,
+    })
+}
+
+#[cfg(windows)]
+fn preserve_target_dacl(target: &Path, temporary: &File) -> std::io::Result<()> {
+    crate::windows_acl::preserve_target_dacl(target, temporary)
+}
+
+#[cfg(not(windows))]
+fn preserve_target_dacl(_target: &Path, _temporary: &File) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn create_temp_uninjected(target: &Path, mode: u32) -> std::io::Result<(PathBuf, File)> {
@@ -931,5 +1031,110 @@ mod tests {
             fs::metadata(archive.path()).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+    #[cfg(windows)]
+    #[test]
+    fn replacement_preserves_existing_protected_windows_dacl() {
+        use winapi::um::winnt::SE_DACL_PROTECTED;
+
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        fs::write(&path, b"last-valid-main").unwrap();
+        crate::windows_acl::protect_windows_dacl(&path).unwrap();
+        let before = crate::windows_acl::windows_dacl_snapshot(&path).unwrap();
+        assert_ne!(before.control & SE_DACL_PROTECTED, 0);
+
+        let mut store = FileStore::new(&path);
+        store
+            .commit(
+                Some(b"last-valid-main"),
+                b"candidate-settings",
+                BackupMode::ReplaceWithPrevious,
+            )
+            .unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"candidate-settings");
+        assert_eq!(
+            crate::windows_acl::windows_dacl_snapshot(&path).unwrap(),
+            before
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replacement_uses_dacl_from_atomic_target() {
+        use std::io::Write;
+        use winapi::um::winnt::SE_DACL_PROTECTED;
+
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        fs::write(&path, b"old-settings").unwrap();
+        crate::windows_acl::protect_windows_dacl(&path).unwrap();
+        let copied_dacl = crate::windows_acl::windows_dacl_snapshot(&path).unwrap();
+        assert_ne!(copied_dacl.control & SE_DACL_PROTECTED, 0);
+
+        let temporary_path = super::unique_sibling(&path, "dacl-race");
+        let mut temporary_file = super::open_restrictive(&temporary_path, 0o600).unwrap();
+        crate::windows_acl::preserve_target_dacl(&path, &temporary_file).unwrap();
+        temporary_file.write_all(b"new-settings").unwrap();
+        temporary_file.sync_all().unwrap();
+        drop(temporary_file);
+
+        crate::windows_acl::unprotect_windows_dacl(&path).unwrap();
+        let current_dacl = crate::windows_acl::windows_dacl_snapshot(&path).unwrap();
+        assert_eq!(current_dacl.control & SE_DACL_PROTECTED, 0);
+        assert_ne!(current_dacl, copied_dacl);
+
+        super::replace_file(&temporary_path, &path).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new-settings");
+        assert_eq!(
+            crate::windows_acl::windows_dacl_snapshot(&path).unwrap(),
+            current_dacl
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn substituted_replace_backup_source_is_never_restored() {
+        let directory = TestDirectory::new();
+        let target = directory.0.join("settings.toml");
+        let backup = directory.0.join("settings.toml.replaced");
+        let displaced = directory.0.join("verified-original");
+        fs::write(&target, b"original-target").unwrap();
+        fs::rename(&target, &backup).unwrap();
+        let verified_original = fs::read(&backup).unwrap();
+        fs::rename(&backup, &displaced).unwrap();
+        fs::write(&backup, b"substituted-source").unwrap();
+
+        // The verified source path was substituted before recovery. Recovery
+        // must leave both the original and the substitute untouched.
+        let failure =
+            crate::windows_acl::recover_replace_failure(std::io::Error::from_raw_os_error(1177));
+
+        assert!(!failure.replaced);
+        assert!(failure.indeterminate);
+        assert!(!target.exists());
+        assert_eq!(fs::read(&displaced).unwrap(), verified_original);
+        assert_eq!(fs::read(&backup).unwrap(), b"substituted-source");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_replace_recovery_is_indeterminate_without_clobbering_raced_target() {
+        let directory = TestDirectory::new();
+        let target = directory.0.join("settings.toml");
+        let backup = directory.0.join("settings.toml.replaced");
+        fs::write(&target, b"original-target").unwrap();
+        fs::rename(&target, &backup).unwrap();
+        fs::write(&target, b"raced-target").unwrap();
+
+        let failure =
+            crate::windows_acl::recover_replace_failure(std::io::Error::from_raw_os_error(1177));
+
+        assert!(!failure.replaced);
+        assert!(failure.indeterminate);
+        assert_eq!(fs::read(&target).unwrap(), b"raced-target");
+        assert_eq!(fs::read(&backup).unwrap(), b"original-target");
     }
 }

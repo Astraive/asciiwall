@@ -27,6 +27,8 @@ dependencies = [
  "fs2",
  "proptest",
  "toml",
+ "toml_edit",
+ "winapi",
 ]
 
 [[package]]
