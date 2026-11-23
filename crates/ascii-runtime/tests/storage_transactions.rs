@@ -2851,6 +2851,41 @@ fn portable_export_redacts_user_qualified_home_paths_in_generic_strings() {
 }
 
 #[test]
+fn portable_export_redacts_home_and_local_paths_in_unicode_quotes() {
+    let source = json!({
+        "quoted_posix_home": "see ‚/home/alice/private.txt‛ before import",
+        "quoted_relative_local": "selected 「Downloads/private-file」 before import",
+        "quoted_tilde_home": "from 『~alice/Documents/private.txt』",
+        "quoted_substitution_brackets": "⸂/home/alice/private.txt⸃",
+        "ordinary_quoted_prose": "the phrase 「hello」 is harmless",
+        "substitution_bracket_prose": "⸂hello⸃"
+    });
+    let portable =
+        ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
+            .expect("portable export");
+
+    for private_key in [
+        "quoted_posix_home",
+        "quoted_relative_local",
+        "quoted_tilde_home",
+        "quoted_substitution_brackets",
+    ] {
+        assert!(
+            portable.content().get(private_key).is_none(),
+            "portable export retained quoted path {private_key}"
+        );
+    }
+    assert_eq!(
+        portable.content()["ordinary_quoted_prose"],
+        json!("the phrase 「hello」 is harmless")
+    );
+    assert_eq!(
+        portable.content()["substitution_bracket_prose"],
+        json!("⸂hello⸃")
+    );
+}
+
+#[test]
 fn portable_export_redacts_machine_paths_after_colon_delimiters() {
     let source = json!({
         "first_note": "note:~alice/Documents/private.txt",
