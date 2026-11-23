@@ -128,10 +128,10 @@ impl GlyphRepertoire {
     }
 }
 
-/// Returns whether a scalar belongs to the strict, single-cell v1 repertoire.
+/// Returns whether a scalar belongs to the strict, supported single-cell v1 repertoire.
 #[must_use]
 pub const fn is_supported_single_cell_scalar(character: char) -> bool {
-    matches!(character as u32, 0x20..=0x7e | 0x2580..=0x259f | 0x2800..=0x28ff)
+    ascii_core::is_supported_single_cell_scalar(character)
 }
 
 /// Validated geometry and raster size for a single-cell glyph table.

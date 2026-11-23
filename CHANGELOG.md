@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
 - Added named strict-cell presets for printable ASCII/space, Unicode blocks, Braille, and their union, plus deterministic scalar-specific validation and fixed-cell metric classification ([font contract](docs/engine/glyph-matching-and-fonts.md)).
 - Added matcher-identical single-glyph previews with available, unavailable, invisible, and multi-cell states; source-generated font fixtures cover the complete supported repertoire and every Braille dot pattern at two raster sizes. Editor, clip-reader, and text-export integrations remain absent and are explicitly not claimed.
+- Added `ascii-media::parse_clip_glyph_table` for the draft ASCII clip v1 glyph-table section, validating bounded lengths, UTF-8, exact counts, and the shared FNT-002 single-cell predicate; full clip header/index/frame decoding remains unimplemented (`[FNT-002]`).
 
 ### Changed
 
