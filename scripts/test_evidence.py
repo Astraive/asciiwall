@@ -1340,11 +1340,19 @@ class EvidenceRecordTests(unittest.TestCase):
             self.assertTrue(record_path.is_file())
             record = json.loads(record_path.read_text(encoding="utf-8"))
             self.assertEqual(record["record_id"], result["record_id"])
+            if os.name == "posix":
+                lock_path = archive / ".qa-evidence.lock"
+                lock_identity = (lock_path.stat().st_dev, lock_path.stat().st_ino)
             repeated = subprocess.run(
                 [sys.executable, str(SCRIPT), "record", "-", "--archive", str(archive)],
                 cwd=ROOT, input=payload, capture_output=True, text=True, check=False,
             )
             self.assertEqual(repeated.returncode, 2)
+            if os.name == "posix":
+                self.assertEqual(
+                    (lock_path.stat().st_dev, lock_path.stat().st_ino),
+                    lock_identity,
+                )
             self.assertEqual(len(list(archive.iterdir())), 2 if os.name == "posix" else 1)
 
 

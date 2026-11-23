@@ -1462,6 +1462,29 @@ def _write_new_at(directory_fd: int, name: str, content: bytes) -> None:
     except OSError as exc:
         raise EvidenceError("cannot write output") from exc
 
+def _write_archive_new(archive: Path, name: str, content: bytes) -> None:
+    if archive.is_symlink() or not archive.is_dir():
+        raise EvidenceError("archive must be an existing non-symlink directory")
+    if os.name == "nt":
+        write_new(archive / name, content)
+        return
+    try:
+        directory_fd = _open_directory(archive)
+    except OSError as exc:
+        raise EvidenceError("archive must be an existing non-symlink directory") from exc
+    lock_fd: int | None = None
+    try:
+        lock_fd = _lock_archive_posix(directory_fd)
+        _write_new_at(directory_fd, name, content)
+    except OSError as exc:
+        raise EvidenceError("cannot safely write to the evidence archive") from exc
+    finally:
+        try:
+            if lock_fd is not None:
+                os.close(lock_fd)
+        finally:
+            os.close(directory_fd)
+
 
 def emit(value: Any) -> None:
     sys.stdout.buffer.write(canonical_json(value))
@@ -1840,29 +1863,13 @@ def store_artifact(report: dict[str, Any], prefix: str, output: Path | None, arc
     if output is not None:
         write_new(output, canonical_json(report))
         return
-    if archive is None or archive.is_symlink() or not archive.is_dir():
+    if archive is None:
         raise EvidenceError("archive must be an existing non-symlink directory")
-    name = f"{prefix}-{report['artifact_id']}.json"
-    content = canonical_json(report)
-    if os.name == "nt":
-        write_new(archive / name, content)
-        return
-    try:
-        directory_fd = _open_directory(archive)
-    except OSError as exc:
-        raise EvidenceError("archive must be an existing non-symlink directory") from exc
-    lock_fd: int | None = None
-    try:
-        lock_fd = _lock_archive_posix(directory_fd)
-        _write_new_at(directory_fd, name, content)
-    except OSError as exc:
-        raise EvidenceError("cannot safely write to the evidence archive") from exc
-    finally:
-        try:
-            if lock_fd is not None:
-                os.close(lock_fd)
-        finally:
-            os.close(directory_fd)
+    _write_archive_new(
+        archive,
+        f"{prefix}-{report['artifact_id']}.json",
+        canonical_json(report),
+    )
 
 
 def _archive_names(directory_fd: Any, *, archive_root: bool = False) -> list[str]:
@@ -2429,9 +2436,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.output is not None:
                 write_new(args.output, canonical_json(record))
             else:
-                if args.archive.is_symlink() or not args.archive.is_dir():
-                    raise EvidenceError("archive must be an existing non-symlink directory")
-                write_new(args.archive / f"qa-evidence-{record['record_id']}.json", canonical_json(record))
+                _write_archive_new(
+                    args.archive,
+                    f"qa-evidence-{record['record_id']}.json",
+                    canonical_json(record),
+                )
             emit({"status": "recorded", "schema_version": 1, "record_id": record["record_id"]})
             return 0
         if args.command == "validate":
