@@ -2097,12 +2097,13 @@ impl OutputRegistry {
 
     /// Writes into a unique sibling temporary file. Unix and Windows atomically replace an
     /// existing destination; other targets commit with no-clobber creation and reject replacement.
-    /// Existing destinations are backed up by a same-directory hard link, which is synced before
-    /// replacement. Relative destinations are resolved to an absolute path once at transaction
-    /// start, and that captured path is used for staging, verification, commit, errors, and
-    /// registration. Registration follows parent-directory sync and backup cleanup. If sync fails
-    /// after publication, the previous destination is restored (or a new destination is removed);
-    /// `partial_temp_path` never points at the published destination.
+    /// Existing destinations are backed up by a same-directory hard link when supported.
+    /// Symbolic-link destinations are rejected before publication because hard-link behavior for
+    /// symlinks differs across platforms. Relative destinations are resolved to an absolute path
+    /// once at transaction start, and that captured path is used for staging, verification,
+    /// commit, errors, and registration. Registration follows parent-directory sync and backup
+    /// cleanup. If sync fails after publication, the previous destination is restored (or a new
+    /// destination is removed); `partial_temp_path` never points at the published file.
     ///
     /// The stage handle stays open and its file identity is checked before the path-based commit.
     /// Unix/Windows use stable file identifiers; other targets compare available file metadata.
@@ -2238,23 +2239,22 @@ impl OutputRegistry {
                 return Err(OutputWriteError::new(kind, Some(temp_path), Some(error)));
             }
         };
-        if let Some(backup_path) = backup_path.as_ref() {
-            if let Err(error) = sync_parent_directory(destination_parent) {
-                let kind = if is_disk_full(&error) {
-                    OutputFailureKind::DiskFull
-                } else {
-                    OutputFailureKind::Sync
-                };
-                let recovery_path = if fs::remove_file(backup_path).is_err() && backup_path.exists()
-                {
-                    Some(backup_path.clone())
-                } else {
-                    None
-                };
-                let mut output_error = OutputWriteError::new(kind, Some(temp_path), Some(error));
-                output_error.recovery_path = recovery_path;
-                return Err(output_error);
-            }
+        if let Some(backup_path) = backup_path.as_ref()
+            && let Err(error) = sync_parent_directory(destination_parent)
+        {
+            let kind = if is_disk_full(&error) {
+                OutputFailureKind::DiskFull
+            } else {
+                OutputFailureKind::Sync
+            };
+            let recovery_path = if fs::remove_file(backup_path).is_err() && backup_path.exists() {
+                Some(backup_path.clone())
+            } else {
+                None
+            };
+            let mut output_error = OutputWriteError::new(kind, Some(temp_path), Some(error));
+            output_error.recovery_path = recovery_path;
+            return Err(output_error);
         }
         if let Err(error) = replace(&temp_path, &destination) {
             let kind = if is_disk_full(&error) {
@@ -2395,8 +2395,12 @@ where
 
 fn output_recovery_path(backup_path: Option<&Path>, destination: &Path) -> Option<PathBuf> {
     backup_path
-        .filter(|path| path.exists())
-        .or_else(|| destination.exists().then_some(destination))
+        .filter(|path| fs::symlink_metadata(path).is_ok())
+        .or_else(|| {
+            fs::symlink_metadata(destination)
+                .is_ok()
+                .then_some(destination)
+        })
         .map(Path::to_path_buf)
 }
 
@@ -3018,6 +3022,12 @@ fn create_output_temp(destination: &Path) -> io::Result<(PathBuf, File)> {
 }
 fn create_output_backup(destination: &Path) -> io::Result<Option<PathBuf>> {
     match fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "symbolic-link output destinations are not supported",
+            ));
+        }
         Ok(_) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -3929,6 +3939,67 @@ mod tests {
             })
             .count();
         assert_eq!(transaction_temps, 0);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn output_symlink_destination_is_rejected_before_publication() {
+        let directory = TempManagedDirectory::new();
+        let output_dir = fs::canonicalize(&directory.0).unwrap();
+        let target = output_dir.join("symlink-target");
+        let destination = output_dir.join("symlink-output");
+        fs::write(&target, b"original bytes").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &destination).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &destination).unwrap();
+
+        let identity = cache_test_identity(202);
+        let registry = OutputRegistry::default();
+        let budget = DiskBudget::new(64, 0);
+        let reservation = budget
+            .reserve(DiskRequirements {
+                output_bytes: 32,
+                ..DiskRequirements::default()
+            })
+            .unwrap();
+        let error = registry
+            .write_transactional(identity.clone(), &destination, &reservation, |output| {
+                output.write_all(b"replacement bytes")
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind, OutputFailureKind::Commit);
+        assert_eq!(error.recovery_path, None);
+        let partial_path = error
+            .partial_temp_path
+            .expect("rejected symlink leaves the staged output available");
+        assert_eq!(fs::read(&partial_path).unwrap(), b"replacement bytes");
+        assert!(
+            fs::symlink_metadata(&destination)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"original bytes");
+        assert_eq!(fs::read(&target).unwrap(), b"original bytes");
+        assert_eq!(registry.registered_path(&identity), None);
+        fs::remove_file(partial_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_symlink_recovery_path_reports_dangling_backup() {
+        let directory = TempManagedDirectory::new();
+        let backup_path = directory.0.join("dangling-backup");
+        let destination = directory.0.join("missing-destination");
+        std::os::unix::fs::symlink("missing-target", &backup_path).unwrap();
+        assert!(!backup_path.exists());
+
+        assert_eq!(
+            output_recovery_path(Some(&backup_path), &destination),
+            Some(backup_path)
+        );
     }
 
     struct DiskFullAfterPrefix {
