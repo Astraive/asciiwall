@@ -447,7 +447,6 @@ impl BoundedHandoff {
                 if cancellation.is_cancelled() {
                     return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
                 }
-                before_publish();
                 (fill, true)
             }
             Err(RuntimeError::NoFreeSlots) => {
@@ -482,6 +481,7 @@ impl BoundedHandoff {
             Err(error) => return Err(error),
         };
         let descriptor = if commit_publication_with_cancellation {
+            before_publish();
             fill.publish_prevalidated_if_not_cancelled(metadata, cancellation)?
         } else {
             fill.publish_prevalidated(metadata)?
@@ -614,6 +614,8 @@ mod tests {
             .unwrap();
         let cancellation = CancellationToken::new();
 
+        // On the free-slot path this seam runs after its last cancellation check, immediately
+        // before the cancellation-aware publication gate.
         let error = handoff
             .submit_frame_before_publish(metadata(2), &[4, 5, 6], &limits, &cancellation, || {
                 cancellation.cancel()
@@ -624,6 +626,7 @@ mod tests {
             error,
             RuntimeError::CoreValidation(ascii_core::Error::Cancelled)
         );
+        assert!(cancellation.is_cancelled());
         assert_eq!(handoff.queued_frames(), 1);
         assert_eq!(
             handoff.slot_state(first.slot_id).unwrap(),
