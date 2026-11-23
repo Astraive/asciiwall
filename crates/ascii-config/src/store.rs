@@ -1121,10 +1121,7 @@ fn exclusive_rename_is_unsupported(error: &std::io::Error) -> bool {
     }
 }
 
-#[cfg(all(
-    not(windows),
-    not(any(target_os = "linux", target_os = "macos"))
-))]
+#[cfg(all(not(windows), not(any(target_os = "linux", target_os = "macos"))))]
 fn exclusive_rename_new_file(_temporary: &Path, _target: &Path) -> std::io::Result<()> {
     Err(no_replace_unsupported_error())
 }
