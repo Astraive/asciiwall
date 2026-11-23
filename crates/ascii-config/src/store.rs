@@ -1039,9 +1039,12 @@ fn publish_new_file(temporary: &Path, target: &Path) -> Result<(), ReplaceFailur
 const RENAME_NOREPLACE: libc::c_uint = 1;
 
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
 fn exclusive_rename_new_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
     let temporary = c_path(temporary)?;
     let target = c_path(target)?;
+    // SAFETY: Both pointers are live NUL-terminated CStrings; the syscall number,
+    // directory descriptors, and flag match the Linux renameat2 ABI.
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,
@@ -1068,6 +1071,8 @@ fn exclusive_rename_new_file(temporary: &Path, target: &Path) -> std::io::Result
 const RENAME_EXCL: libc::c_uint = 0x0000_0004;
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+// SAFETY: This declaration matches the documented macOS libSystem renamex_np ABI.
 #[link(name = "System")]
 unsafe extern "C" {
     fn renamex_np(
@@ -1078,9 +1083,12 @@ unsafe extern "C" {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 fn exclusive_rename_new_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
     let temporary = c_path(temporary)?;
     let target = c_path(target)?;
+    // SAFETY: Both pointers are live NUL-terminated CStrings and RENAME_EXCL is
+    // the documented exclusive-rename flag; renamex_np consumes them synchronously.
     let result = unsafe { renamex_np(temporary.as_ptr(), target.as_ptr(), RENAME_EXCL) };
     if result == 0 {
         Ok(())
