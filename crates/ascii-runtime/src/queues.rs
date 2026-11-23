@@ -13,6 +13,8 @@
 use std::collections::VecDeque;
 use std::mem::size_of;
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::{Arc, Barrier};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use ascii_core::{Budget, CancellationToken, Error as CoreError};
@@ -294,6 +296,8 @@ pub struct BoundedHandoff {
     cancel_after_replacement_fill_acquire: Mutex<bool>,
     #[cfg(test)]
     cancel_during_replacement_staging: Mutex<bool>,
+    #[cfg(test)]
+    pause_before_free_slot_publication: Mutex<Option<Arc<Barrier>>>,
 }
 
 impl BoundedHandoff {
@@ -332,6 +336,8 @@ impl BoundedHandoff {
             cancel_after_replacement_fill_acquire: Mutex::new(false),
             #[cfg(test)]
             cancel_during_replacement_staging: Mutex::new(false),
+            #[cfg(test)]
+            pause_before_free_slot_publication: Mutex::new(None),
         })
     }
 
@@ -357,6 +363,22 @@ impl BoundedHandoff {
     /// Returns one slot's state for bounded diagnostics/tests.
     pub fn slot_state(&self, slot_id: u32) -> Result<crate::SlotState, RuntimeError> {
         self.pool.slot_state(slot_id)
+    }
+
+    #[cfg(test)]
+    fn pause_before_next_free_slot_publication(&self) -> Arc<Barrier> {
+        let pause = Arc::new(Barrier::new(2));
+        *lock_unpoisoned(&self.pause_before_free_slot_publication) = Some(Arc::clone(&pause));
+        pause
+    }
+
+    #[cfg(test)]
+    fn apply_test_pause_before_free_slot_publication(&self) {
+        let pause = lock_unpoisoned(&self.pause_before_free_slot_publication).take();
+        if let Some(pause) = pause {
+            pause.wait();
+            pause.wait();
+        }
     }
 
     #[cfg(test)]
@@ -444,21 +466,13 @@ impl BoundedHandoff {
         let descriptor = match self.pool.begin_fill() {
             Ok(mut fill) => {
                 fill.write_with_cpu_permit(pixels)?;
+                before_publish();
                 if cancellation.is_cancelled() {
                     return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
                 }
                 #[cfg(test)]
-                let descriptor = fill.publish_prevalidated_if_not_cancelled_with_hook(
-                    metadata,
-                    cancellation,
-                    before_publish,
-                )?;
-                #[cfg(not(test))]
-                let descriptor = {
-                    drop(before_publish);
-                    fill.publish_prevalidated_if_not_cancelled(metadata, cancellation)?
-                };
-                descriptor
+                self.apply_test_pause_before_free_slot_publication();
+                fill.publish_prevalidated_if_not_cancelled(metadata, cancellation)?
             }
             Err(RuntimeError::NoFreeSlots) => {
                 before_publish();
@@ -612,24 +626,35 @@ mod tests {
     #[test]
     fn cancellation_winning_at_free_slot_publication_keeps_previous_frame() {
         let resource_budget = resource_budget();
-        let handoff = BoundedHandoff::new(&resource_budget, 1, 2, 3, 1, 1).unwrap();
+        let handoff = std::sync::Arc::new(
+            BoundedHandoff::new(&resource_budget, 1, 2, 3, 1, 1).unwrap(),
+        );
         let limits = budget();
         let first = handoff
             .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
             .unwrap();
-        let cancellation = CancellationToken::new();
+        let cancellation = std::sync::Arc::new(CancellationToken::new());
+        let pause = handoff.pause_before_next_free_slot_publication();
+        let submission_handoff = std::sync::Arc::clone(&handoff);
+        let submission_cancellation = std::sync::Arc::clone(&cancellation);
+        let submission_limits = budget();
+        let submission = std::thread::spawn(move || {
+            submission_handoff.submit_frame(
+                metadata(2),
+                &[4, 5, 6],
+                &submission_limits,
+                &submission_cancellation,
+            )
+        });
 
-        // On the free-slot path this seam runs after its last cancellation check, immediately
-        // before the cancellation-aware publication gate.
-        let error = handoff
-            .submit_frame_before_publish(metadata(2), &[4, 5, 6], &limits, &cancellation, || {
-                cancellation.cancel()
-            })
-            .unwrap_err();
+        // The public submission pauses after its final cancellation check, before the commit gate.
+        pause.wait();
+        cancellation.cancel();
+        pause.wait();
 
         assert_eq!(
-            error,
-            RuntimeError::CoreValidation(ascii_core::Error::Cancelled)
+            submission.join().unwrap(),
+            Err(RuntimeError::CoreValidation(ascii_core::Error::Cancelled))
         );
         assert!(cancellation.is_cancelled());
         assert_eq!(handoff.queued_frames(), 1);
