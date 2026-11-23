@@ -31,7 +31,7 @@ pub struct Cli {
     /// Disable diagnostic color; explicit ANSI artwork is unaffected.
     #[arg(long, global = true)]
     pub no_color: bool,
-    /// Forbid network access regardless of saved preferences.
+    /// Windows rejects recognized remote roots/provider flags and reparse points, then pins traversal and file I/O to checked handles; this does not guarantee no network I/O. Unsupported platforms reject offline conversion.
     #[arg(long, global = true)]
     pub offline: bool,
     #[command(subcommand)]
@@ -114,6 +114,30 @@ impl Format {
 impl ConvertArgs {
     /// Validates the request without opening or modifying the destination.
     pub fn validate(&self, json: bool) -> Result<(Format, GlyphRepertoire), CliError> {
+        #[cfg(windows)]
+        {
+            self.validate_inner(json, None)
+        }
+        #[cfg(not(windows))]
+        {
+            self.validate_inner(json)
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn validate_with_output_state(
+        &self,
+        json: bool,
+        output_state: OutputPathState,
+    ) -> Result<(Format, GlyphRepertoire), CliError> {
+        self.validate_inner(json, Some(output_state))
+    }
+
+    fn validate_inner(
+        &self,
+        json: bool,
+        #[cfg(windows)] bound_output_state: Option<OutputPathState>,
+    ) -> Result<(Format, GlyphRepertoire), CliError> {
         if self.image.as_os_str().is_empty()
             || self.output.as_os_str().is_empty()
             || self
@@ -133,20 +157,55 @@ impl ConvertArgs {
             ));
         }
 
-        // Reject an existing destination before format and charset validation so it remains the
-        // primary actionable error and cannot be mistaken for a conversion failure.
-        let output_metadata = if !stdout && !self.overwrite {
+        // Offline Windows callers supply state from the pinned destination directory handle;
+        // other callers retain the path-based validation contract.
+        #[cfg(windows)]
+        let output_metadata = if !stdout && bound_output_state.is_none() {
             Some(fs::symlink_metadata(&self.output))
         } else {
             None
         };
-        if matches!(&output_metadata, Some(Ok(_))) {
+        #[cfg(not(windows))]
+        let output_metadata = if !stdout {
+            Some(fs::symlink_metadata(&self.output))
+        } else {
+            None
+        };
+        #[cfg(windows)]
+        let output_exists = match bound_output_state {
+            Some(OutputPathState::Missing) => false,
+            Some(OutputPathState::File | OutputPathState::Directory) => true,
+            None => matches!(&output_metadata, Some(Ok(_))),
+        };
+        #[cfg(not(windows))]
+        let output_exists = matches!(&output_metadata, Some(Ok(_)));
+        if !stdout && !self.overwrite && output_exists {
             return Err(CliError::usage(
                 "output already exists; use --overwrite to replace it",
             ));
         }
 
         if !stdout {
+            #[cfg(windows)]
+            match bound_output_state {
+                Some(OutputPathState::Directory) => {
+                    return Err(CliError::io("output path is a directory"));
+                }
+                Some(OutputPathState::Missing | OutputPathState::File) => {}
+                None => match output_metadata.unwrap_or_else(|| fs::symlink_metadata(&self.output))
+                {
+                    Ok(metadata) if metadata.is_dir() => {
+                        return Err(CliError::io("output path is a directory"));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                        return Err(CliError::permission("cannot inspect output path"));
+                    }
+                    Err(_) => return Err(CliError::io("cannot inspect output path")),
+                },
+            }
+            #[cfg(not(windows))]
             match output_metadata.unwrap_or_else(|| fs::symlink_metadata(&self.output)) {
                 Ok(metadata) if metadata.is_dir() => {
                     return Err(CliError::io("output path is a directory"));
@@ -185,4 +244,12 @@ impl ConvertArgs {
         })?;
         Ok((format, repertoire))
     }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutputPathState {
+    Missing,
+    File,
+    Directory,
 }

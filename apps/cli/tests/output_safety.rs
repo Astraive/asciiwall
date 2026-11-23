@@ -29,6 +29,31 @@ fn successful_publication_respects_overwrite() {
     assert_eq!(fs::read(&destination).unwrap(), b"second\n");
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }
+#[cfg(unix)]
+#[test]
+fn overwrite_replaces_symlink_entry_without_following_it() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.txt");
+    let destination = dir.path().join("output.txt");
+    fs::write(&target, b"original target").unwrap();
+    symlink(&target, &destination).unwrap();
+
+    publish_file(&destination, true, &CancellationToken::new(), |file| {
+        file.write_all(b"replacement")
+    })
+    .unwrap();
+
+    assert_eq!(fs::read(&target).unwrap(), b"original target");
+    assert_eq!(fs::read(&destination).unwrap(), b"replacement");
+    assert!(
+        fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
+}
 
 #[test]
 fn failed_write_and_cancellation_preserve_original() {

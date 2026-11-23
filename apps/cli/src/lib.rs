@@ -5,9 +5,14 @@ pub mod convert;
 mod diagnostic;
 pub mod font;
 pub mod output;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+mod posix_output;
+#[cfg(windows)]
+mod windows_path;
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
+#[cfg(windows)]
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -22,7 +27,10 @@ use ascii_convert::{
 use ascii_core::{Budget, CancellationToken, Error, GlyphFailureReason};
 use ascii_media::{DecodeLimits, DecodeResources, decode_image};
 use ascii_render::{AnsiColorMode, ExportError, ExportTarget, export};
+#[cfg(windows)]
+use font::load_glyph_table_with_repertoire_from_file;
 use font::{FontLoadError, load_glyph_table_with_repertoire, open_regular_input_file};
+
 /// Parses and handles one invocation without starting a controller or wallpaper host.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     let cancellation = CancellationToken::new();
@@ -162,116 +170,55 @@ impl From<CliError> for ExecutionError {
     }
 }
 
+#[cfg(windows)]
+fn prepare_offline_io(
+    offline: bool,
+    config: Option<&Path>,
+    request: &arguments::ConvertArgs,
+) -> Result<Option<windows_path::PreparedConvertIo>, CliError> {
+    if !offline {
+        return Ok(None);
+    }
+    // Preserve the raw spelling check before Windows path normalization can reinterpret
+    // slash-style UNC paths as rooted local paths.
+    let raw_paths = [
+        Some(request.image.as_path()),
+        request.font.as_deref(),
+        (request.output.as_os_str() != OsStr::new("-")).then_some(request.output.as_path()),
+        config,
+    ];
+    if raw_paths.into_iter().flatten().any(is_unc_path) {
+        return Err(offline_path_error());
+    }
+    windows_path::prepare_offline_paths(request, config)
+        .map(Some)
+        .map_err(|error| {
+            #[cfg(test)]
+            eprintln!("{error}");
+            if error.is_rejected() {
+                offline_path_error()
+            } else if error.is_permission_denied() {
+                CliError::permission("offline path access was denied")
+            } else {
+                CliError::io("offline path verification failed")
+            }
+        })
+}
+
+#[cfg(all(windows, test))]
 fn reject_offline_network_paths(
     offline: bool,
     config: Option<&Path>,
     request: &arguments::ConvertArgs,
 ) -> Result<(), CliError> {
-    if !offline {
-        return Ok(());
-    }
-
-    #[cfg(windows)]
-    {
-        // Check the original spellings before `Path` normalization can treat slash-style UNC
-        // paths as rooted local paths.
-        let raw_paths = [
-            Some(request.image.as_path()),
-            request.font.as_deref(),
-            (request.output.as_os_str() != OsStr::new("-")).then_some(request.output.as_path()),
-            config,
-        ];
-        if raw_paths.into_iter().flatten().any(is_unc_path) {
-            return Err(offline_path_error());
-        }
-
-        let mut current_directory = None;
-        let image = resolve_offline_path(&request.image, &mut current_directory)
-            .map_err(|()| offline_path_error())?;
-        let font = request
-            .font
-            .as_deref()
-            .map(|path| resolve_offline_path(path, &mut current_directory))
-            .transpose()
-            .map_err(|()| offline_path_error())?;
-        let output = if request.output.as_os_str() == OsStr::new("-") {
-            None
-        } else {
-            Some(
-                resolve_offline_path(&request.output, &mut current_directory)
-                    .map_err(|()| offline_path_error())?,
-            )
-        };
-        let config = config
-            .map(|path| resolve_offline_path(path, &mut current_directory))
-            .transpose()
-            .map_err(|()| offline_path_error())?;
-        let paths = [
-            Some(&image),
-            font.as_ref(),
-            output.as_ref(),
-            config.as_ref(),
-        ];
-
-        // Inspect all effective roots before probing any path component, so a network path in
-        // one argument vetoes the invocation before local destination metadata can take priority.
-        for path in paths.into_iter().flatten() {
-            let path = path.as_ref();
-            if is_unc_path(path) || is_remote_drive_path(path) {
-                return Err(offline_path_error());
-            }
-        }
-
-        // Check each component without following its final reparse point. Stop at the first one
-        // before any descendant can be resolved through a junction or symlink target.
-        for path in [
-            Some(&image),
-            font.as_ref(),
-            output.as_ref(),
-            config.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if path_has_reparse_component(path.as_ref()).unwrap_or(true) {
-                return Err(offline_path_error());
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    let _ = (config, request);
-
-    Ok(())
+    prepare_offline_io(offline, config, request).map(|_| ())
 }
 
 #[cfg(windows)]
 fn offline_path_error() -> CliError {
     CliError::usage(
-        "offline mode does not allow network-backed UNC paths, mapped drives, non-volume device namespaces, or filesystem reparse points; paths must be safely inspectable",
+        "offline mode requires a known local filesystem and rejects network-backed, reparse, or unsafe paths",
     )
-}
-
-#[cfg(windows)]
-fn resolve_offline_path<'a>(
-    path: &'a Path,
-    current_directory: &mut Option<std::path::PathBuf>,
-) -> Result<std::borrow::Cow<'a, Path>, ()> {
-    if path.is_absolute() {
-        return Ok(std::borrow::Cow::Borrowed(path));
-    }
-
-    if current_directory.is_none() {
-        // On Windows this obtains the process path with GetCurrentDirectoryW; it does not inspect
-        // file contents or follow a reparse point.
-        *current_directory = Some(std::env::current_dir().map_err(|_| ())?);
-    }
-    let mut absolute = current_directory.as_ref().ok_or(())?.clone();
-    absolute.push(path);
-    if !absolute.is_absolute() {
-        return Err(());
-    }
-    Ok(std::borrow::Cow::Owned(absolute))
 }
 
 #[cfg(windows)]
@@ -282,9 +229,28 @@ fn is_unc_path(path: &Path) -> bool {
     let mut spelling = path.as_os_str().encode_wide();
     let first = spelling.next();
     let second = spelling.next();
-    let separator = |unit| unit == u16::from(b'\\') || unit == u16::from(b'/');
-    if first.is_some_and(separator) && second.is_some_and(separator) {
-        return true;
+    let third = spelling.next();
+    let fourth = spelling.next();
+    let is_separator = |unit| unit == 92 || unit == 47;
+    if first.is_some_and(is_separator) && second.is_some_and(is_separator) {
+        if third == Some(b'?' as u16) && fourth.is_some_and(is_separator) {
+            let ascii_lower = |unit: u16| {
+                if (b'A' as u16..=b'Z' as u16).contains(&unit) {
+                    unit + (b'a' - b'A') as u16
+                } else {
+                    unit
+                }
+            };
+            let unc = [spelling.next(), spelling.next(), spelling.next()];
+            return unc
+                .into_iter()
+                .zip([b'u' as u16, b'n' as u16, b'c' as u16])
+                .all(|(actual, expected)| {
+                    actual.is_some_and(|actual| ascii_lower(actual) == expected)
+                })
+                && spelling.next().is_some_and(is_separator);
+        }
+        return third != Some(b'.' as u16);
     }
 
     matches!(
@@ -292,100 +258,6 @@ fn is_unc_path(path: &Path) -> bool {
         Some(Component::Prefix(prefix))
             if matches!(prefix.kind(), Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _))
     )
-}
-
-#[cfg(windows)]
-fn is_remote_drive_path(path: &Path) -> bool {
-    use std::path::{Component, Prefix};
-
-    let drive = match path.components().next() {
-        Some(Component::Prefix(prefix)) => match prefix.kind() {
-            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
-            Prefix::DeviceNS(_) => return true,
-            Prefix::Verbatim(prefix) => return !is_local_volume_prefix(prefix),
-            _ => return false,
-        },
-        _ => return false,
-    };
-
-    const DRIVE_REMOTE: u32 = 4;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetDriveTypeW(root_path_name: *const u16) -> u32;
-    }
-
-    let root_path = [u16::from(drive), b':' as u16, b'\\' as u16, 0];
-    // The root-only drive-type query classifies a mapped drive without opening a share path.
-    // SAFETY: `root_path` is a fixed, NUL-terminated UTF-16 buffer for this call.
-    unsafe { GetDriveTypeW(root_path.as_ptr()) == DRIVE_REMOTE }
-}
-
-#[cfg(windows)]
-fn is_local_volume_prefix(prefix: &OsStr) -> bool {
-    let Some(prefix) = prefix.to_str() else {
-        return false;
-    };
-    prefix
-        .get(..7)
-        .is_some_and(|start| start.eq_ignore_ascii_case("Volume{"))
-        && prefix.ends_with('}')
-}
-
-#[cfg(windows)]
-fn path_has_reparse_component(path: &Path) -> Result<bool, ()> {
-    use std::os::windows::fs::MetadataExt;
-    use std::path::{Component, PathBuf};
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    let mut resolved = PathBuf::new();
-    let mut checked_component_depth = 0usize;
-    let mut unresolved_suffix_depth = 0usize;
-
-    // Do not probe descendants of a missing or non-directory component. Track the unresolved
-    // suffix so a later `..` can return to a previously checked prefix.
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir => {
-                resolved.push(component.as_os_str());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if unresolved_suffix_depth > 0 {
-                    resolved.pop();
-                    unresolved_suffix_depth -= 1;
-                } else if checked_component_depth > 0 {
-                    resolved.pop();
-                    checked_component_depth -= 1;
-                }
-            }
-            Component::Normal(_) => {
-                resolved.push(component.as_os_str());
-                if unresolved_suffix_depth > 0 {
-                    unresolved_suffix_depth += 1;
-                    continue;
-                }
-                match std::fs::symlink_metadata(&resolved) {
-                    Ok(metadata)
-                        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 =>
-                    {
-                        return Ok(true);
-                    }
-                    Ok(_) => checked_component_depth += 1,
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                        ) =>
-                    {
-                        unresolved_suffix_depth = 1;
-                    }
-                    Err(_) => return Err(()),
-                }
-            }
-        }
-    }
-
-    Ok(false)
 }
 
 fn execute(
@@ -403,9 +275,33 @@ fn execute(
         ..
     } = cli;
     let Command::Convert(request) = command;
-    // This veto must precede `validate`, which inspects destination metadata.
-    reject_offline_network_paths(offline, config.as_deref(), &request)?;
+    #[cfg(windows)]
+    let mut offline_io = prepare_offline_io(offline, config.as_deref(), &request)?;
+    #[cfg(not(windows))]
+    if offline {
+        // Path lookup itself can activate a remote mount. Without a portable pre-open locality
+        // check, reject before validation inspects the destination or conversion opens an input.
+        return Err(CliError::usage(
+            "offline mode cannot guarantee that filesystem path resolution stays local on this platform",
+        )
+        .into());
+    }
+    #[cfg(windows)]
+    let (format, repertoire) = if let Some(output) = offline_io
+        .as_ref()
+        .and_then(|prepared| prepared.output.as_ref())
+    {
+        request.validate_with_output_state(json, output.state)?
+    } else {
+        request.validate(json)?
+    };
+    #[cfg(not(windows))]
     let (format, repertoire) = request.validate(json)?;
+
+    #[cfg(all(windows, test))]
+    if offline {
+        windows_path::test_hook(windows_path::TestHookPoint::Validated);
+    }
 
     if config.is_some() {
         return Err(CliError::capability(
@@ -442,14 +338,49 @@ fn execute(
     let geometry = GlyphConfig::new(8.0, 8, 12, 9)
         .map_err(|_| CliError::validation("configured font geometry is invalid"))?;
     let verbose = verbose && !quiet;
-    progress(verbose, "measuring selected font");
-    let glyphs =
+    #[cfg(windows)]
+    let font_result = if offline {
+        match offline_io
+            .as_mut()
+            .and_then(|prepared| prepared.font.take())
+        {
+            Some(input) => input.into_file().and_then(|file| {
+                load_glyph_table_with_repertoire_from_file(
+                    file,
+                    &repertoire,
+                    &geometry,
+                    &budget,
+                    cancellation,
+                )
+            }),
+            None => Err(FontLoadError::NotRegularFile),
+        }
+    } else {
         load_glyph_table_with_repertoire(font_path, &repertoire, &geometry, &budget, cancellation)
-            .map_err(font_error)?;
-
-    progress(verbose, "decoding source image");
-    let (mut input, _) =
-        open_regular_input_file(&request.image, cancellation).map_err(image_open_error)?;
+    };
+    #[cfg(not(windows))]
+    let font_result =
+        load_glyph_table_with_repertoire(font_path, &repertoire, &geometry, &budget, cancellation);
+    let glyphs = font_result.map_err(font_error)?;
+    #[cfg(windows)]
+    let mut input = if offline {
+        match offline_io
+            .as_mut()
+            .and_then(|prepared| prepared.image.take())
+        {
+            Some(image) => image.into_file(),
+            None => Err(FontLoadError::NotRegularFile),
+        }
+        .map_err(image_open_error)?
+    } else {
+        open_regular_input_file(&request.image, cancellation)
+            .map_err(image_open_error)?
+            .0
+    };
+    #[cfg(not(windows))]
+    let mut input = open_regular_input_file(&request.image, cancellation)
+        .map_err(image_open_error)?
+        .0;
     let decode_limits = DecodeLimits::new(
         budget,
         DecodeResources::new(1, budget.max_frame_bytes()),
@@ -458,7 +389,9 @@ fn execute(
         budget.max_raster_bytes(),
         budget.max_frame_bytes(),
     );
+    progress(verbose, "decoding source image");
     let decoded = decode_image(&mut input, &decode_limits, cancellation).map_err(core_error)?;
+    drop(input);
 
     progress(verbose, "matching image density");
     let columns = std::num::NonZeroU32::new(request.columns)
@@ -490,10 +423,26 @@ fn execute(
     if request.output.as_os_str() == OsStr::new("-") {
         publish_stdout(bytes, cancellation, stdout)?;
     } else {
-        output::publish_file(&request.output, request.overwrite, cancellation, |file| {
-            file.write_all(bytes)
-        })
-        .map_err(publish_error)?;
+        #[cfg(windows)]
+        let publish_result = if offline {
+            let prepared = offline_io
+                .as_ref()
+                .and_then(|prepared| prepared.output.as_ref())
+                .ok_or_else(offline_path_error)?;
+            prepared.publish(request.overwrite, cancellation, |file| {
+                file.write_all(bytes)
+            })
+        } else {
+            output::publish_file(&request.output, request.overwrite, cancellation, |file| {
+                file.write_all(bytes)
+            })
+        };
+        #[cfg(not(windows))]
+        let publish_result =
+            output::publish_file(&request.output, request.overwrite, cancellation, |file| {
+                file.write_all(bytes)
+            });
+        publish_result.map_err(publish_error)?;
     }
 
     report_success(
@@ -677,6 +626,10 @@ fn publish_error(error: output::PublishError) -> CliError {
         output::PublishError::DestinationExists => {
             CliError::usage("output already exists; use --overwrite to replace it")
         }
+
+        output::PublishError::NoClobberUnsupported => {
+            CliError::io("destination filesystem does not support atomic no-clobber publication")
+        }
         output::PublishError::Io(error) if error.kind() == io::ErrorKind::PermissionDenied => {
             CliError::permission("cannot write conversion output")
         }
@@ -719,8 +672,12 @@ fn font_error(error: FontLoadError) -> CliError {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    #[cfg(windows)]
+    use std::fs;
     use std::io::{self, Write};
     use std::process::ExitCode;
+    #[cfg(windows)]
+    use std::sync::Arc;
 
     use ascii_core::CancellationToken;
 
@@ -799,6 +756,8 @@ mod tests {
                 2
             );
         }
+        assert!(!is_unc_path(Path::new(r"\\?\C:\local\source.png")));
+        assert!(!is_unc_path(Path::new("//?/C:/local/source.png")));
 
         assert!(reject_offline_network_paths(false, None, &request).is_ok());
     }
@@ -1058,6 +1017,515 @@ mod tests {
             std::fs::read(&output).unwrap(),
             expected_artifact,
             "the fully published text artifact must survive the status failure"
+        );
+    }
+    #[cfg(windows)]
+    #[test]
+    fn offline_conversion_denies_source_rename_and_keeps_output_bound_across_junction_swaps() {
+        use std::cell::Cell;
+        use std::fs;
+        use std::rc::Rc;
+
+        use super::windows_path::{ERROR_SHARING_VIOLATION, TestHookPoint, install_test_hook};
+
+        const RIGHTS_CLEARED_PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xff, 0xff, 0xff, 0x7f, 0x00, 0x09, 0xfb, 0x03, 0xfd, 0x2a, 0x86,
+            0xe3, 0x8a, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+
+        let temp = super::windows_path::offline_test_tempdir_for_directory_rename();
+        let root = temp.path();
+        let input_dir = root.join("input");
+        let moved_input_dir = root.join("input-pinned");
+        let output_dir = root.join("output");
+        let moved_output_dir = root.join("output-pinned");
+        let input_decoy = root.join("input-decoy");
+        let output_decoy_one = root.join("output-decoy-one");
+        let output_decoy_two = root.join("output-decoy-two");
+        fs::create_dir(&input_dir).unwrap();
+        fs::create_dir(&output_dir).unwrap();
+        fs::create_dir(&input_decoy).unwrap();
+        fs::create_dir(&output_decoy_one).unwrap();
+        fs::create_dir(&output_decoy_two).unwrap();
+
+        let image = input_dir.join("source.png");
+        let font = input_dir.join("font.ttf");
+        fs::write(&image, RIGHTS_CLEARED_PNG).unwrap();
+        fs::write(&font, synthetic_font::synthetic_font(false)).unwrap();
+        fs::write(input_decoy.join("source.png"), b"not a PNG").unwrap();
+        fs::write(input_decoy.join("font.ttf"), b"not a font").unwrap();
+
+        let output = output_dir.join("result.txt");
+        fs::write(&output, b"old destination").unwrap();
+        let calls = Rc::new(Cell::new((false, false)));
+        let staging_reached = Rc::new(Cell::new(false));
+        let hook_staging_reached = Rc::clone(&staging_reached);
+        let hook_calls = Rc::clone(&calls);
+        let hook_input = input_dir.clone();
+        let hook_output = output_dir.clone();
+        let hook_output_pinned = moved_output_dir.clone();
+        let hook_output_decoy_one = output_decoy_one.clone();
+        let hook_output_decoy_two = output_decoy_two.clone();
+        let _hook = install_test_hook(move |point| match point {
+            TestHookPoint::RootResolved => {
+                // Output-path junction swaps happen only after its parent handle is pinned.
+            }
+            TestHookPoint::Validated => {
+                assert!(!hook_calls.get().0);
+                let input_leaf = hook_input.join("source.png");
+                let error = fs::rename(&input_leaf, hook_input.join("source-pinned.png"))
+                    .expect_err("the pinned input handle must deny delete-sharing rename");
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(ERROR_SHARING_VIOLATION),
+                    "the input share mode must deny the source rename: {error:?}"
+                );
+                fs::rename(&hook_output, &hook_output_pinned).unwrap();
+                create_directory_junction(&hook_output, &hook_output_decoy_one).unwrap();
+                hook_calls.set((true, false));
+            }
+            TestHookPoint::Staged => {
+                hook_staging_reached.set(true);
+                assert!(hook_calls.get().0);
+                assert!(!hook_calls.get().1);
+                let staging_directory = fs::read_dir(&hook_output_pinned)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.file_name().is_some_and(|name| {
+                            name.to_string_lossy().starts_with(".asciiwall-stage-")
+                        })
+                    })
+                    .expect("the private staging directory must exist before publication");
+                let staging = fs::read_dir(&staging_directory)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with(".asciiwall-"))
+                    })
+                    .expect("the private staging file must exist before publication");
+                let staging_moved = staging_directory.join(".saved-staging.tmp");
+                fs::rename(&staging, &staging_moved).unwrap();
+                fs::write(&staging, b"unrelated replacement").unwrap();
+                fs::remove_dir(&hook_output).unwrap();
+                create_directory_junction(&hook_output, &hook_output_decoy_two).unwrap();
+                hook_calls.set((true, true));
+            }
+        });
+
+        let args = vec![
+            OsString::from("asciiwall"),
+            OsString::from("--quiet"),
+            OsString::from("--offline"),
+            OsString::from("convert"),
+            image.as_os_str().to_owned(),
+            OsString::from("--font"),
+            font.as_os_str().to_owned(),
+            OsString::from("--output"),
+            output.as_os_str().to_owned(),
+            OsString::from("--overwrite"),
+            OsString::from("--columns"),
+            OsString::from("12"),
+            OsString::from("--charset"),
+            OsString::from(" AB"),
+        ];
+        let cancellation = CancellationToken::new();
+        let mut stdout = Vec::new();
+        let exit = super::run_with_cancellation_to(args.clone(), &cancellation, &mut stdout);
+
+        assert_eq!(
+            exit,
+            ExitCode::SUCCESS,
+            "argv={args:?}; output={output:?}; AfterStaging reached={}; hook state={:?}; publish rename OS error={:?}; stdout={:?}; stderr is suppressed by --quiet",
+            staging_reached.get(),
+            calls.get(),
+            super::windows_path::test_last_publish_rename_error(),
+            String::from_utf8_lossy(&stdout),
+        );
+
+        assert_eq!(calls.get(), (true, true));
+        fs::rename(&input_dir, &moved_input_dir)
+            .expect("input directory rename succeeds after the pinned handles are released");
+        create_directory_junction(&input_dir, &input_decoy).unwrap();
+        let published = moved_output_dir.join("result.txt");
+        assert!(
+            fs::metadata(&published).is_ok(),
+            "publication must remain relative to the pinned output directory handle"
+        );
+        assert!(
+            !output_decoy_one.join("result.txt").exists()
+                && !output_decoy_two.join("result.txt").exists(),
+            "replacing the output path with local junctions must not redirect writes"
+        );
+        assert_eq!(
+            fs::read(moved_input_dir.join("source.png")).unwrap(),
+            RIGHTS_CLEARED_PNG
+        );
+        assert_eq!(
+            fs::read(input_dir.join("source.png")).unwrap(),
+            b"not a PNG"
+        );
+        assert_ne!(
+            published.metadata().unwrap().len(),
+            0,
+            "the artifact must have been produced from the already-opened valid source and font"
+        );
+        assert_ne!(fs::read(&published).unwrap(), b"old destination");
+        let staging_directories: Vec<_> = fs::read_dir(&moved_output_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".asciiwall-stage-"))
+            })
+            .collect();
+        assert_eq!(staging_directories.len(), 1);
+        let staging_decoys: Vec<_> = fs::read_dir(&staging_directories[0])
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".asciiwall-"))
+            })
+            .collect();
+        assert_eq!(staging_decoys.len(), 1);
+        assert_eq!(
+            fs::read(&staging_decoys[0]).unwrap(),
+            b"unrelated replacement",
+            "handle-based publication and cleanup must leave a replaced staging name untouched"
+        );
+
+        fn create_directory_junction(
+            link: &std::path::Path,
+            target: &std::path::Path,
+        ) -> std::io::Result<()> {
+            use std::ffi::c_void;
+            use std::io;
+            use std::os::windows::ffi::OsStrExt;
+            use std::os::windows::io::{AsRawHandle, FromRawHandle};
+            use std::ptr;
+            const GENERIC_WRITE: u32 = 0x4000_0000;
+            const SHARE_ALL: u32 = 7;
+            const OPEN_EXISTING: u32 = 3;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00a4;
+            const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xa000_0003;
+            const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
+
+            unsafe extern "system" {
+                fn CreateDirectoryW(path_name: *const u16, security_attributes: *mut c_void)
+                -> i32;
+                fn CreateFileW(
+                    file_name: *const u16,
+                    desired_access: u32,
+                    share_mode: u32,
+                    security_attributes: *mut c_void,
+                    creation_disposition: u32,
+                    flags_and_attributes: u32,
+                    template_file: *mut c_void,
+                ) -> *mut c_void;
+                fn DeviceIoControl(
+                    device: *mut c_void,
+                    control_code: u32,
+                    input_buffer: *mut c_void,
+                    input_buffer_size: u32,
+                    output_buffer: *mut c_void,
+                    output_buffer_size: u32,
+                    bytes_returned: *mut u32,
+                    overlapped: *mut c_void,
+                ) -> i32;
+            }
+
+            let link_wide: Vec<u16> = link.as_os_str().encode_wide().chain(Some(0)).collect();
+            if unsafe { CreateDirectoryW(link_wide.as_ptr(), ptr::null_mut()) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let handle = unsafe {
+                CreateFileW(
+                    link_wide.as_ptr(),
+                    GENERIC_WRITE,
+                    SHARE_ALL,
+                    ptr::null_mut(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                    ptr::null_mut(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                let error = io::Error::last_os_error();
+                std::fs::remove_dir(link)?;
+                return Err(error);
+            }
+            let handle = unsafe { std::fs::File::from_raw_handle(handle as _) };
+
+            let target = std::fs::canonicalize(target)?;
+            let mut print_name: Vec<u16> = target.as_os_str().encode_wide().collect();
+            if print_name.starts_with(&[92, 92, 63, 92]) {
+                drop(print_name.drain(..4));
+            }
+            let mut substitute_name: Vec<u16> = vec![92, 63, 63, 92];
+            substitute_name.extend_from_slice(&print_name);
+            let substitute_len = substitute_name.len() * 2;
+            let print_len = print_name.len() * 2;
+            let path_bytes = (substitute_name.len() + 1 + print_name.len() + 1) * 2;
+            let data_length = 8 + path_bytes;
+            let mut reparse = vec![0_u8; 16 + path_bytes];
+            reparse[0..4].copy_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+            reparse[4..6].copy_from_slice(&(data_length as u16).to_le_bytes());
+            reparse[8..10].copy_from_slice(&0_u16.to_le_bytes());
+            reparse[10..12].copy_from_slice(&(substitute_len as u16).to_le_bytes());
+            reparse[12..14].copy_from_slice(&((substitute_len + 2) as u16).to_le_bytes());
+            reparse[14..16].copy_from_slice(&(print_len as u16).to_le_bytes());
+            let path = &mut reparse[16..];
+            for (index, unit) in substitute_name.iter().copied().enumerate() {
+                path[index * 2..index * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+            }
+            let print_offset = substitute_name.len() + 1;
+            for (index, unit) in print_name.iter().copied().enumerate() {
+                let offset = (print_offset + index) * 2;
+                path[offset..offset + 2].copy_from_slice(&unit.to_le_bytes());
+            }
+            let mut returned = 0;
+            let succeeded = unsafe {
+                DeviceIoControl(
+                    handle.as_raw_handle(),
+                    FSCTL_SET_REPARSE_POINT,
+                    reparse.as_mut_ptr().cast(),
+                    reparse.len() as u32,
+                    ptr::null_mut(),
+                    0,
+                    &mut returned,
+                    ptr::null_mut(),
+                )
+            };
+            if succeeded == 0 {
+                let error = io::Error::last_os_error();
+                drop(handle);
+                std::fs::remove_dir(link)?;
+                return Err(error);
+            }
+            Ok(())
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn offline_overwrite_replaces_decoded_input_path() {
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xff, 0xff, 0xff, 0x7f, 0x00, 0x09, 0xfb, 0x03, 0xfd, 0x2a, 0x86,
+            0xe3, 0x8a, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+
+        let temp = super::windows_path::offline_test_tempdir();
+        let image_and_output = temp.path().join("source.txt");
+        let font = temp.path().join("font.ttf");
+        fs::write(&image_and_output, PNG).unwrap();
+        fs::write(&font, synthetic_font::synthetic_font(false)).unwrap();
+        let args = [
+            OsString::from("asciiwall"),
+            OsString::from("--quiet"),
+            OsString::from("--offline"),
+            OsString::from("convert"),
+            image_and_output.as_os_str().to_owned(),
+            OsString::from("--font"),
+            font.as_os_str().to_owned(),
+            OsString::from("--output"),
+            image_and_output.as_os_str().to_owned(),
+            OsString::from("--overwrite"),
+            OsString::from("--columns"),
+            OsString::from("12"),
+            OsString::from("--charset"),
+            OsString::from(" AB"),
+        ];
+        let mut stdout = Vec::new();
+        let exit = run_with_cancellation_to(args, &CancellationToken::new(), &mut stdout);
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        let converted = fs::read(&image_and_output).unwrap();
+        assert_ne!(converted, PNG);
+        assert!(!converted.is_empty());
+        assert!(converted.ends_with(b"\n"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn offline_output_preserves_existing_precedence_and_no_clobber_cleanup() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        use super::windows_path::{TestHookPoint, install_test_hook};
+
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xff, 0xff, 0xff, 0x7f, 0x00, 0x09, 0xfb, 0x03, 0xfd, 0x2a, 0x86,
+            0xe3, 0x8a, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+
+        let temp = super::windows_path::offline_test_tempdir();
+        let image = temp.path().join("source.png");
+        let font = temp.path().join("font.ttf");
+        let output = temp.path().join("result.txt");
+        fs::write(&image, PNG).unwrap();
+        fs::write(&font, synthetic_font::synthetic_font(false)).unwrap();
+        fs::write(&output, b"original").unwrap();
+        let make_args = |charset: &str| {
+            vec![
+                OsString::from("asciiwall"),
+                OsString::from("--quiet"),
+                OsString::from("--offline"),
+                OsString::from("convert"),
+                image.as_os_str().to_owned(),
+                OsString::from("--font"),
+                font.as_os_str().to_owned(),
+                OsString::from("--output"),
+                output.as_os_str().to_owned(),
+                OsString::from("--columns"),
+                OsString::from("12"),
+                OsString::from("--charset"),
+                OsString::from(charset),
+            ]
+        };
+
+        let invalid_args = make_args("\u{1b}");
+        let cancellation = CancellationToken::new();
+        let mut invalid_stdout = Vec::new();
+        let invalid_exit = super::run_with_cancellation_to(
+            invalid_args.clone(),
+            &cancellation,
+            &mut invalid_stdout,
+        );
+        assert_eq!(
+            invalid_exit,
+            ExitCode::from(2),
+            "argv={invalid_args:?}; output={output:?}; stdout={:?}; stderr is suppressed by --quiet",
+            String::from_utf8_lossy(&invalid_stdout),
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"original");
+
+        fs::remove_file(&output).unwrap();
+        let racing_output = output.clone();
+        let staging_reached = Rc::new(Cell::new(false));
+        let hook_staging_reached = Rc::clone(&staging_reached);
+        let hook_write_error = Rc::new(RefCell::new(None::<String>));
+        let hook_error = Rc::clone(&hook_write_error);
+        let _hook = install_test_hook(move |point| {
+            if point == TestHookPoint::Staged {
+                hook_staging_reached.set(true);
+                let parent = racing_output.parent();
+                let before_write = format!(
+                    "path={racing_output:?}, path_exists={}, parent={parent:?}, parent_exists={}, parent_is_dir={}",
+                    racing_output.exists(),
+                    parent.is_some_and(|parent| parent.exists()),
+                    parent.is_some_and(|parent| parent.is_dir()),
+                );
+                if let Err(error) = fs::write(&racing_output, b"concurrent creator") {
+                    *hook_error.borrow_mut() = Some(format!("{before_write}, write_error={error}"));
+                }
+            }
+        });
+        let args = make_args(" AB");
+        let mut stdout = Vec::new();
+        let exit = super::run_with_cancellation_to(args.clone(), &cancellation, &mut stdout);
+        assert_eq!(
+            exit,
+            ExitCode::from(2),
+            "argv={args:?}; output={output:?}; AfterStaging reached={}; hook write error={:?}; stdout={:?}; stderr is suppressed by --quiet",
+            staging_reached.get(),
+            hook_write_error.borrow(),
+            String::from_utf8_lossy(&stdout),
+        );
+        assert!(
+            staging_reached.get(),
+            "AfterStaging was not reached; argv={args:?}; output={output:?}; stdout={:?}; stderr is suppressed by --quiet",
+            String::from_utf8_lossy(&stdout),
+        );
+        assert!(
+            hook_write_error.borrow().is_none(),
+            "concurrent destination creation failed in AfterStaging: {:?}; argv={args:?}; output={output:?}; stdout={:?}; stderr is suppressed by --quiet",
+            hook_write_error.borrow(),
+            String::from_utf8_lossy(&stdout),
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"concurrent creator");
+        let entries: Vec<_> = fs::read_dir(temp.path()).unwrap().collect();
+        assert_eq!(
+            entries.len(),
+            3,
+            "failed publication must remove its staging file"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn offline_cancellation_after_staging_removes_the_private_file() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        use super::windows_path::{TestHookPoint, install_test_hook};
+
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xff, 0xff, 0xff, 0x7f, 0x00, 0x09, 0xfb, 0x03, 0xfd, 0x2a, 0x86,
+            0xe3, 0x8a, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+
+        let temp = super::windows_path::offline_test_tempdir();
+        let image = temp.path().join("source.png");
+        let font = temp.path().join("font.ttf");
+        let output = temp.path().join("result.txt");
+        fs::write(&image, PNG).unwrap();
+        fs::write(&font, synthetic_font::synthetic_font(false)).unwrap();
+        let cancellation = Arc::new(CancellationToken::new());
+        let hook_cancellation = Arc::clone(&cancellation);
+        let staging_reached = Rc::new(Cell::new(false));
+        let hook_staging_reached = Rc::clone(&staging_reached);
+        let _hook = install_test_hook(move |point| {
+            if point == TestHookPoint::Staged {
+                hook_staging_reached.set(true);
+                hook_cancellation.cancel();
+            }
+        });
+        let args = vec![
+            OsString::from("asciiwall"),
+            OsString::from("--quiet"),
+            OsString::from("--offline"),
+            OsString::from("convert"),
+            image.as_os_str().to_owned(),
+            OsString::from("--font"),
+            font.as_os_str().to_owned(),
+            OsString::from("--output"),
+            output.as_os_str().to_owned(),
+            OsString::from("--columns"),
+            OsString::from("12"),
+            OsString::from("--charset"),
+            OsString::from(" AB"),
+        ];
+        let mut stdout = Vec::new();
+        let exit = super::run_with_cancellation_to(args.clone(), &cancellation, &mut stdout);
+
+        assert_eq!(
+            exit,
+            ExitCode::from(10),
+            "argv={args:?}; output={output:?}; AfterStaging reached={}; output exists={}; stdout={:?}; stderr is suppressed by --quiet",
+            staging_reached.get(),
+            output.exists(),
+            String::from_utf8_lossy(&stdout),
+        );
+        assert!(!output.exists());
+        assert_eq!(
+            fs::read_dir(temp.path()).unwrap().count(),
+            2,
+            "cancelled publication must remove its staging file"
         );
     }
 }

@@ -39,6 +39,101 @@ fn status(output: &Output) -> i32 {
     output.status.code().expect("CLI exited with a status")
 }
 
+#[cfg(windows)]
+fn offline_test_tempdir() -> tempfile::TempDir {
+    let cwd = std::env::current_dir().expect("Windows offline tests require a current directory");
+    assert_direct_local_ntfs_path(&cwd);
+    let temp = tempfile::Builder::new()
+        .prefix(".asciiwall-offline-test-")
+        .tempdir_in(&cwd)
+        .expect("Windows offline tests require a writable worktree-local fixture root");
+    assert_direct_local_ntfs_path(temp.path());
+    temp
+}
+
+#[cfg(windows)]
+fn assert_direct_local_ntfs_path(path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+
+    for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        let metadata = fs::symlink_metadata(ancestor).expect("fixture ancestor is inspectable");
+        assert_eq!(
+            metadata.file_attributes() & 0x0000_0400,
+            0,
+            "offline fixture ancestors must not be reparse points: {ancestor:?}"
+        );
+    }
+
+    let volume_root = path
+        .ancestors()
+        .last()
+        .expect("absolute Windows fixture path has a volume root");
+    let volume_root_wide: Vec<u16> = volume_root
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    assert_eq!(
+        unsafe { GetDriveTypeW(volume_root_wide.as_ptr()) },
+        3,
+        "Windows offline fixtures require a fixed local volume"
+    );
+    let mut filesystem = [0_u16; 64];
+    assert_ne!(
+        unsafe {
+            GetVolumeInformationW(
+                volume_root_wide.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                filesystem.as_mut_ptr(),
+                filesystem.len() as u32,
+            )
+        },
+        0,
+        "Windows offline fixture volume information is available"
+    );
+    let end = filesystem
+        .iter()
+        .position(|unit| *unit == 0)
+        .expect("filesystem name is terminated");
+    assert_eq!(end, 4, "filesystem name must be exactly NTFS");
+    let ascii_lower = |unit: u16| {
+        if (b'A' as u16..=b'Z' as u16).contains(&unit) {
+            unit + (b'a' - b'A') as u16
+        } else {
+            unit
+        }
+    };
+    assert!(
+        filesystem[..end]
+            .iter()
+            .copied()
+            .zip("NTFS".encode_utf16())
+            .all(|(actual, expected)| ascii_lower(actual) == ascii_lower(expected)),
+        "Windows offline fixtures require a local NTFS volume"
+    );
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetDriveTypeW(root_path_name: *const u16) -> u32;
+    fn GetVolumeInformationW(
+        root_path_name: *const u16,
+        volume_name: *mut u16,
+        volume_name_size: u32,
+        volume_serial: *mut u32,
+        maximum_component_length: *mut u32,
+        file_system_flags: *mut u32,
+        file_system_name: *mut u16,
+        file_system_name_size: u32,
+    ) -> i32;
+}
+
 fn shared_engine_export(source_path: &Path, font_path: &Path, target: ExportTarget) -> Vec<u8> {
     let budget = Budget::new(8_000_000, 64_000_000, 16_000_000);
     let raster_resources = NormalizedRasterResources::new(budget.max_raster_bytes());
@@ -248,10 +343,7 @@ fn unavailable_matcher_color_and_configuration_are_explicit() {
     for (extra, expected) in [
         (vec!["--matcher", "structural"], "structural matching"),
         (vec!["--color", "source"], "source-color"),
-        (
-            vec!["--config", "settings.toml", "--offline"],
-            "settings registry",
-        ),
+        (vec!["--config", "settings.toml"], "settings registry"),
         (vec![], "no built-in font"),
     ] {
         let mut args = vec!["--quiet", "convert", "image.png", "--output", "-"];
@@ -266,7 +358,7 @@ fn unavailable_matcher_color_and_configuration_are_explicit() {
 #[cfg(windows)]
 #[test]
 fn offline_unc_paths_are_rejected_before_destination_metadata() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = offline_test_tempdir();
     let existing_output = dir.path().join("existing output.txt");
     fs::write(&existing_output, b"preserve this output").unwrap();
     let assert_rejected = |output: Output| {
@@ -275,7 +367,7 @@ fn offline_unc_paths_are_rejected_before_destination_metadata() {
         assert!(
             String::from_utf8(output.stderr)
                 .unwrap()
-                .contains("offline mode does not allow network-backed UNC paths")
+                .contains("offline mode requires a known local filesystem")
         );
     };
 
@@ -335,7 +427,7 @@ fn offline_unc_paths_are_rejected_before_destination_metadata() {
 fn offline_reparse_source_is_rejected_before_target_or_output_metadata() {
     use std::os::windows::fs::MetadataExt;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = offline_test_tempdir();
     let target = dir.path().join("local target");
     fs::create_dir(&target).unwrap();
     fs::write(target.join("source.png"), b"local junction target").unwrap();
@@ -374,9 +466,139 @@ fn offline_reparse_source_is_rejected_before_target_or_output_metadata() {
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .contains("offline mode does not allow network-backed UNC paths")
+            .contains("offline mode requires a known local filesystem")
     );
     assert_eq!(fs::read(existing_output).unwrap(), b"preserve this output");
+}
+
+#[cfg(windows)]
+#[test]
+fn offline_directory_font_uses_regular_file_validation_error() {
+    let dir = offline_test_tempdir();
+    let source = dir.path().join("local source.png");
+    let font_directory = dir.path().join("font directory");
+    fs::write(&source, RIGHTS_CLEARED_PNG).unwrap();
+    fs::create_dir(&font_directory).unwrap();
+
+    let output = run([
+        OsStr::new("--offline"),
+        OsStr::new("convert"),
+        source.as_os_str(),
+        OsStr::new("--font"),
+        font_directory.as_os_str(),
+        OsStr::new("--output"),
+        OsStr::new("-"),
+    ]);
+
+    assert_eq!(status(&output), 3);
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("font input must be a regular file")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn offline_local_ntfs_conversion_succeeds_with_local_source_font_and_destination() {
+    let dir = offline_test_tempdir();
+    let source = dir.path().join("local source.png");
+    let font = dir.path().join("local font.ttf");
+    let destination = dir.path().join("local output.txt");
+    fs::write(&source, RIGHTS_CLEARED_PNG).unwrap();
+    fs::write(&font, synthetic_font::synthetic_font(false)).unwrap();
+
+    let output = run([
+        OsStr::new("--offline"),
+        OsStr::new("convert"),
+        source.as_os_str(),
+        OsStr::new("--font"),
+        font.as_os_str(),
+        OsStr::new("--columns"),
+        OsStr::new("12"),
+        OsStr::new("--charset"),
+        OsStr::new(" AB"),
+        OsStr::new("--format"),
+        OsStr::new("txt"),
+        OsStr::new("--output"),
+        destination.as_os_str(),
+    ]);
+
+    assert_eq!(
+        status(&output),
+        0,
+        "local NTFS offline conversion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        fs::read(destination).unwrap(),
+        shared_engine_export(&source, &font, ExportTarget::Text)
+    );
+}
+#[cfg(unix)]
+#[test]
+fn posix_symlink_input_and_overwrite_semantics_are_preserved_without_offline_mode() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source image.png");
+    let source_link = directory.path().join("source image link.png");
+    let font = directory.path().join("font.ttf");
+    let destination = directory.path().join("output.txt");
+    fs::write(&source, RIGHTS_CLEARED_PNG).unwrap();
+    symlink(&source, &source_link).unwrap();
+    fs::write(&font, synthetic_font::synthetic_font(false)).unwrap();
+    fs::write(&destination, b"previous output").unwrap();
+
+    let output = run([
+        OsStr::new("convert"),
+        source_link.as_os_str(),
+        OsStr::new("--font"),
+        font.as_os_str(),
+        OsStr::new("--columns"),
+        OsStr::new("12"),
+        OsStr::new("--charset"),
+        OsStr::new(" AB"),
+        OsStr::new("--format"),
+        OsStr::new("txt"),
+        OsStr::new("--output"),
+        destination.as_os_str(),
+        OsStr::new("--overwrite"),
+    ]);
+    assert_eq!(status(&output), 0);
+    assert_eq!(
+        fs::read(destination).unwrap(),
+        shared_engine_export(&source, &font, ExportTarget::Text)
+    );
+}
+#[cfg(unix)]
+#[test]
+fn offline_mode_fails_closed_before_posix_path_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("existing output.txt");
+    fs::write(&destination, b"preserve this output").unwrap();
+
+    let output = run([
+        OsStr::new("--offline"),
+        OsStr::new("convert"),
+        OsStr::new("//offline.invalid/share/source.png"),
+        OsStr::new("--font"),
+        OsStr::new("//offline.invalid/share/font.ttf"),
+        OsStr::new("--output"),
+        destination.as_os_str(),
+    ]);
+
+    assert_eq!(status(&output), 2);
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("offline mode cannot guarantee that filesystem path resolution stays local")
+    );
+    assert_eq!(fs::read(destination).unwrap(), b"preserve this output");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 
 #[test]
@@ -430,7 +652,6 @@ fn shared_decoder_density_and_text_ansi_export_are_wired_end_to_end() {
         OsStr::new("convert"),
         source_path.as_os_str(),
         OsStr::new("--quiet"),
-        OsStr::new("--offline"),
         OsStr::new("--font"),
         font_path.as_os_str(),
         OsStr::new("--columns"),
@@ -450,7 +671,6 @@ fn shared_decoder_density_and_text_ansi_export_are_wired_end_to_end() {
 
     let ansi_output = run([
         OsStr::new("--quiet"),
-        OsStr::new("--offline"),
         OsStr::new("convert"),
         source_path.as_os_str(),
         OsStr::new("--font"),
@@ -483,7 +703,6 @@ fn shared_decoder_density_and_text_ansi_export_are_wired_end_to_end() {
     let ansi_path = dir.path().join("converted output with spaces.ans");
     let ansi_file_output = run([
         OsStr::new("--quiet"),
-        OsStr::new("--offline"),
         OsStr::new("convert"),
         source_path.as_os_str(),
         OsStr::new("--font"),
@@ -531,7 +750,6 @@ fn shared_decoder_density_and_text_ansi_export_are_wired_end_to_end() {
         fs::write(destination, b"preserve this output").unwrap();
         let failed = run([
             OsStr::new("--quiet"),
-            OsStr::new("--offline"),
             OsStr::new("convert"),
             invalid_path.as_os_str(),
             OsStr::new("--font"),
@@ -559,7 +777,6 @@ fn shared_decoder_density_and_text_ansi_export_are_wired_end_to_end() {
     fs::write(&png_path, b"preserve this output").unwrap();
     let png_output = run([
         OsStr::new("--quiet"),
-        OsStr::new("--offline"),
         OsStr::new("convert"),
         source_path.as_os_str(),
         OsStr::new("--font"),

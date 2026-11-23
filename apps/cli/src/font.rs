@@ -1,7 +1,7 @@
 //! Explicit local font loading for the shared glyph-table builder.
 
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -71,10 +71,16 @@ pub(crate) fn open_regular_input_file(
     path: &Path,
     cancellation: &CancellationToken,
 ) -> Result<(File, u64), FontLoadError> {
-    // OpenOptions follows symlinks intentionally. Unix O_NONBLOCK makes FIFO targets swapped
-    // after path preflight safe; the resulting handle is authoritative before any read.
+    // Path metadata follows symlinks and rejects non-files before opening. The opened handle
+    // remains authoritative if the path changes after this preflight.
     check_cancelled(cancellation)?;
     if !is_windows_filesystem_file_path(path) {
+        return Err(FontLoadError::NotRegularFile);
+    }
+    let path_metadata =
+        std::fs::metadata(path).map_err(|error| io_or_cancel(error, cancellation))?;
+    check_cancelled(cancellation)?;
+    if !path_metadata.is_file() {
         return Err(FontLoadError::NotRegularFile);
     }
     let mut options = OpenOptions::new();
@@ -340,16 +346,27 @@ pub fn load_glyph_table_with_repertoire(
     budget: &Budget,
     cancellation: &CancellationToken,
 ) -> Result<GlyphTable, FontLoadError> {
+    let (file, _) = open_regular_input_file(path, cancellation)?;
+    load_glyph_table_with_repertoire_from_file(file, repertoire, config, budget, cancellation)
+}
+
+/// Loads a font from the already-opened file that passed the caller's path boundary.
+pub(crate) fn load_glyph_table_with_repertoire_from_file(
+    mut file: File,
+    repertoire: &GlyphRepertoire,
+    config: &GlyphConfig,
+    budget: &Budget,
+    cancellation: &CancellationToken,
+) -> Result<GlyphTable, FontLoadError> {
     check_cancelled(cancellation)?;
-    if !is_windows_filesystem_file_path(path) {
+    let metadata = file
+        .metadata()
+        .map_err(|error| io_or_cancel(error, cancellation))?;
+    check_cancelled(cancellation)?;
+    if !metadata.is_file() {
         return Err(FontLoadError::NotRegularFile);
     }
-    let path_metadata = fs::metadata(path).map_err(|error| io_or_cancel(error, cancellation))?;
-    check_cancelled(cancellation)?;
-    if !path_metadata.is_file() {
-        return Err(FontLoadError::NotRegularFile);
-    }
-    let (mut file, initial_len) = open_regular_input_file(path, cancellation)?;
+    let initial_len = metadata.len();
     let max_bytes = MAX_FONT_BYTES.min(budget.max_raster_bytes());
     if initial_len > max_bytes {
         return Err(FontLoadError::TooLarge { max_bytes });
