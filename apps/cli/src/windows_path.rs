@@ -79,6 +79,7 @@ const FILE_LIST_DIRECTORY: u32 = 0x0000_0001;
 const FILE_TRAVERSE: u32 = 0x0000_0020;
 const FILE_READ_DATA: u32 = 0x0000_0001;
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+const READ_CONTROL: u32 = 0x0002_0000;
 const FILE_WRITE_DATA: u32 = 0x0000_0002;
 const FILE_ADD_SUBDIRECTORY: u32 = 0x0000_0004;
 const DELETE: u32 = 0x0001_0000;
@@ -176,11 +177,9 @@ const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
 #[cfg(test)]
 const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
 #[cfg(test)]
-const TEST_PERMISSIVE_PARENT_SDDL: &[u16] =
-    &widen_ascii(b"D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;BU)\0");
+const TEST_PERMISSIVE_PARENT_SDDL: &[u16] = &widen_ascii(b"D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;BU)\0");
 #[cfg(test)]
 const TEST_PERMISSIVE_DESTINATION_SDDL: &[u16] = &widen_ascii(b"D:P(A;;FA;;;BU)\0");
-
 
 #[allow(dead_code)]
 #[repr(C)]
@@ -1792,6 +1791,7 @@ fn create_staging_directory(
             FILE_LIST_DIRECTORY
                 | FILE_TRAVERSE
                 | FILE_READ_ATTRIBUTES
+                | READ_CONTROL
                 | FILE_WRITE_DATA
                 | DELETE
                 | SYNCHRONIZE,
@@ -2214,7 +2214,7 @@ mod tests {
         FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
         FILE_READ_DATA, FILE_SYNCHRONOUS_IO_NONALERT, FILE_TRAVERSE, GetSecurityDescriptorDacl,
         GetSecurityInfo, LocalAllocation, OPEN_EXISTING, PROTECTED_DACL_SECURITY_INFORMATION,
-        SE_FILE_OBJECT, SetSecurityInfo, SHARE_ALL, SYNCHRONIZE, TEST_PERMISSIVE_DESTINATION_SDDL,
+        SE_FILE_OBJECT, SHARE_ALL, SYNCHRONIZE, SetSecurityInfo, TEST_PERMISSIVE_DESTINATION_SDDL,
         TEST_PERMISSIVE_PARENT_SDDL, create_staging, open_relative, publish_relative,
     };
 
@@ -2325,7 +2325,10 @@ mod tests {
         let units = unsafe {
             std::slice::from_raw_parts(string.as_ptr().cast::<u16>(), string_length as usize)
         };
-        let end = units.iter().position(|unit| *unit == 0).unwrap_or(units.len());
+        let end = units
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(units.len());
         Ok(String::from_utf16_lossy(&units[..end]))
     }
 
@@ -2350,11 +2353,26 @@ mod tests {
 
     fn assert_restrictive_staging_dacl(dacl: &str) {
         assert!(dacl.contains("D:P"), "staging DACL is protected: {dacl}");
-        assert!(dacl.contains(";;;OW)"), "staging DACL grants only its owner: {dacl}");
-        assert!(!dacl.contains(";;;SY)"), "staging DACL excludes SYSTEM: {dacl}");
-        assert!(!dacl.contains(";;;BA)"), "staging DACL excludes local admins: {dacl}");
-        assert!(!dacl.contains(";;;BU)"), "staging DACL excludes Users: {dacl}");
-        assert!(!dacl.contains(";;;WD)"), "staging DACL excludes Everyone: {dacl}");
+        assert!(
+            dacl.contains(";;;OW)"),
+            "staging DACL grants only its owner: {dacl}"
+        );
+        assert!(
+            !dacl.contains(";;;SY)"),
+            "staging DACL excludes SYSTEM: {dacl}"
+        );
+        assert!(
+            !dacl.contains(";;;BA)"),
+            "staging DACL excludes local admins: {dacl}"
+        );
+        assert!(
+            !dacl.contains(";;;BU)"),
+            "staging DACL excludes Users: {dacl}"
+        );
+        assert!(
+            !dacl.contains(";;;WD)"),
+            "staging DACL excludes Everyone: {dacl}"
+        );
     }
 
     #[test]
@@ -2441,7 +2459,6 @@ mod tests {
             b"updated secret"
         );
     }
-
 
     #[test]
     fn offline_accepts_a_direct_local_ntfs_root_and_rejects_volume_mismatch() {
