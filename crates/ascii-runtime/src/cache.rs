@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions, TryLockError};
+use std::hash::{Hash, Hasher};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -279,12 +280,106 @@ pub struct VideoCacheKey {
     pub seed: u64,
 }
 
+/// The concrete values consumed by the GPU rendering stage.
+///
+/// Floating-point settings compare and hash by their IEEE bit patterns so cache identity matches
+/// the values supplied to the shader.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuUniformSettings {
+    pub foreground: Rgba8,
+    pub background: Rgba8,
+    pub secondary: Rgba8,
+    pub opacity: f32,
+    pub glitch_enabled: bool,
+    pub glitch_strength: f32,
+    pub scanlines_enabled: bool,
+    pub scanlines_strength: f32,
+    pub bloom_enabled: bool,
+    pub bloom_strength: f32,
+    pub trails_enabled: bool,
+    pub trails_decay: f32,
+    pub vignette: f32,
+    pub noise: f32,
+    pub interaction_pointer_radius_cells: f32,
+    pub interaction_pointer_strength: f32,
+    pub interaction_pointer_max_offset_cells: f32,
+    pub interaction_click_radius_cells: f32,
+    pub interaction_click_strength: f32,
+    pub interaction_window_margin_cells: f32,
+    pub interaction_window_strength: f32,
+}
+
+impl PartialEq for GpuUniformSettings {
+    fn eq(&self, other: &Self) -> bool {
+        self.foreground == other.foreground
+            && self.background == other.background
+            && self.secondary == other.secondary
+            && self.opacity.to_bits() == other.opacity.to_bits()
+            && self.glitch_enabled == other.glitch_enabled
+            && self.glitch_strength.to_bits() == other.glitch_strength.to_bits()
+            && self.scanlines_enabled == other.scanlines_enabled
+            && self.scanlines_strength.to_bits() == other.scanlines_strength.to_bits()
+            && self.bloom_enabled == other.bloom_enabled
+            && self.bloom_strength.to_bits() == other.bloom_strength.to_bits()
+            && self.trails_enabled == other.trails_enabled
+            && self.trails_decay.to_bits() == other.trails_decay.to_bits()
+            && self.vignette.to_bits() == other.vignette.to_bits()
+            && self.noise.to_bits() == other.noise.to_bits()
+            && self.interaction_pointer_radius_cells.to_bits()
+                == other.interaction_pointer_radius_cells.to_bits()
+            && self.interaction_pointer_strength.to_bits()
+                == other.interaction_pointer_strength.to_bits()
+            && self.interaction_pointer_max_offset_cells.to_bits()
+                == other.interaction_pointer_max_offset_cells.to_bits()
+            && self.interaction_click_radius_cells.to_bits()
+                == other.interaction_click_radius_cells.to_bits()
+            && self.interaction_click_strength.to_bits()
+                == other.interaction_click_strength.to_bits()
+            && self.interaction_window_margin_cells.to_bits()
+                == other.interaction_window_margin_cells.to_bits()
+            && self.interaction_window_strength.to_bits()
+                == other.interaction_window_strength.to_bits()
+    }
+}
+
+impl Eq for GpuUniformSettings {}
+
+impl Hash for GpuUniformSettings {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.foreground.hash(state);
+        self.background.hash(state);
+        self.secondary.hash(state);
+        self.opacity.to_bits().hash(state);
+        self.glitch_enabled.hash(state);
+        self.glitch_strength.to_bits().hash(state);
+        self.scanlines_enabled.hash(state);
+        self.scanlines_strength.to_bits().hash(state);
+        self.bloom_enabled.hash(state);
+        self.bloom_strength.to_bits().hash(state);
+        self.trails_enabled.hash(state);
+        self.trails_decay.to_bits().hash(state);
+        self.vignette.to_bits().hash(state);
+        self.noise.to_bits().hash(state);
+        self.interaction_pointer_radius_cells.to_bits().hash(state);
+        self.interaction_pointer_strength.to_bits().hash(state);
+        self.interaction_pointer_max_offset_cells
+            .to_bits()
+            .hash(state);
+        self.interaction_click_radius_cells.to_bits().hash(state);
+        self.interaction_click_strength.to_bits().hash(state);
+        self.interaction_window_margin_cells.to_bits().hash(state);
+        self.interaction_window_strength.to_bits().hash(state);
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct GpuCacheKey {
     pub upstream: Box<CacheIdentity>,
     pub backend: String,
     pub device: String,
     pub shader_digest: ContentDigest,
+    /// Exact settings sent to the GPU stage, rather than a caller-reusable digest.
+    pub uniforms: GpuUniformSettings,
 }
 
 /// Namespaced content identity for conversion, video, or GPU-derived artifacts.
@@ -2296,9 +2391,77 @@ fn canonical_output_destination(destination: &Path) -> io::Result<PathBuf> {
 
 fn absolute_output_destination(destination: &Path) -> io::Result<PathBuf> {
     if destination.is_absolute() {
-        Ok(destination.to_path_buf())
-    } else {
-        Ok(std::env::current_dir()?.join(destination))
+        return Ok(destination.to_path_buf());
+    }
+    #[cfg(windows)]
+    if windows_is_drive_relative_destination(destination) {
+        return windows_absolute_drive_relative_destination(destination);
+    }
+    Ok(std::env::current_dir()?.join(destination))
+}
+
+#[cfg(windows)]
+fn windows_is_drive_relative_destination(destination: &Path) -> bool {
+    matches!(
+        destination.components().next(),
+        Some(std::path::Component::Prefix(prefix))
+            if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+    ) && !destination.has_root()
+}
+
+#[cfg(windows)]
+fn windows_absolute_drive_relative_destination(destination: &Path) -> io::Result<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFullPathNameW(
+            file_name: *const u16,
+            buffer_length: u32,
+            buffer: *mut u16,
+            file_part: *mut *mut u16,
+        ) -> u32;
+    }
+
+    let mut wide_destination: Vec<u16> = destination.as_os_str().encode_wide().collect();
+    if wide_destination.contains(&0) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "drive-relative destination contains a NUL",
+        ));
+    }
+    wide_destination.push(0);
+
+    let mut buffer = vec![0u16; 260];
+    loop {
+        let buffer_length = u32::try_from(buffer.len()).map_err(|_| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                "resolved destination path exceeds Windows API limits",
+            )
+        })?;
+        // SAFETY: the input is NUL-terminated, the output buffer has buffer_length elements,
+        // and the unused file-part output is null.
+        let required_or_written = unsafe {
+            GetFullPathNameW(
+                wide_destination.as_ptr(),
+                buffer_length,
+                buffer.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        if required_or_written == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let length = required_or_written as usize;
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer)));
+        }
+        buffer
+            .try_reserve_exact(length.saturating_sub(buffer.len()))
+            .map_err(io::Error::other)?;
+        buffer.resize(length, 0);
     }
 }
 

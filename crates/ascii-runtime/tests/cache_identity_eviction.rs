@@ -1,9 +1,9 @@
 use ascii_runtime::cache::{
     CacheError, CacheIdentity, CellGeometry, ContentDigest, ConversionKey, CropRect, DerivedCache,
     DiskBudget, DiskRequirements, FitCrop, FitMode, FontHinting, FontRasterSettings, GpuCacheKey,
-    GridSize, OutputFailureKind, OutputRegistry, PatchDimensions, Rational, Rgba8, SourceContent,
-    SourceObservation, SourceStatHint, StoreOutcome, VideoCacheKey, VideoStreamSelection,
-    VideoTimeRange,
+    GpuUniformSettings, GridSize, OutputFailureKind, OutputRegistry, PatchDimensions, Rational,
+    Rgba8, SourceContent, SourceObservation, SourceStatHint, StoreOutcome, VideoCacheKey,
+    VideoStreamSelection, VideoTimeRange,
 };
 use std::fs;
 use std::io::{self, ErrorKind};
@@ -146,6 +146,21 @@ fn configure_windows_case_mode(directory: &Path, case_sensitive: bool) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn windows_drive_letter(path: &Path) -> Option<u8> {
+    path.components()
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Prefix(prefix) => match prefix.kind() {
+                std::path::Prefix::Disk(drive) | std::path::Prefix::VerbatimDisk(drive) => {
+                    Some(drive)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+}
+
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 static CWD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -153,16 +168,22 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Self {
+        let parent = std::env::temp_dir();
+        Self::try_new_under(&parent)
+            .unwrap_or_else(|error| panic!("create test temporary directory: {error}"))
+    }
+
+    fn try_new_under(parent: &Path) -> io::Result<Self> {
         loop {
             let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
+            let path = parent.join(format!(
                 "asciiwall-cor009-cache-{}-{id}",
                 std::process::id()
             ));
             match fs::create_dir(&path) {
-                Ok(()) => return Self(path),
+                Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-                Err(error) => panic!("create test temporary directory: {error}"),
+                Err(error) => return Err(error),
             }
         }
     }
@@ -466,6 +487,44 @@ fn video_and_gpu_semantic_components_change_identity() {
         backend: "vulkan".to_owned(),
         device: "device-0".to_owned(),
         shader_digest: digest(8),
+        uniforms: GpuUniformSettings {
+            foreground: Rgba8 {
+                red: 0xd7,
+                green: 0xfb,
+                blue: 0xe8,
+                alpha: 0xff,
+            },
+            background: Rgba8 {
+                red: 0x07,
+                green: 0x11,
+                blue: 0x0b,
+                alpha: 0xff,
+            },
+            secondary: Rgba8 {
+                red: 0x58,
+                green: 0xaa,
+                blue: 0x80,
+                alpha: 0xff,
+            },
+            opacity: 1.0,
+            glitch_enabled: false,
+            glitch_strength: 0.1,
+            scanlines_enabled: true,
+            scanlines_strength: 0.1,
+            bloom_enabled: true,
+            bloom_strength: 0.2,
+            trails_enabled: false,
+            trails_decay: 0.8,
+            vignette: 0.0,
+            noise: 0.0,
+            interaction_pointer_radius_cells: 10.0,
+            interaction_pointer_strength: 0.5,
+            interaction_pointer_max_offset_cells: 4.0,
+            interaction_click_radius_cells: 15.0,
+            interaction_click_strength: 0.6,
+            interaction_window_margin_cells: 2.0,
+            interaction_window_strength: 0.5,
+        },
     };
     let base_gpu = CacheIdentity::Gpu(gpu.clone());
     let mut backend = gpu.clone();
@@ -477,6 +536,34 @@ fn video_and_gpu_semantic_components_change_identity() {
     let mut shader = gpu.clone();
     shader.shader_digest = digest(9);
     assert_ne!(base_gpu, CacheIdentity::Gpu(shader));
+    let mut scanlines = gpu.clone();
+    scanlines.uniforms.scanlines_strength = 0.25;
+    assert_ne!(
+        base_gpu,
+        CacheIdentity::Gpu(scanlines),
+        "scanline strength changes must not reuse a GPU cache entry"
+    );
+    let mut bloom_strength = gpu.clone();
+    bloom_strength.uniforms.bloom_strength = 0.3;
+    assert_ne!(
+        base_gpu,
+        CacheIdentity::Gpu(bloom_strength),
+        "bloom strength changes must not reuse a GPU cache entry"
+    );
+    macro_rules! interaction_uniform_changes_identity {
+        ($field:ident, $value:expr) => {{
+            let mut changed = gpu.clone();
+            changed.uniforms.$field = $value;
+            assert_ne!(base_gpu, CacheIdentity::Gpu(changed), stringify!($field));
+        }};
+    }
+    interaction_uniform_changes_identity!(interaction_pointer_radius_cells, 11.0);
+    interaction_uniform_changes_identity!(interaction_pointer_strength, 0.75);
+    interaction_uniform_changes_identity!(interaction_pointer_max_offset_cells, 5.0);
+    interaction_uniform_changes_identity!(interaction_click_radius_cells, 16.0);
+    interaction_uniform_changes_identity!(interaction_click_strength, 0.8);
+    interaction_uniform_changes_identity!(interaction_window_margin_cells, 3.0);
+    interaction_uniform_changes_identity!(interaction_window_strength, 0.75);
     let mut gpu_upstream = gpu;
     gpu_upstream.upstream = Box::new(CacheIdentity::Video(video));
     assert_ne!(base_gpu, CacheIdentity::Gpu(gpu_upstream));
@@ -1363,6 +1450,102 @@ fn relative_output_destination_is_captured_before_callback_changes_working_direc
     assert!(
         !changed_working_directory
             .join("relative-output.bin")
+            .exists()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn drive_relative_output_destination_is_captured_before_callback_changes_working_directory() {
+    let _cwd_test_lock = CWD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut candidate_parents = vec![std::env::temp_dir()];
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        candidate_parents.push(PathBuf::from(local_app_data));
+    }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(parent) = executable.parent()
+    {
+        candidate_parents.push(parent.to_path_buf());
+    }
+    if let Ok(current_directory) = std::env::current_dir() {
+        candidate_parents.push(current_directory);
+    }
+
+    let mut drive_temp = None;
+    let mut last_temp_error = None;
+    for parent in candidate_parents {
+        let Some(drive_letter) = windows_drive_letter(&parent) else {
+            continue;
+        };
+        match TempDir::try_new_under(&parent) {
+            Ok(temp) => {
+                drive_temp = Some((temp, drive_letter));
+                break;
+            }
+            Err(error) => last_temp_error = Some(error),
+        }
+    }
+    let Some((temp, drive_letter)) = drive_temp else {
+        if let Some(error) = last_temp_error {
+            eprintln!(
+                "skipping drive-relative output regression: no writable drive-qualified temp directory ({error})"
+            );
+        } else {
+            eprintln!(
+                "skipping drive-relative output regression: no drive-qualified temp directory is available"
+            );
+        }
+        return;
+    };
+    let initial_working_directory = temp.path().join("initial");
+    let changed_working_directory = temp.path().join("changed");
+    fs::create_dir(&initial_working_directory).unwrap();
+    fs::create_dir(&changed_working_directory).unwrap();
+    let _current_directory_guard =
+        CurrentDirectoryGuard::change_to(&initial_working_directory).unwrap();
+    let drive_relative_destination = PathBuf::from(format!(
+        "{}:drive-relative-output.bin",
+        char::from(drive_letter)
+    ));
+    assert!(!drive_relative_destination.is_absolute());
+    assert!(!drive_relative_destination.has_root());
+
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 64,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(49);
+    let committed = registry
+        .write_transactional(
+            key.clone(),
+            &drive_relative_destination,
+            &reservation,
+            |output| {
+                output.write_all(b"drive-relative target captured before callback")?;
+                std::env::set_current_dir(&changed_working_directory)
+            },
+        )
+        .expect("drive-relative destination remains bound to its original drive cwd");
+
+    let expected_destination = initial_working_directory.join("drive-relative-output.bin");
+    assert_eq!(committed, expected_destination);
+    assert_eq!(
+        registry.registered_path(&key),
+        Some(expected_destination.clone())
+    );
+    assert_eq!(
+        fs::read(&expected_destination).unwrap(),
+        b"drive-relative target captured before callback"
+    );
+    assert!(
+        !changed_working_directory
+            .join("drive-relative-output.bin")
             .exists()
     );
 }

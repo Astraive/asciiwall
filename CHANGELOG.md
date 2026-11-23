@@ -102,6 +102,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   entry until all its leases are acknowledged, even after cache and lease handles drop.
   Lease acknowledgement remains retryable; retained-byte accounting, OS file locks, and failed-write
   protections remain.
+- [COR-009] Bind GPU cache identity to typed GPU-stage uniforms, including color/effect values and pointer, click, and window interaction controls.
+- [COR-009] Resolve Windows drive-relative export destinations to stable absolute targets before writer callbacks, preserving publication when a callback changes the process CWD.
 - [COR-009] Serialize operations on a shared cache root with a process-local per-root mutex before
   the OS file lock, preserving root accounting and generated-file publication across Windows threads.
 - [COR-009] Persist a monotonic generated-file ID high-water mark before file creation, reconcile
