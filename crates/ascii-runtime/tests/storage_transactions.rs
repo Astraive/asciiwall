@@ -597,6 +597,32 @@ fn windows_roots_separate_case_aliases_when_final_directories_are_missing() {
 
 #[cfg(windows)]
 #[test]
+fn windows_roots_separate_unicode_ordinal_case_aliases_when_final_directories_are_missing() {
+    let temp = TempDir::new();
+    let roaming = temp.path().join("Stateς");
+    let local = temp.path().join("Stateσ");
+    assert!(!roaming.exists());
+    assert!(!local.exists());
+
+    let app_id = "org.example.wall";
+    let roots = StorageRoots::resolve(
+        app_id,
+        &DirectoryInputs::Windows {
+            roaming_app_data: roaming.clone(),
+            local_app_data: local.clone(),
+        },
+    )
+    .expect("ordinal-case-aliased Windows roots are separated");
+    assert_eq!(roots.config, roaming.join(app_id).join("config"));
+    assert_eq!(roots.data, local.join(app_id));
+    assert!(
+        !roaming.exists() && !local.exists(),
+        "root identity checks do not create synthetic paths"
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_directory_lock_preserves_unicode_expanding_path_for_io() {
     let temp = TempDir::new();
     assert_eq!("İ".to_lowercase(), "i\u{307}");
@@ -988,6 +1014,83 @@ fn registry_validation_rejects_shared_package_paths() {
         ))
     ));
 }
+#[cfg(target_os = "macos")]
+#[test]
+fn registry_validation_rejects_macos_case_aliases() {
+    let mut aliases = registry("1.0.0");
+    aliases
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/I/shared".to_owned();
+    aliases.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: "packages/i/SHARED".to_owned(),
+        },
+    );
+
+    assert!(matches!(
+        aliases.validate(),
+        Err(StorageError::InvalidRegistry(
+            "package paths must be unique"
+        ))
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn registry_validation_rejects_macos_canonical_unicode_aliases() {
+    let mut aliases = registry("1.0.0");
+    aliases
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/café/shared".to_owned();
+    aliases.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: "packages/cafe\u{301}/shared".to_owned(),
+        },
+    );
+
+    assert!(matches!(
+        aliases.validate(),
+        Err(StorageError::InvalidRegistry(
+            "package paths must be unique"
+        ))
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn registry_validation_rejects_macos_unicode_casefold_aliases() {
+    let mut aliases = registry("1.0.0");
+    aliases
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/straße/shared".to_owned();
+    aliases.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: "packages/STRASSE/shared".to_owned(),
+        },
+    );
+
+    assert!(matches!(
+        aliases.validate(),
+        Err(StorageError::InvalidRegistry(
+            "package paths must be unique"
+        ))
+    ));
+}
 
 #[cfg(windows)]
 #[test]
@@ -997,7 +1100,7 @@ fn registry_validation_rejects_windows_path_aliases() {
         .packages
         .get_mut("org.example.sample")
         .expect("first package")
-        .relative_path = "packages./Shared /path.".to_owned();
+        .relative_path = "packages/Shared/path".to_owned();
     shared.packages.insert(
         "org.example.second".to_owned(),
         InstallEntry {
@@ -1039,6 +1142,145 @@ fn registry_validation_rejects_windows_ordinal_case_aliases() {
             "package paths must be unique"
         ))
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn registry_validation_rejects_windows_final_sigma_path_aliases() {
+    let mut aliases = registry("1.0.0");
+    aliases
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/Stateς/shared".to_owned();
+    aliases.packages.insert(
+        "org.example.second".to_owned(),
+        InstallEntry {
+            package_version: "2.0.0".to_owned(),
+            sha256: "b".repeat(64),
+            relative_path: "PACKAGES/stateσ/SHARED".to_owned(),
+        },
+    );
+
+    assert!(matches!(
+        aliases.validate(),
+        Err(StorageError::InvalidRegistry(
+            "package paths must be unique"
+        ))
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn registry_and_journal_reject_windows_trimmed_path_components() {
+    let mut registry = registry("1.0.0");
+    for path in ["packages/foo.", "packages/foo "] {
+        registry
+            .packages
+            .get_mut("org.example.sample")
+            .expect("first package")
+            .relative_path = path.to_owned();
+        assert!(matches!(
+            registry.validate(),
+            Err(StorageError::InvalidRegistry(
+                "package path must be normalized and relative"
+            ))
+        ));
+    }
+    registry
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/foo".to_owned();
+    assert!(
+        registry.validate().is_ok(),
+        "canonical paths remain accepted"
+    );
+
+    let temp = TempDir::new();
+    let journal_root = temp.path().join("journal");
+    let journal = ImportJournal::new(journal_root.clone());
+    for (transaction_id, path) in [
+        ("org.example.trailingdot", "packages/foo."),
+        ("org.example.trailingspace", "packages/foo "),
+    ] {
+        assert!(matches!(
+            journal.begin(transaction_id, "org.example.sample", path),
+            Err(StorageError::InvalidJournal(
+                "staging path must be normalized and relative"
+            ))
+        ));
+    }
+    assert!(
+        !journal_root.exists(),
+        "invalid journal paths are rejected before filesystem effects"
+    );
+
+    let record = journal
+        .begin(
+            "org.example.canonical",
+            "org.example.sample",
+            "packages/foo",
+        )
+        .expect("canonical journal paths remain accepted");
+    assert_eq!(record.staging_path, "packages/foo");
+}
+
+#[cfg(windows)]
+#[test]
+fn registry_and_journal_reject_reserved_windows_device_components() {
+    const RESERVED_PATHS: &[&str] = &[
+        "packages/CON",
+        "packages/prn.txt",
+        "packages/AUX",
+        "packages/NUL",
+        "packages/CONIN$/file",
+        "packages/CONOUT$",
+        "packages/COM1",
+        "packages/LPT9.log",
+        "packages/COM¹",
+    ];
+
+    let mut registry = registry("1.0.0");
+    for path in RESERVED_PATHS {
+        registry
+            .packages
+            .get_mut("org.example.sample")
+            .expect("first package")
+            .relative_path = (*path).to_owned();
+        assert!(matches!(
+            registry.validate(),
+            Err(StorageError::InvalidRegistry(
+                "package path must be normalized and relative"
+            ))
+        ));
+    }
+    registry
+        .packages
+        .get_mut("org.example.sample")
+        .expect("first package")
+        .relative_path = "packages/foo".to_owned();
+    assert!(
+        registry.validate().is_ok(),
+        "canonical paths remain accepted"
+    );
+
+    let temp = TempDir::new();
+    let journal_root = temp.path().join("journal");
+    let journal = ImportJournal::new(journal_root.clone());
+    for (index, path) in RESERVED_PATHS.iter().enumerate() {
+        let transaction_id = format!("org.example.reserved{index}");
+        assert!(matches!(
+            journal.begin(&transaction_id, "org.example.sample", path),
+            Err(StorageError::InvalidJournal(
+                "staging path must be normalized and relative"
+            ))
+        ));
+    }
+    assert!(
+        !journal_root.exists(),
+        "invalid device paths are rejected before filesystem effects"
+    );
 }
 
 #[cfg(windows)]
@@ -1893,7 +2135,7 @@ fn newer_settings_schema_is_not_replaced_by_older_writer_or_explicit_recovery() 
 }
 
 #[test]
-fn oversized_newer_settings_schema_is_not_replaced_by_older_backup() {
+fn oversized_settings_current_is_rejected_before_recovery() {
     const CONFIG_MAX_BYTES: usize = 8 * 1024 * 1024;
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
@@ -1924,10 +2166,7 @@ fn oversized_newer_settings_schema_is_not_replaced_by_older_backup() {
 
     assert!(matches!(
         storage.restore_config_from_backup(Some(&oversized_newer), validate_schema_v1),
-        Err(StorageError::UnsupportedVersion {
-            kind: "settings configuration",
-            version: 2
-        })
+        Err(StorageError::DocumentTooLarge)
     ));
     assert_eq!(
         fs::read(&config_path).expect("oversized newer schema remains untouched"),
@@ -1935,58 +2174,6 @@ fn oversized_newer_settings_schema_is_not_replaced_by_older_backup() {
     );
     assert_eq!(
         fs::read(&backup_path).expect("last-good backup remains untouched"),
-        known_good_backup
-    );
-}
-
-#[test]
-fn oversized_schema_scan_ignores_fake_versions_in_multiline_strings() {
-    const CONFIG_MAX_BYTES: usize = 8 * 1024 * 1024;
-    let temp = TempDir::new();
-    let storage = Storage::new(linux_roots(temp.path()));
-    let validate_schema_v1 = |value: &TomlValue| {
-        (value.get("schema_version").and_then(TomlValue::as_integer) == Some(1))
-            .then_some(())
-            .ok_or("unsupported settings schema")
-    };
-    let supported = ParsedToml::from_toml(
-        b"schema_version = 1\nrevision = 1\n[settings]\ntheme = \"known-good\"\n",
-    )
-    .expect("parse supported TOML");
-    save_current_config(&storage, &supported, validate_schema_v1).expect("save supported schema");
-    let current_supported = ParsedToml::from_toml(
-        b"schema_version = 1\nrevision = 2\n[settings]\ntheme = \"current\"\n",
-    )
-    .expect("parse current supported TOML");
-    save_current_config(&storage, &current_supported, validate_schema_v1)
-        .expect("establish schema-1 last-good backup");
-    let backup_path = storage.config_backup_path();
-    let known_good_backup = fs::read(&backup_path).expect("read schema-1 last-good backup");
-
-    let payload = "x".repeat(CONFIG_MAX_BYTES);
-    let oversized_current = format!(
-        "basic_note = \"\"\"\nschema_version = 1\n\"\"\"\n\
-         literal_note = '''\nschema_version = 1\n'''\n\
-         schema_version = 2\nrevision = 3\npayload = \"{payload}\"\n"
-    )
-    .into_bytes();
-    assert!(oversized_current.len() > CONFIG_MAX_BYTES);
-    let config_path = storage.config_path();
-    fs::write(&config_path, &oversized_current).expect("write oversized schema-2 config");
-
-    assert!(matches!(
-        storage.restore_config_from_backup(Some(&oversized_current), validate_schema_v1),
-        Err(StorageError::UnsupportedVersion {
-            kind: "settings configuration",
-            version: 2
-        })
-    ));
-    assert_eq!(
-        fs::read(&config_path).expect("schema-2 config remains untouched"),
-        oversized_current
-    );
-    assert_eq!(
-        fs::read(&backup_path).expect("schema-1 backup remains untouched"),
         known_good_backup
     );
 }
@@ -2244,19 +2431,16 @@ fn authoritative_documents_enforce_save_and_read_size_limits() {
         fs::read(&backup_path).expect("oversized current preserves last-good"),
         known_good_backup
     );
-    storage
-        .restore_config_from_backup(Some(&oversized_current), validate_test_config)
-        .expect("explicitly restore from last-good");
+    assert!(matches!(
+        storage.restore_config_from_backup(Some(&oversized_current), validate_test_config),
+        Err(StorageError::DocumentTooLarge)
+    ));
     assert_eq!(
-        storage
-            .load_config(validate_test_config)
-            .unwrap()
-            .unwrap()
-            .value(),
-        original_config.value()
+        fs::read(&config_path).expect("refused recovery preserves oversized current"),
+        oversized_current
     );
     assert_eq!(
-        fs::read(&backup_path).expect("recovery preserves last-good"),
+        fs::read(&backup_path).expect("refused recovery preserves last-good"),
         known_good_backup
     );
 
@@ -2375,6 +2559,29 @@ fn diagnostic_log_rotates_within_bounds_and_redacts_local_media_paths() {
 }
 
 #[test]
+fn diagnostic_log_redacts_full_spaced_path_and_preserves_safe_prefix() {
+    let temp = TempDir::new();
+    let log = DiagnosticLog::new(
+        temp.path().join("spaced-path-logs"),
+        temp.path().join("home"),
+        LogLimits::new(1024, 2, 512).expect("valid bounds"),
+    );
+    let private_path = "/mnt/archive/Client Tax Return.xlsx";
+    log.append(&format!("opened {private_path}; request complete"))
+        .expect("append redacted path event");
+
+    let record = fs::read_to_string(log.current_path()).expect("read redacted path record");
+    assert!(
+        record.contains("opened "),
+        "safe text before the path is retained"
+    );
+    assert!(record.contains("[REDACTED_PATH]"));
+    assert!(!record.contains(private_path));
+    assert!(!record.contains("Tax Return.xlsx"));
+    assert!(!record.contains("Return.xlsx"));
+}
+
+#[test]
 fn diagnostic_log_redacts_drive_relative_paths_after_unicode_punctuation() {
     let temp = TempDir::new();
     let log = DiagnosticLog::new(
@@ -2384,10 +2591,15 @@ fn diagnostic_log_redacts_drive_relative_paths_after_unicode_punctuation() {
     );
     log.append("opened “C:private.txt” but AC:private and A: status are harmless")
         .expect("append diagnostic event");
+    log.append("opened C:Client Tax Return.xlsx; request complete")
+        .expect("append spaced drive-relative path");
 
     let record = fs::read_to_string(log.current_path()).expect("read diagnostic record");
     assert!(record.contains("[REDACTED_PATH]"));
     assert!(!record.contains("private.txt"));
+    assert!(record.contains("opened [REDACTED_PATH]"));
+    assert!(!record.contains("Tax Return.xlsx"));
+    assert!(!record.contains("Return.xlsx"));
     assert!(record.contains("AC:private"));
     assert!(record.contains("A: status"));
 }
@@ -2749,6 +2961,8 @@ fn portable_export_redacts_user_qualified_home_paths_in_generic_strings() {
         },
         "prefixed_posix": "note=~alice/Documents/private.mov",
         "prefixed_windows": "note=~bob\\Documents\\private.mp4",
+        "curly_quoted": "see “~alice/Documents/private.mov”",
+        "curly_quoted_prose": "see “~visitor without a path”",
         "ordinary": "ordinary note about ~visitor without a path"
     });
     let portable =
@@ -2760,9 +2974,49 @@ fn portable_export_redacts_user_qualified_home_paths_in_generic_strings() {
             "portable export retained {private_value}"
         );
     }
+    assert!(portable.content().get("curly_quoted").is_none());
+    assert_eq!(
+        portable.content()["curly_quoted_prose"],
+        json!("see “~visitor without a path”")
+    );
     assert_eq!(
         portable.content()["ordinary"],
         json!("ordinary note about ~visitor without a path")
+    );
+}
+
+#[test]
+fn portable_export_redacts_home_and_local_paths_in_unicode_quotes() {
+    let source = json!({
+        "quoted_posix_home": "see ‚/home/alice/private.txt‛ before import",
+        "quoted_relative_local": "selected 「Downloads/private-file」 before import",
+        "quoted_tilde_home": "from 『~alice/Documents/private.txt』",
+        "quoted_substitution_brackets": "⸂/home/alice/private.txt⸃",
+        "ordinary_quoted_prose": "the phrase 「hello」 is harmless",
+        "substitution_bracket_prose": "⸂hello⸃"
+    });
+    let portable =
+        ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
+            .expect("portable export");
+
+    for private_key in [
+        "quoted_posix_home",
+        "quoted_relative_local",
+        "quoted_tilde_home",
+        "quoted_substitution_brackets",
+    ] {
+        assert!(
+            portable.content().get(private_key).is_none(),
+            "portable export retained quoted path {private_key}"
+        );
+    }
+    assert_eq!(
+        portable.content()["ordinary_quoted_prose"],
+        json!("the phrase 「hello」 is harmless")
+    );
+    assert_eq!(
+        portable.content()["substitution_bracket_prose"],
+        json!("⸂hello⸃")
     );
 }
 
@@ -2884,39 +3138,76 @@ fn portable_export_filters_host_components_but_preserves_local_backup() {
     let source = json!({
         "host": "buildhost",
         "service_host": "buildhost",
+        "serviceHost": "servicehostsecret",
+        "ipv6Host": "ipv6hostsecret",
+        "serviceHostname": "upstreamhost",
+        "remoteHost2": "remotehostsecret",
+        "ipv6Host2": "ipv6host2secret",
+        "hostname2": "hostname2secret",
         "upstream_host": "upstreamhost",
         "ghost_count": 7,
+        "ghostCount": 8,
         "supported_versions": "Supported versions v1.0/v2.0"
     });
     let portable =
         ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
             .expect("bounded portable export");
-    for private_field in ["host", "service_host", "upstream_host"] {
+    for private_field in [
+        "host",
+        "service_host",
+        "serviceHost",
+        "serviceHostname",
+        "ipv6Host",
+        "remoteHost2",
+        "ipv6Host2",
+        "hostname2",
+        "upstream_host",
+    ] {
         assert!(
             portable.content().get(private_field).is_none(),
             "portable export retained {private_field}"
         );
     }
     assert_eq!(portable.content()["ghost_count"], json!(7));
+    assert_eq!(portable.content()["ghostCount"], json!(8));
     assert_eq!(
         portable.content()["supported_versions"],
         json!("Supported versions v1.0/v2.0")
     );
 
     let encoded = String::from_utf8(portable.to_json().unwrap()).unwrap();
-    for private_field in ["\"host\"", "\"service_host\"", "\"upstream_host\""] {
+    for private_field in [
+        "\"host\"",
+        "\"service_host\"",
+        "\"serviceHost\"",
+        "\"serviceHostname\"",
+        "\"ipv6Host\"",
+        "\"remoteHost2\"",
+        "\"ipv6Host2\"",
+        "\"hostname2\"",
+        "\"upstream_host\"",
+    ] {
         assert!(
             !encoded.contains(private_field),
             "portable JSON retained {private_field}"
         );
     }
-    for hostname in ["buildhost", "upstreamhost"] {
+    for hostname in [
+        "buildhost",
+        "upstreamhost",
+        "ipv6hostsecret",
+        "remotehostsecret",
+        "ipv6host2secret",
+        "hostname2secret",
+        "servicehostsecret",
+    ] {
         assert!(
             !encoded.contains(hostname),
             "portable JSON retained hostname {hostname}"
         );
     }
     assert!(encoded.contains("\"ghost_count\": 7"));
+    assert!(encoded.contains("\"ghostCount\": 8"));
     assert!(encoded.contains("Supported versions v1.0/v2.0"));
 
     let local_backup = ascii_runtime::storage::PortableExport::from_value(

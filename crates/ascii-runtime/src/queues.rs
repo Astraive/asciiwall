@@ -270,8 +270,11 @@ impl ControlQueue {
 /// Coordinated latest-frame handoff with separate urgent control and fixed buffer slots.
 ///
 /// The coordinator publishes a valid replacement before discarding older queued frames whenever
-/// a free slot exists. If all slots are occupied by queued frames, it validates the replacement
-/// before reclaiming the oldest queued frame to make room; consumed slots retain output permits
+/// a free slot exists. With no free slot, it stages replacement bytes before taking over the oldest
+/// queued publication as a replacement fill lease. Cancellation that wins before that acquisition
+/// leaves the prior publication intact. This replacement lease acquisition is the point of no
+/// return: cancellation during or after copying no longer aborts replacement publication. The
+/// staging buffer is charged to the shared memory budget. Consumed slots retain output permits
 /// until acknowledgement, generation invalidation, or pool destruction, without the slot pinning
 /// the pool.
 #[derive(Debug)]
@@ -279,14 +282,21 @@ pub struct BoundedHandoff {
     operation: Mutex<()>,
     resource_budget: ResourceBudget,
     pool: BufferPool,
+    replacement_staging: Mutex<Vec<u8>>,
+    _replacement_staging_permit: MemoryPermit,
     frames: FrameQueue,
     controls: ControlQueue,
     #[cfg(test)]
-    cancel_after_copy: Mutex<bool>,
+    cancel_before_replacement_fill: Mutex<bool>,
+    #[cfg(test)]
+    cancel_after_replacement_fill_acquire: Mutex<bool>,
+    #[cfg(test)]
+    cancel_during_replacement_staging: Mutex<bool>,
 }
 
 impl BoundedHandoff {
-    /// Creates fixed slot, frame-queue, and ordinary-control capacities using a shared budget.
+    /// Creates fixed slot, replacement-staging, frame-queue, and ordinary-control capacities
+    /// using a shared budget.
     pub fn new(
         resource_budget: &ResourceBudget,
         generation: u64,
@@ -295,14 +305,31 @@ impl BoundedHandoff {
         frame_queue_capacity: usize,
         control_queue_capacity: usize,
     ) -> Result<Self, RuntimeError> {
+        let pool = BufferPool::new(resource_budget, generation, slot_count, bytes_per_slot)?;
+        let staging_bytes =
+            u64::try_from(bytes_per_slot).map_err(|_| RuntimeError::SizeOverflow)?;
+        let replacement_staging_permit =
+            resource_budget.try_reserve_memory(MemoryUsage::new(staging_bytes, 0))?;
+        let mut replacement_staging = Vec::new();
+        replacement_staging
+            .try_reserve_exact(bytes_per_slot)
+            .map_err(|_| RuntimeError::AllocationFailed)?;
+        replacement_staging.resize(bytes_per_slot, 0);
+
         Ok(Self {
             operation: Mutex::new(()),
             resource_budget: resource_budget.clone(),
-            pool: BufferPool::new(resource_budget, generation, slot_count, bytes_per_slot)?,
+            pool,
+            replacement_staging: Mutex::new(replacement_staging),
+            _replacement_staging_permit: replacement_staging_permit,
             frames: FrameQueue::new(resource_budget, frame_queue_capacity)?,
             controls: ControlQueue::new(resource_budget, control_queue_capacity)?,
             #[cfg(test)]
-            cancel_after_copy: Mutex::new(false),
+            cancel_before_replacement_fill: Mutex::new(false),
+            #[cfg(test)]
+            cancel_after_replacement_fill_acquire: Mutex::new(false),
+            #[cfg(test)]
+            cancel_during_replacement_staging: Mutex::new(false),
         })
     }
 
@@ -329,19 +356,55 @@ impl BoundedHandoff {
     pub fn slot_state(&self, slot_id: u32) -> Result<crate::SlotState, RuntimeError> {
         self.pool.slot_state(slot_id)
     }
+
     #[cfg(test)]
-    fn cancel_during_next_copy(&self) {
-        *lock_unpoisoned(&self.cancel_after_copy) = true;
+    fn cancel_during_next_replacement_staging(&self) {
+        *lock_unpoisoned(&self.cancel_during_replacement_staging) = true;
     }
 
     #[cfg(test)]
-    fn apply_test_copy_cancellation(&self, cancellation: &CancellationToken) {
-        if std::mem::take(&mut *lock_unpoisoned(&self.cancel_after_copy)) {
+    fn apply_test_replacement_staging_cancellation(&self, cancellation: &CancellationToken) {
+        if std::mem::take(&mut *lock_unpoisoned(
+            &self.cancel_during_replacement_staging,
+        )) {
             cancellation.cancel();
         }
     }
 
-    /// Publishes the newest valid frame before releasing older queued frames.
+    #[cfg(test)]
+    fn cancel_before_next_replacement_fill(&self) {
+        *lock_unpoisoned(&self.cancel_before_replacement_fill) = true;
+    }
+
+    #[cfg(test)]
+    fn apply_test_cancellation_before_replacement_fill(&self, cancellation: &CancellationToken) {
+        if std::mem::take(&mut *lock_unpoisoned(&self.cancel_before_replacement_fill)) {
+            cancellation.cancel();
+        }
+    }
+
+    #[cfg(test)]
+    fn cancel_after_next_replacement_fill_acquire(&self) {
+        *lock_unpoisoned(&self.cancel_after_replacement_fill_acquire) = true;
+    }
+
+    #[cfg(test)]
+    fn apply_test_cancellation_after_replacement_fill_acquire(
+        &self,
+        cancellation: &CancellationToken,
+    ) {
+        if std::mem::take(&mut *lock_unpoisoned(
+            &self.cancel_after_replacement_fill_acquire,
+        )) {
+            cancellation.cancel();
+        }
+    }
+
+    /// Publishes the newest valid frame before releasing older queued frames when a free slot
+    /// exists. With no free slot, it stages replacement bytes before taking over the oldest queued
+    /// publication as a replacement fill lease. If cancellation wins before that acquisition, the
+    /// prior publication is preserved. This replacement lease acquisition is the point of no return:
+    /// cancellation during or after copying no longer aborts replacement publication.
     pub fn submit_frame(
         &self,
         metadata: RasterDescriptorMetadata,
@@ -377,8 +440,6 @@ impl BoundedHandoff {
         let fill = match self.pool.begin_fill() {
             Ok(mut fill) => {
                 fill.write_with_cpu_permit(pixels)?;
-                #[cfg(test)]
-                self.apply_test_copy_cancellation(cancellation);
                 before_publish();
                 if cancellation.is_cancelled() {
                     return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
@@ -390,27 +451,29 @@ impl BoundedHandoff {
                 if cancellation.is_cancelled() {
                     return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
                 }
-                loop {
-                    let Some(stale) = self.frames.try_recv() else {
-                        return Err(RuntimeError::NoFreeSlots);
-                    };
-                    if self.pool.discard(&stale)? {
-                        self.pool.reclaim_released();
-                    }
-                    match self.pool.begin_fill() {
-                        Ok(mut fill) => {
-                            fill.write_with_cpu_permit(pixels)?;
-                            #[cfg(test)]
-                            self.apply_test_copy_cancellation(cancellation);
-                            if cancellation.is_cancelled() {
-                                return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
-                            }
-                            break fill;
-                        }
-                        Err(RuntimeError::NoFreeSlots) => {}
-                        Err(error) => return Err(error),
-                    }
+                let mut staging = lock_unpoisoned(&self.replacement_staging);
+                staging[..pixels.len()].copy_from_slice(pixels);
+                #[cfg(test)]
+                self.apply_test_replacement_staging_cancellation(cancellation);
+                if cancellation.is_cancelled() {
+                    return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
                 }
+                let Some(previous) = self.frames.try_recv() else {
+                    return Err(RuntimeError::NoFreeSlots);
+                };
+                #[cfg(test)]
+                self.apply_test_cancellation_before_replacement_fill(cancellation);
+                let mut fill = match self.pool.begin_replacement_fill(&previous, cancellation) {
+                    Ok(fill) => fill,
+                    Err(error) => {
+                        self.frames.restore_front(previous);
+                        return Err(error);
+                    }
+                };
+                #[cfg(test)]
+                self.apply_test_cancellation_after_replacement_fill_acquire(cancellation);
+                fill.write_with_cpu_permit(&staging[..pixels.len()])?;
+                fill
             }
             Err(error) => return Err(error),
         };
@@ -599,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_during_one_slot_replacement_copy_is_not_published() {
+    fn cancellation_during_one_slot_replacement_staging_preserves_previous_frame() {
         let resource_budget = resource_budget();
         let handoff = BoundedHandoff::new(&resource_budget, 1, 1, 3, 1, 1).unwrap();
         let limits = budget();
@@ -607,22 +670,88 @@ mod tests {
             .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
             .unwrap();
         let cancellation = CancellationToken::new();
-        handoff.cancel_during_next_copy();
+        handoff.cancel_during_next_replacement_staging();
 
         assert_eq!(
             handoff.submit_frame(metadata(2), &[4, 5, 6], &limits, &cancellation),
             Err(RuntimeError::CoreValidation(ascii_core::Error::Cancelled))
         );
         assert!(cancellation.is_cancelled());
-        assert_eq!(handoff.queued_frames(), 0);
-        assert_eq!(handoff.slot_state(0).unwrap(), SlotState::Free);
-        assert!(
-            handoff
-                .receive_frame(&limits, &CancellationToken::new())
-                .unwrap()
-                .is_none()
-        );
+        assert_eq!(handoff.queued_frames(), 1);
+        assert_eq!(handoff.slot_state(0).unwrap(), SlotState::Published);
+        let mut lease = handoff
+            .receive_frame(&limits, &CancellationToken::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.descriptor().media_timestamp_ns, 1);
+        lease
+            .with_pixels(|pixels| assert_eq!(pixels, &[1, 2, 3]))
+            .unwrap();
+        lease.completion_token().unwrap().acknowledge();
+        lease.release().unwrap();
     }
+
+    #[test]
+    fn cancellation_after_staging_check_before_fill_acquisition_preserves_previous_frame() {
+        let resource_budget = resource_budget();
+        let handoff = BoundedHandoff::new(&resource_budget, 1, 1, 3, 1, 1).unwrap();
+        let limits = budget();
+        handoff
+            .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        handoff.cancel_before_next_replacement_fill();
+
+        assert_eq!(
+            handoff.submit_frame(metadata(2), &[4, 5, 6], &limits, &cancellation),
+            Err(RuntimeError::CoreValidation(ascii_core::Error::Cancelled))
+        );
+        assert!(cancellation.is_cancelled());
+        assert_eq!(handoff.queued_frames(), 1);
+        assert_eq!(handoff.slot_state(0).unwrap(), SlotState::Published);
+        let mut lease = handoff
+            .receive_frame(&limits, &CancellationToken::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.descriptor().media_timestamp_ns, 1);
+        lease
+            .with_pixels(|pixels| assert_eq!(pixels, &[1, 2, 3]))
+            .unwrap();
+        lease.completion_token().unwrap().acknowledge();
+        lease.release().unwrap();
+    }
+
+    #[test]
+    fn cancellation_after_replacement_fill_acquisition_finishes_publication() {
+        let resource_budget = resource_budget();
+        let handoff = BoundedHandoff::new(&resource_budget, 1, 1, 3, 1, 1).unwrap();
+        let limits = budget();
+        handoff
+            .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        handoff.cancel_after_next_replacement_fill_acquire();
+
+        let replacement = handoff
+            .submit_frame(metadata(2), &[4, 5, 6], &limits, &cancellation)
+            .unwrap();
+
+        assert!(cancellation.is_cancelled());
+        assert_eq!(handoff.queued_frames(), 1);
+        assert_eq!(handoff.slot_state(0).unwrap(), SlotState::Published);
+        let mut lease = handoff
+            .receive_frame(&limits, &CancellationToken::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(*lease.descriptor(), replacement);
+        assert_eq!(lease.descriptor().media_timestamp_ns, 2);
+        lease
+            .with_pixels(|pixels| assert_eq!(pixels, &[4, 5, 6]))
+            .unwrap();
+        lease.completion_token().unwrap().acknowledge();
+        lease.release().unwrap();
+    }
+
     #[test]
     fn pending_stop_before_fifo_commit_wins_the_dequeue_race() {
         let resource_budget = resource_budget();

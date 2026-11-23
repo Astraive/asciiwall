@@ -58,6 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   spellings the filesystem resolves to the same existing entry and retain uncertain registrations.
 
 - Durable publication-ledger replacement uses a same-directory overwrite rename instead of the Windows PowerShell `File.Replace` null-backup binding; a real filesystem regression runs locally and in CI.
+- Redacted complete whitespace-containing and drive-relative paths from diagnostic logs, rejected Windows-trimmed and reserved-device registry/journal path components, compared storage-root and registry-path aliases with Windows ordinal case-insensitive semantics (including final sigma), and bounded explicit restore of oversized settings files ([COR-008]).
 - Project-field schema preflight preserves singleton GraphQL argument collections instead of mistaking a valid input object for multiple arguments.
 - Preserve ISO-looking JSON text and exact protected ledger timestamp strings through repeated reads and atomic writes; the real filesystem regression now exercises lossless reloads.
 - Hardened FNT-001 cancellation through parser preflight, glyph description, rasterization, and final sorting; prevented implicit deep clones of budgeted tables, validated legacy cmap format 2 beside Unicode maps, fixed one-pixel edge descriptors, expanded fingerprint invalidation coverage, and documented the checked parser-allocation envelope.
@@ -71,7 +72,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Keep the active old-scene COR-005 memory permit borrowed while a transition is staged; abort releases only the candidate charge, while completion releases the old charge once and deactivates the original permit.
 - Linearize urgent Stop/revocation publication against the final ordinary FIFO dequeue with an atomic dequeue-commit bit; a pending urgent event wins the commit race (`[COR-005]`).
 - Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
-- Reject a queued-frame replacement cancelled during its buffer copy before publication, with public `submit_frame` regression coverage (`[COR-005]`).
+- Preserve queued COR-005 frames when replacement is cancelled during staging, before publication, with public `submit_frame` regression coverage (`[COR-005]`).
+- Linearize one-slot replacement cancellation against fill-lease acquisition: cancellation before acquisition restores the prior `Published` frame; after acquisition, copying and publication finish despite cancellation (`[COR-005]`).
 - [COR-008] Serialize atomic writes, importer journal transitions, and diagnostic-log rotation by
   storage directory; clean owned interrupted-write temporaries, sync newly created directory
   entries where supported, preserve only schema-valid last-good configs, and redact clipped
@@ -101,10 +103,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   portable-export traversal and serialized output, reject over-budget exports without partial data,
   and redact single-label host-and-port endpoints such as `buildhost:9000` with trailing sentence,
   angle, or colon punctuation while retaining non-endpoint text.
-- [COR-008] Filter bare `host` keys from portable exports so single-label machine names such as
-  `buildhost` cannot survive under a generic field name.
-- [COR-008] Filter exact host/hostname key components, including composed fields such as
-  `service_host`, from portable exports while preserving benign substring matches and supported-version prose.
+- [COR-008] Filter portable host/hostname keys at separator, camelCase, and digit boundaries while
+  preserving benign substrings; redact home and local paths bounded by Unicode initial/final
+  punctuation or selected quote delimiters; reject macOS install-registry aliases using ICU Unicode
+  18.0.0 NFD and full case folding.
+
 - [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
   explicitly labeled nonportable local backups.
 - COR-009 cache hardening preserves output bytes written after a disk-probe snapshot, captures
