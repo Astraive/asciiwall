@@ -8,9 +8,9 @@ Build an immutable glyph table from a font fingerprint, raster size, cell dimens
 
 `ascii-convert::build_glyph_table(font_bytes, &repertoire, config, budget, cancellation)` builds one row-major, 8-bit coverage mask per requested Unicode scalar. `GlyphRepertoire::new(&str)` validates a nonempty, duplicate-free repertoire and stores it privately; its only accepted scalars are printable ASCII (including space), Unicode block elements U+2580–U+259F, and Braille patterns U+2800–U+28FF. The public `is_supported_single_cell_scalar` predicate is the shared contract for future consumers. The builder accepts only `&GlyphRepertoire`, so raw strings cannot bypass validation. Missing font glyphs remain a separate typed error. `GlyphConfig` requires finite positive raster size, nonzero cell dimensions, and a baseline no lower than the cell's bottom edge.
 
-Each glyph is rasterized with pinned `fontdue 0.9.3` (default features disabled; `hashbrown` enabled, SIMD disabled), centered by advance width and positioned at the configured baseline, then clipped to the cell. Space remains a real measured blank mask. Bounds, coverage-weighted centroid, normalized mean coverage, and four gradient-orientation energy bins come from the resulting mask. The immutable table sorts by measured coverage, then font glyph index, then Unicode scalar.
+Each glyph is rasterized with pinned `fontdue 0.9.3` (default features disabled; `hashbrown` enabled, SIMD disabled), centered by advance width and positioned at the configured baseline, then clipped to the cell. Space remains a real measured blank mask. Bounds, coverage-weighted centroid, normalized mean coverage, dimensionless X/Y total variation, and four gradient-orientation energy bins come from the resulting mask. The immutable table sorts by measured coverage, then font glyph index, then Unicode scalar.
 
-The SHA-256 table fingerprint includes a descriptor/rasterizer mode version, font bytes, raster size's IEEE-754 bits, cell width/height, baseline, and the canonical sorted scalar repertoire. Reordering the same repertoire does not change the fingerprint. Exact dependency versions and enabled features are recorded in `crates/ascii-convert/Cargo.toml` and `Cargo.lock`.
+The SHA-256 table fingerprint includes descriptor version 2, rasterizer mode, font bytes, raster size's IEEE-754 bits, cell width/height, baseline, and the canonical sorted scalar repertoire. Version 2 includes normalized X/Y total-variation features; changing descriptor semantics invalidates the table fingerprint. Reordering the same repertoire does not change the fingerprint. Exact dependency versions and enabled features are recorded in `crates/ascii-convert/Cargo.toml` and `Cargo.lock`.
 
 Before raster-mask allocation, the builder checks encoded input length, glyph count, cell-mask/table bytes, rasterizer scratch, checked work, and cancellation. It returns only a complete table or a typed error; no partial glyphs are published. `GlyphRecord` and `GlyphTable` are intentionally non-`Clone`, so `Clone` cannot implicitly duplicate masks outside the construction budget. Cancellation is polled every 256 cmap/outline work units and mask pixels, plus each raster row. `ttf-parser`/`fontdue` parse and rasterize calls and final sorting are not internally interruptible; checks around them ensure cancellation observed before return yields `Error::Cancelled` rather than a table.
 
@@ -28,16 +28,29 @@ Coverage ties are resolved deterministically. Space is a valid glyph. Sparse mas
 
 ## Structure-aware matching
 
-For target patch `P`, glyph mask `M_g`, foreground `F`, and background `B`, reconstruct `R_g(p)=B+(F-B)*M_g(p)`. A proposed score is:
+CNV-007 implements patch description and candidate shortlisting; detailed pixel reconstruction scoring, color fitting, and temporal penalties are separate work. `StructuralDescriptor::from_luminance(samples, dimensions, foreground_luminance, background_luminance, budget, cancellation)` consumes the retained linear-light patch and maps each luminance sample to density coverage:
 
 ```text
-score(g) = w_pixel * mean_squared_error(P, R_g)
-         + w_edge  * edge_descriptor_distance(P, M_g)
-         + w_tone  * abs(mean(P) - mean(R_g))
-         + temporal_penalty(g, previous_glyph)
+coverage = clamp((luminance - background_luminance)
+                 / (foreground_luminance - background_luminance), 0, 1)
 ```
 
-First shortlist candidates by coverage and rough orientation; then evaluate the detailed score. Solve or choose foreground/background before comparing candidates consistently. Weights are normalized and benchmarked, not arbitrary magic quality constants. Per-channel least-squares color fitting is a later quality option, with clamping and degenerate-mask handling.
+This definition supports either foreground/background polarity and makes tone, shape, and edge features dimensionless. Tone is mean coverage. X and Y shape features are the mean per-row/per-column total variations, clamped to `[0, 1]`. The four edge-orientation fractions use the same finite differences, zero-boundary convention, bins, and energy normalization as immutable glyph masks. A zero-energy patch remains finite and has zero orientation bins.
+
+For shortlist comparison, normalized samples are deterministically resampled to the glyph table's cell width and height before calculating candidate features. Each target cell-center coordinate maps to the source index `floor(((2 * i + 1) * source_extent) / (2 * target_extent))`; coverage, gradients, and orientation therefore use the same raster geometry as glyph descriptors even when input patch dimensions differ. Source descriptor getters continue to report native patch features, while candidate scores use the common cell-grid features.
+
+The shortlist uses these normalized distances:
+
+```text
+tone_distance  = abs(target_coverage - glyph_coverage)
+shape_distance = 0.5 * L1(target_xy_variation, glyph_xy_variation)
+edge_distance  = 0.5 * L1(target_orientation_bins, glyph_orientation_bins)
+score          = w_tone * tone_distance + w_shape * shape_distance + w_edge * edge_distance
+```
+
+`StructuralWeights::new` validates each nonnegative weight in `[0, 1]` and a sum of one; therefore every distance and combined score remains in `[0, 1]`. `ShortlistOptions` validates a maximum candidate count of 1–4096, and a call also rejects a count larger than its glyph repertoire. `StructuralScratch` reuses a caller-owned top-K heap bounded by that count. Candidates are returned in score order with stable ties by font glyph index, Unicode scalar, then table position; no detailed reconstruction is performed by this API.
+
+`StructuralIdentity` is SHA-256 over structural descriptor version 2, the resolved `SamplingIdentity`, source patch dimensions and native/common feature values, the glyph-table mask fingerprint, foreground/background luminance, maximum candidates, and normalized weights. The common cell-grid features are part of the ranking semantics, while source dimensions still invalidate identity when sampling geometry changes. The scratch byte envelope and checked patch-feature, scoring, and heap work are validated against the supplied `Budget`; cancellation is polled at bounded work checkpoints. Malformed controls, budget exhaustion, arithmetic overflow, allocation failure, and cancellation retain their distinct `ascii_core::Error` variants, and failure returns no partial shortlist.
 
 ## Temporal stabilization
 

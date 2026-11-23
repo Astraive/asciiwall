@@ -11,6 +11,21 @@ pub fn synthetic_font(narrow_b: bool) -> Vec<u8> {
     ];
     font_with_glyphs(glyphs, false)
 }
+
+/// Source-built equal-area horizontal and vertical masks for structural orientation tests.
+#[allow(dead_code)]
+pub fn equal_area_orientation_font() -> Vec<u8> {
+    font_with_glyphs(
+        vec![
+            rectangle(600, 800),
+            Vec::new(),
+            rectangle(500, 250),
+            rectangle(250, 500),
+        ],
+        false,
+    )
+}
+
 /// A Unicode format-4 map coexisting with a legacy format-2 map for the same character.
 /// The Unicode map selects glyph 2 while format 2 maps the character to glyph 3.
 pub fn legacy_format2_font(malformed: bool) -> Vec<u8> {

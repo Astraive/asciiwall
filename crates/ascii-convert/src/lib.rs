@@ -7,6 +7,7 @@ mod font_preflight;
 mod glyphs;
 
 mod sampling;
+mod structural;
 
 pub use color::{
     Alpha, ColorNormalizationError, ColorNormalizationWarning, EncodedOutputColor, EncodedSrgb,
@@ -23,8 +24,12 @@ pub use font::{
     GlyphConfig, GlyphRecord, GlyphRepertoire, GlyphTable, build_glyph_table,
     is_supported_single_cell_scalar,
 };
-pub use glyphs::{Centroid, EdgeOrientation, GlyphBounds, GlyphMetrics};
+pub use glyphs::{Centroid, EdgeOrientation, GlyphBounds, GlyphMetrics, GradientDescriptor};
 pub use sampling::{
     CropRect, FitMode, FitTransform, PatchDescriptors, PatchDimensions, QualityPatches,
     SamplingFilter, SamplingIdentity, SamplingOptions, SamplingRect,
+};
+pub use structural::{
+    MAX_STRUCTURAL_CANDIDATES, ShortlistOptions, StructuralCandidate, StructuralDescriptor,
+    StructuralIdentity, StructuralScratch, StructuralShortlist, StructuralWeights,
 };
