@@ -62,6 +62,7 @@ dependencies = [
  "ascii-core",
  "icu_casemap",
  "icu_normalizer",
+ "icu_properties",
  "serde",
  "serde_json",
  "toml",

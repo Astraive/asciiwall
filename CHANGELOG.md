@@ -103,11 +103,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   portable-export traversal and serialized output, reject over-budget exports without partial data,
   and redact single-label host-and-port endpoints such as `buildhost:9000` with trailing sentence,
   angle, or colon punctuation while retaining non-endpoint text.
-- [COR-008] Filter bare and exact host/hostname key components in portable exports across separators,
-  camelCase (including digit-to-uppercase transitions), and letter-to-ASCII-digit boundaries;
-  preserve benign substring matches such as `ghostCount` and supported-version prose.
-- [COR-008] Redact home paths wrapped in Unicode quotes and reject macOS package-path aliases
-  using Unicode 18.0.0 NFD and full case folding.
+- [COR-008] Filter portable host/hostname keys at separator, camelCase, and digit boundaries while
+  preserving benign substrings; redact home and local paths bounded by Unicode initial/final
+  punctuation or selected quote delimiters; reject macOS install-registry aliases using ICU Unicode
+  18.0.0 NFD and full case folding.
 
 - [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
   explicitly labeled nonportable local backups.
