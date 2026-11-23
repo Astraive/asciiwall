@@ -323,7 +323,8 @@ pub struct FitTransform {
 impl FitTransform {
     /// Builds the transform from source and destination pixel-edge extents.
     /// Returns `SizeOverflow` when edge arithmetic loses an extent beyond
-    /// bounded local f64 rounding error.
+    /// bounded local `f64` rounding error, or when contain centering cannot
+    /// represent both margins within its centering tolerance.
     pub fn new(
         source_width: u32,
         source_height: u32,
