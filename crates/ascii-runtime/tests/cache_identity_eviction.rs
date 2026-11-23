@@ -536,34 +536,58 @@ fn video_and_gpu_semantic_components_change_identity() {
     let mut shader = gpu.clone();
     shader.shader_digest = digest(9);
     assert_ne!(base_gpu, CacheIdentity::Gpu(shader));
-    let mut scanlines = gpu.clone();
-    scanlines.uniforms.scanlines_strength = 0.25;
-    assert_ne!(
-        base_gpu,
-        CacheIdentity::Gpu(scanlines),
-        "scanline strength changes must not reuse a GPU cache entry"
-    );
-    let mut bloom_strength = gpu.clone();
-    bloom_strength.uniforms.bloom_strength = 0.3;
-    assert_ne!(
-        base_gpu,
-        CacheIdentity::Gpu(bloom_strength),
-        "bloom strength changes must not reuse a GPU cache entry"
-    );
-    macro_rules! interaction_uniform_changes_identity {
+    macro_rules! uniform_changes_identity {
         ($field:ident, $value:expr) => {{
             let mut changed = gpu.clone();
             changed.uniforms.$field = $value;
             assert_ne!(base_gpu, CacheIdentity::Gpu(changed), stringify!($field));
         }};
     }
-    interaction_uniform_changes_identity!(interaction_pointer_radius_cells, 11.0);
-    interaction_uniform_changes_identity!(interaction_pointer_strength, 0.75);
-    interaction_uniform_changes_identity!(interaction_pointer_max_offset_cells, 5.0);
-    interaction_uniform_changes_identity!(interaction_click_radius_cells, 16.0);
-    interaction_uniform_changes_identity!(interaction_click_strength, 0.8);
-    interaction_uniform_changes_identity!(interaction_window_margin_cells, 3.0);
-    interaction_uniform_changes_identity!(interaction_window_strength, 0.75);
+    uniform_changes_identity!(
+        foreground,
+        Rgba8 {
+            red: 0xd6,
+            green: 0xfb,
+            blue: 0xe8,
+            alpha: 0xff,
+        }
+    );
+    uniform_changes_identity!(
+        background,
+        Rgba8 {
+            red: 0x08,
+            green: 0x11,
+            blue: 0x0b,
+            alpha: 0xff,
+        }
+    );
+    uniform_changes_identity!(
+        secondary,
+        Rgba8 {
+            red: 0x59,
+            green: 0xaa,
+            blue: 0x80,
+            alpha: 0xff,
+        }
+    );
+    uniform_changes_identity!(opacity, 0.9);
+    uniform_changes_identity!(glitch_enabled, true);
+    uniform_changes_identity!(glitch_strength, 0.2);
+    uniform_changes_identity!(scanlines_enabled, false);
+    uniform_changes_identity!(scanlines_strength, 0.25);
+    uniform_changes_identity!(bloom_enabled, false);
+    uniform_changes_identity!(bloom_strength, 0.3);
+    uniform_changes_identity!(trails_enabled, true);
+    uniform_changes_identity!(trails_decay, 0.7);
+    uniform_changes_identity!(vignette, 0.1);
+    uniform_changes_identity!(noise, 0.1);
+    uniform_changes_identity!(interaction_pointer_radius_cells, 11.0);
+    uniform_changes_identity!(interaction_pointer_strength, 0.75);
+    uniform_changes_identity!(interaction_pointer_max_offset_cells, 5.0);
+    uniform_changes_identity!(interaction_click_radius_cells, 16.0);
+    uniform_changes_identity!(interaction_click_strength, 0.8);
+    uniform_changes_identity!(interaction_window_margin_cells, 3.0);
+    uniform_changes_identity!(interaction_window_strength, 0.75);
     let mut gpu_upstream = gpu;
     gpu_upstream.upstream = Box::new(CacheIdentity::Video(video));
     assert_ne!(base_gpu, CacheIdentity::Gpu(gpu_upstream));
@@ -676,6 +700,50 @@ fn byte_lru_pins_active_resources_until_explicit_acknowledgement() {
     lease.acknowledge().expect("completion releases and trims");
     assert!(!pinned_path.exists());
     assert_eq!(cache.snapshot().unwrap().used_bytes, 0);
+}
+
+#[test]
+fn eviction_continues_to_equal_tick_orphan_after_entry_lock_failure() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let managed_dir = cache_root.join(".asciiwall-cache-v1");
+    let cache = DerivedCache::open(&cache_root, 16).expect("open cache");
+    cache.store(identity(203), b"entry").unwrap();
+
+    let entry_path = fs::read_dir(&managed_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_name().to_string_lossy().starts_with("derived-"))
+        .expect("stored entry path")
+        .path();
+
+    let other_cache = DerivedCache::open(&cache_root, 16).expect("open second cache");
+    cache
+        .store(identity(203), b"entry")
+        .expect("re-touch the entry after opening the second cache");
+    other_cache.store(identity(204), b"free").unwrap();
+    let orphan_path = fs::read_dir(&managed_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry.file_name().to_string_lossy().starts_with("derived-")
+                && entry.path() != entry_path
+        })
+        .expect("second cache entry path")
+        .path();
+    let pinned_file = fs::File::open(&entry_path).unwrap();
+    pinned_file
+        .try_lock()
+        .expect("hold an exclusive lock on the known cache entry");
+
+    cache
+        .set_budget_bytes(b"entry".len() as u64)
+        .expect("evict the unpinned orphan at the same LRU tick");
+
+    assert!(!orphan_path.exists());
+    assert_eq!(cache.snapshot().unwrap().used_bytes, b"entry".len() as u64);
+    drop(pinned_file);
+    assert_eq!(fs::read(&entry_path).unwrap(), b"entry");
 }
 
 #[test]

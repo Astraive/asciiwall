@@ -1016,41 +1016,49 @@ fn trim_to_budget(root: &Path, state: &mut CacheState) -> Result<(), CacheError>
 }
 
 fn evict_oldest_file(root: &Path, state: &mut CacheState) -> Result<bool, CacheError> {
-    let mut last_examined_tick = 0u64;
+    // Failed deletions leave state unchanged, so stable ranks let us continue after one.
+    // Rank by tick, then entries before orphans, then stable file ID.
+    let mut last_examined: Option<(u64, bool, u64)> = None;
     loop {
         let entry_victim = state
             .entries
             .iter()
-            .filter(|(_, entry)| entry.active_leases == 0 && entry.last_used > last_examined_tick)
-            .min_by_key(|(_, entry)| entry.last_used)
-            .map(|(identity, entry)| (entry.last_used, identity));
+            .filter(|(_, entry)| {
+                entry.active_leases == 0
+                    && last_examined
+                        .is_none_or(|last| (entry.last_used, false, entry.file_id) > last)
+            })
+            .min_by_key(|(_, entry)| (entry.last_used, entry.file_id))
+            .map(|(identity, entry)| ((entry.last_used, false, entry.file_id), identity));
         let orphan_victim = state
             .orphaned_files
             .iter()
             .enumerate()
-            .filter(|(_, file)| file.last_used > last_examined_tick)
-            .min_by_key(|(_, file)| file.last_used)
-            .map(|(index, file)| (file.last_used, index));
+            .filter(|(_, file)| {
+                last_examined.is_none_or(|last| (file.last_used, true, file.file_id) > last)
+            })
+            .min_by_key(|(_, file)| (file.last_used, file.file_id))
+            .map(|(index, file)| ((file.last_used, true, file.file_id), index));
         match (entry_victim, orphan_victim) {
-            (Some((entry_tick, identity)), Some((orphan_tick, _))) if entry_tick <= orphan_tick => {
+            (Some((entry_rank, identity)), Some((orphan_rank, _))) if entry_rank <= orphan_rank => {
                 let identity = identity.clone();
                 if remove_entry(root, state, &identity)? {
                     return Ok(true);
                 }
-                last_examined_tick = entry_tick;
+                last_examined = Some(entry_rank);
             }
-            (Some((tick, identity)), None) => {
+            (Some((rank, identity)), None) => {
                 let identity = identity.clone();
                 if remove_entry(root, state, &identity)? {
                     return Ok(true);
                 }
-                last_examined_tick = tick;
+                last_examined = Some(rank);
             }
-            (_, Some((tick, index))) => {
+            (_, Some((rank, index))) => {
                 if remove_orphaned_file(root, state, index)? {
                     return Ok(true);
                 }
-                last_examined_tick = tick;
+                last_examined = Some(rank);
             }
             (None, None) => return Ok(false),
         }
