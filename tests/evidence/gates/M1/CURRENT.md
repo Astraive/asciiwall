@@ -1,6 +1,6 @@
 # Current M1 gate receipt
 
-The current immutable receipt is [`signoff-revision-9-2026-11-23.json`](signoff-revision-9-2026-11-23.json) (draft-10, recorded 2026-11-23; SHA-256 `d02b5813cbb2d26c9f75f892c635869774b5ddc9c2ce6fb010ffb7e45a84083c`).
+The current immutable receipt is [`signoff-revision-10-2026-11-23.json`](signoff-revision-10-2026-11-23.json) (draft-10, recorded 2026-11-23; SHA-256 `9a220e5803e72e144194d9213f55850a35522398bec14501ac85997475faf76e`).
 
 [`signoff.json`](signoff.json) remains byte-for-byte historical draft-4; its stale QA-102/EC-010 `PASS` from PR #305 is superseded. Revisions 2–6 remain immutable (revision 6 SHA-256 `ebab58129748e7e0ea91356e702457390f86b8d0d1f2da4450736184ba24e977`; revision 5 SHA-256 `e5c816fc571ce7c233c34a8547f09e9fcad35b07086d6c198187498ace16230b`). Revision 7 SHA-256 is `f46e2710254dc3111eb79a28750cc2df59c15c28d932808ffdc54dd9baaa7916`. The `CURRENT.md` SHA-256 before revisions 7 and 8 was `a4ae9285c270f5ba2bc645397e3cd53ea6a48544388b4f99914277191b75f0d4` and `350c1079143d1cc073d98fdfc51e48ca732915ca4b51e45d6260a2c4319728e7`, respectively.
 
