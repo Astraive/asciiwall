@@ -35,6 +35,7 @@
 use icu_casemap::CaseMapper;
 #[cfg(target_os = "macos")]
 use icu_normalizer::DecomposingNormalizer;
+use icu_properties::{CodePointMapData, props::GeneralCategory};
 
 use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -2610,6 +2611,13 @@ fn looks_like_relative_local_path(value: &str) -> bool {
     recognized_root && !final_component.is_empty()
 }
 
+fn is_unicode_quote_boundary(character: char) -> bool {
+    matches!(
+        CodePointMapData::<GeneralCategory>::new().get(character),
+        GeneralCategory::InitialPunctuation | GeneralCategory::FinalPunctuation
+    )
+}
+
 fn trim_export_punctuation(value: &str) -> &str {
     value.trim_matches(|character: char| {
         matches!(
@@ -2628,17 +2636,29 @@ fn trim_export_punctuation(value: &str) -> &str {
                 | '!'
                 | '<'
                 | '>'
-                | '“'
-                | '”'
-                | '‘'
-                | '’'
-                | '„'
-                | '‟'
-                | '«'
-                | '»'
-                | '‹'
-                | '›'
-        )
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '〝'
+                | '〞'
+                | '〟'
+                | '﹁'
+                | '﹂'
+                | '﹃'
+                | '﹄'
+                | '＂'
+                | '＇'
+                | '⹂'
+                | '❛'
+                | '❜'
+                | '❝'
+                | '❞'
+                | '❮'
+                | '❯'
+                | '｢'
+                | '｣'
+        ) || is_unicode_quote_boundary(character)
     })
 }
 
