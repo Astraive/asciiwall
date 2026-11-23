@@ -21,7 +21,7 @@ serde_json = "=1.0.145"
 [dev-dependencies]
 tempfile = "=3.23.0"
 
-[target.'cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))'.dependencies]
+[target.'cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "windows")))'.dependencies]
 tempfile = "=3.23.0"
 
 [target.'cfg(unix)'.dependencies]
