@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -1354,6 +1355,103 @@ class EvidenceRecordTests(unittest.TestCase):
                     lock_identity,
                 )
             self.assertEqual(len(list(archive.iterdir())), 2 if os.name == "posix" else 1)
+
+    @unittest.skipUnless(
+        os.name == "posix" and _supports_safe_directory_access(),
+        "archive lock contention requires POSIX directory-relative access",
+    )
+    def test_archive_writer_waits_for_held_posix_lock_then_proceeds(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            target = archive / "qa-evidence-contention.json"
+            lock_holder_code = (
+                "import os, sys\n"
+                "from pathlib import Path\n"
+                "import evidence\n"
+                "archive = Path(sys.argv[1])\n"
+                "directory_fd = evidence._open_directory(archive)\n"
+                "lock_fd = evidence._lock_archive_posix(directory_fd)\n"
+                "print('locked', flush=True)\n"
+                "sys.stdin.readline()\n"
+                "evidence._fcntl.flock(lock_fd, evidence._fcntl.LOCK_UN)\n"
+                "os.close(lock_fd)\n"
+                "os.close(directory_fd)\n"
+            )
+            holder = subprocess.Popen(
+                [sys.executable, "-c", lock_holder_code, str(archive)],
+                cwd=ROOT / "scripts",
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            contention_seen = threading.Event()
+            retry_after_release = threading.Event()
+            writer_errors: list[BaseException] = []
+            writer: threading.Thread | None = None
+
+            def write_archive():
+                try:
+                    evidence._write_archive_new(archive, target.name, b"record")
+                except BaseException as exc:
+                    writer_errors.append(exc)
+
+            try:
+                self.assertEqual(holder.stdout.readline(), "locked\n")
+                original_flock = evidence._fcntl.flock
+
+                def detect_contention_then_retry(descriptor, operation):
+                    try:
+                        original_flock(
+                            descriptor,
+                            operation | evidence._fcntl.LOCK_NB,
+                        )
+                    except BlockingIOError:
+                        contention_seen.set()
+                        if not retry_after_release.wait(timeout=10):
+                            raise TimeoutError("test did not release the held archive lock")
+                        return original_flock(descriptor, operation)
+                    raise AssertionError("writer acquired the held archive lock")
+
+                writer = threading.Thread(target=write_archive)
+                with patch.object(
+                    evidence._fcntl,
+                    "flock",
+                    side_effect=detect_contention_then_retry,
+                ):
+                    writer.start()
+                    try:
+                        self.assertTrue(
+                            contention_seen.wait(timeout=10),
+                            "writer did not contend for the held archive lock",
+                        )
+                        self.assertFalse(target.exists())
+                        holder.stdin.write("\n")
+                        holder.stdin.flush()
+                        self.assertEqual(holder.wait(timeout=10), 0)
+                        retry_after_release.set()
+                        writer.join(timeout=10)
+                        self.assertFalse(writer.is_alive())
+                        self.assertEqual(writer_errors, [])
+                        self.assertEqual(target.read_bytes(), b"record")
+                    finally:
+                        if holder.poll() is None:
+                            holder.stdin.write("\n")
+                            holder.stdin.flush()
+                            holder.wait(timeout=10)
+                        retry_after_release.set()
+                        writer.join(timeout=10)
+            finally:
+                if holder.poll() is None:
+                    holder.stdin.write("\n")
+                    holder.stdin.flush()
+                    holder.wait(timeout=10)
+                if writer is not None and writer.is_alive():
+                    retry_after_release.set()
+                    writer.join(timeout=10)
+                holder.stdin.close()
+                holder.stdout.close()
+                holder.stderr.close()
 
 
 class SyntheticControlsTests(unittest.TestCase):
