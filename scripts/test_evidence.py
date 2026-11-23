@@ -1820,6 +1820,57 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(old_path.read_bytes(), replacement_bytes)
             self.assertEqual(displaced_path.read_bytes(), old_bytes)
             self.assertEqual(recent_path.read_bytes(), recent_bytes)
+    @unittest.skipUnless(
+        os.name == "posix" and _supports_safe_directory_access(),
+        "same-directory replacement injection requires POSIX directory-relative access",
+    )
+    def test_prune_preserves_replacement_installed_after_final_posix_snapshot_check(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            old = evidence.finalize_record(base_record(date="2026-11-12"))
+            recent = evidence.finalize_record(base_record(date="2026-11-14"))
+            old_name = f"qa-evidence-{old['record_id']}.json"
+            recent_name = f"qa-evidence-{recent['record_id']}.json"
+            old_path = archive / old_name
+            old_bytes = evidence.canonical_json(old)
+            recent_bytes = evidence.canonical_json(recent)
+            old_path.write_bytes(old_bytes)
+            recent_path = archive / recent_name
+            recent_path.write_bytes(recent_bytes)
+            replacement_path = archive / "replacement.bin"
+            replacement_bytes = b"unrelated artifact at the POSIX removal boundary"
+            replacement_path.write_bytes(replacement_bytes)
+            displaced_path = archive / "displaced-original.json"
+            original_stat = os.stat
+            matching_stat_calls = 0
+
+            def replace_after_final_snapshot_stat(name, *args, **kwargs):
+                nonlocal matching_stat_calls
+                result = original_stat(name, *args, **kwargs)
+                if (
+                    name == old_name
+                    and kwargs.get("dir_fd") is not None
+                    and kwargs.get("follow_symlinks") is False
+                ):
+                    matching_stat_calls += 1
+                    if matching_stat_calls == 3:
+                        # Replace only after the final pre-removal stat has captured the old inode.
+                        old_path.rename(displaced_path)
+                        replacement_path.rename(old_path)
+                return result
+
+            with patch.object(evidence.os, "stat", side_effect=replace_after_final_snapshot_stat):
+                with self.assertRaisesRegex(
+                    evidence.EvidenceError,
+                    "archive prune incomplete:.*atomic compare-and-unlink",
+                ):
+                    evidence.prune_archive(archive, keep=1)
+
+            self.assertEqual(matching_stat_calls, 3)
+            self.assertEqual(old_path.read_bytes(), replacement_bytes)
+            self.assertEqual(displaced_path.read_bytes(), old_bytes)
+            self.assertEqual(recent_path.read_bytes(), recent_bytes)
+
 
     def test_prune_reports_changed_retained_candidate_instead_of_stale_kept_count(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:

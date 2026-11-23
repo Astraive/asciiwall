@@ -1956,8 +1956,8 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                             # Refuse the deletion rather than risk removing a same-name
                             # replacement installed after the snapshot check.
                             raise EvidenceError(
-                                "cannot safely prune expired artifacts on POSIX: "
-                                "atomic compare-and-unlink is unavailable"
+                                "archive prune incomplete: cannot safely prune expired artifacts "
+                                "on POSIX: atomic compare-and-unlink is unavailable"
                             )
                     except FileNotFoundError as exc:
                         raise EvidenceError(
