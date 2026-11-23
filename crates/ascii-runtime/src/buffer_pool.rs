@@ -591,10 +591,10 @@ impl FillLease {
         Ok(())
     }
 
-    /// Validates the filled bytes and publishes one immutable descriptor.
+    /// Validates the filled bytes, then commits publication atomically against cancellation.
     ///
-    /// On any error this fill lease is dropped and the slot returns to `Free`; callers cannot
-    /// publish an incomplete or invalid raster.
+    /// Cancellation that wins before the `Published` transition returns `Cancelled` and drops this
+    /// fill back to `Free`; if publication wins, it completes.
     pub fn publish(
         self,
         metadata: RasterDescriptorMetadata,
@@ -602,20 +602,29 @@ impl FillLease {
         cancellation: &CancellationToken,
     ) -> Result<FrameDescriptor, RuntimeError> {
         let _cpu_permit = self.resource_budget.try_acquire_cpu()?;
-        self.publish_inner(metadata, Some((budget, cancellation)))
+        self.publish_inner(metadata, Some((budget, cancellation)), Some(cancellation))
     }
 
     pub(crate) fn publish_prevalidated(
         self,
         metadata: RasterDescriptorMetadata,
     ) -> Result<FrameDescriptor, RuntimeError> {
-        self.publish_inner(metadata, None)
+        self.publish_inner(metadata, None, None)
+    }
+
+    pub(crate) fn publish_prevalidated_if_not_cancelled(
+        self,
+        metadata: RasterDescriptorMetadata,
+        cancellation: &CancellationToken,
+    ) -> Result<FrameDescriptor, RuntimeError> {
+        self.publish_inner(metadata, None, Some(cancellation))
     }
 
     fn publish_inner(
         mut self,
         metadata: RasterDescriptorMetadata,
         validation: Option<(&Budget, &CancellationToken)>,
+        publication_cancellation: Option<&CancellationToken>,
     ) -> Result<FrameDescriptor, RuntimeError> {
         let mut inner = lock_unpoisoned(&self.inner);
         if inner.generation != self.generation {
@@ -656,16 +665,26 @@ impl FillLease {
             validate_raster(&descriptor, &inner.region[start..end], budget, cancellation)?;
         }
         let publication_id = inner.next_publication_id;
-        inner.next_publication_id = publication_id
+        let next_publication_id = publication_id
             .checked_add(1)
             .ok_or(RuntimeError::SizeOverflow)?;
         descriptor.publication_id = publication_id;
-        let slot = &mut inner.slots[index];
-        slot.state = SlotState::Published;
-        slot.descriptor = Some(descriptor);
-        slot.completion_token_issued = false;
-        slot.completion_acknowledged = false;
-        slot.lease_attached = false;
+        let mut publish = || {
+            inner.next_publication_id = next_publication_id;
+            let slot = &mut inner.slots[index];
+            slot.state = SlotState::Published;
+            slot.descriptor = Some(descriptor);
+            slot.completion_token_issued = false;
+            slot.completion_acknowledged = false;
+            slot.lease_attached = false;
+            descriptor
+        };
+        let descriptor = match publication_cancellation {
+            Some(cancellation) => cancellation
+                .commit_if_not_cancelled(publish)
+                .map_err(RuntimeError::CoreValidation)?,
+            None => publish(),
+        };
         self.active = false;
         Ok(descriptor)
     }
