@@ -179,7 +179,7 @@ const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
 #[cfg(test)]
 const TEST_PERMISSIVE_PARENT_SDDL: &[u16] = &widen_ascii(b"D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;BU)\0");
 #[cfg(test)]
-const TEST_PERMISSIVE_DESTINATION_SDDL: &[u16] = &widen_ascii(b"D:P(A;;FA;;;BU)\0");
+const TEST_PROTECTED_DESTINATION_SDDL: &[u16] = &widen_ascii(b"D:P(A;;FA;;;OW)\0");
 
 #[allow(dead_code)]
 #[repr(C)]
@@ -1598,6 +1598,74 @@ fn destination_exists_relative(parent: &File, destination: &[u16]) -> io::Result
     }
 }
 
+pub(crate) fn publish_path(
+    destination: &Path,
+    overwrite: bool,
+    cancellation: &CancellationToken,
+    write_artifact: impl FnOnce(&mut File) -> io::Result<()>,
+) -> Result<(), PublishError> {
+    if cancellation.is_cancelled() {
+        return Err(PublishError::Cancelled);
+    }
+    let Some(destination_name) = destination.file_name() else {
+        return Err(PublishError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination is not a file path",
+        )));
+    };
+    let destination_name: Vec<u16> = destination_name.encode_wide().collect();
+    // Keep normal Win32 path resolution, then pin the resolved parent for staging
+    // and publication.
+    let parent_path = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent =
+        open_publish_parent(parent_path).map_err(|error| io_or_cancel(error, cancellation))?;
+    let root_volume_identity =
+        volume_identity(&parent).map_err(|error| io_or_cancel(error, cancellation))?;
+    publish_relative(
+        &parent,
+        &destination_name,
+        root_volume_identity,
+        overwrite,
+        cancellation,
+        write_artifact,
+    )
+}
+
+fn open_publish_parent(path: &Path) -> io::Result<File> {
+    let mut path: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if path.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination parent contains an invalid path unit",
+        ));
+    }
+    path.push(0);
+    let desired_access = FILE_LIST_DIRECTORY
+        | FILE_TRAVERSE
+        | FILE_READ_ATTRIBUTES
+        | FILE_WRITE_DATA
+        | FILE_ADD_SUBDIRECTORY
+        | SYNCHRONIZE;
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            desired_access,
+            SHARE_ALL,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            ptr::null_mut(),
+        )
+    };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
+}
+
 fn publish_relative(
     parent: &File,
     destination: &[u16],
@@ -2232,8 +2300,8 @@ mod tests {
         FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
         FILE_READ_DATA, FILE_SYNCHRONOUS_IO_NONALERT, FILE_TRAVERSE, GetSecurityDescriptorDacl,
         GetSecurityInfo, LocalAllocation, OPEN_EXISTING, PROTECTED_DACL_SECURITY_INFORMATION,
-        SE_FILE_OBJECT, SHARE_ALL, SYNCHRONIZE, SetSecurityInfo, TEST_PERMISSIVE_DESTINATION_SDDL,
-        TEST_PERMISSIVE_PARENT_SDDL, create_staging, open_relative, publish_relative,
+        SE_FILE_OBJECT, SHARE_ALL, SYNCHRONIZE, SetSecurityInfo, TEST_PERMISSIVE_PARENT_SDDL,
+        TEST_PROTECTED_DESTINATION_SDDL, create_staging, open_relative, publish_relative,
     };
 
     const TEST_READ_CONTROL: u32 = 0x0002_0000;
@@ -2369,28 +2437,19 @@ mod tests {
         (fixture, parent, identity)
     }
 
-    fn assert_restrictive_staging_dacl(dacl: &str) {
-        assert!(dacl.contains("D:P"), "staging DACL is protected: {dacl}");
+    fn assert_owner_only_dacl(dacl: &str) {
+        assert!(dacl.contains("D:P"), "DACL is protected: {dacl}");
         assert!(
             dacl.contains(";;;OW)"),
-            "staging DACL grants only its owner: {dacl}"
+            "DACL grants full access to its owner: {dacl}"
         );
-        assert!(
-            !dacl.contains(";;;SY)"),
-            "staging DACL excludes SYSTEM: {dacl}"
-        );
+        assert!(!dacl.contains(";;;SY)"), "DACL excludes SYSTEM: {dacl}");
         assert!(
             !dacl.contains(";;;BA)"),
-            "staging DACL excludes local admins: {dacl}"
+            "DACL excludes local admins: {dacl}"
         );
-        assert!(
-            !dacl.contains(";;;BU)"),
-            "staging DACL excludes Users: {dacl}"
-        );
-        assert!(
-            !dacl.contains(";;;WD)"),
-            "staging DACL excludes Everyone: {dacl}"
-        );
+        assert!(!dacl.contains(";;;BU)"), "DACL excludes Users: {dacl}");
+        assert!(!dacl.contains(";;;WD)"), "DACL excludes Everyone: {dacl}");
     }
 
     #[test]
@@ -2405,8 +2464,8 @@ mod tests {
             handle_dacl_sddl(staging.file()).expect("staging file DACL reads by handle");
         let staging_directory_dacl = handle_dacl_sddl(staging._directory.file())
             .expect("staging directory DACL reads by handle");
-        assert_restrictive_staging_dacl(&staging_file_dacl);
-        assert_restrictive_staging_dacl(&staging_directory_dacl);
+        assert_owner_only_dacl(&staging_file_dacl);
+        assert_owner_only_dacl(&staging_directory_dacl);
         drop(staging);
 
         let destination = "protected-output.txt";
@@ -2429,7 +2488,7 @@ mod tests {
         )
         .expect("published output opens through pinned parent");
         let output_dacl = handle_dacl_sddl(&output).expect("published output DACL reads by handle");
-        assert_restrictive_staging_dacl(&output_dacl);
+        assert_owner_only_dacl(&output_dacl);
         assert_eq!(
             fs::read(_fixture.path().join(destination)).expect("published output reads"),
             b"published secret"
@@ -2446,10 +2505,9 @@ mod tests {
             &destination_path,
             FILE_READ_ATTRIBUTES | TEST_READ_CONTROL | TEST_WRITE_DAC | SYNCHRONIZE,
         );
-        set_handle_dacl(&existing, TEST_PERMISSIVE_DESTINATION_SDDL);
+        set_handle_dacl(&existing, TEST_PROTECTED_DESTINATION_SDDL);
         let original_dacl = handle_dacl_sddl(&existing).expect("existing output DACL reads");
-        assert!(original_dacl.contains("D:P"));
-        assert!(original_dacl.contains(";;;BU)"));
+        assert_owner_only_dacl(&original_dacl);
         drop(existing);
 
         let leaf: Vec<u16> = destination.encode_utf16().collect();
@@ -2471,10 +2529,63 @@ mod tests {
         )
         .expect("overwritten output opens through pinned parent");
         let output_dacl = handle_dacl_sddl(&output).expect("overwritten output DACL reads");
-        assert_restrictive_staging_dacl(&output_dacl);
+        assert_owner_only_dacl(&output_dacl);
         assert_eq!(
             fs::read(destination_path).expect("overwritten output reads"),
             b"updated secret"
+        );
+    }
+
+    #[test]
+    fn default_output_creation_is_owner_only_under_permissive_parent() {
+        let (fixture, _parent, _identity) = permissive_parent();
+        let destination = fixture.path().join("default-output.txt");
+
+        crate::output::publish_file(&destination, false, &CancellationToken::new(), |file| {
+            file.write_all(b"default output")
+        })
+        .expect("default Windows output publication succeeds");
+
+        let output = open_acl_path(
+            &destination,
+            FILE_READ_ATTRIBUTES | TEST_READ_CONTROL | SYNCHRONIZE,
+        );
+        let output_dacl = handle_dacl_sddl(&output).expect("default output DACL reads by handle");
+        assert_owner_only_dacl(&output_dacl);
+        assert_eq!(
+            fs::read(destination).expect("default output reads"),
+            b"default output"
+        );
+    }
+
+    #[test]
+    fn default_output_overwrite_keeps_owner_only_dacl_under_permissive_parent() {
+        let (fixture, _parent, _identity) = permissive_parent();
+        let destination = fixture.path().join("default-existing.txt");
+        fs::write(&destination, b"original").expect("existing output is created");
+        let existing = open_acl_path(
+            &destination,
+            FILE_READ_ATTRIBUTES | TEST_READ_CONTROL | TEST_WRITE_DAC | SYNCHRONIZE,
+        );
+        set_handle_dacl(&existing, TEST_PROTECTED_DESTINATION_SDDL);
+        let existing_dacl = handle_dacl_sddl(&existing).expect("existing output DACL reads");
+        assert_owner_only_dacl(&existing_dacl);
+        drop(existing);
+
+        crate::output::publish_file(&destination, true, &CancellationToken::new(), |file| {
+            file.write_all(b"updated default output")
+        })
+        .expect("default Windows overwrite succeeds");
+
+        let output = open_acl_path(
+            &destination,
+            FILE_READ_ATTRIBUTES | TEST_READ_CONTROL | SYNCHRONIZE,
+        );
+        let output_dacl = handle_dacl_sddl(&output).expect("overwritten output DACL reads");
+        assert_owner_only_dacl(&output_dacl);
+        assert_eq!(
+            fs::read(destination).expect("overwritten output reads"),
+            b"updated default output"
         );
     }
 
