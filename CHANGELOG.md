@@ -46,6 +46,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - [COR-009] Continue cache eviction past lock-blocked entries sharing an LRU tick; test identity
   changes for every GPU uniform independently.
+- [COR-009] Roll back published output when parent-directory sync fails; keep staged partial and
+  rollback recovery paths distinct.
 
 - [COR-009] Keep expanded-input and scratch capacity charged after reservation drop until a fresh
   host-space probe reconciles files that can survive cancellation or errors.
