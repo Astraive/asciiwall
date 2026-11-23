@@ -409,8 +409,8 @@ pub(super) fn set_permissive_windows_dacl(path: &Path) -> std::io::Result<()> {
             aclapi::SetNamedSecurityInfoW,
             securitybaseapi::GetSecurityDescriptorDacl,
             winnt::{
-                DACL_SECURITY_INFORMATION, PACL, PSECURITY_DESCRIPTOR,
-                PROTECTED_DACL_SECURITY_INFORMATION,
+                DACL_SECURITY_INFORMATION, PACL, PROTECTED_DACL_SECURITY_INFORMATION,
+                PSECURITY_DESCRIPTOR,
             },
         },
     };
@@ -659,4 +659,3 @@ pub(super) fn replace_file(
         }
     }
 }
-

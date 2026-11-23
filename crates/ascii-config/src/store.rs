@@ -242,12 +242,8 @@ impl FileStore {
             return Err(WriteFailure::before_replace(error));
         }
 
-        let replace_result = self.replace_temporary(
-            temporary.path(),
-            target,
-            replace_stage,
-            target_expectation,
-        );
+        let replace_result =
+            self.replace_temporary(temporary.path(), target, replace_stage, target_expectation);
         if let Err(failure) = replace_result {
             let ReplaceFailure {
                 error: replace_error,
@@ -456,10 +452,7 @@ impl FileStore {
     }
 
     #[cfg(all(test, windows))]
-    pub(crate) fn inspect_temporary_dacl(
-        &mut self,
-        inspect: impl FnOnce(&File) + Send + 'static,
-    ) {
+    pub(crate) fn inspect_temporary_dacl(&mut self, inspect: impl FnOnce(&File) + Send + 'static) {
         self.inspect_temporary_dacl = Some(Box::new(inspect));
     }
 }
@@ -874,9 +867,7 @@ fn parent_directory(path: &Path) -> PathBuf {
 fn initial_target_expectation(path: &Path) -> std::io::Result<TargetExpectation> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(TargetExpectation::Present),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(TargetExpectation::Absent)
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(TargetExpectation::Absent),
         Err(error) => Err(error),
     }
 }
@@ -1067,13 +1058,13 @@ mod tests {
         BackupMode, ConfigStore, FileStore, PersistStage, StoreError, StoreOperation,
         archive_without_replace,
     };
+    #[cfg(windows)]
+    use std::sync::{Arc, Mutex};
     use std::{
         fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
-    #[cfg(windows)]
-    use std::sync::{Arc, Mutex};
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
