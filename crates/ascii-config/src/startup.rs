@@ -116,7 +116,8 @@ impl RestoreFailureState {
 
     fn reset_expired_window(&mut self, now_unix_millis: u64, policy: RestorePolicy) {
         let expired = self.window_started_unix_millis.is_none_or(|start| {
-            now_unix_millis < start || now_unix_millis.saturating_sub(start) >= policy.window_millis
+            // A clock rollback is not evidence that the suppression window elapsed.
+            now_unix_millis.saturating_sub(start) >= policy.window_millis
         });
         if expired {
             self.window_started_unix_millis = Some(now_unix_millis);
@@ -183,6 +184,24 @@ mod tests {
 
         state.record_failure(120, policy);
         assert_eq!(state.window_started_unix_millis(), Some(110));
+        assert_eq!(state.failures(), 1);
+    }
+
+    #[test]
+    fn clock_rollback_preserves_restore_failure_suppression() {
+        let policy = RestorePolicy::new(1, 100).unwrap();
+        let mut state = RestoreFailureState::default();
+        state.record_failure(100, policy);
+
+        let validations = AtomicUsize::new(0);
+        let result = state.validate_before_restore(true, 99, policy, 42, |value| {
+            validations.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, ()>(value)
+        });
+
+        assert_eq!(result, Err(RestoreGateError::Suppressed));
+        assert_eq!(validations.load(Ordering::Relaxed), 0);
+        assert_eq!(state.window_started_unix_millis(), Some(100));
         assert_eq!(state.failures(), 1);
     }
 
