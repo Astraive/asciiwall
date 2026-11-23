@@ -78,3 +78,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Preflight Windows candidate snapshots and bound each delete/retained-entry reread to its precharged scan-time file size; fail closed on changed entries and report later partial pruning as incomplete within the 256 MiB aggregate cap ([QA-004]).
 - Prefer the 1 MiB error for oversized JSON that also contains synthetic markers while continuing to reject markers in non-JSON evidence; assert Windows preflight mutations as incomplete pruning rather than stale retention ([QA-004]).
 - Reject oversized BOM-less UTF-16BE JSON strings whose first content character is non-ASCII, including supplementary-plane scalars, before native-manifest binary acceptance ([QA-004]).
+- Scan synthetic markers at every byte alignment for UTF-16/32 content and recheck POSIX native evidence directory-entry identity after streaming ([QA-004]).

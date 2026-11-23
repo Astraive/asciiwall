@@ -426,12 +426,28 @@ def _open_directory(path: Path) -> int:
         raise
 
 
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
 def _same_file_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
     return (
         left.st_dev, left.st_ino, left.st_mode, left.st_size, left.st_mtime_ns, left.st_ctime_ns
     ) == (
         right.st_dev, right.st_ino, right.st_mode, right.st_size, right.st_mtime_ns, right.st_ctime_ns
     )
+
+
+def _verify_regular_entry_at(
+    directory_fd: int,
+    name: str,
+    opened: os.stat_result,
+    message: str,
+) -> None:
+    entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    if not stat.S_ISREG(entry.st_mode) or not _same_file_identity(opened, entry):
+        raise EvidenceError(message)
+
 
 
 def _read_regular_at(
@@ -455,6 +471,12 @@ def _read_regular_at(
         after = os.fstat(descriptor)
         if not _same_file_snapshot(before, after):
             raise EvidenceError("evidence artifact changed while being read")
+        _verify_regular_entry_at(
+            directory_fd,
+            name,
+            before,
+            "evidence artifact path changed while being read",
+        )
         if len(raw) > MAX_JSON_BYTES:
             raise EvidenceError("evidence artifact exceeds the 1 MiB limit")
         return raw, after
@@ -839,7 +861,7 @@ class _SyntheticMarkerStream:
     _window_limit = max(map(len, _markers))
     _hex_digits = b"0123456789abcdefABCDEF"
 
-    def __init__(self, encoding: str) -> None:
+    def __init__(self, encoding: str, alignment: int = 0) -> None:
         if encoding == "utf-8":
             self.width = 1
         elif encoding.startswith("utf-16"):
@@ -847,6 +869,7 @@ class _SyntheticMarkerStream:
         else:
             self.width = 4
         self.little_endian = encoding.endswith("-le")
+        self.alignment = alignment
         self.backslash_run = 0
         self.unicode_remaining = 0
         self.unicode_value = 0
@@ -919,6 +942,12 @@ class _SyntheticMarkerStream:
     def update(self, raw: bytes) -> None:
         if self.found:
             return
+        if self.alignment:
+            skipped = min(self.alignment, len(raw))
+            self.alignment -= skipped
+            raw = raw[skipped:]
+            if not raw:
+                return
         if self.width == 1:
             for byte in raw:
                 self._consume(byte)
@@ -951,16 +980,18 @@ class _SyntheticMarkerScanner:
     """Find fixed markers in UTF-8/16/32 views without classifying JSON."""
 
     _encodings = (
-        "utf-8",
-        "utf-16-le",
-        "utf-16-be",
-        "utf-32-le",
-        "utf-32-be",
+        ("utf-8", 1),
+        ("utf-16-le", 2),
+        ("utf-16-be", 2),
+        ("utf-32-le", 4),
+        ("utf-32-be", 4),
     )
 
     def __init__(self) -> None:
         self._streams = tuple(
-            _SyntheticMarkerStream(encoding) for encoding in self._encodings
+            _SyntheticMarkerStream(encoding, alignment)
+            for encoding, width in self._encodings
+            for alignment in range(width)
         )
         self.found = False
 
@@ -1069,35 +1100,44 @@ def _hash_native_artifact(
             ) from exc
     try:
         directory_fd = _open_directory(ROOT.joinpath(*parts[:-1]))
-        try:
-            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
-            descriptor = os.open(parts[-1], flags, dir_fd=directory_fd)
-        finally:
-            os.close(directory_fd)
     except OSError as exc:
         raise EvidenceError("native evidence artifact is inaccessible or a symlink") from exc
     try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode):
-            raise EvidenceError("native evidence artifact must be a regular file")
-        if before.st_size > limit:
-            raise EvidenceError("native evidence artifacts exceed their size limit")
-        if budget is not None:
-            budget.charge(before.st_size)
-        with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            identity, size = _hash_native_stream(
-                stream.read,
-                limit,
-                expected_size=before.st_size if budget is not None else None,
+        try:
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(parts[-1], flags, dir_fd=directory_fd)
+        except OSError as exc:
+            raise EvidenceError("native evidence artifact is inaccessible or a symlink") from exc
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise EvidenceError("native evidence artifact must be a regular file")
+            if before.st_size > limit:
+                raise EvidenceError("native evidence artifacts exceed their size limit")
+            if budget is not None:
+                budget.charge(before.st_size)
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                identity, size = _hash_native_stream(
+                    stream.read,
+                    limit,
+                    expected_size=before.st_size if budget is not None else None,
+                )
+            after = os.fstat(descriptor)
+            if not _same_file_snapshot(before, after) or after.st_size != size:
+                raise EvidenceError("native evidence artifact changed while being read")
+            _verify_regular_entry_at(
+                directory_fd,
+                parts[-1],
+                before,
+                "native evidence artifact path changed while being read",
             )
-        after = os.fstat(descriptor)
-        if not _same_file_snapshot(before, after) or after.st_size != size:
-            raise EvidenceError("native evidence artifact changed while being read")
-        return identity, size
-    except OSError as exc:
-        raise EvidenceError("cannot read native evidence artifact") from exc
+            return identity, size
+        except OSError as exc:
+            raise EvidenceError("cannot read native evidence artifact") from exc
+        finally:
+            os.close(descriptor)
     finally:
-        os.close(descriptor)
+        os.close(directory_fd)
 
 
 def _validate_native_manifest(

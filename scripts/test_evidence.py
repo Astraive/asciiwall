@@ -1050,6 +1050,107 @@ class EvidenceRecordTests(unittest.TestCase):
             with self.assertRaises(evidence.EvidenceError):
                 evidence.finalize_record(record)
 
+            report_text = evidence.canonical_json(synthetic_report).decode("utf-8")
+            unaligned_encodings = (
+                ("utf-16-le", 1),
+                ("utf-16-be", 1),
+                ("utf-32-le", 1),
+                ("utf-32-le", 2),
+                ("utf-32-le", 3),
+                ("utf-32-be", 1),
+                ("utf-32-be", 2),
+                ("utf-32-be", 3),
+            )
+            for encoding, alignment in unaligned_encodings:
+                with self.subTest(encoding=encoding, alignment=alignment):
+                    synthetic_bytes = b"\xff" * alignment + report_text.encode(encoding)
+                    synthetic_path.write_bytes(synthetic_bytes)
+                    write_manifest(
+                        artifact_path=synthetic_path.relative_to(ROOT).as_posix(),
+                        artifact_hash=hashlib.sha256(synthetic_bytes).hexdigest(),
+                    )
+                    with self.assertRaisesRegex(
+                        evidence.EvidenceError, "synthetic artifacts cannot support"
+                    ):
+                        evidence.finalize_record(record)
+
+    @unittest.skipUnless(
+        os.name == "posix" and _supports_safe_directory_access(),
+        "POSIX descriptor-relative access is unavailable",
+    )
+    def test_native_manifest_rejects_artifact_replaced_after_streaming(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            artifact = directory / "binary-evidence.dat"
+            replacement = directory / "replacement.dat"
+            manifest_path = directory / "native-evidence.json"
+            original = b"\x89PNG\r\n\x1a\noriginal binary evidence"
+            artifact.write_bytes(original)
+            replacement.write_bytes(b"\x89PNG\r\n\x1a\nreplacement evidence")
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id="NATIVE-REPLACEMENT-001",
+                ec_ids=[],
+                evidence_path=manifest_path.relative_to(ROOT).as_posix(),
+            )
+            manifest_path.write_bytes(evidence.canonical_json({
+                "schema_version": 1,
+                "artifact_type": "native-manual-evidence",
+                "execution": "manual",
+                "procedure_id": record["procedure_id"],
+                "reviewer": record["reviewer"],
+                "date": record["date"],
+                "status": "pass",
+                "artifacts": [{
+                    "path": artifact.relative_to(ROOT).as_posix(),
+                    "sha256": hashlib.sha256(original).hexdigest(),
+                }],
+            }))
+            hash_stream = evidence._hash_native_stream
+
+            def replace_after_stream(read, limit, *, expected_size=None):
+                result = hash_stream(read, limit, expected_size=expected_size)
+                os.replace(replacement, artifact)
+                return result
+
+            with patch.object(evidence, "_hash_native_stream", side_effect=replace_after_stream):
+                with self.assertRaisesRegex(
+                    evidence.EvidenceError, "native evidence artifact path changed"
+                ):
+                    evidence.finalize_record(record)
+
+    @unittest.skipUnless(
+        os.name == "posix" and _supports_safe_directory_access(),
+        "POSIX descriptor-relative access is unavailable",
+    )
+    def test_native_manual_pass_rejects_direct_artifact_replaced_after_read(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            directory = Path(temporary)
+            artifact = directory / "native-observation.txt"
+            replacement = directory / "replacement.txt"
+            artifact.write_text("Native procedure observation.\n", encoding="utf-8")
+            replacement.write_text("Replacement observation.\n", encoding="utf-8")
+            record = base_record(
+                level="native-manual",
+                execution="manual",
+                procedure_id="NATIVE-REPLACEMENT-002",
+                ec_ids=[],
+                evidence_path=artifact.relative_to(ROOT).as_posix(),
+            )
+            same_snapshot = evidence._same_file_snapshot
+
+            def replace_after_read(before, after):
+                unchanged = same_snapshot(before, after)
+                os.replace(replacement, artifact)
+                return unchanged
+
+            with patch.object(evidence, "_same_file_snapshot", side_effect=replace_after_read):
+                with self.assertRaisesRegex(
+                    evidence.EvidenceError, "evidence artifact path changed"
+                ):
+                    evidence.finalize_record(record)
+
     def test_native_manual_accepts_a_direct_utf8_evidence_artifact(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             artifact = Path(temporary) / "native-observation.txt"
