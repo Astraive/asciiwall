@@ -91,15 +91,20 @@ fn block_glyph(character: char) -> Vec<u8> {
 
 fn shade_rectangles(level: u32) -> Vec<(i16, i16, i16, i16)> {
     let mut rectangles = Vec::new();
-    let step = match level {
-        1 => 4,
-        2 => 2,
-        _ => 1,
-    };
-    for y in (40..800).step_by(step * 100) {
-        for x in (40..600).step_by(step * 100) {
-            if (x / 100 + y / 100) % step == 0 {
-                rectangles.push((x as i16, y as i16, x as i16 + 55, y as i16 + 55));
+    const GRID_SIZE: u32 = 4;
+    for row in 0..GRID_SIZE {
+        for column in 0..GRID_SIZE {
+            let is_ink = match level {
+                1 => (row + column) % GRID_SIZE == 0,
+                2 => (row + column) % 2 == 0,
+                _ => (row + column) % GRID_SIZE != 0,
+            };
+            if is_ink {
+                let x0 = column * 600 / GRID_SIZE;
+                let y0 = row * 800 / GRID_SIZE;
+                let x1 = (column + 1) * 600 / GRID_SIZE;
+                let y1 = (row + 1) * 800 / GRID_SIZE;
+                rectangles.push((x0 as i16, y0 as i16, x1 as i16, y1 as i16));
             }
         }
     }

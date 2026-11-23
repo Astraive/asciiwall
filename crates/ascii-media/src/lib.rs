@@ -6,10 +6,12 @@
 //! Codec crate limits are defense in depth; decoder scratch, input, work, and retained output
 //! are also preflighted and charged to local and shared resource ledgers.
 
+mod clip;
 mod decoded_frame;
 mod image;
 mod resources;
 
+pub use clip::{ClipGlyphTable, ClipGlyphTableError, MAX_CLIP_GLYPH_COUNT, parse_clip_glyph_table};
 pub use decoded_frame::DecodedFrame;
 pub use image::{DecodeLimits, ReadSeek, decode_image};
 pub use resources::DecodeResources;
