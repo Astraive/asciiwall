@@ -40,6 +40,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- [COR-009] Continue cache eviction past lock-blocked entries sharing an LRU tick; test identity
+  changes for every GPU uniform independently.
+
 - [COR-009] Deterministically verify that overlapping stores from independently opened caches contend on the shared-root mutex and preserve the shared byte budget.
 
 - [COR-009] Query `FILE_CASE_SENSITIVE_INFO.Flags` through `GetFileInformationByHandleEx` when
