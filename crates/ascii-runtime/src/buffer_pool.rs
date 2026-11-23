@@ -310,6 +310,55 @@ impl BufferPool {
         })
     }
 
+    /// Takes over one queued publication as a replacement fill, ordered atomically with
+    /// cancellation.
+    ///
+    /// The prior publication remains intact unless this transition acquires its fill lease.
+    /// Callers must restore the descriptor to its queue if this returns cancellation.
+    pub(crate) fn begin_replacement_fill(
+        &self,
+        descriptor: &FrameDescriptor,
+        cancellation: &CancellationToken,
+    ) -> Result<FillLease, RuntimeError> {
+        let mut inner = lock_unpoisoned(&self.inner);
+        cancellation
+            .commit_if_not_cancelled(|| {
+                if descriptor.pool_identity != inner.pool_identity {
+                    return Err(RuntimeError::InvalidDescriptor);
+                }
+                if descriptor.generation != inner.generation {
+                    return Err(RuntimeError::StaleGeneration);
+                }
+                let index = descriptor.slot_id as usize;
+                let Some(slot) = inner.slots.get(index) else {
+                    return Err(RuntimeError::InvalidDescriptor);
+                };
+                if slot.state != SlotState::Published || slot.generation != inner.generation {
+                    return Err(RuntimeError::InvalidState);
+                }
+                if slot.descriptor.as_ref() != Some(descriptor) {
+                    return Err(RuntimeError::InvalidDescriptor);
+                }
+
+                let generation = inner.generation;
+                let slot = &mut inner.slots[index];
+                slot.state = SlotState::Filling;
+                slot.written_len = 0;
+                slot.descriptor = None;
+                slot.completion_token_issued = false;
+                slot.completion_acknowledged = false;
+                slot.lease_attached = false;
+                Ok(FillLease {
+                    inner: Arc::clone(&self.inner),
+                    resource_budget: self.resource_budget.clone(),
+                    slot_id: index as u32,
+                    generation,
+                    active: true,
+                })
+            })
+            .map_err(RuntimeError::CoreValidation)?
+    }
+
     /// Returns a slot's current state, or `InvalidDescriptor` for an unknown slot id.
     pub fn slot_state(&self, slot_id: u32) -> Result<SlotState, RuntimeError> {
         let inner = lock_unpoisoned(&self.inner);
