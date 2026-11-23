@@ -2437,6 +2437,35 @@ class RetentionTests(unittest.TestCase):
                 self.assertFalse(reviewed_path.exists())
             self.assertTrue(unreviewed_path.exists())
 
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "successful pruning is unavailable on POSIX, which intentionally fails closed",
+    )
+    def test_grid_diff_retention_orders_negative_modification_times_numerically(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            archive = Path(temporary)
+            golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
+            older = evidence.grid_diff({"grid": ["....", "|#.|", "|..|", "+--+"]}, golden)
+            newer = evidence.grid_diff({"grid": golden["grid"]}, golden)
+            older_path = archive / f"qa-grid-diff-{older['artifact_id']}.json"
+            newer_path = archive / f"qa-grid-diff-{newer['artifact_id']}.json"
+            older_path.write_bytes(evidence.canonical_json(older))
+            newer_path.write_bytes(evidence.canonical_json(newer))
+
+            older_mtime_ns = -100 * 1_000_000_000
+            newer_mtime_ns = -1 * 1_000_000_000
+            os.utime(older_path, ns=(older_mtime_ns, older_mtime_ns))
+            os.utime(newer_path, ns=(newer_mtime_ns, newer_mtime_ns))
+            self.assertEqual(older_path.stat().st_mtime_ns, older_mtime_ns)
+            self.assertEqual(newer_path.stat().st_mtime_ns, newer_mtime_ns)
+
+            result = evidence.prune_archive(archive, keep=1)
+
+            self.assertEqual(result["removed_names"], [older_path.name])
+            self.assertFalse(older_path.exists())
+            self.assertTrue(newer_path.is_file())
+
     def test_retention_bounds_reports_diffs_and_sanitized_logs_separately(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)

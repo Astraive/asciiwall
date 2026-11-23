@@ -1830,7 +1830,7 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
             "grid-diff": validate_grid_diff_report,
             "log": validate_log_report,
         }
-        valid: dict[str, list[tuple[str, str, str, Any, str]]] = {
+        valid: dict[str, list[tuple[tuple[int, str | int], str, str, Any, str]]] = {
             name: [] for name, _ in patterns
         }
         for name in _archive_names(directory_fd):
@@ -1876,7 +1876,7 @@ def prune_archive(directory: Path, keep: int) -> dict[str, Any]:
                     sort_date = ""
                 if accepted:
                     # Records have explicit dates; generated artifacts use write time.
-                    order = sort_date or f"{snapshot.st_mtime_ns:020d}"
+                    order = (0, sort_date) if sort_date else (1, snapshot.st_mtime_ns)
                     digest = sha256_bytes(raw) if os.name == "nt" else ""
                     valid[kind].append((order, identity, name, snapshot, digest))
                 break
