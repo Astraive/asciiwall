@@ -2245,15 +2245,13 @@ impl OutputRegistry {
                 } else {
                     OutputFailureKind::Sync
                 };
-                let recovery_path = if fs::remove_file(backup_path).is_err()
-                    && backup_path.exists()
+                let recovery_path = if fs::remove_file(backup_path).is_err() && backup_path.exists()
                 {
                     Some(backup_path.clone())
                 } else {
                     None
                 };
-                let mut output_error =
-                    OutputWriteError::new(kind, Some(temp_path), Some(error));
+                let mut output_error = OutputWriteError::new(kind, Some(temp_path), Some(error));
                 output_error.recovery_path = recovery_path;
                 return Err(output_error);
             }
@@ -2271,8 +2269,7 @@ impl OutputRegistry {
                     None
                 }
             });
-            let mut output_error =
-                OutputWriteError::new(kind, Some(temp_path), Some(error));
+            let mut output_error = OutputWriteError::new(kind, Some(temp_path), Some(error));
             output_error.recovery_path = recovery_path;
             return Err(output_error);
         }
@@ -2298,17 +2295,17 @@ impl OutputRegistry {
                         !same_output_destination(
                             &output.canonical_path,
                             &committed_canonical_destination,
-                        ) && !previous_destination_identity
-                            .is_some_and(|file_identity| {
-                                output.file_identity == Some(file_identity)
-                            })
+                        ) && !previous_destination_identity.is_some_and(|file_identity| {
+                            output.file_identity == Some(file_identity)
+                        })
                     });
                 }
-                let recovery_path =
-                    output_recovery_path(backup_path.as_deref(), &destination);
+                let recovery_path = output_recovery_path(backup_path.as_deref(), &destination);
                 let source = io::Error::new(
                     error.kind(),
-                    format!("parent-directory sync failed: {error}; rollback failed: {rollback_error}"),
+                    format!(
+                        "parent-directory sync failed: {error}; rollback failed: {rollback_error}"
+                    ),
                 );
                 let mut output_error = OutputWriteError::new(kind, None, Some(source));
                 output_error.recovery_path = recovery_path;
@@ -2335,14 +2332,12 @@ impl OutputRegistry {
                             !same_output_destination(
                                 &output.canonical_path,
                                 &committed_canonical_destination,
-                            ) && !previous_destination_identity
-                                .is_some_and(|file_identity| {
-                                    output.file_identity == Some(file_identity)
-                                })
+                            ) && !previous_destination_identity.is_some_and(|file_identity| {
+                                output.file_identity == Some(file_identity)
+                            })
                         });
                     }
-                    let recovery_path =
-                        output_recovery_path(Some(backup_path), &destination);
+                    let recovery_path = output_recovery_path(Some(backup_path), &destination);
                     let source = io::Error::new(
                         error.kind(),
                         format!(
@@ -3053,7 +3048,6 @@ fn create_output_backup(destination: &Path) -> io::Result<Option<PathBuf>> {
         "temporary output backup name exhausted",
     ))
 }
-
 
 #[cfg(unix)]
 fn replace_destination(temp_path: &Path, destination: &Path) -> io::Result<()> {
@@ -3936,7 +3930,6 @@ mod tests {
             .count();
         assert_eq!(transaction_temps, 0);
     }
-
 
     struct DiskFullAfterPrefix {
         remaining_bytes: usize,
