@@ -1460,6 +1460,78 @@ fn configuration_validation_backup_and_interrupted_replacement_keep_valid_state(
 }
 
 #[test]
+fn process_crash_during_config_replacement_recovers_complete_state() {
+    const CHILD: &str = "process_crash_during_config_replacement_recovers_complete_state";
+    const CHILD_EXIT: i32 = 73;
+
+    if let (Ok(root), Ok(stage)) = (
+        std::env::var("ASCII_RUNTIME_CRASH_ROOT"),
+        std::env::var("ASCII_RUNTIME_CRASH_STAGE"),
+    ) {
+        let storage = Storage::new(linux_roots(Path::new(&root)));
+        let replacement = config(json!({"theme": "new", "grid": {"width": 123}}));
+        let target_stage = match stage.as_str() {
+            "before" => AtomicWriteStage::TemporarySynced,
+            "after" => AtomicWriteStage::TargetReplaced,
+            other => panic!("unknown crash stage {other}"),
+        };
+        let expected_current = storage
+            .load_config(validate_test_config)
+            .expect("load child current config");
+        let _ = storage.save_config_with_hook(
+            expected_current.as_ref().map(ParsedToml::as_bytes),
+            &replacement,
+            validate_test_config,
+            move |stage| {
+                if stage == target_stage {
+                    std::process::exit(CHILD_EXIT);
+                }
+                Ok(())
+            },
+        );
+        panic!("child save completed without reaching crash stage");
+    }
+
+    for (stage, expected_theme) in [("before", "old"), ("after", "new")] {
+        let temp = TempDir::new();
+        let storage = Storage::new(linux_roots(temp.path()));
+        let original = config(json!({"theme": "old", "grid": {"width": 80}}));
+        save_current_config(&storage, &original, validate_test_config)
+            .expect("save initial config");
+
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", CHILD, "--nocapture"])
+            .env("ASCII_RUNTIME_CRASH_ROOT", temp.path())
+            .env("ASCII_RUNTIME_CRASH_STAGE", stage)
+            .output()
+            .expect("run crash child");
+        assert_eq!(
+            output.status.code(),
+            Some(CHILD_EXIT),
+            "child must terminate abruptly at {stage}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let reopened = Storage::new(linux_roots(temp.path()));
+        let loaded = reopened
+            .load_config(validate_test_config)
+            .expect("reopen after child process termination")
+            .expect("configuration remains present");
+        assert_eq!(
+            loaded.value().get("theme").and_then(TomlValue::as_str),
+            Some(expected_theme),
+            "recovery after {stage} must expose only a complete old or new document"
+        );
+        let expected = if expected_theme == "old" {
+            original
+        } else {
+            config(json!({"theme": "new", "grid": {"width": 123}}))
+        };
+        assert_eq!(loaded.value(), expected.value());
+    }
+}
+
+#[test]
 fn concurrent_config_writers_reject_stale_snapshots_before_mutation() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
