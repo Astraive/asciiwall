@@ -242,7 +242,8 @@ def main() -> int:
         fixture_hash = fixture_set_hash(fixtures)
         status = "pass" if test_passed else "fail"
         summary = (
-            f"Hosted {runner_os} CI: EC-001–EC-005 {status} ({sum(value.endswith(': ok') for value in cases.values())}/5); "
+            f"GitHub Actions {runner_os} automated CI result {status} for EC-001–EC-005; "
+            f"{sum(value.endswith(': ok') for value in cases.values())} of 5 passed. "
             "automated only; no independent human review or native or product acceptance."
         )
         record = {
