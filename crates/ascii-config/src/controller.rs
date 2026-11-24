@@ -19,7 +19,9 @@ use crate::{
 pub enum ControllerStatus {
     Ready,
     RepairRequired(ConfigError),
-    ReadOnlyFutureSchema { schema_version: i64 },
+    ReadOnlyFutureSchema {
+        schema_version: i64,
+    },
     ReadOnlyUnclassifiableDocument(ConfigError),
     /// A valid legacy revision cannot be incremented for migration.
     ReadOnlyRevisionOverflow,
@@ -1144,11 +1146,7 @@ mod persistence_tests {
             Some(&SettingValue::Boolean(true))
         );
         assert_eq!(
-            snapshot
-                .effective()
-                .get(&key)
-                .unwrap()
-                .requested(),
+            snapshot.effective().get(&key).unwrap().requested(),
             &SettingValue::Boolean(true)
         );
         assert!(matches!(
