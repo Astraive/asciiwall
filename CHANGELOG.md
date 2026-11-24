@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Preserve canonical inline-table output and exact document-size limits, repair recognized current-schema documents missing a revision, and prevent corrupt-archive name collisions from replacing existing data ([CFG-001]).
 - Fixed inline settings-table assignment preflight so exactly 4,096 entries pass and 4,097 fail in both inline and table forms ([CFG-001]).
 - Reopen a current-schema settings document after a stale migration CAS by rereading under the writer lock; keep corrupt or unreadable replacements classified rather than retrying indefinitely (`[CFG-001]`).
+- Resolve Preset preferences for O-scope settings below assignment and session values, preserve valid maximum-revision legacy settings in a read-only snapshot, and retry corrupt-archive name collisions without overwriting stale files ([CFG-001]).
 - Allow explicit repair of recognized settings with unsupported structures, including canonical inline values and quoted table/array headers, while unknown and ambiguous dotted/implicit keys remain read-only (`[CFG-001]`).
 - Preserve existing Windows target DACLs on replacement with `ReplaceFileW`; on partial replacement errors, avoid path-based backup restoration and report `CommitIndeterminate` rather than risk moving a substituted source or overwriting a raced target (`[CFG-001]`).
 - Publish first-time Windows main and backup files with restrictive DACLs and no-replace semantics; raced targets fail closed without adopting or overwriting their ACLs ([CFG-001]).

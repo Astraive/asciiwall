@@ -84,6 +84,44 @@ impl FileStore {
     fn unique_corrupt_path(&self) -> PathBuf {
         unique_sibling(&self.path, "corrupt")
     }
+
+    fn archive_corrupt_main(&mut self) -> Result<PathBuf, StoreError> {
+        for _ in 0..32 {
+            let archive = self.unique_corrupt_path();
+            self.fail(PersistStage::ArchiveReplace)?;
+            match archive_without_replace(&self.path, &archive) {
+                Ok(()) => return Ok(archive),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(StoreError::io(StoreOperation::ArchiveCorrupt, error));
+                }
+            }
+        }
+        Err(StoreError::TemporaryNameExhausted)
+    }
+
+    fn archive_corrupt_bytes(&mut self, bytes: &[u8]) -> Result<PathBuf, StoreError> {
+        for _ in 0..32 {
+            let archive = self.unique_corrupt_path();
+            match self.atomic_write(
+                &archive,
+                bytes,
+                PersistStage::ArchiveReplace,
+                TargetExpectation::Absent,
+            ) {
+                Ok(()) => return Ok(archive),
+                Err(failure) if is_archive_name_collision(&failure) => continue,
+                Err(failure) => {
+                    return Err(if failure.indeterminate {
+                        indeterminate_without_rollback(failure)
+                    } else {
+                        failure.error
+                    });
+                }
+            }
+        }
+        Err(StoreError::TemporaryNameExhausted)
+    }
     fn writer_lock(&self) -> Result<WriterLock, StoreError> {
         let parent = parent_directory(&self.path);
         fs::create_dir_all(&parent)
@@ -519,10 +557,7 @@ impl ConfigStore for FileStore {
         }
 
         if oversized {
-            let archive = self.unique_corrupt_path();
-            self.fail(PersistStage::ArchiveReplace)?;
-            archive_without_replace(&self.path, &archive)
-                .map_err(|error| StoreError::io(StoreOperation::ArchiveCorrupt, error))?;
+            let archive = self.archive_corrupt_main()?;
             return match self.atomic_write(
                 &self.path.clone(),
                 contents,
@@ -573,19 +608,7 @@ impl ConfigStore for FileStore {
             }
             BackupMode::PreserveLastGood => {
                 if let Some(previous_bytes) = previous.as_deref() {
-                    let archive = self.unique_corrupt_path();
-                    if let Err(failure) = self.atomic_write(
-                        &archive,
-                        previous_bytes,
-                        PersistStage::ArchiveReplace,
-                        TargetExpectation::Absent,
-                    ) {
-                        return Err(if failure.indeterminate {
-                            indeterminate_without_rollback(failure)
-                        } else {
-                            failure.error
-                        });
-                    }
+                    self.archive_corrupt_bytes(previous_bytes)?;
                 }
             }
         }
@@ -688,6 +711,19 @@ impl WriteFailure {
             displaced_path,
         }
     }
+}
+
+fn is_archive_name_collision(failure: &WriteFailure) -> bool {
+    !failure.replaced
+        && !failure.indeterminate
+        && matches!(
+            &failure.error,
+            StoreError::Io {
+                operation: StoreOperation::Replace,
+                kind: std::io::ErrorKind::AlreadyExists,
+                ..
+            }
+        )
 }
 
 fn indeterminate_without_rollback(failure: WriteFailure) -> StoreError {
@@ -1287,6 +1323,41 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(&source).unwrap(), b"corrupt-main");
         assert_eq!(fs::read(&archive).unwrap(), b"existing-archive");
+    }
+
+    #[test]
+    fn archive_collision_retries_without_overwriting_the_stale_archive() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        fs::write(&path, b"previous-settings").unwrap();
+
+        let mut store = FileStore::new(&path);
+        store.inject_after_absent_check(|target| {
+            fs::write(target, b"stale-archive").unwrap();
+        });
+        store
+            .commit(
+                Some(b"previous-settings"),
+                b"repaired-settings",
+                BackupMode::PreserveLastGood,
+            )
+            .unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"repaired-settings");
+        let archives = fs::read_dir(&directory.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.toml.corrupt-")
+            })
+            .map(|entry| fs::read(entry.path()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(archives.len(), 2);
+        assert!(archives.contains(&b"previous-settings".to_vec()));
+        assert!(archives.contains(&b"stale-archive".to_vec()));
     }
 
     #[test]
