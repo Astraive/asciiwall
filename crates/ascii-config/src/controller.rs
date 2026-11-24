@@ -21,6 +21,8 @@ pub enum ControllerStatus {
     RepairRequired(ConfigError),
     ReadOnlyFutureSchema { schema_version: i64 },
     ReadOnlyUnclassifiableDocument(ConfigError),
+    /// A valid legacy revision cannot be incremented for migration.
+    ReadOnlyRevisionOverflow,
 }
 
 /// A complete, immutable settings revision published by the controller.
@@ -111,11 +113,22 @@ impl SettingsController {
                         let migrated = migrate(document).map_err(map_migration_error)?;
                         validate_overrides(&registry, &migrated.overrides)?;
                         let effective = resolve_overrides(&registry, &migrated.overrides)?;
-                        let revision = migrated
+                        let Some(revision) = migrated
                             .revision
                             .checked_add(1)
                             .filter(|revision| *revision <= i64::MAX as u64)
-                            .ok_or(ConfigError::RevisionOverflow)?;
+                        else {
+                            let snapshot = Arc::new(SettingsSnapshot {
+                                revision: migrated.revision,
+                                effective,
+                                overrides: Arc::new(migrated.overrides),
+                            });
+                            break (
+                                ControllerStatus::ReadOnlyRevisionOverflow,
+                                snapshot,
+                                Some(bytes),
+                            );
+                        };
                         let serialized = encode(revision, &migrated.overrides)?;
                         match store.commit(
                             Some(&bytes),
@@ -195,8 +208,8 @@ impl SettingsController {
         Ok(self.lock()?.snapshot.clone())
     }
 
-    /// Returns whether changes are accepted, require repair, or blocked by a
-    /// future schema or unclassifiable document.
+    /// Returns whether changes are accepted, require repair, or are blocked by
+    /// a future schema, unclassifiable document, or migration revision overflow.
     pub fn status(&self) -> Result<ControllerStatus, ConfigError> {
         Ok(self.lock()?.status.clone())
     }
@@ -287,8 +300,8 @@ impl SettingsController {
     }
 
     /// Explicitly restores the last-good `.bak`, revalidates it and publishes
-    /// it as a new current-schema revision. Future-schema and unclassifiable
-    /// files remain read-only and cannot be overwritten through this API.
+    /// it as a new current-schema revision. Future-schema, unclassifiable, and
+    /// revision-overflowed legacy files remain read-only through this API.
     pub fn restore_backup(
         &self,
         expected_revision: u64,
@@ -298,6 +311,9 @@ impl SettingsController {
             return Err(ConfigError::ReadOnlyFutureSchema {
                 schema_version: *schema_version,
             });
+        }
+        if matches!(&state.status, ControllerStatus::ReadOnlyRevisionOverflow) {
+            return Err(ConfigError::RevisionOverflow);
         }
         if matches!(
             &state.status,
@@ -840,6 +856,7 @@ fn ensure_writable(status: &ControllerStatus) -> Result<(), ConfigError> {
         ControllerStatus::ReadOnlyUnclassifiableDocument(_) => {
             Err(ConfigError::ReadOnlyUnclassifiableDocument)
         }
+        ControllerStatus::ReadOnlyRevisionOverflow => Err(ConfigError::RevisionOverflow),
     }
 }
 
@@ -1101,6 +1118,55 @@ mod persistence_tests {
         );
         assert_eq!(fs::read(path).unwrap(), concurrent);
         assert_eq!(locked_rechecks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn max_revision_legacy_document_opens_read_only_with_its_values() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("settings.toml");
+        let original =
+            b"schema_version = 1\nrevision = 9223372036854775807\n[settings]\n\"application.enabled\" = true\n";
+        fs::write(&path, original).unwrap();
+
+        let controller =
+            SettingsController::open_for_test(registry(), Box::new(FileStore::new(&path))).unwrap();
+
+        assert_eq!(
+            controller.status().unwrap(),
+            ControllerStatus::ReadOnlyRevisionOverflow
+        );
+        let revision = i64::MAX as u64;
+        let snapshot = controller.snapshot().unwrap();
+        assert_eq!(snapshot.revision(), revision);
+        let key = SettingKey::new("application.enabled").unwrap();
+        assert_eq!(
+            snapshot.overrides().get(&key),
+            Some(&SettingValue::Boolean(true))
+        );
+        assert_eq!(
+            snapshot
+                .effective()
+                .get(&key)
+                .unwrap()
+                .requested(),
+            &SettingValue::Boolean(true)
+        );
+        assert!(matches!(
+            controller.apply_batch(
+                revision,
+                &[(key, SettingChange::Set(SettingValue::Boolean(false)))]
+            ),
+            Err(ConfigError::RevisionOverflow)
+        ));
+        assert!(matches!(
+            controller.repair(revision),
+            Err(ConfigError::RevisionOverflow)
+        ));
+        assert!(matches!(
+            controller.restore_backup(revision),
+            Err(ConfigError::RevisionOverflow)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
     }
 
     #[test]
