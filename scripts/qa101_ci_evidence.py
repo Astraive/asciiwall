@@ -14,7 +14,7 @@ import subprocess
 import sys
 from typing import Any
 
-QA004_COMMIT = "27a81685878ca8b7fd47e13148384824bbfb7bea"
+QA004_COMMIT = "fb20e84ec196c421b954b90985dc2217a35767c6"
 TEST_TARGET = "qa_101_input_conversion"
 EXPECTED_EC_IDS = {"001", "002", "003", "004", "005"}
 FIXTURE_LINE = re.compile(r"fixture=([A-Za-z0-9._-]+).*?sha256=([0-9a-f]{64})")
@@ -303,7 +303,7 @@ def main() -> int:
 
         stage = "qa004-validation"
         validation = command(
-            [sys.executable, str(qa004_root / "scripts" / "evidence.py"), "validate", str(record_path)],
+            [sys.executable, str(qa004_root / "scripts" / "evidence.py"), "validate", str(record_path), "--evidence-root", str(artifact_root)],
             cwd=qa004_root,
         )
         (output_dir / "qa004-validation.stdout.json").write_bytes(validation.stdout)
