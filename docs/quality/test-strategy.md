@@ -14,6 +14,7 @@ Use [`scripts/evidence.py`](../../scripts/evidence.py) to create reproducible re
 python -c "from pathlib import Path; Path('tests/evidence/reports').mkdir(parents=True, exist_ok=True)"
 python scripts/evidence.py record evidence-input.json --output evidence-record.json
 python scripts/evidence.py validate evidence-record.json
+python scripts/evidence.py validate downloaded-artifact-root/linux/qa004-record.json --evidence-root downloaded-artifact-root
 python scripts/evidence.py fake-control timestamp-fault --archive tests/evidence/reports
 python scripts/evidence.py grid-diff actual-grid.json --archive tests/evidence/reports
 python scripts/evidence.py sanitize-log run.log --archive tests/evidence/reports
@@ -22,10 +23,11 @@ python scripts/test_evidence.py
 ```
 On Windows, also run `python scripts/test_evidence_windows.py` to exercise the anchored helper against real local-NTFS files and handles.
 
-Each record distinguishes document QA, unit/property, integration, fuzz, benchmark, native manual, and release acceptance. Records require source, binary, and fixture SHA-256 hashes; EC IDs when applicable; observed OS/session/compositor/GPU and permission state; result; repository-relative evidence path; issue; reviewer; and date. Native/manual records require a procedure ID. An absent host must use explicit `not-available` environment details and `not-run`; it can never be reported as a pass.
+Each record distinguishes document QA, unit/property, integration, fuzz, benchmark, native manual, and release acceptance. Records require source, binary, and fixture SHA-256 hashes; EC IDs when applicable; observed OS/session/compositor/GPU and permission state; result; a safe relative evidence path (repository-root-relative by default, or rooted at an explicit validation `--evidence-root`); issue; reviewer; and date. Native/manual records require a procedure ID. An absent host must use explicit `not-available` environment details and `not-run`; it can never be reported as a pass.
 #### Native manual pass manifests
 
 For a native/manual record with `status: pass`, `evidence_path` may name a JSON manifest. It must be one object with exactly these top-level fields: `schema_version: 1`, `artifact_type: "native-manual-evidence"`, `execution: "manual"`, `procedure_id`, `reviewer`, `date`, `status: "pass"`, and `artifacts`. The manifest's `procedure_id`, `reviewer`, and `date` must match the record. Each `artifacts` item must be an object with exactly `path` (a repository-root-relative path to a regular file) and `sha256` (64 lowercase hexadecimal SHA-256 characters). The list must contain 1–16 unique paths; each referenced file must be nonempty and at most 16 MiB, with an aggregate maximum of 64 MiB. Files are streamed and hash-checked. A referenced file that looks like JSON must fit the 1 MiB inspection limit and be inspectable JSON.
+When `validate --evidence-root` is used, it resolves both `evidence_path` and manifest artifact paths under that root instead of the repository root.
 
 Use a manifest for native binary evidence. A direct artifact is limited to 1 MiB and may be nonempty UTF-8 non-JSON text without unsafe control characters, or a validated sanitized-log JSON report. Parse failures that still match JSON syntax—including integers rejected by the runtime's digit-conversion limit—are rejected instead of treated as free text. Known synthetic control and CPU-grid-diff markers are rejected even if renamed or referenced by a manifest; this is not an exhaustive detector of fabricated evidence. Matching metadata, snapshots, and hashes establish consistency only: they do not authenticate a reviewer, prove a native procedure ran, or establish that the content is genuine.
 

@@ -145,6 +145,75 @@ class EvidenceRecordTests(unittest.TestCase):
         with self.assertRaises(evidence.EvidenceError):
             evidence.finalize_record(missing_reviewer)
 
+    def test_validate_can_resolve_qa101_artifact_paths_from_downloaded_root(self):
+        paths = (
+            ("linux", "linux/test-output.log"),
+            ("macos", "macos/test-output.log"),
+            ("windows", "windows/test-output.log"),
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            temp_root = Path(temporary)
+            artifact_root = temp_root / "downloaded-artifact"
+            artifact_root.mkdir()
+
+            def validate(record_path):
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "validate",
+                        str(record_path),
+                        "--evidence-root",
+                        str(artifact_root),
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            for platform, evidence_path in paths:
+                with self.subTest(platform=platform):
+                    artifact = artifact_root.joinpath(*evidence_path.split("/"))
+                    artifact.parent.mkdir(parents=True, exist_ok=True)
+                    artifact.write_text("test result: 5 passed\n", encoding="utf-8")
+                    record = evidence.finalize_record(
+                        base_record(
+                            level="integration",
+                            ec_ids=["EC-001", "EC-002", "EC-003", "EC-004", "EC-005"],
+                            issue="QA-101",
+                            evidence_path=evidence_path,
+                        )
+                    )
+                    record_path = temp_root / f"{platform}-qa004-record.json"
+                    record_path.write_bytes(evidence.canonical_json(record))
+
+                    completed = validate(record_path)
+                    self.assertEqual(
+                        completed.returncode,
+                        0,
+                        f"stdout={completed.stdout!r}\nstderr={completed.stderr!r}",
+                    )
+                    validation = json.loads(completed.stdout)
+                    self.assertEqual(validation["status"], "valid")
+                    self.assertEqual(validation["record_id"], record["record_id"])
+
+            missing_record = evidence.finalize_record(
+                base_record(
+                    level="integration",
+                    ec_ids=["EC-001", "EC-002", "EC-003", "EC-004", "EC-005"],
+                    issue="QA-101",
+                    evidence_path="linux/missing.log",
+                )
+            )
+            missing_path = temp_root / "missing-qa004-record.json"
+            missing_path.write_bytes(evidence.canonical_json(missing_record))
+            completed = validate(missing_path)
+            self.assertEqual(completed.returncode, 2)
+            error = json.loads(completed.stdout)
+            self.assertEqual(error["status"], "error")
+            self.assertIn("evidence artifact", error["error"])
+
     def test_native_manual_is_separate_and_absent_environment_is_not_run(self):
         native = base_record(
             level="native-manual",

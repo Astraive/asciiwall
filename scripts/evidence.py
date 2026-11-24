@@ -493,6 +493,47 @@ def _verify_regular_entry_at(
         raise EvidenceError(message)
 
 
+def _validate_evidence_reference(relative_path: str, root: Path) -> None:
+    """Verify a packaged evidence locator without following links or reading it."""
+    parts = PurePosixPath(relative_path).parts
+    if os.name == "nt":
+        try:
+            with evidence_windows.open_directory(root.joinpath(*parts[:-1])) as directory:
+                with directory.open_file(parts[-1]) as artifact:
+                    artifact.snapshot()
+        except OSError as exc:
+            if isinstance(exc, evidence_windows.FileCloseError):
+                raise
+            raise EvidenceError("evidence artifact is inaccessible or unsafe") from exc
+        return
+    try:
+        directory_fd = _open_directory(root.joinpath(*parts[:-1]))
+    except OSError as exc:
+        raise EvidenceError("evidence artifact is inaccessible or unsafe") from exc
+    try:
+        try:
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(parts[-1], flags, dir_fd=directory_fd)
+        except OSError as exc:
+            raise EvidenceError("evidence artifact is inaccessible or unsafe") from exc
+        try:
+            try:
+                opened = os.fstat(descriptor)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise EvidenceError("evidence artifact must be a regular file")
+                _verify_regular_entry_at(
+                    directory_fd,
+                    parts[-1],
+                    opened,
+                    "evidence artifact path changed during validation",
+                )
+            except OSError as exc:
+                raise EvidenceError("evidence artifact is inaccessible or unsafe") from exc
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(directory_fd)
+
 
 def _read_regular_at(
     directory_fd: int,
@@ -1111,15 +1152,16 @@ def _hash_native_artifact(
     relative_path: str,
     limit: int,
     *,
+    root: Path = ROOT,
     budget: _PruneByteBudget | None = None,
 ) -> tuple[str, int]:
     if not _safe_relative_evidence_path(relative_path):
-        raise EvidenceError("native evidence artifact path must be safe and repository-relative")
+        raise EvidenceError("native evidence artifact path must be safe and relative")
     _require_safe_directory_access()
     parts = PurePosixPath(relative_path).parts
     if os.name == "nt":
         try:
-            with evidence_windows.open_directory(ROOT.joinpath(*parts[:-1])) as directory:
+            with evidence_windows.open_directory(root.joinpath(*parts[:-1])) as directory:
                 with directory.open_file(parts[-1]) as artifact:
                     before = artifact.snapshot()
                     if before.st_size > limit:
@@ -1143,7 +1185,7 @@ def _hash_native_artifact(
                 "Windows requires local fixed NTFS without reparse points"
             ) from exc
     try:
-        directory_fd = _open_directory(ROOT.joinpath(*parts[:-1]))
+        directory_fd = _open_directory(root.joinpath(*parts[:-1]))
     except OSError as exc:
         raise EvidenceError("native evidence artifact is inaccessible or a symlink") from exc
     try:
@@ -1188,6 +1230,7 @@ def _validate_native_manifest(
     content: dict[str, Any],
     record: dict[str, Any],
     *,
+    root: Path = ROOT,
     budget: _PruneByteBudget | None = None,
 ) -> None:
     """Check manifest consistency and artifact hashes, not reviewer identity."""
@@ -1222,6 +1265,7 @@ def _validate_native_manifest(
         identity, size = _hash_native_artifact(
             path,
             min(MAX_NATIVE_ARTIFACT_BYTES, MAX_NATIVE_TOTAL_BYTES - total),
+            root=root,
             budget=budget,
         )
         if identity != expected:
@@ -1232,6 +1276,7 @@ def _validate_native_manifest(
 def _validate_native_pass_artifact(
     record: dict[str, Any],
     *,
+    root: Path = ROOT,
     budget: _PruneByteBudget | None = None,
 ) -> None:
     _require_safe_directory_access()
@@ -1240,12 +1285,12 @@ def _validate_native_pass_artifact(
         if os.name == "nt":
             # Keep the manifest and its ancestor directories pinned while its
             # referenced artifacts are inspected.
-            with evidence_windows.open_directory(ROOT.joinpath(*parts[:-1])) as directory:
+            with evidence_windows.open_directory(root.joinpath(*parts[:-1])) as directory:
                 with directory.open_file(parts[-1]) as artifact:
                     raw, _ = _read_windows_regular(artifact, budget=budget)
-                    _inspect_native_pass_content(raw, record, budget=budget)
+                    _inspect_native_pass_content(raw, record, root=root, budget=budget)
             return
-        directory_fd = _open_directory(ROOT.joinpath(*parts[:-1]))
+        directory_fd = _open_directory(root.joinpath(*parts[:-1]))
         try:
             raw, _ = _read_regular_at(directory_fd, parts[-1], budget=budget)
         finally:
@@ -1258,13 +1303,14 @@ def _validate_native_pass_artifact(
                 "native-manual pass requires accessible evidence on local fixed NTFS without reparse points"
             ) from exc
         raise EvidenceError("native-manual pass requires an accessible non-symlink evidence artifact") from exc
-    _inspect_native_pass_content(raw, record, budget=budget)
+    _inspect_native_pass_content(raw, record, root=root, budget=budget)
 
 
 def _inspect_native_pass_content(
     raw: bytes,
     record: dict[str, Any],
     *,
+    root: Path = ROOT,
     budget: _PruneByteBudget | None = None,
 ) -> None:
     if not raw:
@@ -1288,7 +1334,7 @@ def _inspect_native_pass_content(
         if _contains_synthetic_marker(content):
             raise EvidenceError("synthetic artifacts cannot support a native-manual pass")
         if isinstance(content, dict) and content.get("artifact_type") == "native-manual-evidence":
-            _validate_native_manifest(content, record, budget=budget)
+            _validate_native_manifest(content, record, root=root, budget=budget)
         elif not validate_log_report(content):
             raise EvidenceError("native-manual JSON evidence must be a native manifest or sanitized log")
 
@@ -1297,6 +1343,7 @@ def validate_record(
     record: Any,
     *,
     check_identity: bool = True,
+    evidence_root: Path | None = None,
     _prune_budget: _PruneByteBudget | None = None,
 ) -> list[str]:
     errors: list[str] = []
@@ -1390,12 +1437,21 @@ def validate_record(
         errors.append("unavailable native/manual environments can never pass")
     evidence_path = record.get("evidence_path")
     if not _safe_relative_evidence_path(evidence_path):
-        errors.append("evidence_path must be a safe repository-relative path")
+        errors.append("evidence_path must be a safe relative path")
     elif level == "native-manual" and status == "pass":
         try:
-            _validate_native_pass_artifact(record, budget=_prune_budget)
+            _validate_native_pass_artifact(
+                record,
+                root=ROOT if evidence_root is None else evidence_root,
+                budget=_prune_budget,
+            )
         except _PruneBudgetExceeded:
             raise
+        except EvidenceError as exc:
+            errors.append(str(exc))
+    elif evidence_root is not None:
+        try:
+            _validate_evidence_reference(evidence_path, evidence_root)
         except EvidenceError as exc:
             errors.append(str(exc))
     if not isinstance(record.get("issue"), str) or not ISSUE_RE.fullmatch(record["issue"]):
@@ -1490,9 +1546,9 @@ def emit(value: Any) -> None:
     sys.stdout.buffer.write(canonical_json(value))
 
 
-def load_record(path: Path) -> dict[str, Any]:
+def load_record(path: Path, *, evidence_root: Path | None = None) -> dict[str, Any]:
     data = read_json(path)
-    errors = validate_record(data)
+    errors = validate_record(data, evidence_root=evidence_root)
     if errors:
         raise EvidenceError("; ".join(errors))
     return data
@@ -2414,6 +2470,11 @@ def make_parser() -> argparse.ArgumentParser:
     add_store_options(record, required=True)
     validate = subparsers.add_parser("validate", help="validate an existing record without modifying it")
     validate.add_argument("record", type=Path)
+    validate.add_argument(
+        "--evidence-root",
+        type=Path,
+        help="resolve evidence_path under this root instead of the repository root",
+    )
     controls = subparsers.add_parser("fake-control", help="emit a synthetic decoder/host failure-control report")
     controls.add_argument("scenario", choices=("timestamp-fault", "capability-change", "surface-failure", "cancellation"))
     add_store_options(controls)
@@ -2455,7 +2516,7 @@ def main(argv: list[str] | None = None) -> int:
             emit({"status": "recorded", "schema_version": 1, "record_id": record["record_id"]})
             return 0
         if args.command == "validate":
-            record = load_record(args.record)
+            record = load_record(args.record, evidence_root=args.evidence_root)
             emit({"status": "valid", "schema_version": 1, "record_id": record["record_id"]})
             return 0
         if args.command == "fake-control":

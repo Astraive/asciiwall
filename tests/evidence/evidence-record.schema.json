@@ -72,6 +72,7 @@
     },
     "evidence_path": {
       "type": "string",
+      "description": "Safe relative path; validate --evidence-root selects the package root used to check this reference.",
       "minLength": 1,
       "pattern": "^(?!/)(?!.*(?:^|/)[.][.]?(?:/|$))(?!.*//)(?!.*[/]$)(?!.*\\\\)(?!.*:)[A-Za-z0-9._/-]+$"
     },
