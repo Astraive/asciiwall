@@ -247,6 +247,63 @@ fn package_scope_cannot_enable_pointer_observation() {
 }
 
 #[test]
+fn preset_values_apply_to_local_output_assignments_below_assignment_and_session() {
+    let registry = Registry::new([descriptor(
+        "output.preference",
+        SettingValue::Integer(1),
+        SettingType::Integer { min: 1, max: 4 },
+        SettingScope::O,
+        None,
+        InvalidationClass::Controller,
+        SemanticValidator::None,
+    )])
+    .expect("valid local output registry");
+    let key = key("output.preference");
+    let mut layers = SettingLayers::default();
+    layers.set(
+        SettingSource::Preset,
+        key.clone(),
+        SettingValue::Integer(2),
+    );
+
+    let preset = resolve_settings(&registry, &layers, &Constraints::default()).unwrap();
+    let resolved = preset.get(&key).unwrap();
+    assert_eq!(resolved.requested(), &SettingValue::Integer(2));
+    assert_eq!(resolved.source(), Some(SettingSource::Preset));
+
+    layers.set(
+        SettingSource::Assignment,
+        key.clone(),
+        SettingValue::Integer(3),
+    );
+    let assignment = resolve_settings(&registry, &layers, &Constraints::default()).unwrap();
+    let resolved = assignment.get(&key).unwrap();
+    assert_eq!(resolved.requested(), &SettingValue::Integer(3));
+    assert_eq!(resolved.source(), Some(SettingSource::Assignment));
+
+    layers.set(SettingSource::Session, key.clone(), SettingValue::Integer(4));
+    let session = resolve_settings(&registry, &layers, &Constraints::default()).unwrap();
+    let resolved = session.get(&key).unwrap();
+    assert_eq!(resolved.requested(), &SettingValue::Integer(4));
+    assert_eq!(resolved.source(), Some(SettingSource::Session));
+
+    let mut package_layers = SettingLayers::default();
+    package_layers.set(
+        SettingSource::Package,
+        key,
+        SettingValue::Integer(2),
+    );
+    assert!(matches!(
+        resolve_settings(&registry, &package_layers, &Constraints::default()),
+        Err(ResolveError::UnauthorizedSource {
+            source: SettingSource::Package,
+            scope: SettingScope::O,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn effective_constraints_preserve_the_requested_value() {
     let registry = registry();
     let mut layers = SettingLayers::default();

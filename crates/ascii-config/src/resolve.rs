@@ -269,7 +269,8 @@ pub fn resolve_settings(
 
 pub(crate) fn source_may_set(source: SettingSource, scope: SettingScope) -> bool {
     match source {
-        SettingSource::Package | SettingSource::Preset => scope == SettingScope::P,
+        SettingSource::Package => scope == SettingScope::P,
+        SettingSource::Preset => matches!(scope, SettingScope::P | SettingScope::O),
         SettingSource::Assignment => matches!(scope, SettingScope::P | SettingScope::O),
         SettingSource::Application => scope == SettingScope::A,
         SettingSource::Session => {
@@ -292,7 +293,11 @@ fn requested_value(
             SettingSource::Session,
         ],
         SettingScope::A => &[SettingSource::Application],
-        SettingScope::O => &[SettingSource::Assignment, SettingSource::Session],
+        SettingScope::O => &[
+            SettingSource::Preset,
+            SettingSource::Assignment,
+            SettingSource::Session,
+        ],
         SettingScope::S => &[SettingSource::Session],
     };
     let mut selected = (default.clone(), None);
