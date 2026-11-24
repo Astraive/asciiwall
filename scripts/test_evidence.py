@@ -95,14 +95,18 @@ class EvidenceRecordTests(unittest.TestCase):
             "safe [U+202E]RLO [U+2066]LRI [U+2067]RLI [U+2068]FSI "
             "[U+2069]PDI plain text stays readable"
         )
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
             payload = json.dumps(base_record(result={"status": "pass", "summary": raw_summary}))
             completed = subprocess.run(
                 [sys.executable, str(SCRIPT), "record", "-", "--archive", str(archive)],
                 cwd=ROOT, input=payload, capture_output=True, text=True, check=False,
             )
-            self.assertEqual(completed.returncode, 0)
+            self.assertEqual(
+                completed.returncode,
+                0,
+                f"stdout={completed.stdout!r}\nstderr={completed.stderr!r}",
+            )
             result = json.loads(completed.stdout)
             record_path = archive / f"qa-evidence-{result['record_id']}.json"
             encoded = record_path.read_bytes()
@@ -1240,14 +1244,22 @@ class EvidenceRecordTests(unittest.TestCase):
             evidence.finalize_record(over_limit_input)
         payload = json.dumps(over_limit_input, separators=(",", ":"))
         self.assertLessEqual(len(payload.encode("utf-8")), evidence.MAX_JSON_BYTES)
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
             rejected = subprocess.run(
                 [sys.executable, str(SCRIPT), "record", "-", "--archive", str(archive)],
                 cwd=ROOT, input=payload, capture_output=True, text=True, check=False,
             )
-            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(
+                rejected.returncode,
+                2,
+                f"stdout={rejected.stdout!r}\nstderr={rejected.stderr!r}",
+            )
             self.assertEqual(json.loads(rejected.stdout)["status"], "error")
+            self.assertEqual(
+                json.loads(rejected.stdout)["error"],
+                "final record exceeds the 1 MiB limit",
+            )
             self.assertEqual(list(archive.iterdir()), [])
 
         readable_input = base_record(permissions={
@@ -1328,14 +1340,18 @@ class EvidenceRecordTests(unittest.TestCase):
             self.assertEqual(json.loads(invalid.stdout)["status"], "error")
 
     def test_record_cli_writes_exclusive_deterministic_archive_file(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             archive = Path(temporary)
             payload = json.dumps(base_record())
             stored = subprocess.run(
                 [sys.executable, str(SCRIPT), "record", "-", "--archive", str(archive)],
                 cwd=ROOT, input=payload, capture_output=True, text=True, check=False,
             )
-            self.assertEqual(stored.returncode, 0)
+            self.assertEqual(
+                stored.returncode,
+                0,
+                f"stdout={stored.stdout!r}\nstderr={stored.stderr!r}",
+            )
             result = json.loads(stored.stdout)
             record_path = archive / f"qa-evidence-{result['record_id']}.json"
             self.assertTrue(record_path.is_file())
