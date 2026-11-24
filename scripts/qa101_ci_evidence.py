@@ -82,14 +82,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def artifact_relative_path(artifact_root: Path, evidence_file: Path) -> str:
-    if not evidence_file.is_file():
-        raise RuntimeError("the QA-101 run output does not exist")
+def artifact_relative_path(artifact_root: Path, artifact_file: Path, expected_path: str) -> str:
+    if not artifact_file.is_file():
+        raise RuntimeError("artifact file does not exist")
     try:
-        relative = evidence_file.resolve().relative_to(artifact_root.resolve())
+        relative = artifact_file.resolve().relative_to(artifact_root.resolve()).as_posix()
     except ValueError as exc:
-        raise RuntimeError("the QA-101 run output is outside the uploaded artifact root") from exc
-    return relative.as_posix()
+        raise RuntimeError("artifact file is outside the uploaded artifact root") from exc
+    if relative != expected_path:
+        raise RuntimeError("artifact file path does not match the downloaded artifact layout")
+    return relative
 
 
 def fixture_records(output: str) -> list[dict[str, str]]:
@@ -240,8 +242,7 @@ def main() -> int:
             "--- stdout ---\n"
         ).encode("utf-8") + test_run.stdout + b"\n--- stderr ---\n" + test_run.stderr
         evidence_file.write_bytes(test_log)
-        if artifact_relative_path(artifact_root, evidence_file) != evidence_path:
-            raise RuntimeError("the QA-004 evidence locator does not match the uploaded artifact layout")
+        artifact_relative_path(artifact_root, evidence_file, evidence_path)
         test_output = (test_run.stdout + b"\n" + test_run.stderr).decode("utf-8", errors="replace")
         fixtures = fixture_records(test_output)
         cases = observed_cases(test_output)
@@ -291,9 +292,13 @@ def main() -> int:
             manifest["result"] = {"status": "fail", "stage": stage, "exit_code": recorder.returncode}
             write_json(manifest_path, manifest)
             return 1
-        stored_record = json.loads(record_path.read_text(encoding="utf-8"))
-        if stored_record.get("evidence_path") != evidence_path:
+        stored_evidence_path = stored_record.get("evidence_path")
+        if not isinstance(stored_evidence_path, str) or stored_evidence_path != evidence_path:
             raise RuntimeError("QA-004 stored a different evidence locator")
+        artifact_relative_path(artifact_root, evidence_file, stored_evidence_path)
+        record_artifact_path = artifact_relative_path(
+            artifact_root, record_path, f"{os_slug}/qa004-record.json"
+        )
 
         stage = "qa004-validation"
         validation = command(
@@ -321,7 +326,8 @@ def main() -> int:
             "result": {"status": status, "summary": summary},
             "qa004": {
                 "commit": qa004_commit,
-                "record_path": f"artifacts/qa-101-ec-001-005/{os_slug}/qa004-record.json",
+                "record_path": record_artifact_path,
+                "record_path_base": "downloaded artifact root",
                 "record_id": record_response.get("record_id"),
                 "validation": json.loads(validation.stdout),
             },
