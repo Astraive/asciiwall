@@ -463,11 +463,9 @@ fn offline_reparse_source_is_rejected_before_target_or_output_metadata() {
     ]);
     assert_eq!(status(&output), 2);
     assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("offline mode requires a known local filesystem")
-    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("offline path checks reject known remote, reparse, or unsafe paths"));
+    assert!(stderr.contains("storage providers may still perform network I/O"));
     assert_eq!(fs::read(existing_output).unwrap(), b"preserve this output");
 }
 
