@@ -18,7 +18,8 @@ QA004_COMMIT = "27a81685878ca8b7fd47e13148384824bbfb7bea"
 TEST_TARGET = "qa_101_input_conversion"
 EXPECTED_EC_IDS = {"001", "002", "003", "004", "005"}
 FIXTURE_LINE = re.compile(r"fixture=([A-Za-z0-9._-]+).*?sha256=([0-9a-f]{64})")
-CASE_LINE = re.compile(r"^test (ec_(00[1-5])_[A-Za-z0-9_]+) \.\.\. (ok|FAILED|ignored)$")
+CASE_START = re.compile(r"^test (ec_(00[1-5])_[A-Za-z0-9_]+) \.\.\.")
+CASE_STATUS = {"ok", "FAILED", "ignored"}
 
 
 def command(args: list[str], *, cwd: Path, input_bytes: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
@@ -93,11 +94,23 @@ def fixture_set_hash(fixtures: list[dict[str, str]]) -> str:
 
 def observed_cases(output: str) -> dict[str, str]:
     cases: dict[str, str] = {}
+    current: tuple[str, str] | None = None
     for line in output.splitlines():
-        match = CASE_LINE.fullmatch(line.strip())
+        stripped = line.strip()
+        if current is not None and stripped in CASE_STATUS:
+            name, ec_id = current
+            cases[name] = f"EC-{ec_id}: {stripped}"
+            current = None
+            continue
+        match = CASE_START.match(stripped)
         if match:
-            name, ec_id, result = match.groups()
-            cases[name] = f"EC-{ec_id}: {result}"
+            name, ec_id = match.groups()
+            trailing = stripped[match.end():].strip()
+            if trailing in CASE_STATUS:
+                cases[name] = f"EC-{ec_id}: {trailing}"
+                current = None
+            else:
+                current = (name, ec_id)
     return cases
 
 
@@ -230,7 +243,7 @@ def main() -> int:
         status = "pass" if test_passed else "fail"
         summary = (
             f"Hosted {runner_os} CI: EC-001–EC-005 {status} ({sum(value.endswith(': ok') for value in cases.values())}/5); "
-            "automated only; no independent human review or native/product acceptance."
+            "automated only; no independent human review or native or product acceptance."
         )
         record = {
             "schema_version": 1,
