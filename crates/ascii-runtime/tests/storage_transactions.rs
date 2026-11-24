@@ -1522,9 +1522,12 @@ fn process_crash_during_config_replacement_recovers_complete_state() {
             Some(expected_theme),
             "recovery after {stage} must expose only a complete old or new document"
         );
-        assert_eq!(loaded.value(), if expected_theme == "old" { original.value() } else {
-            config(json!({"theme": "new", "grid": {"width": 123}})).value()
-        });
+        let expected = if expected_theme == "old" {
+            original
+        } else {
+            config(json!({"theme": "new", "grid": {"width": 123}}))
+        };
+        assert_eq!(loaded.value(), expected.value());
     }
 }
 
