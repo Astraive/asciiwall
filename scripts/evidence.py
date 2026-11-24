@@ -494,7 +494,12 @@ def _verify_regular_entry_at(
 
 
 def _validate_evidence_reference(relative_path: str, root: Path) -> None:
-    """Verify a packaged evidence locator without following links or reading it."""
+    """Check a locator in a quiescent tree; this is not race-resistant confinement.
+
+    The caller must keep the root path, its ancestors, and referenced entries
+    unchanged for this check. Portable POSIX descriptor-relative opens cannot
+    prevent an opened ancestor from being renamed outside the root.
+    """
     parts = PurePosixPath(relative_path).parts
     if os.name == "nt":
         try:
@@ -1346,6 +1351,13 @@ def validate_record(
     evidence_root: Path | None = None,
     _prune_budget: _PruneByteBudget | None = None,
 ) -> list[str]:
+    """Validate a record, resolving optional evidence references under ``evidence_root``.
+
+    When a root is supplied, the caller must keep its path and the complete
+    referenced tree quiescent for the duration of validation. Portable POSIX
+    path operations cannot prevent an ancestor from being renamed outside the
+    root while it is being checked.
+    """
     errors: list[str] = []
     if not isinstance(record, dict):
         return ["record must be a JSON object"]
@@ -1547,6 +1559,7 @@ def emit(value: Any) -> None:
 
 
 def load_record(path: Path, *, evidence_root: Path | None = None) -> dict[str, Any]:
+    """Load and validate a record; ``evidence_root`` must remain quiescent during validation."""
     data = read_json(path)
     errors = validate_record(data, evidence_root=evidence_root)
     if errors:
@@ -2473,7 +2486,10 @@ def make_parser() -> argparse.ArgumentParser:
     validate.add_argument(
         "--evidence-root",
         type=Path,
-        help="resolve evidence_path under this root instead of the repository root",
+        help=(
+            "resolve evidence_path under this root; the root path and referenced tree must remain "
+            "quiescent (no concurrent renames or replacements) during validation"
+        ),
     )
     controls = subparsers.add_parser("fake-control", help="emit a synthetic decoder/host failure-control report")
     controls.add_argument("scenario", choices=("timestamp-fault", "capability-change", "surface-failure", "cancellation"))

@@ -214,6 +214,43 @@ class EvidenceRecordTests(unittest.TestCase):
             self.assertEqual(error["status"], "error")
             self.assertIn("evidence artifact", error["error"])
 
+    def test_validate_cli_documents_quiescent_evidence_root_contract(self):
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), "validate", "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0)
+        help_text = " ".join(completed.stdout.split())
+        self.assertIn("must remain quiescent", help_text)
+        self.assertIn("no concurrent renames or replacements", help_text)
+
+    def test_validate_evidence_root_rejects_symlinked_parent_in_quiescent_tree(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            temp_root = Path(temporary)
+            artifact_root = temp_root / "artifacts"
+            outside = temp_root / "outside"
+            artifact_root.mkdir()
+            outside.mkdir()
+            (outside / "sample.log").write_text("validation output\n", encoding="utf-8")
+            try:
+                (artifact_root / "linked").symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"directory symlinks are unavailable: {exc}")
+
+            record = evidence.finalize_record(
+                base_record(
+                    level="integration",
+                    ec_ids=["EC-001", "EC-002", "EC-003", "EC-004", "EC-005"],
+                    issue="QA-101",
+                    evidence_path="linked/sample.log",
+                )
+            )
+            errors = evidence.validate_record(record, evidence_root=artifact_root)
+            self.assertIn("evidence artifact is inaccessible or unsafe", errors)
+
     def test_native_manual_is_separate_and_absent_environment_is_not_run(self):
         native = base_record(
             level="native-manual",
