@@ -14,6 +14,8 @@ use std::collections::VecDeque;
 use std::mem::size_of;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(test)]
+use std::sync::{Arc, Barrier};
 
 use ascii_core::{Budget, CancellationToken, Error as CoreError};
 
@@ -270,13 +272,15 @@ impl ControlQueue {
 /// Coordinated latest-frame handoff with separate urgent control and fixed buffer slots.
 ///
 /// The coordinator publishes a valid replacement before discarding older queued frames whenever
-/// a free slot exists. With no free slot, it stages replacement bytes before taking over the oldest
-/// queued publication as a replacement fill lease. Cancellation that wins before that acquisition
-/// leaves the prior publication intact. This replacement lease acquisition is the point of no
-/// return: cancellation during or after copying no longer aborts replacement publication. The
-/// staging buffer is charged to the shared memory budget. Consumed slots retain output permits
-/// until acknowledgement, generation invalidation, or pool destruction, without the slot pinning
-/// the pool.
+/// a free slot exists. Publication into a free slot commits atomically against cancellation: if
+/// cancellation wins before the `Published` transition, the previous queued frame remains intact;
+/// if publication wins, it completes. With no free slot, it stages replacement bytes before taking
+/// over the oldest queued publication as a replacement fill lease. Cancellation that wins before
+/// that acquisition leaves the prior publication intact. This replacement lease acquisition is
+/// the point of no return: cancellation during or after copying no longer aborts replacement
+/// publication. The staging buffer is charged to the shared memory budget. Consumed slots retain
+/// output permits until acknowledgement, generation invalidation, or pool destruction, without the
+/// slot pinning the pool.
 #[derive(Debug)]
 pub struct BoundedHandoff {
     operation: Mutex<()>,
@@ -292,6 +296,8 @@ pub struct BoundedHandoff {
     cancel_after_replacement_fill_acquire: Mutex<bool>,
     #[cfg(test)]
     cancel_during_replacement_staging: Mutex<bool>,
+    #[cfg(test)]
+    pause_before_free_slot_publication: Mutex<Option<Arc<Barrier>>>,
 }
 
 impl BoundedHandoff {
@@ -330,6 +336,8 @@ impl BoundedHandoff {
             cancel_after_replacement_fill_acquire: Mutex::new(false),
             #[cfg(test)]
             cancel_during_replacement_staging: Mutex::new(false),
+            #[cfg(test)]
+            pause_before_free_slot_publication: Mutex::new(None),
         })
     }
 
@@ -355,6 +363,22 @@ impl BoundedHandoff {
     /// Returns one slot's state for bounded diagnostics/tests.
     pub fn slot_state(&self, slot_id: u32) -> Result<crate::SlotState, RuntimeError> {
         self.pool.slot_state(slot_id)
+    }
+
+    #[cfg(test)]
+    fn pause_before_next_free_slot_publication(&self) -> Arc<Barrier> {
+        let pause = Arc::new(Barrier::new(2));
+        *lock_unpoisoned(&self.pause_before_free_slot_publication) = Some(Arc::clone(&pause));
+        pause
+    }
+
+    #[cfg(test)]
+    fn apply_test_pause_before_free_slot_publication(&self) {
+        let pause = lock_unpoisoned(&self.pause_before_free_slot_publication).take();
+        if let Some(pause) = pause {
+            pause.wait();
+            pause.wait();
+        }
     }
 
     #[cfg(test)]
@@ -401,10 +425,12 @@ impl BoundedHandoff {
     }
 
     /// Publishes the newest valid frame before releasing older queued frames when a free slot
-    /// exists. With no free slot, it stages replacement bytes before taking over the oldest queued
-    /// publication as a replacement fill lease. If cancellation wins before that acquisition, the
-    /// prior publication is preserved. This replacement lease acquisition is the point of no return:
-    /// cancellation during or after copying no longer aborts replacement publication.
+    /// exists. Cancellation and the free-slot `Published` transition are linearized: cancellation
+    /// that wins first preserves the old queue; publication that wins first completes. With no free
+    /// slot, it stages replacement bytes before taking over the oldest queued publication. If
+    /// cancellation wins before that acquisition, the prior publication is preserved. Replacement
+    /// lease acquisition is the no-return point: cancellation during or after copying no longer
+    /// aborts publication.
     pub fn submit_frame(
         &self,
         metadata: RasterDescriptorMetadata,
@@ -437,14 +463,16 @@ impl BoundedHandoff {
         self.pool
             .validate_frame_input(metadata, pixels, budget, cancellation)?;
         self.pool.reclaim_released();
-        let fill = match self.pool.begin_fill() {
+        let descriptor = match self.pool.begin_fill() {
             Ok(mut fill) => {
                 fill.write_with_cpu_permit(pixels)?;
                 before_publish();
                 if cancellation.is_cancelled() {
                     return Err(RuntimeError::CoreValidation(CoreError::Cancelled));
                 }
-                fill
+                #[cfg(test)]
+                self.apply_test_pause_before_free_slot_publication();
+                fill.publish_prevalidated_if_not_cancelled(metadata, cancellation)?
             }
             Err(RuntimeError::NoFreeSlots) => {
                 before_publish();
@@ -473,11 +501,10 @@ impl BoundedHandoff {
                 #[cfg(test)]
                 self.apply_test_cancellation_after_replacement_fill_acquire(cancellation);
                 fill.write_with_cpu_permit(&staging[..pixels.len()])?;
-                fill
+                fill.publish_prevalidated(metadata)?
             }
             Err(error) => return Err(error),
         };
-        let descriptor = fill.publish_prevalidated(metadata)?;
         while let Some(stale) = self.frames.try_recv() {
             let _ = self.pool.discard(&stale)?;
         }
@@ -597,35 +624,52 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_replacement_keeps_the_previous_queued_frame() {
+    fn cancellation_winning_at_free_slot_publication_keeps_previous_frame() {
         let resource_budget = resource_budget();
-        let handoff = BoundedHandoff::new(&resource_budget, 1, 2, 3, 1, 1).unwrap();
+        let handoff =
+            std::sync::Arc::new(BoundedHandoff::new(&resource_budget, 1, 2, 3, 1, 1).unwrap());
         let limits = budget();
         let first = handoff
             .submit_frame(metadata(1), &[1, 2, 3], &limits, &CancellationToken::new())
             .unwrap();
-        let cancellation = CancellationToken::new();
+        let cancellation = std::sync::Arc::new(CancellationToken::new());
+        let pause = handoff.pause_before_next_free_slot_publication();
+        let submission_handoff = std::sync::Arc::clone(&handoff);
+        let submission_cancellation = std::sync::Arc::clone(&cancellation);
+        let submission_limits = budget();
+        let submission = std::thread::spawn(move || {
+            submission_handoff.submit_frame(
+                metadata(2),
+                &[4, 5, 6],
+                &submission_limits,
+                &submission_cancellation,
+            )
+        });
 
-        let error = handoff
-            .submit_frame_before_publish(metadata(2), &[4, 5, 6], &limits, &cancellation, || {
-                cancellation.cancel()
-            })
-            .unwrap_err();
+        // The public submission pauses after its final cancellation check, before the commit gate.
+        pause.wait();
+        cancellation.cancel();
+        pause.wait();
 
         assert_eq!(
-            error,
-            RuntimeError::CoreValidation(ascii_core::Error::Cancelled)
+            submission.join().unwrap(),
+            Err(RuntimeError::CoreValidation(ascii_core::Error::Cancelled))
         );
+        assert!(cancellation.is_cancelled());
         assert_eq!(handoff.queued_frames(), 1);
         assert_eq!(
             handoff.slot_state(first.slot_id).unwrap(),
             SlotState::Published
         );
+        assert_eq!(handoff.slot_state(1).unwrap(), SlotState::Free);
         let mut lease = handoff
             .receive_frame(&limits, &CancellationToken::new())
             .unwrap()
             .unwrap();
-        assert_eq!(lease.descriptor().media_timestamp_ns, 1);
+        assert_eq!(*lease.descriptor(), first);
+        lease
+            .with_pixels(|pixels| assert_eq!(pixels, &[1, 2, 3]))
+            .unwrap();
         lease.completion_token().unwrap().acknowledge();
         lease.release().unwrap();
     }
