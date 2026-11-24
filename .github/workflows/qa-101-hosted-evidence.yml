@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Astraive/asciiwall
-          ref: 27a81685878ca8b7fd47e13148384824bbfb7bea
+          ref: fb20e84ec196c421b954b90985dc2217a35767c6
           path: qa004
           persist-credentials: false
           fetch-depth: 1
