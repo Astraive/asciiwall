@@ -675,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn in_flight_quality_patch_cancellation_returns_no_partial_conversion() {
+    fn in_flight_quality_patch_cancellation_releases_raster_reservation() {
         let cancellation = CancellationToken::new();
         let table = build_glyph_table(
             &synthetic_font::synthetic_font(false),
@@ -712,12 +712,14 @@ mod tests {
             RasterOrientation::TopDown,
             &pixels,
         );
+        let resources = super::NormalizedRasterResources::new(u64::MAX);
         let poll_count = Cell::new(0);
         let reached_in_flight_poll = Cell::new(false);
         let sample_cancel_poll = |index: usize, output: &[f32]| {
             poll_count.set(poll_count.get() + 1);
             if index == 256 {
                 reached_in_flight_poll.set(true);
+                assert!(resources.retained_bytes_in_use() > 0);
                 assert_eq!(output.len(), 4096);
                 assert!(output[..index].iter().all(|value| *value > 0.0));
                 assert_eq!(output[index], 0.0);
@@ -726,7 +728,6 @@ mod tests {
                 false
             }
         };
-        let resources = super::NormalizedRasterResources::new(u64::MAX);
 
         let result = convert_density_detailed_impl(
             raster,
@@ -743,6 +744,7 @@ mod tests {
             result,
             Err(DensityConversionError::Core(Error::Cancelled))
         ));
+        assert_eq!(resources.retained_bytes_in_use(), 0);
     }
 
     #[test]
