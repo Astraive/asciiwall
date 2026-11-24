@@ -1,0 +1,59 @@
+name: QA-101 hosted evidence
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [test/qa-101-main-r1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qa101-integration:
+    name: EC-001–EC-005 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      CARGO_TERM_COLOR: never
+      QA101_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - name: Check out the tested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+      - name: Set up Python for the QA-004 recorder
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Check out pinned QA-004 recorder and schema
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Astraive/asciiwall
+          ref: 27a81685878ca8b7fd47e13148384824bbfb7bea
+          path: qa004
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Run exact QA-101 test and record automated evidence
+        run: python scripts/qa101_ci_evidence.py --qa004-root qa004
+      - name: Upload test output, source/binary/fixture hashes, and QA-004 record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qa-101-${{ matrix.os }}
+          path: artifacts/qa-101-ec-001-005/
+          if-no-files-found: error
+          retention-days: 90
