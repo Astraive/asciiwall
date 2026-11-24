@@ -172,12 +172,7 @@ pub fn export(
         if index % CANCELLATION_POLL_INTERVAL == 0 && cancellation.is_cancelled() {
             return Err(ExportError::Core(Error::Cancelled));
         }
-        if !ascii_convert::is_supported_single_cell_scalar(glyph.character()) {
-            return Err(ExportError::UnsupportedGlyph {
-                glyph_index: u32::try_from(index)
-                    .map_err(|_| ExportError::Core(Error::SizeOverflow))?,
-            });
-        }
+        validate_export_glyph(glyph.character(), index)?;
     }
     if cancellation.is_cancelled() {
         return Err(ExportError::Core(Error::Cancelled));
@@ -205,6 +200,16 @@ pub fn export(
         size,
         target,
     })
+}
+
+fn validate_export_glyph(character: char, index: usize) -> Result<(), ExportError> {
+    if !ascii_convert::is_supported_single_cell_scalar(character) {
+        return Err(ExportError::UnsupportedGlyph {
+            glyph_index: u32::try_from(index)
+                .map_err(|_| ExportError::Core(Error::SizeOverflow))?,
+        });
+    }
+    Ok(())
 }
 
 fn allocate_serialized_output(
@@ -577,7 +582,7 @@ const fn decimal_size(value: u8) -> u64 {
 mod tests {
     use super::{
         AnsiColorMode, ExportError, ExportTarget, allocate_serialized_output, nearest_cube_level,
-        nearest_xterm_256, serialize_into, serialized_size,
+        nearest_xterm_256, serialize_into, serialized_size, validate_export_glyph,
     };
     use ascii_convert::{GlyphConfig, GlyphRepertoire, build_glyph_table};
     use ascii_core::{AsciiCell, Budget, CancellationToken, Error};
@@ -598,6 +603,22 @@ mod tests {
         assert_eq!(nearest_cube_level(195), 3);
         assert_eq!(nearest_cube_level(235), 4);
         assert_eq!(nearest_xterm_256([13, 13, 13]), 232);
+    }
+
+    #[test]
+    fn invalid_export_glyphs_return_indexed_errors() {
+        assert_eq!(
+            validate_export_glyph('\x1b', 7),
+            Err(ExportError::UnsupportedGlyph { glyph_index: 7 })
+        );
+        assert_eq!(
+            validate_export_glyph('\n', 11),
+            Err(ExportError::UnsupportedGlyph { glyph_index: 11 })
+        );
+        assert_eq!(
+            validate_export_glyph('界', 13),
+            Err(ExportError::UnsupportedGlyph { glyph_index: 13 })
+        );
     }
 
     #[test]
