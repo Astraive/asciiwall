@@ -109,7 +109,7 @@ jobs:
         env:
           QA102_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          python scripts/record-qa-102-ci-evidence.py \
+          python scripts/record_qa_102_ci_evidence.py \
             --recorder .qa004-evidence-recorder/scripts/evidence.py \
             --output-dir artifacts/qa-102-hosted-evidence
       - name: Upload QA-102 hosted component evidence
