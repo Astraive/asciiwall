@@ -82,6 +82,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def artifact_relative_path(artifact_root: Path, evidence_file: Path) -> str:
+    if not evidence_file.is_file():
+        raise RuntimeError("the QA-101 run output does not exist")
+    try:
+        relative = evidence_file.resolve().relative_to(artifact_root.resolve())
+    except ValueError as exc:
+        raise RuntimeError("the QA-101 run output is outside the uploaded artifact root") from exc
+    return relative.as_posix()
+
+
 def fixture_records(output: str) -> list[dict[str, str]]:
     entries = {(name, digest) for name, digest in FIXTURE_LINE.findall(output)}
     return [{"name": name, "sha256": digest} for name, digest in sorted(entries)]
@@ -136,10 +146,12 @@ def main() -> int:
     os_slug = {"Linux": "linux", "Windows": "windows", "macOS": "macos"}.get(
         runner_os, re.sub(r"[^a-z0-9-]+", "-", runner_os.lower()).strip("-") or "unknown"
     )
-    output_dir = repo_root / "artifacts" / "qa-101-ec-001-005" / os_slug
+    artifact_root = repo_root / "artifacts" / "qa-101-ec-001-005"
+    output_dir = artifact_root / os_slug
     output_dir.mkdir(parents=True, exist_ok=True)
     date = datetime.now(timezone.utc).date().isoformat()
-    evidence_path = f"artifacts/qa-101-ec-001-005/{os_slug}/test-output.log"
+    evidence_file = output_dir / "test-output.log"
+    evidence_path = evidence_file.relative_to(artifact_root).as_posix()
     manifest_path = output_dir / "run-manifest.json"
     manifest: dict[str, Any] = {
         "schema_version": 1,
@@ -153,6 +165,7 @@ def main() -> int:
         "issue": {"id": "QA-101", "github_number": 77},
         "date": date,
         "evidence_path": evidence_path,
+        "evidence_path_base": "downloaded artifact root",
         "acceptance_gaps": {
             "authenticated_acceptance_receipt": "not-issued",
             "independent_human_review": "not-performed",
@@ -226,7 +239,9 @@ def main() -> int:
             "command=qa_101_input_conversion --nocapture --color never --test-threads=1\n"
             "--- stdout ---\n"
         ).encode("utf-8") + test_run.stdout + b"\n--- stderr ---\n" + test_run.stderr
-        (output_dir / "test-output.log").write_bytes(test_log)
+        evidence_file.write_bytes(test_log)
+        if artifact_relative_path(artifact_root, evidence_file) != evidence_path:
+            raise RuntimeError("the QA-004 evidence locator does not match the uploaded artifact layout")
         test_output = (test_run.stdout + b"\n" + test_run.stderr).decode("utf-8", errors="replace")
         fixtures = fixture_records(test_output)
         cases = observed_cases(test_output)
@@ -276,6 +291,9 @@ def main() -> int:
             manifest["result"] = {"status": "fail", "stage": stage, "exit_code": recorder.returncode}
             write_json(manifest_path, manifest)
             return 1
+        stored_record = json.loads(record_path.read_text(encoding="utf-8"))
+        if stored_record.get("evidence_path") != evidence_path:
+            raise RuntimeError("QA-004 stored a different evidence locator")
 
         stage = "qa004-validation"
         validation = command(
