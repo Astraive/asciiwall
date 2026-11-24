@@ -292,6 +292,7 @@ def main() -> int:
             manifest["result"] = {"status": "fail", "stage": stage, "exit_code": recorder.returncode}
             write_json(manifest_path, manifest)
             return 1
+        stored_record = json.loads(record_path.read_text(encoding="utf-8"))
         stored_evidence_path = stored_record.get("evidence_path")
         if not isinstance(stored_evidence_path, str) or stored_evidence_path != evidence_path:
             raise RuntimeError("QA-004 stored a different evidence locator")
