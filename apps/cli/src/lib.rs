@@ -217,7 +217,7 @@ fn reject_offline_network_paths(
 #[cfg(windows)]
 fn offline_path_error() -> CliError {
     CliError::usage(
-        "offline mode requires a known local filesystem and rejects network-backed, reparse, or unsafe paths",
+        "offline path checks reject known remote, reparse, or unsafe paths; storage providers may still perform network I/O",
     )
 }
 

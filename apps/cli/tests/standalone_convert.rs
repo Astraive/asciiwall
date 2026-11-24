@@ -364,11 +364,11 @@ fn offline_unc_paths_are_rejected_before_destination_metadata() {
     let assert_rejected = |output: Output| {
         assert_eq!(status(&output), 2);
         assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(
-            String::from_utf8(output.stderr)
-                .unwrap()
-                .contains("offline mode requires a known local filesystem")
+            stderr.contains("offline path checks reject known remote, reparse, or unsafe paths")
         );
+        assert!(stderr.contains("storage providers may still perform network I/O"));
     };
 
     // Request validation would inspect this existing local destination and report its conflict;
