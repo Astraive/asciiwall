@@ -35,7 +35,7 @@ use crate::sampling::{
 use crate::structural::{
     MAX_STRUCTURAL_CANDIDATES, ReconstructionInput, ReconstructionWeights, ShortlistOptions,
     StructuralCandidate, StructuralDescriptor, StructuralScratch, StructuralWeights,
-    rerank_candidates,
+    rerank_candidates, shortlist_grid_work_bound,
 };
 
 const CANCELLATION_CELL_INTERVAL: usize = 32;
@@ -621,6 +621,21 @@ pub fn convert_structural(
         settings.sampling.filter(),
         Some(patch_dimensions),
     );
+    let crop_derived_sizing = matches!(
+        (settings.sizing, sampling.fit()),
+        (GridSizing::Columns(_), FitMode::CustomCrop(_))
+    );
+    let validated_source = if crop_derived_sizing {
+        if input.width() == 0 || input.height() == 0 {
+            return Err(Error::Malformed(MalformedReason::EmptyDimensions));
+        }
+        Some(
+            SamplingSource::new(input)
+                .map_err(|error| DensityConversionError::from(error).into_core())?,
+        )
+    } else {
+        None
+    };
     let size = settings.sizing.resolve_for_sampling(
         input.width(),
         input.height(),
@@ -633,17 +648,17 @@ pub fn convert_structural(
     let mut execution = settings.begin_job(rows)?;
     execution.check(settings.cancellation)?;
     let grid_budget = validate_grid_budget(size, budget, settings.cancellation)?;
+    let cell_count = grid_budget.cell_count_usize();
     if previous.is_some_and(|frame| frame.size() != size) {
         return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
     }
-
-    let glyph_count = u32::try_from(glyphs.glyphs().len()).map_err(|_| Error::SizeOverflow)?;
     let candidate_count = glyphs.glyphs().len().min(64).min(MAX_STRUCTURAL_CANDIDATES);
+    let glyph_count = u32::try_from(glyphs.glyphs().len()).map_err(|_| Error::SizeOverflow)?;
     let shortlist_options =
         ShortlistOptions::new(candidate_count, StructuralWeights::new(0.34, 0.33, 0.33)?)?;
     let foreground_luminance = settings.foreground.luminance().value();
     let background_luminance = settings.background.luminance().value();
-    let cell_count = grid_budget.cell_count_usize();
+
     let sample_count =
         usize::try_from(patch_dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
     let sample_count_u64 = u64::try_from(sample_count).map_err(|_| Error::SizeOverflow)?;
@@ -659,10 +674,10 @@ pub fn convert_structural(
         .transpose()?
         .unwrap_or(0);
     let rerank_work = sample_count_u64
-        .checked_mul(3)
+        .checked_mul(4)
         .and_then(|work| work.checked_add(fit_work_per_candidate))
         .and_then(|work| work.checked_mul(u64::try_from(candidate_count).ok()?))
-        .and_then(|work| work.checked_mul(u64::try_from(cell_count).ok()?))
+        .and_then(|work| work.checked_mul(grid_budget.cell_count()))
         .ok_or(Error::SizeOverflow)?;
     let additional_memory_bytes = extra_job_memory_bytes(
         glyphs,
@@ -672,15 +687,27 @@ pub fn convert_structural(
         candidate_count,
         previous,
     )?;
-    let source = SamplingSource::new(input)
-        .map_err(|error| DensityConversionError::from(error).into_core())?;
+    let shortlist_work = shortlist_grid_work_bound(
+        glyphs.glyphs().len(),
+        candidate_count,
+        patch_dimensions,
+        grid_budget.cell_count(),
+    )?;
+    let structural_matching_work = rerank_work
+        .checked_add(shortlist_work)
+        .ok_or(Error::SizeOverflow)?;
+    let source = match validated_source {
+        Some(source) => source,
+        None => SamplingSource::new(input)
+            .map_err(|error| DensityConversionError::from(error).into_core())?,
+    };
     let structural_sampling = prepare_sampling(
         source,
         size,
         glyphs.cell_width(),
         glyphs.cell_height(),
         sampling,
-        rerank_work,
+        structural_matching_work,
         grid_budget.work_units(),
         sample_count_u64,
         palette_storage_bytes,
@@ -690,7 +717,17 @@ pub fn convert_structural(
     .map_err(|error| DensityConversionError::from(error).into_core())?;
     execution.reserve_memory(structural_sampling.memory_bytes())?;
     execution.check(settings.cancellation)?;
-
+    // Reserve structural-phase work before allowing the intermediate density pass to consume the
+    // remaining operation work ceiling.
+    let density_work_limit = budget
+        .max_work_units()
+        .checked_sub(structural_sampling.work_units())
+        .ok_or(Error::BudgetExceeded(BudgetKind::WorkUnits))?;
+    let density_budget = Budget::new(
+        budget.max_frame_bytes(),
+        budget.max_raster_bytes(),
+        density_work_limit,
+    );
     let mut structural_settings = settings.with_sampling(sampling).without_worker_pool();
     structural_settings.color_fit = None;
     let resources = NormalizedRasterResources::new(budget.max_raster_bytes());
@@ -698,18 +735,22 @@ pub fn convert_structural(
         input,
         glyphs,
         &structural_settings,
-        budget,
+        &density_budget,
         &resources,
         #[cfg(test)]
         None,
     )
     .map_err(DensityConversionError::into_core)?;
+    execution.check(settings.cancellation)?;
     let DensityConversion {
         frame,
         patches,
         sampling_identity,
         ..
     } = conversion;
+    if frame.size() != size {
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+    }
     drop(frame);
     let patches = patches.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
     if patches.cell_count() != cell_count {
@@ -717,7 +758,11 @@ pub fn convert_structural(
     }
     let normalized = normalize_raster(input, budget, settings.cancellation, &resources)
         .map_err(|error| DensityConversionError::ColorNormalization(error).into_core())?;
-    let mut cells = reserve_output_cells(cell_count, settings.cancellation)?;
+    execution.check(settings.cancellation)?;
+    let mut cells = reserve_output_cells(cell_count, settings.cancellation, || {
+        execution.is_current()
+    })?;
+    execution.check(settings.cancellation)?;
     run_structural_workers(
         settings,
         &execution,
@@ -737,14 +782,16 @@ pub fn convert_structural(
         budget,
     )?;
     execution.check(settings.cancellation)?;
-    AsciiFrame::try_new(
+    let frame = AsciiFrame::try_new(
         size,
         settings.metadata,
         cells,
         glyph_count,
         budget,
         settings.cancellation,
-    )
+    )?;
+    execution.check(settings.cancellation)?;
+    Ok(frame)
 }
 
 /// Converts a raster into a bounded frame plus the shared geometry and optional quality patches.
@@ -888,8 +935,14 @@ fn convert_density_detailed_impl(
     execution.reserve_memory(sampling.memory_bytes())?;
     execution.check(settings.cancellation)?;
     let normalized = normalize_raster(input, budget, settings.cancellation, resources)?;
+    execution.check(settings.cancellation)?;
     let normalization_warning = normalized.warning();
-    let patches = sampling.allocate_patches(grid_budget.cell_count_usize(), settings.cancellation)?;
+    let patches = sampling.allocate_patches(
+        grid_budget.cell_count_usize(),
+        settings.cancellation,
+        || execution.is_current(),
+    )?;
+    execution.check(settings.cancellation)?;
     let (patch_dimensions, mut patch_values, mut patch_descriptors) = match patches {
         Some(patches) => {
             let (dimensions, luminance, descriptors) = patches.into_parts();
@@ -902,7 +955,12 @@ fn convert_density_detailed_impl(
     let luminance_span = foreground_luminance - background_luminance;
     let foreground = output_color(settings.foreground);
     let background = output_color(settings.background);
-    let mut cells = reserve_output_cells(grid_budget.cell_count_usize(), settings.cancellation)?;
+    let mut cells = reserve_output_cells(
+        grid_budget.cell_count_usize(),
+        settings.cancellation,
+        || execution.is_current(),
+    )?;
+    execution.check(settings.cancellation)?;
     run_density_workers(
         settings,
         &execution,
@@ -936,6 +994,7 @@ fn convert_density_detailed_impl(
         budget,
         settings.cancellation,
     )?;
+    execution.check(settings.cancellation)?;
     let palette_kind = settings.color_fit.map(|(palette, _)| palette.kind());
     let palette_cache_identity = settings
         .color_fit
@@ -1475,8 +1534,9 @@ fn process_density_range(
 fn reserve_output_cells(
     cell_count: usize,
     cancellation: &CancellationToken,
+    mut is_current: impl FnMut() -> bool,
 ) -> Result<Vec<AsciiCell>, Error> {
-    if cancellation.is_cancelled() {
+    if cancellation.is_cancelled() || !is_current() {
         return Err(Error::Cancelled);
     }
 
@@ -1484,14 +1544,19 @@ fn reserve_output_cells(
     cells
         .try_reserve_exact(cell_count)
         .map_err(|_| Error::AllocationFailed)?;
+    if cancellation.is_cancelled() || !is_current() {
+        return Err(Error::Cancelled);
+    }
     let empty_cell = AsciiCell::new(0, [0; 4], [0; 4]);
     for index in 0..cell_count {
-        if index.is_multiple_of(CANCELLATION_CELL_INTERVAL * 8) && cancellation.is_cancelled() {
+        if index.is_multiple_of(CANCELLATION_CELL_INTERVAL * 8)
+            && (cancellation.is_cancelled() || !is_current())
+        {
             return Err(Error::Cancelled);
         }
         cells.push(empty_cell);
     }
-    if cancellation.is_cancelled() {
+    if cancellation.is_cancelled() || !is_current() {
         return Err(Error::Cancelled);
     }
     Ok(cells)
@@ -1546,6 +1611,8 @@ mod tests {
         convert_density_detailed_impl, reserve_output_cells,
     };
     use crate::color::LinearRgb;
+    use crate::worker::{ConversionResources, GenerationController};
+    use core::num::NonZeroUsize;
     use crate::font::{GlyphConfig, GlyphRepertoire, build_glyph_table};
     use crate::sampling::{FitMode, PatchDimensions, SamplingFilter, SamplingOptions};
     use ascii_core::{
@@ -1554,6 +1621,7 @@ mod tests {
         TransferFunction,
     };
     use std::sync::mpsc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     #[allow(dead_code)]
@@ -1685,13 +1753,112 @@ mod tests {
     }
 
     #[test]
+    fn stale_generation_cancels_at_tile_boundary_and_releases_before_b_publishes() {
+        let cancellation = CancellationToken::new();
+        let table = build_glyph_table(
+            &synthetic_font::synthetic_font(false),
+            &GlyphRepertoire::new("BA ").unwrap(),
+            &GlyphConfig::new(8.0, 8, 12, 9).unwrap(),
+            &Budget::new(1_000_000, 2_000_000, 2_000_000),
+            &cancellation,
+        )
+        .unwrap();
+        let generations = GenerationController::new(11);
+        let resources =
+            ConversionResources::new(128_000_000, NonZeroUsize::new(2).unwrap());
+        let make_settings = |generation: u64| {
+            super::ConversionSettings::new(
+                super::GridSizing::fixed_pixel_surface(8, 12),
+                FrameMetadata::new(GlyphTableId::new(*table.fingerprint()), generation, 0, 0, 1),
+                &cancellation,
+                LinearRgb::WHITE,
+                LinearRgb::BLACK,
+            )
+            .unwrap()
+            .with_sampling(SamplingOptions::new(
+                FitMode::Contain,
+                SamplingFilter::Box,
+                Some(PatchDimensions::new(64, 64).unwrap()),
+            ))
+            .with_worker_pool(&resources, NonZeroUsize::new(2).unwrap())
+            .with_generation_controller(&generations)
+        };
+        let pixels = [u8::MAX; 6];
+        let make_raster = || {
+            RasterFrameView::new(
+                2,
+                3,
+                2,
+                PixelFormat::gray8(),
+                ColorDescription::new(
+                    ColorPrimaries::Srgb,
+                    TransferFunction::Linear,
+                    AlphaMode::Opaque,
+                ),
+                RasterOrientation::TopDown,
+                &pixels,
+            )
+        };
+        let settings_a = make_settings(11);
+        let raster_resources = super::NormalizedRasterResources::new(u64::MAX);
+        let sample_cancel_poll = |index: usize, _output: &[f32]| {
+            if index == 256 {
+                assert!(resources.active_bytes() > 0);
+                assert!(resources.active_workers() > 0);
+                assert_eq!(generations.advance().unwrap(), 12);
+            }
+            false
+        };
+
+        let result_a = convert_density_detailed_impl(
+            make_raster(),
+            &table,
+            &settings_a,
+            &Budget::new(64_000_000, 128_000_000, u64::MAX),
+            &raster_resources,
+            Some(&sample_cancel_poll),
+        );
+        assert!(matches!(
+            result_a,
+            Err(DensityConversionError::Core(Error::Cancelled))
+        ));
+        assert_eq!(resources.active_bytes(), 0);
+        assert_eq!(resources.active_workers(), 0);
+        assert_eq!(raster_resources.retained_bytes_in_use(), 0);
+
+        let settings_b = make_settings(12);
+        let result_b = convert_density_detailed_impl(
+            make_raster(),
+            &table,
+            &settings_b,
+            &Budget::new(64_000_000, 128_000_000, u64::MAX),
+            &raster_resources,
+            None,
+        )
+        .unwrap();
+        let published_generation = AtomicU64::new(0);
+        assert!(!generations.publish_if_current(11, || {
+            published_generation.store(11, Ordering::Release);
+        }));
+        assert!(generations.publish_if_current(
+            result_b.frame().metadata().generation(),
+            || {
+                published_generation.store(12, Ordering::Release);
+            },
+        ));
+        assert_eq!(published_generation.load(Ordering::Acquire), 12);
+        assert_eq!(resources.active_bytes(), 0);
+        assert_eq!(resources.active_workers(), 0);
+        assert_eq!(raster_resources.retained_bytes_in_use(), 0);
+    }
+
+    #[test]
     fn output_cell_reservation_checks_cancellation_before_impossible_reserve() {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
 
         assert_eq!(
-            reserve_output_cells(usize::MAX, &cancellation).err(),
-            Some(Error::Cancelled)
+            reserve_output_cells(usize::MAX, &cancellation, || true).err(),
         );
     }
 }

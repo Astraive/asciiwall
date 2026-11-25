@@ -239,7 +239,7 @@ pub(crate) fn rerank_candidates(
     let work_bound = u64::try_from(sample_count)
         .map_err(|_| Error::SizeOverflow)?
         .checked_mul(u64::try_from(candidates.len()).map_err(|_| Error::SizeOverflow)?)
-        .and_then(|work| work.checked_mul(3))
+        .and_then(|work| work.checked_mul(4))
         .ok_or(Error::SizeOverflow)?;
     if work_bound > budget.max_work_units() {
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits).into());
@@ -1100,6 +1100,26 @@ fn shortlist_work_bound(glyph_count: usize, candidate_count: usize) -> Result<u6
                 .checked_mul(levels.checked_mul(2)?)
                 .and_then(|sort_work| work.checked_add(sort_work))
         })
+        .ok_or(Error::SizeOverflow)
+}
+
+/// Aggregates descriptor extraction and shortlist work across every grid cell.
+pub(crate) fn shortlist_grid_work_bound(
+    glyph_count: usize,
+    candidate_count: usize,
+    dimensions: PatchDimensions,
+    cell_count: u64,
+) -> Result<u64, Error> {
+    let width = usize::try_from(dimensions.width()).map_err(|_| Error::SizeOverflow)?;
+    let height = usize::try_from(dimensions.height()).map_err(|_| Error::SizeOverflow)?;
+    let sample_count = dimensions.sample_count();
+    let descriptor_work = sample_count
+        .checked_mul(FEATURE_WORK_UNITS_PER_SAMPLE)
+        .ok_or(Error::SizeOverflow)?;
+    shortlist_work_bound(glyph_count, candidate_count)?
+        .checked_add(common_feature_work_bound(width, height)?)
+        .and_then(|work| work.checked_add(descriptor_work))
+        .and_then(|work| work.checked_mul(cell_count))
         .ok_or(Error::SizeOverflow)
 }
 

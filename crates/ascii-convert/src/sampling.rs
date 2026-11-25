@@ -567,15 +567,16 @@ impl QualityPatches {
         cell_count: usize,
         patch_value_count: usize,
         cancellation: &CancellationToken,
+        mut is_current: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
-        if cancellation.is_cancelled() {
+        if cancellation.is_cancelled() || !is_current() {
             return Err(Error::Cancelled);
         }
         let mut luminance = Vec::new();
         luminance
             .try_reserve_exact(patch_value_count)
             .map_err(|_| Error::AllocationFailed)?;
-        if cancellation.is_cancelled() {
+        if cancellation.is_cancelled() || !is_current() {
             return Err(Error::Cancelled);
         }
         let mut descriptors = Vec::new();
@@ -583,7 +584,7 @@ impl QualityPatches {
             .try_reserve_exact(cell_count)
             .map_err(|_| Error::AllocationFailed)?;
         zero_fill_patch_values(&mut luminance, patch_value_count, || {
-            cancellation.is_cancelled()
+            cancellation.is_cancelled() || !is_current()
         })?;
         let empty = PatchDescriptors {
             mean_luminance: 0.0,
@@ -592,7 +593,7 @@ impl QualityPatches {
         };
         for index in 0..cell_count {
             if index.is_multiple_of(PATCH_INITIALIZATION_CANCEL_INTERVAL)
-                && cancellation.is_cancelled()
+                && (cancellation.is_cancelled() || !is_current())
             {
                 return Err(Error::Cancelled);
             }
@@ -683,6 +684,7 @@ pub(crate) struct SamplingPlan {
     options: SamplingOptions,
     identity: SamplingIdentity,
     memory_bytes: u64,
+    work_units: u64,
 }
 
 impl SamplingPlan {
@@ -690,6 +692,7 @@ impl SamplingPlan {
         self.memory_bytes
     }
 }
+
 
 impl SamplingPlan {
     pub(crate) const fn transform(self) -> FitTransform {
@@ -700,10 +703,16 @@ impl SamplingPlan {
         self.identity
     }
 
+    /// Returns the complete checked work bound accepted by this plan's preflight.
+    pub(crate) const fn work_units(self) -> u64 {
+        self.work_units
+    }
+
     pub(crate) fn allocate_patches(
         self,
         cell_count: usize,
         cancellation: &CancellationToken,
+        mut is_current: impl FnMut() -> bool,
     ) -> Result<Option<QualityPatches>, Error> {
         let Some(dimensions) = self.options.patch else {
             return Ok(None);
@@ -718,6 +727,7 @@ impl SamplingPlan {
             cell_count,
             value_count,
             cancellation,
+            &mut is_current,
         )?))
     }
 
@@ -1612,6 +1622,7 @@ pub(crate) fn prepare_sampling(
         options,
         identity,
         memory_bytes: whole_raster_bytes,
+        work_units: total_work,
     })
 }
 
@@ -1779,6 +1790,7 @@ mod tests {
                 1,
                 1,
                 &cancellation,
+                || true,
             )
             .err(),
             Some(Error::Cancelled)
