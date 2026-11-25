@@ -21,17 +21,17 @@ This is hierarchy observation only. It is not evidence that a surface can be pla
 
 ## Windows test evidence
 
-**Parent-run evidence pending.** The Windows-only, non-disruptive test command is:
+**Local Windows evidence:** `cargo fmt --package ascii-platform -- --check` passed; `cargo clippy --locked --package ascii-platform --all-targets -- -D warnings` passed; `cargo test --locked --package ascii-platform` passed (6 tests across 3 suites). The test command is non-disruptive and does not create a window:
 
 ```text
 cargo test --locked --package ascii-platform
 ```
 
-The package includes deterministic injected hierarchy tests for an absent shell, changed WorkerW/unknown-parent layouts, timeout, and core work-budget exhaustion, plus one native read-only report test. No build, test, formatter, or check result is claimed by this evidence note. The source hashes below were captured before a build:
+The package includes deterministic injected hierarchy tests for an absent shell, changed WorkerW/unknown-parent layouts, timeout, and core work-budget exhaustion, plus one native read-only report test. The source hashes below were captured immediately before the Clippy/test run and match the source revision that passed those checks:
 
-- `crates/ascii-platform/src/lib.rs`: `bc853bf08bf115909f9a678b6a7bcee6fe19012c59d7b0b85e9070baf3ff2314`
+- `crates/ascii-platform/src/lib.rs`: `5cbb5ea5a0d2fd07f283050934bce27101f8dd229c963a33ba7af7e1f3589e6b`
 - `crates/ascii-platform/src/probe.rs`: `0c7a4a2a89dfc269a4fab39ec049d57a8302af3dde6127a4c13e1d61af9b8741`
-- `crates/ascii-platform/src/probe/windows.rs`: `30e82e663e101a2fcb58d9486c2851e6950f6cada579e0c3e1c7f1dfba44b7f1`
+- `crates/ascii-platform/src/probe/windows.rs`: `3379845b06984a7b5d029ca9d2e16d66f2915d5b4c73c27c749f4271749812df`
 - `crates/ascii-platform/tests/host_probe.rs`: `ddef24f1fb9e7a509f7a2c0d9e3c4eac4038137d78fa8cd7e5e21615b899c00c`
 
 No binary or fixture is bundled, so there are no corresponding binary/fixture hashes.

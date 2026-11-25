@@ -1,8 +1,8 @@
 //! The only module containing Win32 FFI. Handles exist only during this read-only query.
 
 use super::{
-    Architecture, EnvironmentTuple, GpuBackend, HierarchySnapshot, ScanFailure, SessionKind,
-    WindowClass, WindowRecord, WindowsVersion, MAX_WINDOW_RECORDS, PROBE_TIMEOUT_MILLIS,
+    Architecture, EnvironmentTuple, GpuBackend, HierarchySnapshot, MAX_WINDOW_RECORDS,
+    PROBE_TIMEOUT_MILLIS, ScanFailure, SessionKind, WindowClass, WindowRecord, WindowsVersion,
 };
 use ascii_core::Budget;
 use core::ffi::c_void;
@@ -53,7 +53,6 @@ impl Default for SystemInfo {
 }
 
 #[repr(C)]
-#[derive(Default)]
 struct OsVersionInfoExW {
     size: u32,
     major: u32,
@@ -67,10 +66,28 @@ struct OsVersionInfoExW {
     product_type: u8,
     reserved: u8,
 }
+impl Default for OsVersionInfoExW {
+    fn default() -> Self {
+        Self {
+            size: 0,
+            major: 0,
+            minor: 0,
+            build: 0,
+            platform_id: 0,
+            service_pack: [0; 128],
+            service_pack_major: 0,
+            service_pack_minor: 0,
+            suite_mask: 0,
+            product_type: 0,
+            reserved: 0,
+        }
+    }
+}
 
 #[link(name = "user32")]
 unsafe extern "system" {
-    fn EnumChildWindows(parent: Hwnd, callback: Option<EnumWindowsProc>, parameter: Lparam) -> Bool;
+    fn EnumChildWindows(parent: Hwnd, callback: Option<EnumWindowsProc>, parameter: Lparam)
+    -> Bool;
     fn EnumWindows(callback: Option<EnumWindowsProc>, parameter: Lparam) -> Bool;
     fn GetClassNameW(window: Hwnd, class_name: *mut u16, maximum: i32) -> i32;
     fn IsChild(parent: Hwnd, child: Hwnd) -> Bool;
@@ -415,4 +432,3 @@ fn version_tuple() -> Option<WindowsVersion> {
         build: info.build,
     })
 }
-
