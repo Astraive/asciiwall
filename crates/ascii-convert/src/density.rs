@@ -27,8 +27,8 @@ use crate::sampling::{
     SamplingOptions, SamplingSource, prepare_sampling,
 };
 use crate::structural::{
-    MAX_STRUCTURAL_CANDIDATES, ReconstructionWeights, ShortlistOptions, StructuralDescriptor,
-    StructuralScratch, StructuralWeights, rerank_candidates,
+    MAX_STRUCTURAL_CANDIDATES, ReconstructionInput, ReconstructionWeights, ShortlistOptions,
+    StructuralDescriptor, StructuralScratch, StructuralWeights, rerank_candidates,
 };
 
 const CANCELLATION_CELL_INTERVAL: usize = 32;
@@ -501,10 +501,10 @@ pub fn convert_structural(
     if glyphs.glyphs().is_empty() {
         return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
     }
-    if let Some(previous) = previous {
-        if previous.metadata().glyph_table_id() != settings.metadata.glyph_table_id() {
-            return Err(Error::Malformed(MalformedReason::GlyphTableMismatch));
-        }
+    if let Some(previous) = previous
+        && previous.metadata().glyph_table_id() != settings.metadata.glyph_table_id()
+    {
+        return Err(Error::Malformed(MalformedReason::GlyphTableMismatch));
     }
 
     let patch_dimensions = PatchDimensions::new(glyphs.cell_width(), glyphs.cell_height())?;
@@ -585,15 +585,17 @@ pub fn convert_structural(
             .and_then(|frame| frame.cells().get(cell_index))
             .map(|cell| cell.glyph());
         let selected = rerank_candidates(
-            samples,
-            patch_dimensions,
-            &descriptor,
-            glyphs,
-            shortlist.candidates(),
-            foreground_luminance,
-            background_luminance,
-            previous_glyph,
-            settings.reconstruction_weights,
+            ReconstructionInput {
+                samples,
+                dimensions: patch_dimensions,
+                descriptor: &descriptor,
+                glyphs,
+                candidates: shortlist.candidates(),
+                foreground_luminance,
+                background_luminance,
+                previous_glyph,
+                weights: settings.reconstruction_weights,
+            },
             budget,
             settings.cancellation,
         )?;

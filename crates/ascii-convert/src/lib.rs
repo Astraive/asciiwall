@@ -43,5 +43,5 @@ pub use sampling::{
 pub use structural::{
     MAX_STRUCTURAL_CANDIDATES, ReconstructionWeights, ShortlistOptions, StructuralCandidate,
     StructuralDescriptor, StructuralIdentity, StructuralScratch, StructuralShortlist,
-    StructuralWeights, rerank_candidates,
+    StructuralWeights,
 };

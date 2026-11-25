@@ -169,6 +169,19 @@ impl ReconstructionWeights {
     }
 }
 
+/// Inputs shared by one candidate-reranking pass.
+pub(crate) struct ReconstructionInput<'a> {
+    pub(crate) samples: &'a [f32],
+    pub(crate) dimensions: PatchDimensions,
+    pub(crate) descriptor: &'a StructuralDescriptor<'a>,
+    pub(crate) glyphs: &'a GlyphTable,
+    pub(crate) candidates: &'a [StructuralCandidate],
+    pub(crate) foreground_luminance: f64,
+    pub(crate) background_luminance: f64,
+    pub(crate) previous_glyph: Option<u32>,
+    pub(crate) weights: ReconstructionWeights,
+}
+
 /// Selects the best shortlisted glyph under one fixed reconstruction objective.
 ///
 /// `samples` is row-major normalized linear-light luminance in `[0, 1]`; reconstruction uses
@@ -176,19 +189,22 @@ impl ReconstructionWeights {
 /// is retained as a separate term, tone error compares mask and sample mean coverage, and a
 /// nonzero temporal weight adds one penalty when the candidate differs from `previous_glyph`.
 /// Exact score ties choose the smaller glyph-table index, then table position.
-pub fn rerank_candidates(
-    samples: &[f32],
-    dimensions: PatchDimensions,
-    descriptor: &StructuralDescriptor<'_>,
-    glyphs: &GlyphTable,
-    candidates: &[StructuralCandidate],
-    foreground_luminance: f64,
-    background_luminance: f64,
-    previous_glyph: Option<u32>,
-    weights: ReconstructionWeights,
+pub(crate) fn rerank_candidates(
+    input: ReconstructionInput<'_>,
     budget: &Budget,
     cancellation: &CancellationToken,
 ) -> Result<StructuralCandidate, Error> {
+    let ReconstructionInput {
+        samples,
+        dimensions,
+        descriptor,
+        glyphs,
+        candidates,
+        foreground_luminance,
+        background_luminance,
+        previous_glyph,
+        weights,
+    } = input;
     let sample_count =
         usize::try_from(dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
     if samples.len() != sample_count

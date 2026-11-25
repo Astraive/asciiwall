@@ -62,9 +62,13 @@ The synthetic vertical-edge regression uses two same-density masks. It checks th
 
 The deterministic synthetic vertical-edge fixture is generated in-process by `equal_area_orientation_font()` in `crates/ascii-convert/tests/support/synthetic_font.rs`; raster samples are copied from the generated vertical glyph mask. No external image, network fetch, or runtime asset is used. The fixture compares equal-density horizontal and vertical masks and asserts stable selection, repeated output equality, and no change with a zero temporal weight.
 
-Targeted command: `cargo test --locked -p ascii-convert --test structural_matcher`
+Targeted commands (with the isolated offline dependency cache):
+`CARGO_HOME='D:/worktrees/cnv-008-cargo-home-isolated' CARGO_TARGET_DIR='D:/worktrees/cnv-008-target' cargo test --offline --locked -p ascii-convert --test structural_matcher`
+`CARGO_HOME='D:/worktrees/cnv-008-cargo-home-isolated' CARGO_TARGET_DIR='D:/worktrees/cnv-008-target' cargo test --offline --locked -p ascii-convert --test density_matcher`
 
 Supported environment verified: Windows 10 x64, `x86_64-pc-windows-msvc`, Rust/Cargo 1.100.0.
+
+Results: structural matcher **11 passed**, density matcher **29 passed**. `CARGO_HOME='D:/worktrees/cnv-008-cargo-home-isolated' CARGO_TARGET_DIR='D:/worktrees/cnv-008-target' cargo clippy --offline --locked --workspace --all-targets -- -D warnings` passed; `cargo fmt --all -- --check` passed; `python scripts/check-repository.py` passed.
 
 Fingerprint basis (SHA-256):
 - Fixture generator: `b052dfbf80e227d85b0f0a3ba0dfceaed2bf0bc47b1e653661b5c31cc398d270` (`tests/support/synthetic_font.rs`).
