@@ -58,6 +58,21 @@ The initial `convert_structural` contract supports the fixed configured foregrou
 
 The synthetic vertical-edge regression uses two same-density masks. It checks that explicit per-pixel reconstruction picks the vertical mask for a vertical edge, repeats deterministically, and ignores a previous frame when temporal weight is zero. This demonstrates a shape-sensitive fixture only; it is not a reproduction of the cited research paper and does not establish universally better fidelity or a performance improvement over density mode.
 
+## Structural matcher evidence
+
+The deterministic synthetic vertical-edge fixture is generated in-process by `equal_area_orientation_font()` in `crates/ascii-convert/tests/support/synthetic_font.rs`; raster samples are copied from the generated vertical glyph mask. No external image, network fetch, or runtime asset is used. The fixture compares equal-density horizontal and vertical masks and asserts stable selection, repeated output equality, and no change with a zero temporal weight.
+
+Targeted command: `cargo test --locked -p ascii-convert --test structural_matcher`
+
+Supported environment verified: Windows 10 x64, `x86_64-pc-windows-msvc`, Rust/Cargo 1.100.0.
+
+Fingerprint basis (SHA-256):
+- Fixture generator: `b052dfbf80e227d85b0f0a3ba0dfceaed2bf0bc47b1e653661b5c31cc398d270` (`tests/support/synthetic_font.rs`).
+- Test and fixture parameters: `75de0184e7b900abef86f67427a37405742ef01561f9456c774d335a6bf43725` (`tests/structural_matcher.rs`).
+- Locked dependency/config inputs: `a2c482e2f1b033b44d2a9166610a88046dc2084201678df206ae175e2c77b8f4` (`Cargo.lock`), `5ff5c32ec18a9806226a3445e38afc072eb65ecb4b3b65488c32a7ca06516630` (`Cargo.toml`), and `c3dcaa2e4c0d9b494b33f2d1539f78166c78b3f1355bb68934405d559af4db43` (`rust-toolchain.toml`).
+
+The scores are a static quality objective only. No throughput, broad fidelity, or paper-reproduction claim is made. CNV-005 candidate-specific color-fit integration remains outstanding, so this evidence does not establish full CNV-008 acceptance.
+
 ## Temporal stabilization
 
 A prior glyph can be retained when the new candidate's improvement is smaller than a hysteresis threshold. Make the threshold sensitive to time and local motion so noise is reduced without freezing legitimate changes. Clear history on scene cuts, seek, source change, font/grid change, and decode discontinuity. A global high penalty may look stable while destroying moving detail; measure both stability and reconstruction quality.
