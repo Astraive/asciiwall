@@ -2,6 +2,7 @@
 //! separate from archive, graph, compatibility, and capability semantics.
 mod manifest;
 mod settings;
+mod validation;
 
 pub use manifest::*;
 pub use settings::{RegistryComparisonError, RegistryDrift, compare_portable_settings};
