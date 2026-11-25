@@ -104,7 +104,7 @@ pub const MATRIX_RAIN_DESCRIPTOR: GeneratorDescriptor = GeneratorDescriptor {
     },
     supported_signals: &[],
     reduced_motion: MotionPolicy::FreezeWhenBackgroundMotionDisabled,
-    deterministic_export: false,
+    deterministic_export: true,
     presets: &[],
     resource_estimate: ResourceEstimatePolicy {
         character_bytes_per_cell: core::mem::size_of::<char>() as u64,

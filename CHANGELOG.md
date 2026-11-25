@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 **Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, PNG/JPEG decoding, and the bounded `ascii-scene` runtime. **No application binary or published release tag exists yet.**
 
 ### Added
+- Added generic deterministic export for caller-supplied first-party scene generators and enabled MatrixRain offline frame export with a pinned seed, identity, settings, event-input, and glyph-table fixture; portable schema, color rendering, native consumers, and interaction remain out of scope (`[SCN-002]`).
 
 - Initial repository MIT license ([LICENSE](LICENSE), `Copyright (c) 2026 Astraive`).
 - Frozen 100-document research and engineering specification pack (`docs/`, merged in PR `#1` at `3801d37`), plus documentation verification report ([docs/quality/documentation-verification.md](docs/quality/documentation-verification.md)).
