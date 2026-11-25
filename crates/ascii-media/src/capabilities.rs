@@ -7,8 +7,6 @@ pub struct ImageCapabilities {
     pub png: PngCapabilities,
     /// JPEG variants accepted by the static-image decoder.
     pub jpeg: JpegCapabilities,
-    /// Whether APNG frame animation is routed to an animation decoder.
-    pub apng_animated: bool,
     /// WebP variants accepted by the static-image decoder.
     pub webp: WebpCapabilities,
 }
@@ -18,7 +16,7 @@ pub struct ImageCapabilities {
 pub struct PngCapabilities {
     /// Non-animated PNG, including supported indexed, grayscale, RGB/RGBA, and Adam7 inputs.
     pub still: bool,
-    /// Animated PNG frame composition.
+    /// Whether APNG frame animation is decoded and composed.
     pub animated: bool,
 }
 
@@ -59,7 +57,6 @@ pub const fn image_capabilities() -> ImageCapabilities {
             baseline: true,
             progressive: true,
         },
-        apng_animated: false,
         webp: WebpCapabilities {
             lossy: false,
             lossless: false,

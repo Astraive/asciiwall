@@ -34,7 +34,6 @@ fn reports_only_variants_implemented_by_this_build() {
     assert!(!capabilities.png.animated);
     assert!(capabilities.jpeg.baseline);
     assert!(capabilities.jpeg.progressive);
-    assert!(!capabilities.apng_animated);
     assert!(!capabilities.webp.lossy);
     assert!(!capabilities.webp.lossless);
     assert!(!capabilities.webp.alpha);

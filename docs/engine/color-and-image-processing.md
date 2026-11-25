@@ -137,10 +137,11 @@ tests. These fixture checks do not imply native-codec, performance, or platform-
 ### Image capability contract (IMG-002)
 
 `ascii-media::image_capabilities()` reports this build's static decoder variants: still PNG,
-baseline/progressive JPEG, and no APNG or WebP variants. These values reflect the fixed decoder
-backends and are tested against the crate's actual implementation. The decoder explicitly rejects
-the RIFF/WEBP signature; animated WebP is not treated as a still image, and no animation decoder
-is currently wired in. Do not advertise WebP, APNG, ICC profile interpretation, or HDR support.
+baseline/progressive JPEG, and no APNG or WebP variants. APNG support is represented solely by
+`png.animated`, preventing contradictory duplicate capability flags. These values reflect the fixed
+decoder backends and are tested against the crate's actual implementation. The decoder explicitly
+rejects the RIFF/WEBP signature; animated WebP is not treated as a still image, and no animation
+decoder is currently wired in. Do not advertise WebP, APNG, ICC profile interpretation, or HDR support.
 
 JPEG display orientation is applied once while producing the normalized top-down raster. The
 returned `RasterFrameView` carries `RasterOrientation::TopDown`; consumers must use that pixel
