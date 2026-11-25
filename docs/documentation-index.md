@@ -1,6 +1,6 @@
 # Documentation index
 
-**100 Markdown documents**, organized for implementation rather than one enormous specification. All delivered filenames/folders are lowercase kebab-case. Begin with [start here](start-here.md); the application and library repositories are proposed, not created by this pack.
+**100 original source documents** (115 Markdown documents total, including 15 repository and planning guides), organized for implementation rather than one enormous specification. All delivered filenames/folders are lowercase kebab-case. Begin with [start here](start-here.md); the application and library repositories are proposed, not created by this pack.
 
 ## Fast paths
 
