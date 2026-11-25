@@ -13,13 +13,13 @@ pub(crate) fn validate_manifest_semantics(
     inventory: &AssetInventory,
 ) -> Result<(), Error> {
     for (index, author) in manifest.authors.iter().enumerate() {
-        if let Some(url) = &author.url {
-            if !valid_display_http_url(url) {
-                return Err(semantic(
-                    &format!("$.authors[{index}].url"),
-                    "author URL must be a display-only HTTP(S) URL",
-                ));
-            }
+        if let Some(url) = &author.url
+            && !valid_display_http_url(url)
+        {
+            return Err(semantic(
+                &format!("$.authors[{index}].url"),
+                "author URL must be a display-only HTTP(S) URL",
+            ));
         }
     }
     let required: BTreeSet<_> = manifest.capabilities.required.iter().collect();
@@ -322,9 +322,7 @@ fn valid_display_http_url(url: &str) -> bool {
     if !matches!(scheme, "http" | "https") {
         return false;
     }
-    let authority_end = remainder
-        .find(|character| matches!(character, '/' | '?' | '#'))
-        .unwrap_or(remainder.len());
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
     let authority = &remainder[..authority_end];
     let suffix = &remainder[authority_end..];
     if authority.is_empty() || authority.contains('@') || !valid_http_authority(authority) {
@@ -377,9 +375,7 @@ fn valid_http_port(port: &str) -> bool {
 
 fn valid_uri_suffix(suffix: &str) -> bool {
     let (path, rest) = if suffix.starts_with('/') {
-        let end = suffix
-            .find(|character| matches!(character, '?' | '#'))
-            .unwrap_or(suffix.len());
+        let end = suffix.find(['?', '#']).unwrap_or(suffix.len());
         (&suffix[..end], &suffix[end..])
     } else {
         ("", suffix)
