@@ -657,6 +657,69 @@ impl SamplingPlan {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sample_color_patch(
+        self,
+        raster: &NormalizedRaster,
+        column: u32,
+        row: u32,
+        cell_width: u32,
+        cell_height: u32,
+        background: LinearRgb,
+        cancellation: &CancellationToken,
+        output: &mut Vec<LinearRgb>,
+    ) -> Result<(), Error> {
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if cell_width == 0 || cell_height == 0 {
+            return Err(Error::Malformed(MalformedReason::EmptyDimensions));
+        }
+        let sample_count = u64::from(cell_width)
+            .checked_mul(u64::from(cell_height))
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or(Error::SizeOverflow)?;
+        if output.capacity() < sample_count {
+            return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
+        }
+        output.clear();
+        let display_x = f64::from(column) * f64::from(cell_width);
+        let display_y = f64::from(row) * f64::from(cell_height);
+        let display_width = f64::from(cell_width);
+        let display_height = f64::from(cell_height);
+        let mut work = 0_u64;
+        for patch_y in 0..cell_height {
+            for patch_x in 0..cell_width {
+                let index = u64::from(patch_y)
+                    .checked_mul(u64::from(cell_width))
+                    .and_then(|start| start.checked_add(u64::from(patch_x)))
+                    .ok_or(Error::SizeOverflow)?;
+                if index.is_multiple_of(SAMPLER_CANCEL_INTERVAL) && cancellation.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                let x0 = display_x + display_width * f64::from(patch_x) / f64::from(cell_width);
+                let x1 = display_x + display_width * f64::from(patch_x + 1) / f64::from(cell_width);
+                let y0 = display_y + display_height * f64::from(patch_y) / f64::from(cell_height);
+                let y1 =
+                    display_y + display_height * f64::from(patch_y + 1) / f64::from(cell_height);
+                let mut color = background;
+                self.sample_rect(
+                    raster,
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    background,
+                    cancellation,
+                    &mut work,
+                    Some(&mut color),
+                )?;
+                output.push(color);
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn sample_cell(
         self,
         raster: &NormalizedRaster,
@@ -713,6 +776,7 @@ impl SamplingPlan {
                         background,
                         cancellation,
                         &mut work,
+                        None,
                     )?;
                     output[index] = value as f32;
                     total += value;
@@ -727,8 +791,17 @@ impl SamplingPlan {
             let x1 = display_x + display_width;
             let y1 = display_y + display_height;
             let mut work = 0_u64;
-            let mean =
-                self.sample_rect(raster, x0, y0, x1, y1, background, cancellation, &mut work)?;
+            let mean = self.sample_rect(
+                raster,
+                x0,
+                y0,
+                x1,
+                y1,
+                background,
+                cancellation,
+                &mut work,
+                None,
+            )?;
             Ok((mean, None))
         }
     }
@@ -744,7 +817,9 @@ impl SamplingPlan {
         background: LinearRgb,
         cancellation: &CancellationToken,
         work: &mut u64,
+        color_output: Option<&mut LinearRgb>,
     ) -> Result<f64, Error> {
+        let mut color_output = color_output;
         match self.options.filter {
             SamplingFilter::Nearest => {
                 let display_x = (display_x0 + display_x1) * 0.5;
@@ -761,6 +836,9 @@ impl SamplingPlan {
                     || source_x > f64::from(raster.width())
                     || source_y > f64::from(raster.height())
                 {
+                    if let Some(output) = color_output.as_deref_mut() {
+                        *output = background;
+                    }
                     return Ok(background.luminance().value());
                 }
                 let x = if source_x == f64::from(raster.width()) {
@@ -778,7 +856,14 @@ impl SamplingPlan {
                 if (*work).is_multiple_of(SAMPLER_CANCEL_INTERVAL) && cancellation.is_cancelled() {
                     return Err(Error::Cancelled);
                 }
-                Ok(pixel_luminance(raster.pixels()[index], background))
+                let pixel = raster.pixels()[index];
+                if let Some(output) = color_output.as_deref_mut() {
+                    let color = pixel.composite_over(background);
+                    *output = color;
+                    Ok(color.luminance().value())
+                } else {
+                    Ok(pixel_luminance(pixel, background))
+                }
             }
             SamplingFilter::Box => {
                 let source_rect = self.transform.source_rect;
@@ -835,6 +920,9 @@ impl SamplingPlan {
                     raster.height(),
                 )?;
                 let mut covered_weight = 0.0;
+                let mut weighted_red = 0.0;
+                let mut weighted_green = 0.0;
+                let mut weighted_blue = 0.0;
                 let mut weighted_luminance = 0.0;
                 if let (Some(x_interval), Some(y_interval)) = (x_interval, y_interval) {
                     let mut remaining_y = y_interval.clipped_span;
@@ -868,13 +956,29 @@ impl SamplingPlan {
                                 return Err(Error::Cancelled);
                             }
                             let index = pixel_index(x, y, raster.width())?;
-                            weighted_luminance +=
-                                pixel_luminance(raster.pixels()[index], background) * weight;
+                            let pixel = raster.pixels()[index];
+                            if color_output.is_some() {
+                                let color = pixel.composite_over(background);
+                                weighted_red += color.red() * weight;
+                                weighted_green += color.green() * weight;
+                                weighted_blue += color.blue() * weight;
+                                weighted_luminance += color.luminance().value() * weight;
+                            } else {
+                                weighted_luminance += pixel_luminance(pixel, background) * weight;
+                            }
                             covered_weight += weight;
                         }
                     }
                 }
                 let uncovered_weight = (1.0 - covered_weight).max(0.0);
+                if let Some(output) = color_output {
+                    *output = LinearRgb::new(
+                        (weighted_red + background.red() * uncovered_weight).clamp(0.0, 1.0),
+                        (weighted_green + background.green() * uncovered_weight).clamp(0.0, 1.0),
+                        (weighted_blue + background.blue() * uncovered_weight).clamp(0.0, 1.0),
+                    )
+                    .map_err(|_| Error::Malformed(MalformedReason::InvalidConfiguration))?;
+                }
                 Ok(weighted_luminance + background.luminance().value() * uncovered_weight)
             }
         }
@@ -1039,6 +1143,8 @@ pub(crate) fn prepare_sampling(
     options: SamplingOptions,
     matching_work: u64,
     frame_validation_work: u64,
+    color_samples_per_cell: u64,
+    palette_storage_bytes: u64,
     budget: &Budget,
 ) -> Result<SamplingPlan, SamplingError> {
     let source_width = source.width();
@@ -1074,24 +1180,57 @@ pub(crate) fn prepare_sampling(
             usize::try_from(sample_count).map_err(|_| Error::SizeOverflow)?;
         let _descriptor_capacity = usize::try_from(cell_count).map_err(|_| Error::SizeOverflow)?;
     }
-    let sample_work = match options.filter {
-        SamplingFilter::Nearest => sample_count,
-        SamplingFilter::Box => {
-            let source_rect = transform.source_rect;
-            let display_rect = transform.display_rect;
-            let span_x = source_rect.width * f64::from(cell_width)
-                / display_rect.width
-                / sample_span_divisor_x as f64;
-            let span_y = source_rect.height * f64::from(cell_height)
-                / display_rect.height
-                / sample_span_divisor_y as f64;
-            let taps_x = conservative_taps(span_x, f64::from(source_width))?;
-            let taps_y = conservative_taps(span_y, f64::from(source_height))?;
-            sample_count
-                .checked_mul(taps_x)
-                .and_then(|work| work.checked_mul(taps_y))
-                .ok_or(Error::SizeOverflow)?
+    let sample_work = if color_samples_per_cell > 0 && patch_dimensions.is_none() {
+        0
+    } else {
+        match options.filter {
+            SamplingFilter::Nearest => sample_count,
+            SamplingFilter::Box => {
+                let source_rect = transform.source_rect;
+                let display_rect = transform.display_rect;
+                let span_x = source_rect.width * f64::from(cell_width)
+                    / display_rect.width
+                    / sample_span_divisor_x as f64;
+                let span_y = source_rect.height * f64::from(cell_height)
+                    / display_rect.height
+                    / sample_span_divisor_y as f64;
+                let taps_x = conservative_taps(span_x, f64::from(source_width))?;
+                let taps_y = conservative_taps(span_y, f64::from(source_height))?;
+                sample_count
+                    .checked_mul(taps_x)
+                    .and_then(|work| work.checked_mul(taps_y))
+                    .ok_or(Error::SizeOverflow)?
+            }
         }
+    };
+    let color_sample_count = cell_count
+        .checked_mul(color_samples_per_cell)
+        .ok_or(Error::SizeOverflow)?;
+    let color_sample_work = if color_samples_per_cell == 0 {
+        0
+    } else {
+        let tap_work = match options.filter {
+            SamplingFilter::Nearest => color_sample_count,
+            SamplingFilter::Box => {
+                let source_rect = transform.source_rect;
+                let display_rect = transform.display_rect;
+                let taps_x = conservative_taps(
+                    source_rect.width / display_rect.width,
+                    f64::from(source_width),
+                )?;
+                let taps_y = conservative_taps(
+                    source_rect.height / display_rect.height,
+                    f64::from(source_height),
+                )?;
+                color_sample_count
+                    .checked_mul(taps_x)
+                    .and_then(|work| work.checked_mul(taps_y))
+                    .ok_or(Error::SizeOverflow)?
+            }
+        };
+        tap_work
+            .checked_add(color_sample_count)
+            .ok_or(Error::SizeOverflow)?
     };
     let descriptor_work = match patch_dimensions {
         Some(_) => sample_count.checked_mul(3).ok_or(Error::SizeOverflow)?,
@@ -1117,6 +1256,7 @@ pub(crate) fn prepare_sampling(
     let total_work = normalization_work
         .checked_add(matching_work)
         .and_then(|work| work.checked_add(sample_work))
+        .and_then(|work| work.checked_add(color_sample_work))
         .and_then(|work| work.checked_add(descriptor_work))
         .and_then(|work| work.checked_add(initialization_work))
         .and_then(|work| work.checked_add(frame_validation_work))
@@ -1149,6 +1289,16 @@ pub(crate) fn prepare_sampling(
     } else {
         0
     };
+    let color_buffer_bytes = if color_samples_per_cell == 0 {
+        0
+    } else {
+        color_samples_per_cell
+            .checked_mul(u64::try_from(size_of::<LinearRgb>()).map_err(|_| Error::SizeOverflow)?)
+            .and_then(|bytes| bytes.checked_add(u64::try_from(size_of::<Vec<LinearRgb>>()).ok()?))
+            .ok_or(Error::SizeOverflow)?
+    };
+    let _color_buffer_layout =
+        isize::try_from(color_buffer_bytes).map_err(|_| Error::SizeOverflow)?;
     let row_bytes = usize::try_from(source.width())
         .map_err(|_| Error::SizeOverflow)?
         .checked_mul(bytes_per_pixel)
@@ -1166,6 +1316,8 @@ pub(crate) fn prepare_sampling(
     let whole_raster_bytes = readable_input_bytes
         .checked_add(normalized_bytes)
         .and_then(|bytes| bytes.checked_add(retained_patch_bytes))
+        .and_then(|bytes| bytes.checked_add(color_buffer_bytes))
+        .and_then(|bytes| bytes.checked_add(palette_storage_bytes))
         .ok_or(Error::SizeOverflow)?;
     if whole_raster_bytes > budget.max_raster_bytes() {
         return Err(Error::BudgetExceeded(BudgetKind::RasterBytes).into());
