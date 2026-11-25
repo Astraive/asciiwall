@@ -46,16 +46,16 @@ from a file extension or still-image capability.
 
 ### Reproducible animation fixtures
 
-The generated fixture inputs and generator settings are pinned by SHA-256 in
+The generated fixture inputs and generator settings are pinned by SHA-256 assertions in
 `ascii-media/tests/animation_decode.rs`:
 
 - GIF settings `dc797df0c1e556719cea89374be0017617b45ac9abb97cd7acb4ca71f65b1092`;
   fixture `d5a5dc5f85f99530aab8862e84a9c5b4c8536dec155cda61bc1bb013edf8be29`.
-- APNG settings `c4cd033e2aa48663db855d031731297fa3e857cc0efe5dabec9452d03bcff237`;
-  fixture `77d6a525c74475921c8e47569d5fbb60ed90da6253ad71773e119d744492b453`.
+- APNG settings `4960c500b02bfa20654df299568b29dea2554e0ace6299284b8e9e175e82f28f`;
+  fixture `9a2efd0e082adadd8e166d92a8dd2724bf27484378375c9fac7fa91d5bd5e079`.
 - First-frame `Previous` disposal mutation settings
-  `51679d6525c606c817699ca1203051994a9f12515add008f7f68ce2d9e1eb143`;
-  fixture `7d21b8a38929c127e58a73c3d9da9d37ffd33acc4c8f7b84bbdd29ffe12a0719`.
+  `a17c43ba4d9d5d33e02c1eb270db702f96a3a2ac4a3c8dedee9ae4ddef9644aa`;
+  fixture `90446459a823e11715c4e128960ece9b97cb820e7876aa92e31e7b7dfa85f5ca`.
 
 ## Hardware decoding
 

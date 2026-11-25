@@ -110,6 +110,10 @@ fn apng_subframes_compose_full_canvas_and_share_a_bounded_timeline() {
         Sha256::digest(APNG_SETTINGS.as_bytes())
     );
     println!("APNG fixture_sha256={:x}", Sha256::digest(&encoded));
+    assert_sha256(
+        &encoded,
+        "9a2efd0e082adadd8e166d92a8dd2724bf27484378375c9fac7fa91d5bd5e079",
+    );
 
     let animation = decode_animation(
         &mut Cursor::new(&encoded),
@@ -447,6 +451,10 @@ fn apng_first_previous_disposal_restores_the_initial_canvas() {
     encoded[frame_control + 4 + 24] = 2;
     update_chunk_crc(&mut encoded, chunk_start);
     let settings = format!("{APNG_SETTINGS};mutation=frame0.dispose=previous;fcTL-crc=updated");
+        &encoded,
+        "90446459a823e11715c4e128960ece9b97cb820e7876aa92e31e7b7dfa85f5ca",
+    );
+    assert_sha256(
     println!(
         "APNG first_previous config_sha256={:x} settings={settings}",
         Sha256::digest(settings.as_bytes())
