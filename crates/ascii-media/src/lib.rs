@@ -1,10 +1,10 @@
-//! Content-sniffed PNG/JPEG decoding into bounded, validated owned raster frames.
+//! Content-sniffed PNG/JPEG/still-WebP decoding into bounded, validated owned raster frames.
 //!
 //! Input is copied once into a size-bounded snapshot so codec metadata inspection and decoding
 //! cannot observe different source bytes. PNGs are checked through IEND and every chunk CRC;
-//! JPEG uses the pure-Rust strict `zune-jpeg` backend, avoiding native callback/panic paths.
-//! Codec crate limits are defense in depth; decoder scratch, input, work, and retained output
-//! are also preflighted and charged to local and shared resource ledgers.
+//! JPEG uses strict pure-Rust `zune-jpeg`, and the optional direct WebP decoder rejects animation
+//! with a typed handoff error before static pixel decoding. Decoder scratch, input, work, and
+//! retained output are preflighted and charged to local and shared resource ledgers.
 
 mod capabilities;
 mod decoded_frame;

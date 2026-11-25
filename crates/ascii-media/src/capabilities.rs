@@ -44,11 +44,9 @@ pub struct WebpCapabilities {
 
 /// Returns the capabilities of this exact `ascii-media` build.
 ///
-/// The decoder currently has fixed PNG/JPEG backends. `image` 0.25.10's optional WebP feature is
-/// disabled here, and its `image-webp` dependency is absent from the lockfile. There is no pinned
-/// local fixture encoder for all lossy/lossless/alpha variants or bounded WebP adapter in this
-/// crate, so WebP remains disabled despite upstream decoder APIs. The RIFF/WEBP signature is
-/// rejected rather than decoded as a static first frame; no animation handler is wired in.
+/// `webp` enables the direct `image-webp` still decoder; this build's fixtures cover lossy,
+/// lossless, and alpha inputs. Animated WebP is classified as `Unsupported(AnimatedImage)` before
+/// static pixel decoding, but no animation/timeline handler is available here.
 #[must_use]
 pub const fn image_capabilities() -> ImageCapabilities {
     ImageCapabilities {
@@ -61,9 +59,9 @@ pub const fn image_capabilities() -> ImageCapabilities {
             progressive: true,
         },
         webp: WebpCapabilities {
-            lossy: false,
-            lossless: false,
-            alpha: false,
+            lossy: cfg!(feature = "webp"),
+            lossless: cfg!(feature = "webp"),
+            alpha: cfg!(feature = "webp"),
             animated: false,
         },
     }

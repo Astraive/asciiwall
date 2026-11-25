@@ -447,6 +447,7 @@ impl ColorDescription {
     #[must_use]
     pub const fn srgb(alpha_mode: AlphaMode) -> Self {
         Self::new(ColorPrimaries::Srgb, TransferFunction::Srgb, alpha_mode)
+    }
 
     /// Adds compact source metadata without copying or allocating.
     #[must_use]

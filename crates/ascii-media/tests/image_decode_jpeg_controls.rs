@@ -30,6 +30,7 @@ use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use ascii_core::{
     Budget, BudgetKind, CancellationToken, ColorRange, Error, MalformedReason, SourceProfile,
     UnsupportedReason,
+};
 use ascii_media::{DecodeLimits, DecodeResources, DecodedFrame, ReadSeek, decode_image};
 use sha2::{Digest, Sha256};
 
@@ -563,7 +564,10 @@ fn malformed_exif_orientation_and_ifd_pointer_are_rejected() {
         Sha256::digest(SETTINGS.as_bytes())
     );
     for (name, fixture) in fixtures {
-        println!("malformed EXIF {name} sha256={:x}", Sha256::digest(&fixture));
+        println!(
+            "malformed EXIF {name} sha256={:x}",
+            Sha256::digest(&fixture)
+        );
         assert!(
             matches!(
                 decode(&fixture),
