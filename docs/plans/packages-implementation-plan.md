@@ -66,6 +66,9 @@ The [repository layout](../architecture/repository-structure.md) defines crate b
 - [ ] Run `cargo test -p ascii-package --test manifest_validation -- --nocapture` again, then affected workspace regressions. Expected: all applicable assertions pass; record unsupported native environments separately, not as success.
 - [ ] Review the diff and commit this independently testable unit with its fixtures/spec changes. Do not amend a failing unrelated test merely to make the suite green.
 
+
+**Current implementation status (PKG-003 draft):** `ascii-package` now exposes the versioned 14-kind data-only registry, unique-key bounded parsing, graph/capability validation, and a pre-allocation aggregate estimate. The validated result is not an executor or host integration. Activation still depends on CFG-004–CFG-016 portable setting descriptors/defaults; particle/decoder/aggregate-memory limits must be provided by the engine, and COR-001 work units do not define calibrated wall time. Keep PKG-003 open until those external authorities and full activation-time policy are available.
+
 ## P03: Safe staged archive importer
 
 **Files:** Create or modify `crates/ascii-package/src/{archive.rs,extract.rs,install.rs}`. Test file: `crates/ascii-package/tests/archive_import.rs`. Any necessary crate manifest/setup belongs to this unit, not an untestable separate scaffold ticket.
