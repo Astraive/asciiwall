@@ -19,13 +19,53 @@ Generator descriptors declare a local parameter schema/version, limits, supporte
 | Particle garden | particles/cells | emission, lifetime, drag | pointer attraction/repulsion |
 | Clock typography | character layout | format, alignment, locale | none required |
 
-These are first-party generator proposals, not third-party downloadable code. The bounded particle field and the incomplete SCN-002 matrix-rain generator are implemented in `ascii-scene`; the other families remain proposals. Matrix-rain does not yet have an executable portable registry, colored-frame/native consumer, or generic offline export. A community package must select a reviewed generator through a separately owned package contract and cannot provide executable code.
+These are first-party generator proposals, not third-party downloadable code. The bounded particle field, SCN-002 matrix-rain generator, and SCN-003 depth-projected starfield generator are implemented in `ascii-scene`; the other families remain proposals. These generators do not yet have an executable portable registry, colored-frame/native consumer, or generic offline export. A community package must select a reviewed generator through a separately owned package contract and cannot provide executable code.
 
 ### SCN-002 matrix-rain generator (partial; issue remains blocked)
 
 `ascii-scene::MatrixRainGenerator` now keeps one bounded stream record per grid column, derives a separate deterministic random stream for each column from the node stream, advances heads in the SCN-001 fixed-step runtime, and clips every trail cell to the grid before indexing the caller-owned frame. It borrows the existing immutable `ascii_convert::GlyphTable` and selects glyphs by its exposed table order; it does not copy or regenerate font records. Density, speed, trail length, and `#RRGGBBAA` configuration are validated before the runtime allocates its frame and stream buffers. A zero-speed generator freezes the simulation and does not refresh its frame.
 
 This is generator-core behavior, not a complete portable node or application feature. SCN-001's export context is still specialized to `ParticleFieldGenerator`; the current schema is documentation rather than a shared executable registry, so missing/unknown-key and arity rejection have not been proven through that registry. The character-frame API carries no RGBA value, so the color is retained in configuration but is not rendered; consequently neither the safe-preset flash criterion nor native appearance is verified. No matrix-specific pointer-deflection or click-burst reaction operator is wired in. FNT-002/FNT-003 remain open, so the borrowed immutable glyph table is used without claiming an accepted font mapping. These limits, plus open SCN-001 integration (#124) and the separate AST-001/006/010/017 consumers, keep SCN-002 open and Blocked Yes.
+
+### SCN-003 depth-projected starfield generator (partial; issue remains blocked)
+
+`ascii_scene::StarfieldGenerator` implements deterministic Q16 depth projection through the SCN-001 `SceneRuntime`, borrowing the existing immutable `ascii_convert::GlyphTable`. It keeps one independent SplitMix64 stream per effective particle, recycles particles at the near plane or when their projection leaves the grid, and maps depth brightness to the measured table's immutable coverage order. Configuration validates requested count (1–20,000), speed (0–10), depth (0.1–100), and exact `#RRGGBBAA` spelling before runtime activation. The requested count remains available while the allocated/effective count is capped by SCN-001 `scene.max-particles`; checked scratch sizing and SCN-001 resource reservation happen before the particle vector is reserved. Pointer attraction and button-0 warp impulse consume only host-filtered `ApprovedSnapshots`. Zero speed and reduced-motion/time-scale gates do not evolve the scene.
+
+The local descriptor is generator introspection only, not the draft-v1 executable package registry: missing/unknown parameter rejection and node arity have not been validated through a shared registry. Color is retained as portable metadata but the character-cell output cannot render RGBA. The descriptor deliberately does not claim deterministic export because SCN-001 export remains specialized to `ParticleFieldGenerator`; no native surface, app behavior, schema, CFG persistence, or accepted FNT mapping is claimed. These external capabilities remain blockers to acceptance.
+
+The dedicated integration test exercises a fixed 600-step deterministic timeline, near-plane recycling and a 27-case, 60-second simulation benchmark (ambient/warp/still × 160/240/320 columns × 20/30/60 FPS). Results below were measured on Windows 11 x64 build 26300 (`x86_64-pc-windows-msvc`), Rust `1.100.0` (`0ef1bc386`, LLVM `23.1.5`), debug test profile. Each case advanced exactly 60 seconds of elapsed simulation. p50/p95/p99 are `Instant` durations around `SceneRuntime::advance`, in nanoseconds. Peak state bytes are SCN-001's checked logical frame-plus-particle estimate, excluding allocator overhead and RSS.
+
+| Preset | Columns | FPS | p50 ns | p95 ns | p99 ns | Peak state bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ambient | 160 | 20 | 95,100 | 97,900 | 100,600 | 88,808 |
+| ambient | 160 | 30 | 80,800 | 81,200 | 84,200 | 88,808 |
+| ambient | 160 | 60 | 66,400 | 68,200 | 70,900 | 88,808 |
+| ambient | 240 | 20 | 110,700 | 113,100 | 115,400 | 127,208 |
+| ambient | 240 | 30 | 96,200 | 98,300 | 99,300 | 127,208 |
+| ambient | 240 | 60 | 81,800 | 83,800 | 85,700 | 127,208 |
+| ambient | 320 | 20 | 125,900 | 128,900 | 133,300 | 165,608 |
+| ambient | 320 | 30 | 111,500 | 114,900 | 126,300 | 165,608 |
+| ambient | 320 | 60 | 97,000 | 100,200 | 110,200 | 165,608 |
+| warp | 160 | 20 | 291,700 | 299,100 | 329,200 | 124,808 |
+| warp | 160 | 30 | 233,600 | 239,300 | 308,700 | 124,808 |
+| warp | 160 | 60 | 177,800 | 460,000 | 624,500 | 124,808 |
+| warp | 240 | 20 | 728,500 | 1,059,900 | 1,328,000 | 163,208 |
+| warp | 240 | 30 | 579,300 | 973,700 | 1,907,500 | 163,208 |
+| warp | 240 | 60 | 442,800 | 760,200 | 1,687,700 | 163,208 |
+| warp | 320 | 20 | 752,400 | 1,297,200 | 2,526,700 | 201,608 |
+| warp | 320 | 30 | 614,400 | 1,184,400 | 2,325,500 | 201,608 |
+| warp | 320 | 60 | 469,400 | 913,700 | 2,062,500 | 201,608 |
+| still | 160 | 20 | 100 | 200 | 200 | 88,808 |
+| still | 160 | 30 | 100 | 200 | 200 | 88,808 |
+| still | 160 | 60 | 100 | 200 | 200 | 88,808 |
+| still | 240 | 20 | 100 | 200 | 200 | 127,208 |
+| still | 240 | 30 | 100 | 200 | 200 | 127,208 |
+| still | 240 | 60 | 100 | 200 | 200 | 127,208 |
+| still | 320 | 20 | 100 | 200 | 200 | 165,608 |
+| still | 320 | 30 | 100 | 200 | 200 | 165,608 |
+| still | 320 | 60 | 100 | 200 | 200 | 165,608 |
+
+The SCN-003 synthetic fixture uses `synthetic_font(false)`, repertoire `BA `, `GlyphConfig(8.0, 8, 12, 9)`, node `starfield`, seed `0x0154`, ambient config, an `80 × 40` grid, empty approved snapshots, and 600 fixed steps at 60 Hz. Its immutable glyph-table fingerprint is `4ddc3a1585b233278e7050a05eb95b777916375d3e619efb8c76cbd85db648e0`; the row-major scalar-wise FNV-1a-64 cell hash is `0f7090f8c4d34773`. Both are pinned in `crates/ascii-scene/tests/starfield.rs`. The hash pins this synthetic-table implementation output, not an accepted FNT portable mapping.
 
 #### Deterministic fixture
 

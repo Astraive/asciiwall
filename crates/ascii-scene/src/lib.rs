@@ -13,6 +13,7 @@ mod params;
 mod resource;
 mod simulation;
 mod snapshots;
+mod starfield;
 
 pub use descriptor::{
     GENERATOR_DESCRIPTOR, GeneratorDescriptor, GeneratorLimits, MotionPolicy, ParameterDefault,
@@ -41,6 +42,10 @@ pub use simulation::{AdvanceReport, FixedStepContext, SimulationLimits};
 pub use snapshots::{
     ApprovedSnapshots, BatterySnapshot, NormalizedButtonEvent, NormalizedPoint, NormalizedRect,
     SignalKind, SnapshotCandidates, SnapshotCapabilities,
+};
+pub use starfield::{
+    STARFIELD_DESCRIPTOR, STARFIELD_PRESETS, StarfieldConfig, StarfieldGenerator,
+    StarfieldPresetDescriptor,
 };
 
 pub use ascii_core::Error;
