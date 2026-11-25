@@ -14,9 +14,10 @@ pub use scene_registry::{
     descriptor_for_node, parameter_schema,
 };
 pub use semantic::{
-    MAX_DECODED_IMAGE_BYTES, MAX_DECODED_IMAGE_PIXELS, MAX_SCENE_EDGES, MAX_SCENE_NODES,
-    SceneCapabilityPlan, SceneFeedDecision, SceneFeedReason, SceneFeedState, SceneFeedStatus,
-    SceneFeeds, ScenePolicy, SceneResourceEstimate, SceneResourceInputs, SceneResourceLimits,
+    MAX_DECODED_IMAGE_BYTES, MAX_DECODED_IMAGE_PIXELS, MAX_SCENE_EDGES,
+    MAX_SCENE_FEED_REASON_CODE_BYTES, MAX_SCENE_NODES, SceneCapabilityPlan, SceneFeedDecision,
+    SceneFeedReason, SceneFeedReasonError, SceneFeedState, SceneFeedStatus, SceneFeeds,
+    ScenePolicy, SceneResourceEstimate, SceneResourceInputs, SceneResourceLimits,
     SceneSemanticError, SceneValidationPlan, SourceResource, estimate_scene_resources,
     validate_graph, validate_scene_capabilities, validate_scene_semantics,
     validate_scene_source_refs,

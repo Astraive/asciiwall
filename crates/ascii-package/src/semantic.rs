@@ -25,11 +25,79 @@ pub enum SceneFeedState {
     Unsupported,
 }
 
-/// Stable adapter-provided reason code. It is carried through unchanged.
+/// Reason-code token length is bounded before storing or displaying host data.
+pub const MAX_SCENE_FEED_REASON_CODE_BYTES: usize = 64;
+
+/// Stable, bounded adapter-provided reason code.
+/// Valid codes are 1–64 lowercase ASCII letters or digits, separated by at most one
+/// hyphen, period, or underscore. Leading/trailing separators are rejected.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SceneFeedReason {
-    pub code: String,
+    code: String,
 }
+
+/// Construction failures contain no caller-provided text, keeping diagnostics bounded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneFeedReasonError {
+    /// The code is empty.
+    Empty,
+    /// The code exceeds [`MAX_SCENE_FEED_REASON_CODE_BYTES`].
+    TooLong,
+    /// The code violates the bounded ASCII token grammar.
+    InvalidToken,
+}
+
+impl SceneFeedReason {
+    /// Validates and stores one bounded reason-code token.
+    pub fn new(code: impl AsRef<str>) -> Result<Self, SceneFeedReasonError> {
+        let code = code.as_ref();
+        if code.is_empty() {
+            return Err(SceneFeedReasonError::Empty);
+        }
+        if code.len() > MAX_SCENE_FEED_REASON_CODE_BYTES {
+            return Err(SceneFeedReasonError::TooLong);
+        }
+
+        let mut previous_separator = false;
+        for (index, byte) in code.bytes().enumerate() {
+            if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+                previous_separator = false;
+            } else if matches!(byte, b'-' | b'.' | b'_') && index > 0 && !previous_separator {
+                previous_separator = true;
+            } else {
+                return Err(SceneFeedReasonError::InvalidToken);
+            }
+        }
+        if previous_separator {
+            return Err(SceneFeedReasonError::InvalidToken);
+        }
+        Ok(Self {
+            code: code.to_owned(),
+        })
+    }
+
+    /// Returns the validated reason-code token.
+    pub fn as_str(&self) -> &str {
+        &self.code
+    }
+}
+
+impl fmt::Display for SceneFeedReasonError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("feed reason code must not be empty"),
+            Self::TooLong => write!(
+                formatter,
+                "feed reason code exceeds the {MAX_SCENE_FEED_REASON_CODE_BYTES}-byte limit"
+            ),
+            Self::InvalidToken => formatter.write_str(
+                "feed reason code must be a lowercase ASCII token using letters, digits, and isolated separators",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SceneFeedReasonError {}
 
 /// Data-only observation for one capability. `usable` is meaningful only when
 /// the state is `Supported`; no platform state is probed by this crate.
@@ -536,12 +604,6 @@ fn validate_feed_status(
         return Err(SceneSemanticError::InvalidCapability {
             capability,
             reason: "only supported feeds may be marked usable",
-        });
-    }
-    if status.reason.code.trim().is_empty() {
-        return Err(SceneSemanticError::InvalidCapability {
-            capability,
-            reason: "feed status requires a non-empty reason code",
         });
     }
     Ok(())
