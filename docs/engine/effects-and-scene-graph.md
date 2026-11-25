@@ -6,7 +6,7 @@ The draft v1 portable graph has character-frame outputs, a fixed built-in node r
 
 ## Later typed-graph architecture
 
-The internal engine may evolve toward typed ports for raster, character grid, scalar/vector fields, event impulses, palettes, and presentation layers. Those richer ports are not accepted by the v1 package schema. Publishing them requires a versioned schema/feature extension and explicit type checks. Cycles remain forbidden unless a future bounded-feedback node owns its own state.
+The internal engine may evolve toward typed ports for raster, character grid, scalar/vector fields, event impulses, palettes, and presentation layers. Those richer ports are not accepted by the v1 package schema. Publishing them requires a versioned schema/feature extension and explicit type checks. All v1 and proposed typed graphs remain DAGs; this proposal admits no feedback node or cycle exception. A separate future reviewed decision must define any bounded-feedback node and its contract before an exception is considered.
 
 A package contains data selecting built-in node kinds and validated parameters. It does not contain Rust, Lua, JavaScript, shell commands, arbitrary mathematical expressions, or user shaders. This enables rich customization without making every wallpaper an executable extension.
 
@@ -89,11 +89,11 @@ Rejection examples (illustrative, future typed-graph validator cases; not v1 fix
 
 - A `raster` source connected directly to a `character-grid` cell effect is a type error. Insert a registered bounded conversion or reject; never reinterpret buffer bytes.
 - A `kind: "third-party-glow"` absent from the fixed registry is unknown, even if its parameter JSON looks valid.
-- An ordinary edge cycle is rejected. A bounded-feedback node, if separately approved, is the only cycle boundary and owns a fixed delay/state contract; it does not legalize any other cycle.
+- An ordinary edge cycle is rejected. This proposal admits no feedback node or cycle exception; a separate future reviewed decision must define any bounded-feedback node and its contract before an exception is considered.
 - A history request with no finite frame/byte bound, or whose checked aggregate exceeds budget, is rejected before allocation.
 - An expression string such as `"sin(x)"` is not a binding/operator or a node. Reject it as an unknown field/value and never parse or execute it.
 
-Cycle analysis runs after graph expansion and before allocation. Any eventual bounded-feedback exception must be separately specified and approved with fixed delay, finite state dimensions, reset/generation rules, deterministic scheduling, and resource bounds. Until then all future typed graphs, like v1, are DAGs.
+Cycle analysis runs after graph expansion and before allocation. FX-015 admits no bounded-feedback node or cycle exception: v1 and proposed typed graphs remain DAGs. A separate future reviewed decision must define any bounded-feedback node, finite state dimensions, reset/generation rules, deterministic scheduling, and resource bounds before any exception is considered.
 
 ### Binding proposal and capability provenance
 
@@ -143,7 +143,7 @@ This classification is a recommendation per proposed effect, not approval of any
 
 ### Approval and unresolved product choices
 
-**Decision record: proposed for review; no implementation, measured native limitation, or product approval is claimed.** Open decisions for the contract owner include: final major-version/capability negotiation shape and identifiers; whether to support all seven proposed port types and any conversion nodes; exact numeric bounds and operator ordering/chain limits; required-versus-optional feed behavior and stale-feed policy; bounded-feedback inclusion and its state/reset model; resource budgets and export/reduced-motion behavior per node; and feature-version versus baked-fallback choice for each future family. Until these are resolved and approved, draft v1 alone is conforming and native limitations remain unverified where not measured.
+**Decision record: proposed for review; no implementation, measured native limitation, or product approval is claimed.** Open decisions for the contract owner include: final major-version/capability negotiation shape and identifiers; whether to support all seven proposed port types and any conversion nodes; exact numeric bounds and operator ordering/chain limits; required-versus-optional feed behavior and stale-feed policy; whether a separate future decision should consider bounded feedback at all; resource budgets and export/reduced-motion behavior per node; and feature-version versus baked-fallback choice for each future family. Until these are resolved and approved, draft v1 alone is conforming and native limitations remain unverified where not measured.
 
 ### Migration and unsupported clients
 
