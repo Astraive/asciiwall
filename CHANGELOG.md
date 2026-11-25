@@ -55,6 +55,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reject contain transforms when f64 rounding cannot preserve centered letterbox margins at extreme destination sizes (`#294`).
 - Normalize box-sampling overlap per axis before combining weights, allowing valid subnormal footprints without requiring representable absolute 2D area (`[CNV-001]`).
 - Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
-- Add CNV-003 regressions for exact-boundary sampling geometry, cache identity, padded strides, crop mapping, patch budgets, 64-wide extreme/collapsed crops, and public cancellation conversion ([CNV-003]).
+- Add CNV-003 regressions for exact-boundary sampling geometry, sampling-configuration identity, padded strides, crop mapping, patch budgets, 64-wide extreme/collapsed crops, and public cancellation conversion ([CNV-003]).
+- Add an in-flight quality-patch cancellation regression confirming normalized-raster reservation release after sampling begins ([CNV-003]).
 - Restrict collapsed Box-sampling scans to each sample's orthogonal source footprint, preserving area coverage without traversing unrelated crop rows ([CNV-003]).
 - Correct CNV-007 feature-extraction work preflight to cover up to nine normalized-coverage evaluations per patch sample before extraction.

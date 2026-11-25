@@ -637,7 +637,8 @@ mod tests {
         FrameMetadata, GlyphTableId, PixelFormat, RasterFrameView, RasterOrientation,
         TransferFunction,
     };
-    use std::cell::Cell;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     #[allow(dead_code)]
     mod synthetic_font {
@@ -675,7 +676,9 @@ mod tests {
     }
 
     #[test]
-    fn in_flight_quality_patch_cancellation_returns_no_partial_conversion() {
+    fn in_flight_quality_patch_cancellation_releases_raster_reservation() {
+        const TIMEOUT: Duration = Duration::from_secs(5);
+
         let cancellation = CancellationToken::new();
         let table = build_glyph_table(
             &synthetic_font::synthetic_font(false),
@@ -712,37 +715,57 @@ mod tests {
             RasterOrientation::TopDown,
             &pixels,
         );
-        let poll_count = Cell::new(0);
-        let reached_in_flight_poll = Cell::new(false);
-        let sample_cancel_poll = |index: usize, output: &[f32]| {
-            poll_count.set(poll_count.get() + 1);
-            if index == 256 {
-                reached_in_flight_poll.set(true);
-                assert_eq!(output.len(), 4096);
-                assert!(output[..index].iter().all(|value| *value > 0.0));
-                assert_eq!(output[index], 0.0);
-                true
-            } else {
-                false
-            }
-        };
         let resources = super::NormalizedRasterResources::new(u64::MAX);
+        let cancellation_ref = &cancellation;
+        let resources_ref = &resources;
+        let (sampling_started_tx, sampling_started_rx) = mpsc::sync_channel(0);
+        let (cancelled_tx, cancelled_rx) = mpsc::sync_channel(0);
 
-        let result = convert_density_detailed_impl(
-            raster,
-            &table,
-            &settings,
-            &Budget::new(64_000_000, 128_000_000, u64::MAX),
-            &resources,
-            Some(&sample_cancel_poll),
-        );
+        let result = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                sampling_started_rx
+                    .recv_timeout(TIMEOUT)
+                    .expect("sampling reaches the synchronized cancellation point");
+                assert!(resources_ref.retained_bytes_in_use() > 0);
+                cancellation_ref.cancel();
+                cancelled_tx
+                    .send(())
+                    .expect("conversion is waiting for cancellation");
+            });
 
-        assert!(reached_in_flight_poll.get());
-        assert_eq!(poll_count.get(), 2);
+            let sample_cancel_poll = |index: usize, output: &[f32]| {
+                if index == 256 {
+                    assert!(resources.retained_bytes_in_use() > 0);
+                    assert_eq!(output.len(), 4096);
+                    assert!(output[..index].iter().all(|value| *value > 0.0));
+                    assert_eq!(output[index], 0.0);
+                    sampling_started_tx
+                        .send(())
+                        .expect("cancellation thread is ready");
+                    cancelled_rx
+                        .recv_timeout(TIMEOUT)
+                        .expect("cancellation thread cancels without blocking indefinitely");
+                    true
+                } else {
+                    false
+                }
+            };
+
+            convert_density_detailed_impl(
+                raster,
+                &table,
+                &settings,
+                &Budget::new(64_000_000, 128_000_000, u64::MAX),
+                &resources,
+                Some(&sample_cancel_poll),
+            )
+        });
+
         assert!(matches!(
             result,
             Err(DensityConversionError::Core(Error::Cancelled))
         ));
+        assert_eq!(resources.retained_bytes_in_use(), 0);
     }
 
     #[test]

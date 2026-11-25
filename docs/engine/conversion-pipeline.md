@@ -39,7 +39,7 @@ The deterministic matcher fixtures build their small font masks from source-defi
 
 Independent cell descriptors and candidate evaluation can be split across rows/tiles using a bounded pool. Error-diffusion dithering introduces order dependencies; do not parallelize it as though each pixel/cell were independent. Ordered dithering is a simpler deterministic parallel alternative.
 
-The density path checks cancellation every 32 output cells, every 64 glyph candidates, and every 256 sampling, patch-initialization, or descriptor operations. It polls again immediately before output-cell allocation, and its aggregate work ceiling includes final frame-cell validation. A cancelled operation returns no partial frame or patch result. Results carry the caller's original generation, frame and timing identity so stale conversions can be discarded after settings change.
+The density path checks cancellation every 32 output cells, every 64 glyph candidates, and every 256 sampling, patch-initialization, or descriptor operations. It polls again immediately before output-cell allocation, and its aggregate work ceiling includes final frame-cell validation. A cancelled operation returns no partial frame or patch result; the in-flight quality-patch regression also verifies that the normalized-raster reservation acquired before sampling is released on cancellation. Results carry the caller's original generation, frame and timing identity so stale conversions can be discarded after settings change.
 
 ## Numerical behavior
 
