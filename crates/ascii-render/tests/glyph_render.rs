@@ -10,7 +10,7 @@ use ascii_core::{
     MalformedReason,
 };
 use ascii_render::{
-    DeviceStatus, Error, PresentOutcome, RecoverableReason, RenderTarget, Renderer,
+    AtlasCache, DeviceStatus, Error, PresentOutcome, RecoverableReason, RenderTarget, Renderer,
     SHADER_REVISION, SkippedReason,
 };
 use sha2::{Digest, Sha256};
@@ -183,6 +183,17 @@ fn srgb(x: f32) -> f32 {
 }
 fn unorm(x: f32) -> u8 {
     (x.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn pixel_candidates(value: f32, extent: usize) -> ([usize; 2], usize) {
+    let value = value.clamp(0.0, extent as f32 - 1.0e-6);
+    let lower = value.floor() as usize;
+    let rounded = value.round() as usize;
+    if rounded > 0 && rounded < extent && (value - rounded as f32).abs() < 1.0e-4 {
+        ([rounded - 1, rounded], 2)
+    } else {
+        ([lower, lower], 1)
+    }
 }
 
 // Reference includes quantization between the background and glyph passes in the sRGB target.
@@ -460,8 +471,9 @@ fn narrow_atlas_budget_boundary_and_gpu_copy() {
     let frame = frame(&table, size, &budget, &token);
     let output = texture(&device, size);
     let target = RenderTarget::texture(&output, 1, 1);
-    let width = table.glyphs().len() as u64 * u64::from(table.cell_width());
-    let height = u64::from(table.cell_height());
+    let padding = 2u64;
+    let width = table.glyphs().len() as u64 * (u64::from(table.cell_width()) + padding);
+    let height = u64::from(table.cell_height()) + padding;
     let alignment = u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let staging_bytes = width.div_ceil(alignment) * alignment * height;
     let raster_bytes = width * height + staging_bytes;
@@ -524,6 +536,183 @@ fn narrow_atlas_budget_boundary_and_gpu_copy() {
     );
     let (pixels, stride) = read_pixels(&device, &queue, &output);
     compare_golden(&frame, &table, &pixels, stride);
+}
+
+#[test]
+#[ignore = "requires a real wgpu adapter for shared-atlas resource lifetime"]
+fn same_device_cache_reuses_fingerprints_and_rejects_generation_without_replacement() {
+    let (device, queue) = native_device();
+    let (table, budget, token) = fixtures();
+    let cache_bytes = table.glyphs().len() as u64
+        * u64::from(table.cell_width() + 2)
+        * u64::from(table.cell_height() + 2);
+    let cache = Arc::new(AtlasCache::new(device.clone(), queue.clone(), cache_bytes));
+    let size = GridSize::new(4, 4);
+    let original_frame = frame(&table, size, &budget, &token);
+    let first_texture = texture(&device, size);
+    let second_texture = texture(&device, size);
+    let first_target = RenderTarget::texture(&first_texture, 1, 1);
+    let second_target = RenderTarget::texture(&second_texture, 2, 1);
+
+    let mut first = Renderer::new_with_cache(
+        cache.clone(),
+        table.clone(),
+        budget,
+        token.clone(),
+        DeviceStatus::new(),
+    );
+    assert_eq!(
+        first.present(&original_frame, &first_target),
+        Ok(PresentOutcome::Presented { suboptimal: false })
+    );
+    assert_eq!(first.stats().atlas_textures, 1);
+    assert_eq!(cache.resident_bytes(), cache_bytes);
+
+    let mut second = Renderer::new_with_cache(
+        cache.clone(),
+        table.clone(),
+        budget,
+        token.clone(),
+        DeviceStatus::new(),
+    );
+    assert_eq!(
+        second.present(&original_frame, &second_target),
+        Ok(PresentOutcome::Presented { suboptimal: false })
+    );
+    assert_eq!(second.stats().atlas_cache_hits, 1);
+    assert_eq!(second.stats().atlas_textures, 0);
+    assert_eq!(cache.resident_bytes(), cache_bytes);
+
+    let alternate = Arc::new(
+        build_glyph_table(
+            &synthetic_font::synthetic_font(false),
+            &GlyphRepertoire::new(" AB").unwrap(),
+            &GlyphConfig::new(9.0, 8, 12, 9).unwrap(),
+            &budget,
+            &token,
+        )
+        .unwrap(),
+    );
+    assert_ne!(table.fingerprint(), alternate.fingerprint());
+    let alternate_frame = frame(&alternate, size, &budget, &token);
+    let third_texture = texture(&device, size);
+    let third_target = RenderTarget::texture(&third_texture, 3, 1);
+    let mut third = Renderer::new_with_cache(
+        cache.clone(),
+        alternate,
+        budget,
+        token.clone(),
+        DeviceStatus::new(),
+    );
+    assert_eq!(
+        third.present(&alternate_frame, &third_target),
+        Err(Error::Core(ascii_core::Error::BudgetExceeded(
+            ascii_core::BudgetKind::RasterBytes
+        )))
+    );
+    assert_eq!(cache.resident_bytes(), cache_bytes);
+    drop(second);
+    assert_eq!(cache.resident_bytes(), cache_bytes);
+    first.invalidate();
+    assert_eq!(
+        first.present(&original_frame, &first_target),
+        Ok(PresentOutcome::Presented { suboptimal: false })
+    );
+
+    drop(first);
+    let _ = device.poll(wgpu::Maintain::Wait);
+    assert_eq!(
+        third.present(&alternate_frame, &third_target),
+        Ok(PresentOutcome::Presented { suboptimal: false })
+    );
+    assert_eq!(third.stats().atlas_textures, 1);
+    assert_eq!(cache.resident_bytes(), cache_bytes);
+}
+
+#[test]
+#[ignore = "requires a real wgpu adapter for integer/fractional-scale atlas goldens"]
+fn adjacent_glyph_masks_have_no_bleed_at_integer_and_fractional_target_scales() {
+    let (device, queue) = native_device();
+    let (table, budget, token) = fixtures();
+    let glyph_a = table
+        .glyphs()
+        .iter()
+        .position(|glyph| glyph.character() == 'A')
+        .unwrap() as u32;
+    let glyph_b = table
+        .glyphs()
+        .iter()
+        .position(|glyph| glyph.character() == 'B')
+        .unwrap() as u32;
+    let cells = vec![
+        AsciiCell::new(glyph_a, [255, 24, 16, 255], [0, 0, 0, 255]),
+        AsciiCell::new(glyph_b, [16, 48, 255, 255], [0, 0, 0, 255]),
+    ];
+    let size = GridSize::new(2, 1);
+    let glyph_frame = AsciiFrame::try_new(
+        size,
+        FrameMetadata::new(GlyphTableId::new(*table.fingerprint()), 1, 1, 0, 0),
+        cells.clone(),
+        table.glyphs().len() as u32,
+        &budget,
+        &token,
+    )
+    .unwrap();
+    let mut renderer = Renderer::new(
+        device.clone(),
+        queue.clone(),
+        table.clone(),
+        budget,
+        token,
+        DeviceStatus::new(),
+    );
+
+    for (width, height) in [(16, 12), (20, 15), (24, 18), (32, 24)] {
+        let output = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scaled adjacent-glyph atlas golden"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target = RenderTarget::texture(&output, u64::from(width), 1);
+        assert_eq!(
+            renderer.present(&glyph_frame, &target),
+            Ok(PresentOutcome::Presented { suboptimal: false })
+        );
+        let (pixels, stride) = read_pixels(&device, &queue, &output);
+        for y in 0..height as usize {
+            let source_y = (y as f32 + 0.5) / height as f32 * 12.0;
+            let (mask_ys, mask_y_count) = pixel_candidates(source_y, 12);
+            for x in 0..width as usize {
+                let source_x = (x as f32 + 0.5) / width as f32 * 2.0;
+                let column = source_x.floor().min(1.0) as usize;
+                let local_x = source_x - column as f32;
+                let (mask_xs, mask_x_count) = pixel_candidates(local_x * 8.0, 8);
+                let actual = &pixels[y * stride + x * 4..y * stride + x * 4 + 4];
+                let close_to_reference = (0..mask_y_count).any(|mask_y| {
+                    (0..mask_x_count).any(|mask_x| {
+                        let coverage = table.glyphs()[cells[column].glyph() as usize].mask()
+                            [mask_ys[mask_y] * 8 + mask_xs[mask_x]];
+                        let expected = reference_pixel(cells[column], coverage);
+                        (0..4).all(|channel| actual[channel].abs_diff(expected[channel]) <= 4)
+                    })
+                });
+                assert!(
+                    close_to_reference,
+                    "adjacent-mask bleed at {width}x{height}, ({x}, {y})"
+                );
+            }
+        }
+    }
+    assert_eq!(renderer.stats().atlas_textures, 1);
 }
 
 #[test]
