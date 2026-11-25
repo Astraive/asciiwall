@@ -475,11 +475,11 @@ fn version_tuple() -> Option<WindowsVersion> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MAX_ENUMERATION_WORK, NativeScan, RootScanAction, WindowClass, note_shell_window_enumerated,
-        record_child, record_root, scan_shell_before_top_level,
-    };
     use super::super::{ObservationReason, ProbeStatus, classify_snapshot};
+    use super::{
+        MAX_ENUMERATION_WORK, NativeScan, RootScanAction, WindowClass,
+        note_shell_window_enumerated, record_child, record_root, scan_shell_before_top_level,
+    };
     use std::cell::RefCell;
 
     fn visit_synthetic_root(
@@ -498,8 +498,7 @@ mod tests {
             RootScanAction::EnumerateChildren => {
                 let parent_class = scan.current_root_class;
                 descendants.iter().all(|child_class| {
-                    scan.reserve_work()
-                        && record_child(scan, *child_class, parent_class, true)
+                    scan.reserve_work() && record_child(scan, *child_class, parent_class, true)
                 })
             }
         }
