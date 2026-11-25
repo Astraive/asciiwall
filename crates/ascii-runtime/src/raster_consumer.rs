@@ -156,6 +156,7 @@ impl RasterToAsciiConsumer {
             return Ok(None);
         };
         let descriptor = *lease.descriptor();
+        lease.pin_output()?;
         let token = lease.completion_token()?;
         let result = self.convert_lease(&lease, descriptor, glyphs, budget, cancellation);
 
@@ -417,6 +418,83 @@ mod tests {
         assert_eq!(consumer.scratch.as_ptr(), scratch_address);
         assert_eq!(consumer.scratch.capacity(), scratch_capacity);
         drop(second);
+        assert_eq!(resources.snapshot().outputs, 0);
+    }
+
+    #[test]
+    fn converted_output_stays_charged_across_generation_invalidation() {
+        let resources = resource_budget();
+        let handoff = BoundedHandoff::new(&resources, 9, 1, 3, 1, 1).unwrap();
+        let mut consumer = consumer(&resources, 3);
+        let table = glyph_table();
+        let old_descriptor = submit_one(&handoff, 123_000, &[255, 255, 255]);
+        let old_output = consumer
+            .convert_next(&handoff, &table, &core_budget(), &CancellationToken::new())
+            .unwrap()
+            .unwrap();
+        assert_output_is_bound(&old_output, old_descriptor, &table);
+        assert_eq!(resources.snapshot().outputs, 1);
+
+        handoff.invalidate_generation(10).unwrap();
+        assert_eq!(resources.snapshot().outputs, 1);
+        assert!(!old_output.frame().cells().is_empty());
+        assert_eq!(old_output.frame().generation(), 9);
+
+        let new_descriptor = submit_one(&handoff, 456_000, &[0, 0, 0]);
+        assert!(matches!(
+            consumer.convert_next(&handoff, &table, &core_budget(), &CancellationToken::new()),
+            Err(RasterConsumerError::Runtime(
+                RuntimeError::ConcurrencyLimit(crate::PermitKind::Output)
+            ))
+        ));
+        assert_eq!(resources.snapshot().outputs, 1);
+        drop(old_output);
+        assert_eq!(resources.snapshot().outputs, 0);
+
+        let new_output = consumer
+            .convert_next(&handoff, &table, &core_budget(), &CancellationToken::new())
+            .unwrap()
+            .unwrap();
+        assert_output_is_bound(&new_output, new_descriptor, &table);
+        assert_eq!(resources.snapshot().outputs, 1);
+        drop(new_output);
+        assert_eq!(resources.snapshot().outputs, 0);
+    }
+
+    #[test]
+    fn invalidation_after_conversion_before_wrapper_return_keeps_output_charged() {
+        let resources = resource_budget();
+        let handoff = BoundedHandoff::new(&resources, 9, 1, 3, 1, 1).unwrap();
+        let mut consumer = consumer(&resources, 3);
+        let table = glyph_table();
+        let descriptor = submit_one(&handoff, 789_000, &[127, 127, 127]);
+        let mut lease = handoff
+            .receive_frame(&core_budget(), &CancellationToken::new())
+            .unwrap()
+            .unwrap();
+        lease.pin_output().unwrap();
+        let token = lease.completion_token().unwrap();
+        let frame = consumer
+            .convert_lease(
+                &lease,
+                descriptor,
+                &table,
+                &core_budget(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(resources.snapshot().outputs, 1);
+
+        handoff.invalidate_generation(10).unwrap();
+        token.acknowledge();
+        let output = ConvertedFrame {
+            frame,
+            descriptor,
+            _lease: lease,
+        };
+        assert_eq!(resources.snapshot().outputs, 1);
+        assert_output_is_bound(&output, descriptor, &table);
+        drop(output);
         assert_eq!(resources.snapshot().outputs, 0);
     }
 
