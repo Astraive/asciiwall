@@ -6,10 +6,12 @@
 //! disconnect, or device-completion behavior is implemented here.
 //!
 //! Submission, producer writes, raster consumption, and pixel callbacks acquire shared CPU-work
-//! permits. A consumed slot retains its shared output permit until completion acknowledgement,
-//! generation invalidation, or final pool-owner drop. A decoder outside this crate MUST hold
-//! `ResourceBudget::try_acquire_decode` for its active decode job; this crate supplies no decoder
-//! operation to which such a permit could be applied internally.
+//! permits. The process-local raster-to-ASCII consumer copies bytes under the pixel callback and
+//! holds a CPU permit across conversion outside the pool lock. A consumed slot retains its output
+//! permit until its acknowledged lease is released or dropped, generation invalidation, or final
+//! pool-owner drop. A decoder outside this crate MUST hold `ResourceBudget::try_acquire_decode` for
+//! its active decode job; this crate supplies no decoder operation to which such a permit could be
+//! applied internally.
 //!
 //! # Locking and callbacks
 //!
@@ -36,11 +38,14 @@ mod buffer_pool;
 pub mod cache;
 mod queues;
 pub mod storage;
+mod raster_consumer;
+
 pub use buffer_pool::{
     BufferPool, CompletionToken, FillLease, FrameDescriptor, FrameLease, RasterDescriptorMetadata,
     SlotState,
 };
 pub use queues::{BoundedHandoff, ControlEvent, ControlQueue, FrameQueue};
+pub use raster_consumer::{ConvertedFrame, RasterConsumerError, RasterToAsciiConsumer};
 
 use std::sync::{Arc, Mutex, MutexGuard};
 

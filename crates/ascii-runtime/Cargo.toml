@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ascii-convert = { path = "../ascii-convert" }
 ascii-core = { path = "../ascii-core" }
 icu_properties = "=2.4.0"
 serde = { version = "=1.0.228", features = ["derive"] }

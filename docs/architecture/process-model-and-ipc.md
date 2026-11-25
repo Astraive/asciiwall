@@ -20,7 +20,7 @@ The session ID is issued by the authenticated handshake and is not proof of iden
 
 Frame descriptors carry slot id, generation, dimensions, stride, format, byte length, media timestamp, and ownership state. The receiver validates multiplication/offset bounds against the mapped region. A producer cannot reuse a slot until release is acknowledged. A crash invalidates the connection generation and all outstanding descriptors.
 
-The current `ascii-runtime` implementation is only an in-process `Vec`-backed model. It does not implement OS shared memory, named pipes, producer-disconnect recovery, or native/GPU completion evidence; platform adapters remain required before these process-boundary contracts can be claimed as implemented.
+The current `ascii-runtime` implementation is a process-local `Vec`-backed model. It includes a bounded raster-to-ASCII consumer that copies into charged reusable scratch and calls the real `ascii-convert` implementation outside the pool lock. It does not implement OS shared memory, named pipes, a production transport owner, producer-disconnect/crash recovery, or native/GPU completion evidence; platform adapters and production lifecycle owners remain required.
 
 ## Reliability
 
