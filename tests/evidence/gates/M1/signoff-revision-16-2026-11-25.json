@@ -1,0 +1,285 @@
+{
+  "schema": "asciiwall.m1-gate-receipt/v1",
+  "receipt_version": "draft-16",
+  "recorded_on": "2026-11-25",
+  "decision": "no-go",
+  "record_status": "draft_pending_independent_signoff",
+  "amends": {
+    "revision": "draft-15",
+    "file": "signoff-revision-15-2026-11-25.json",
+    "sha256": "2fb670c5ee838a90b2208f12aee2f30fabe87b4ee2b23c1806f720719a31301b",
+    "prior_revision_preserved_byte_for_byte": true,
+    "historical_preservation": {
+      "revision_14": {
+        "file": "signoff-revision-14-2026-11-25.json",
+        "sha256": "302ac94cacd8d66c6185cc5215778fb6c8b5166c0360252aa4a904bc3081ed8a",
+        "prior_revision_preserved_byte_for_byte": true
+      },
+      "revision_13": {
+        "file": "signoff-revision-13-2026-11-25.json",
+        "sha256": "561de91e0193a20dc62569c0d75db2e8175ef729513d2ba79084756b6eb9dfc2",
+        "prior_revision_preserved_byte_for_byte": true
+      },
+      "revision_12": {
+        "file": "signoff-revision-12-2026-11-24.json",
+        "sha256": "cf0ce9afb3379922c478429da9ddf720d987c0917aac19cbd5dd73a92037cfd6",
+        "prior_revision_preserved_byte_for_byte": true
+      }
+    }
+  },
+  "gate": {
+    "issue": 211,
+    "state_observed": "OPEN",
+    "status": "In Review / Blocked",
+    "acceptance_status": "NO-GO",
+    "m1_completion_claimed": false,
+    "accepted_scope": []
+  },
+  "pull_request_313_sync": {
+    "url": "https://github.com/Astraive/asciiwall/pull/313",
+    "state_observed_before_sync": "OPEN_DRAFT",
+    "previous_head_sha": "a0936f3b31d3b7d6f0f501dd884219b6bd2d0351",
+    "previous_base_sha": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+    "current_main_base_sha": "a11f6ddad23976962d95a412ffd7aa2972d1be75",
+    "merge_commit": "1986898",
+    "merge_strategy": "A safe non-conflicting merge commit was required because PR #313 was BEHIND main; no rebase or force push was used."
+  },
+  "evidence_added": {
+    "fnt002": {
+      "issue": 120,
+      "issue_state": "OPEN",
+      "pull_request": 334,
+      "url": "https://github.com/Astraive/asciiwall/pull/334",
+      "state": "OPEN_DRAFT",
+      "head_sha": "c43a6c015267871cf441168be710a0dc500c6b12",
+      "base": "main",
+      "base_sha": "a11f6ddad23976962d95a412ffd7aa2972d1be75",
+      "merge_state": "CLEAN",
+      "hosted_checks": {
+        "run_url": "https://github.com/Astraive/asciiwall/actions/runs/45630025804",
+        "portable_core_ubuntu_macos_windows": "SUCCESS",
+        "repository_quality": "SUCCESS",
+        "security_run_url": "https://github.com/Astraive/asciiwall/actions/runs/45629395463",
+        "python_security": "SUCCESS"
+      },
+      "independent_exact_head_review": {
+        "review_url": "https://github.com/Astraive/asciiwall/pull/334#issuecomment-7165049596",
+        "status": "No actionable P0-P2 reader defect found; review scope included bounds/overlap arithmetic, CRC, frame metadata, glyph references, and allocation limits.",
+        "scope_limit": "Code review only, not acceptance; editor/preview, invalid-table export, CLI/destination/atomic integration, native/manual gates remain incomplete."
+      }
+    },
+    "vid010": {
+      "issue": 168,
+      "issue_state": "OPEN",
+      "pull_request": 333,
+      "url": "https://github.com/Astraive/asciiwall/pull/333",
+      "state": "OPEN_DRAFT",
+      "head_sha": "7c3ecd403e77cd8e6aa2e8706c151818a5ee1e51",
+      "base_pull_request": 334,
+      "base_sha": "c43a6c015267871cf441168be710a0dc500c6b12",
+      "merge_state": "CLEAN",
+      "hosted_checks": {
+        "run_url": "https://github.com/Astraive/asciiwall/actions/runs/45630024689",
+        "portable_core_ubuntu_macos_windows": "SUCCESS",
+        "repository_quality": "SUCCESS",
+        "security_run_url": "https://github.com/Astraive/asciiwall/actions/runs/45629524014",
+        "python_security": "SUCCESS"
+      },
+      "independent_exact_head_review": {
+        "review_url": "https://github.com/Astraive/asciiwall/pull/333#issuecomment-7165050253",
+        "status": "No actionable P0-P2 restack/export-safety regression found.",
+        "scope_limit": "Code review only, not acceptance; editor/preview, public invalid-table export, CLI/destination/atomic-write, and native/manual terminal-host acceptance remain incomplete."
+      }
+    },
+    "qa004": {
+      "issue": 35,
+      "issue_state": "OPEN",
+      "project_4_status": "Blocked",
+      "project_4_blocked": "Yes",
+      "pull_request": 310,
+      "url": "https://github.com/Astraive/asciiwall/pull/310",
+      "state": "OPEN_DRAFT",
+      "head_sha": "afac5b0638a23f3e404a2f6a20348f6f783a7c30",
+      "base": "main",
+      "base_sha": "a11f6ddad23976962d95a412ffd7aa2972d1be75",
+      "merge_state_at_refetch": "UNSTABLE",
+      "latest_hosted_run_url": "https://github.com/Astraive/asciiwall/actions/runs/45633840120",
+      "latest_hosted_run_status": "IN_PROGRESS at refetch; Portable core Ubuntu/macOS and Repository quality SUCCESS, offline evidence Ubuntu/macOS IN_PROGRESS; remaining jobs were still running.",
+      "previous_exact_head_hosted_evidence": {
+        "quality_and_portable_run_id": 45629416348,
+        "security_run_id": 45629416334,
+        "status": "Previously reported all eight hosted checks passed at the same exact head; superseded only as latest run state by the in-progress rerun.",
+        "review_url": "https://github.com/Astraive/asciiwall/pull/310#issuecomment-7164791604",
+        "local_python_evidence": "Timed out without a completed summary; not counted as a pass."
+      },
+      "independent_review_scope": "No independent acceptance/sign-off is claimed. Hosted checks and sync/verification are not acceptance.",
+      "remaining_gates": [
+        "Authenticated native/manual procedure receipts",
+        "Integrated product matrix",
+        "Hard dependency issue #23"
+      ]
+    },
+    "qa101": {
+      "issue": 77,
+      "issue_state": "OPEN",
+      "project_4_status": "In Review",
+      "project_4_blocked": "Yes",
+      "pull_request": 335,
+      "url": "https://github.com/Astraive/asciiwall/pull/335",
+      "state": "OPEN_DRAFT",
+      "head_sha": "f0e26c17226bb14de2d10263dbbe7a84281140d3",
+      "base_pull_request": 310,
+      "base_sha": "afac5b0638a23f3e404a2f6a20348f6f783a7c30",
+      "merge_state_at_refetch": "UNSTABLE",
+      "latest_hosted_run_url": "https://github.com/Astraive/asciiwall/actions/runs/45633843089",
+      "latest_hosted_run_status": "IN_PROGRESS at refetch; portable core Ubuntu/macOS/Windows and Repository quality SUCCESS, offline evidence macOS IN_PROGRESS; remaining jobs were still running.",
+      "verified_hosted_component_run": {
+        "run_id": 45629616682,
+        "url": "https://github.com/Astraive/asciiwall/actions/runs/45629616682",
+        "conclusion": "success",
+        "head_sha": "f0e26c17226bb14de2d10263dbbe7a84281140d3",
+        "ec_statuses": {
+          "EC-001": "PASS (automated component scope)",
+          "EC-002": "PASS (automated component scope)",
+          "EC-003": "PASS (automated component scope)",
+          "EC-004": "PASS (automated component scope)",
+          "EC-005": "PASS (automated component scope)"
+        },
+        "artifact_validation": {
+          "archive_sha256_matches_github_api_digest": true,
+          "ubuntu": {
+            "artifact_id": 15029268184,
+            "archive_sha256": "b6cb6fa9c26c50b46d9ce78028bf78c91e28b078686eaf984dec1159b993b145",
+            "manifest_sha256": "41d22ee782f1641b8f33020664b5cf73ab80f4c4fda07f93b395136b40fb4785",
+            "record_id": "9fb1adc0b583befa30b10d4a64e5f6c24fa221bfde07fd07ea01de851c8fda9c",
+            "record_validation": "valid",
+            "evidence_path": "linux/test-output.log"
+          },
+          "macos": {
+            "artifact_id": 15030650465,
+            "archive_sha256": "849cbe6dca73229bbf1ce373414d6888c18fec24e346e2f814e784e67abba069",
+            "manifest_sha256": "04fb8301ab26390ca01a31a2afd739f3419ceedf7c7efa66c0b2df9deb9654bb",
+            "record_id": "d818bdc1ea0cfe677b90ede5dddcd652be70f8fcb217aa687dad26a2f97e0609",
+            "record_validation": "valid",
+            "evidence_path": "macos/test-output.log"
+          },
+          "windows": {
+            "artifact_id": 15030745448,
+            "archive_sha256": "6bd3231806fa2d16f911c25c738a40c2a0e9ef1e1fec983f3954d672d08b352f",
+            "manifest_sha256": "6eb5ae3344ebcf86f153a052f9d7c0d7c015f49b7e81bcbbbe44cdafb9efc21c",
+            "record_id": "d25d699d878a4add7fe1a4c138d2db044afe876fec24fa86427f20a82ecc4feb",
+            "record_validation": "valid",
+            "evidence_path": "windows/test-output.log"
+          },
+          "shared_test_output_sha256": "4940eb7f90090eb535e158ef3d13ef479acb0da30aedb3c5142b3100a16e3c6c",
+          "validation_method": "Downloaded each artifact archive; SHA-256 matched its GitHub API archive digest. Inspected each extracted run-manifest.json and qa004-record.json, verified run/head/OS/evidence path/record ID and QA-004 validation status, and checked artifact file hashes. The archive digest alone was not treated as content validation."
+        },
+        "qa004_recorder_pin": "fb20e84ec196c421b954b90985dc2217a35767c6",
+        "current_qa004_pull_request_head": "afac5b0638a23f3e404a2f6a20348f6f783a7c30",
+        "recorder_pin_is_current_qa004_head": false,
+        "scope": "Automated component evidence only; not human/native/product acceptance or M1 acceptance."
+      },
+      "independent_exact_head_review": {
+        "review_url": "https://github.com/Astraive/asciiwall/pull/335#issuecomment-7164820929",
+        "status": "Exact-head restack review; hosted checks and local narrow validations reported passed.",
+        "scope_limit": "Verification/review only, not QA-101 acceptance or M1 sign-off."
+      }
+    },
+    "qa102": {
+      "pull_request": 341,
+      "url": "https://github.com/Astraive/asciiwall/pull/341",
+      "state": "OPEN_DRAFT",
+      "head_sha": "884d65580f587c046d92cec5daaacf040cabb4b8",
+      "base": "main",
+      "base_sha": "a11f6ddad23976962d95a412ffd7aa2972d1be75",
+      "merge_parents": [
+        "1f14681b9db9480c4eb0db9775820691d0970520",
+        "a11f6ddad23976962d95a412ffd7aa2972d1be75"
+      ],
+      "merge_parent_interpretation": "The current QA-102 PR head is a merge commit whose first parent is the prior QA-102 head and whose second parent is the captured main base. This is not the PR merge commit; PR #341 remains open and draft.",
+      "hosted_component_run": {
+        "run_id": 45620069972,
+        "url": "https://github.com/Astraive/asciiwall/actions/runs/45620069972",
+        "conclusion": "success",
+        "head_sha": "884d65580f587c046d92cec5daaacf040cabb4b8",
+        "checks": [
+          "Portable core: passed on Ubuntu, macOS, and Windows",
+          "Repository quality: passed"
+        ],
+        "scope": "Automated component checks only; not full M1 acceptance."
+      },
+      "hosted_security_run": {
+        "run_id": 45619140079,
+        "url": "https://github.com/Astraive/asciiwall/actions/runs/45619140079",
+        "conclusion": "success",
+        "head_sha": "884d65580f587c046d92cec5daaacf040cabb4b8",
+        "check": "Python security analysis: passed"
+      },
+      "hosted_artifact": {
+        "name": "qa-102-hosted-component-evidence",
+        "run_id": 45619139992,
+        "run_json_sha256": "70031e5babb4e48518a83c331870ddba0f3bcedc58997e1ea3eefe8683e32e7c",
+        "validation": "Current-run run.json validated."
+      },
+      "ec_statuses": {
+        "EC-006": "PASS (automated component scope)",
+        "EC-007": "PASS (automated component scope)",
+        "EC-008": "PASS (automated component scope)",
+        "EC-009": "NOT RUN",
+        "EC-010": "PASS (automated component scope)"
+      },
+      "qa004_recorder_pin": "fb20e84ec196c421b954b90985dc2217a35767c6",
+      "independent_exact_head_review": {
+        "reviewer": "Luna",
+        "head_sha": "884d65580f587c046d92cec5daaacf040cabb4b8",
+        "review_url": "https://github.com/Astraive/asciiwall/pull/341#issuecomment-7163483932",
+        "status": "No P0-P2 findings",
+        "tests_run_by_reviewer": false,
+        "scope": "Merge-focused exact-head code review; no P0-P2 findings and reviewer ran no tests. This is not QA acceptance, authenticated scenario acceptance, or M1 sign-off."
+      },
+      "scope_limits": [
+        "Documented narrow scope only",
+        "EC-009 was NOT RUN",
+        "No authenticated human, native, or product acceptance"
+      ]
+    }
+  },
+  "project_4": {
+    "qa_m1_211": {
+      "status": "In Review",
+      "blocked": "Yes"
+    },
+    "qa004_35": {
+      "status": "Blocked",
+      "blocked": "Yes"
+    },
+    "qa101_77": {
+      "status": "In Review",
+      "blocked": "Yes"
+    },
+    "qa102_78": {
+      "status": "Blocked",
+      "blocked": "Yes"
+    }
+  },
+  "remaining_blockers": [
+    "QA-004 issue #35 remains incomplete and hard dependency issue #23 remains unresolved.",
+    "Authenticated sign-off is absent.",
+    "Native and product acceptance procedures remain outstanding.",
+    "No integrated M1 candidate or binary exists.",
+    "No exact-candidate run or firewall-denied run exists; both scenarios remain untested.",
+    "The required settings digest remains unresolved/unavailable.",
+    "Rights and provenance remain unresolved."
+  ],
+  "independent_human_signoffs": {
+    "engine_maintainer": null,
+    "cli_reviewer": null
+  },
+  "disposition": {
+    "decision": "NO-GO",
+    "m1_completion_claimed": false,
+    "accepted_scope": [],
+    "issue_211_remains_open": true,
+    "reason": "FNT-002, VID-010, QA-004, QA-101, and QA-102 provide current exact-head references and component-level automated evidence only. The QA-101 hosted artifacts were downloaded and their archive digests and extracted manifests/records were validated; QA-101's recorder pin remains fb20e84ec196c421b954b90985dc2217a35767c6, distinct from current unmerged QA-004 PR #310 head afac5b0638a23f3e404a2f6a20348f6f783a7c30. QA-102 EC-009 is NOT RUN. Independent code reviews and hosted checks are not acceptance. QA-004 #35 and hard dependency #23 remain incomplete; authenticated sign-off, native/product procedures, an integrated M1 candidate/binary, exact-candidate and firewall-denied runs, the settings digest, and rights/provenance remain absent. The M1 gate remains blocked and NO-GO."
+  }
+}
