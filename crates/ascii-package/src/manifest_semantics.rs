@@ -127,8 +127,7 @@ pub(crate) fn validate_manifest_semantics(
             "LicenseRef requires supplied text evidence in a listed license file",
         ));
     }
-    if manifest.settings.get("font.face")
-        == Some(&serde_json::Value::String("package-font".into()))
+    if manifest.settings.get("font.face") == Some(&serde_json::Value::String("package-font".into()))
         && manifest.font.is_none()
     {
         return Err(semantic(
@@ -224,22 +223,40 @@ pub(crate) fn validate_asset_inventory(
         .and_then(|count| count.checked_add(1))
         .ok_or_else(|| semantic("$.inventory", "entry count exceeds the supported range"))?;
     if entries > MAX_PACKAGE_ENTRIES {
-        return Err(semantic("$.inventory", "package exceeds the v1 entry limit"));
+        return Err(semantic(
+            "$.inventory",
+            "package exceeds the v1 entry limit",
+        ));
     }
     if expanded_bytes > MAX_EXPANDED_BYTES {
-        return Err(semantic("$.inventory", "package exceeds the v1 expanded-size limit"));
+        return Err(semantic(
+            "$.inventory",
+            "package exceeds the v1 expanded-size limit",
+        ));
     }
     for asset in &manifest.assets {
         let size = inventory.assets[&asset.path].size;
-        if manifest.font.as_ref().is_some_and(|font| font.path == asset.path)
+        if manifest
+            .font
+            .as_ref()
+            .is_some_and(|font| font.path == asset.path)
             && size > MAX_FONT_BYTES
         {
-            return Err(semantic("$.font.path", "font exceeds the v1 font size limit"));
+            return Err(semantic(
+                "$.font.path",
+                "font exceeds the v1 font size limit",
+            ));
         }
-        if manifest.preview.as_ref().is_some_and(|preview| preview.path == asset.path)
+        if manifest
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.path == asset.path)
             && size > MAX_PREVIEW_BYTES
         {
-            return Err(semantic("$.preview.path", "preview exceeds the v1 preview size limit"));
+            return Err(semantic(
+                "$.preview.path",
+                "preview exceeds the v1 preview size limit",
+            ));
         }
     }
     Ok(())
@@ -254,9 +271,28 @@ fn validate_portable_path(path: &str, location: &str) -> Result<(), Error> {
         let basename = component.split('.').next().unwrap_or_default();
         matches!(
             basename,
-            "con" | "prn" | "aux" | "nul" | "com1" | "com2" | "com3" | "com4" | "com5"
-                | "com6" | "com7" | "com8" | "com9" | "lpt1" | "lpt2" | "lpt3"
-                | "lpt4" | "lpt5" | "lpt6" | "lpt7" | "lpt8" | "lpt9"
+            "con"
+                | "prn"
+                | "aux"
+                | "nul"
+                | "com1"
+                | "com2"
+                | "com3"
+                | "com4"
+                | "com5"
+                | "com6"
+                | "com7"
+                | "com8"
+                | "com9"
+                | "lpt1"
+                | "lpt2"
+                | "lpt3"
+                | "lpt4"
+                | "lpt5"
+                | "lpt6"
+                | "lpt7"
+                | "lpt8"
+                | "lpt9"
         )
     });
     if path.is_empty()
@@ -272,7 +308,10 @@ fn validate_portable_path(path: &str, location: &str) -> Result<(), Error> {
         || !valid_chars
         || reserved
     {
-        return Err(semantic(location, "path is not a normalized v1 portable path"));
+        return Err(semantic(
+            location,
+            "path is not a normalized v1 portable path",
+        ));
     }
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Shared draft v1 package contracts. Structural validation is deliberately
 //! separate from archive, graph, compatibility, and capability semantics.
-mod manifest_semantics;
 mod manifest;
+mod manifest_semantics;
 mod scene_registry;
 mod semantic;
 mod settings;

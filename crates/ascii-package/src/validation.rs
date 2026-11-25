@@ -164,7 +164,6 @@ fn structural(location: &str, message: &str) -> Error {
     }
 }
 
-
 static MANIFEST_VALIDATOR: LazyLock<Result<jsonschema::Validator, String>> =
     LazyLock::new(|| compile_schema(include_str!("../schemas/manifest-1.0.json")));
 static SCENE_VALIDATOR: LazyLock<Result<jsonschema::Validator, String>> =

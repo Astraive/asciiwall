@@ -363,7 +363,10 @@ fn rejects_nonportable_and_unresolved_asset_paths() {
         ("assets/source.png", "assets//source.png"),
         ("assets/source.png", "assets/con.txt"),
         ("assets/source.png", "assets/source.png."),
-        ("assets/source.png", "assets/foo/bar/baz/quux/quuz/corge/grault/garply/source.png"),
+        (
+            "assets/source.png",
+            "assets/foo/bar/baz/quux/quuz/corge/grault/garply/source.png",
+        ),
     ] {
         let document = String::from_utf8(BASIC.to_vec()).unwrap().replace(from, to);
         let manifest: Manifest = serde_json::from_str(&document).unwrap();
@@ -446,7 +449,11 @@ fn enforces_entry_and_expanded_size_budgets() {
     source.size = 1073741824;
     inventory.assets.get_mut("assets/source.png").unwrap().size = 1073741824;
     manifest.assets[1].size = 1073741824;
-    inventory.assets.get_mut("licenses/artwork.txt").unwrap().size = 1073741824;
+    inventory
+        .assets
+        .get_mut("licenses/artwork.txt")
+        .unwrap()
+        .size = 1073741824;
     let document = serde_json::to_vec(&manifest).unwrap();
     assert_eq!(
         validate_manifest(&document, &inventory).unwrap_err().kind,
@@ -456,8 +463,11 @@ fn enforces_entry_and_expanded_size_budgets() {
 
 #[test]
 fn requires_license_text_evidence_and_package_font_asset() {
-    let custom_license = String::from_utf8(BASIC.to_vec())
-        .replacen("\"license\": \"CC0-1.0\"", "\"license\": \"LicenseRef-Example\"", 1);
+    let custom_license = String::from_utf8(BASIC.to_vec()).replacen(
+        "\"license\": \"CC0-1.0\"",
+        "\"license\": \"LicenseRef-Example\"",
+        1,
+    );
     let mut inventory = inventory_for(custom_license.as_bytes());
     let error = validate_manifest(custom_license.as_bytes(), &inventory).unwrap_err();
     assert_eq!(error.kind, ErrorKind::Semantic);
@@ -466,13 +476,17 @@ fn requires_license_text_evidence_and_package_font_asset() {
         .insert(("licenses/artwork.txt".into(), "LicenseRef-Example".into()));
     assert!(validate_manifest(custom_license.as_bytes(), &inventory).is_ok());
 
-    let package_font = String::from_utf8(BASIC.to_vec())
-        .unwrap()
-        .replace("\"settings\": {}", "\"settings\": {\"font.face\": \"package-font\"}");
+    let package_font = String::from_utf8(BASIC.to_vec()).unwrap().replace(
+        "\"settings\": {}",
+        "\"settings\": {\"font.face\": \"package-font\"}",
+    );
     assert_eq!(
-        validate_manifest(package_font.as_bytes(), &inventory_for(package_font.as_bytes()))
-            .unwrap_err()
-            .kind,
+        validate_manifest(
+            package_font.as_bytes(),
+            &inventory_for(package_font.as_bytes())
+        )
+        .unwrap_err()
+        .kind,
         ErrorKind::Semantic
     );
 }
