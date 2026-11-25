@@ -703,6 +703,25 @@ fn recorded_pointer_tracks_replay_exactly_and_future_events_are_ignored() {
             .cells()
     );
 }
+#[test]
+fn export_charges_validation_and_replay_scans_before_reserving_resources() {
+    let events = vec![
+        RecordedEvent::new(
+            0,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(0, 0)),
+        );
+        MAX_RECORDED_EVENTS
+    ];
+    let context = recorded_context(parameters(1, 1.0, 0, true), &events);
+    let budget = SceneResourceBudget::default();
+
+    assert_eq!(events.len(), MAX_RECORDED_EVENTS);
+    assert!(matches!(
+        context.execute_frame(SceneDimensions::new(256, 256).unwrap(), 803_392, &budget,),
+        Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
+    ));
+    assert_eq!(budget.reserved_bytes(), 0);
+}
 
 #[test]
 fn aggregate_budget_rejects_the_next_runtime_without_leaking_a_reservation() {

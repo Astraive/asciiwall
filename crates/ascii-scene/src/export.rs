@@ -222,7 +222,11 @@ impl<'a> ExportContext<'a> {
         let step_work = simulation_steps
             .checked_mul(particle_count.max(1))
             .ok_or(Error::SizeOverflow)?;
-        let event_work = u64::try_from(event_count).map_err(|_| Error::SizeOverflow)?;
+        // Charge both the supported-signal validation scan and the replay scan.
+        let event_work = u64::try_from(event_count)
+            .map_err(|_| Error::SizeOverflow)?
+            .checked_mul(2)
+            .ok_or(Error::SizeOverflow)?;
         let work_units = render_work
             .checked_add(particle_work)
             .and_then(|work| work.checked_add(step_work))
