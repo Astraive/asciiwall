@@ -79,9 +79,42 @@ The raster validator accepts top-down 8-bit Gray, RGB, or RGBA with sRGB primari
 
 ## Identity and versioning
 
-`PackageId` identifies a published artwork namespace; `package_version` identifies content release; `content_digest` identifies exact bytes. A local fork gets a new identity or explicit fork lineage, never silently overwrites an upstream immutable version.
+`PackageId`, `AssignmentId`, and `MonitorId` are distinct opaque 16-byte nonzero IDs. `PackageVersion`
+is a nonzero `u32` monotonically increasing release counter per package ID (not a semantic-version
+string). `ContentDigest` holds caller-supplied SHA-256 bytes for exact content; `ascii-core` compares
+but does not calculate or verify the digest.
 
-`AssignmentId` binds an installed version and override set to monitor selectors. `MonitorId` is a local best-effort stable identifier with a fallback match record, not a portable hardware serial to embed in exported packages. `Generation` invalidates results after a settings change, seek, source replacement, or topology reset.
+`PackageRelease` is the immutable package/version/digest tuple, optionally with exact upstream
+release lineage. `PackageRelease::conflict_with` reports a changed digest or lineage for the same
+package ID and version. A fork uses a different package ID and records its upstream package ID,
+version, and digest. This API detects conflicts when callers compare records; it is not a registry
+or persistence layer.
+
+The only identity wire descriptor currently defined is `PackageRelease` v1. Its fixed 116-byte
+layout is: bytes 0–3 ASCII `ACID`; byte 4 format version `1`; byte 5 record kind `1`; bytes 6–7
+little-endian flags (bit 0 means fork lineage, all other bits reserved zero); bytes 8–11
+little-endian payload length `104`; bytes 12–27 package ID; bytes 28–31 little-endian package
+version; bytes 32–63 content digest; bytes 64–79 upstream package ID; bytes 80–83 little-endian
+upstream version; bytes 84–115 upstream digest. All IDs are raw fixed-width bytes and digests are
+raw SHA-256 bytes. When lineage is absent, bytes 64–115 must be zero. Decoding rejects wrong
+lengths, magic, version, kind, flags, payload length, zero IDs or versions, invalid same-ID
+lineage, and nonzero absent-lineage bytes. The format contains no padding derived from a Rust
+layout and uses no `usize`, pointer, or enum representation. No assignment or monitor descriptor
+is serialized by this contract.
+
+`AssignmentBinding` records an `AssignmentId` together with the exact installed `PackageRelease`,
+an override-set digest, and an output-selector digest. Reusing one assignment ID for a different
+binding is an observable conflict. Those digests are caller-supplied SHA-256 values; no complete
+assignment storage or wire schema is implied.
+
+`MonitorIdentity` pairs a local `MonitorId` with a best-effort fallback record of desktop origin and
+active pixel dimensions. Geometry is non-unique and remains local; monitor identity must never
+contain a portable hardware serial or OS handle.
+
+`Generation` is a fixed-width `u64` token. Capture it when work starts and publish a result only if
+the captured token still equals the current one. Advance it after settings edits, seeks, source
+replacement, or output-topology resets. Incrementing at `u64::MAX` fails instead of wrapping, so
+stale results cannot become current by counter rollover.
 
 ## Frame and event contracts
 
