@@ -116,6 +116,7 @@ fn validate_asset_policy(manifest: &Manifest) -> Result<(), Error> {
             "image/jpeg" => matches!(extension, Some("jpg" | "jpeg")),
             "video/webm" => extension == Some("webm"),
             "font/ttf" => extension == Some("ttf"),
+            "application/vnd.asciiwall.ascii-clip" => extension == Some("ascii-clip"),
             _ => false,
         };
         if !supported {

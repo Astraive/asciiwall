@@ -20,7 +20,10 @@ fn validate_asset(
         "license": "CC0-1.0",
         "license_files": ["licenses/artwork.txt"],
         "engine": { "min_version": "1.0.0", "features_required": [] },
-        "source": { "kind": "image", "path": path },
+        "source": {
+            "kind": if path.ends_with(".ascii-clip") { "ascii-clip" } else { "image" },
+            "path": path
+        },
         "capabilities": { "required": [], "optional": [] },
         "settings": {},
         "tags": [],
@@ -159,7 +162,7 @@ fn rejects_executable_asset_types_and_extensions_with_matching_inventory() {
 }
 
 #[test]
-fn accepts_supported_local_media_font_and_data_asset_types() {
+fn accepts_supported_local_media_font_data_and_ascii_clip_assets() {
     for (path, media_type) in [
         ("assets/scene.json", "application/json"),
         ("licenses/artwork.txt", "text/plain"),
@@ -167,10 +170,30 @@ fn accepts_supported_local_media_font_and_data_asset_types() {
         ("assets/image.jpg", "image/jpeg"),
         ("assets/movie.webm", "video/webm"),
         ("fonts/typeface.ttf", "font/ttf"),
+        (
+            "assets/waves.ascii-clip",
+            "application/vnd.asciiwall.ascii-clip",
+        ),
     ] {
         assert!(
             validate_asset(path, media_type).is_ok(),
             "rejected supported asset {path} {media_type}"
+        );
+    }
+}
+
+#[test]
+fn rejects_mismatched_and_executable_ascii_clip_asset_declarations() {
+    for (path, media_type) in [
+        ("assets/waves.ascii-clip", "application/octet-stream"),
+        ("assets/waves.ascii-clip", "application/wasm"),
+        ("assets/waves.exe", "application/vnd.asciiwall.ascii-clip"),
+    ] {
+        let error = validate_asset(path, media_type).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Structural, "{path} {media_type}");
+        assert_eq!(
+            error.location, "$.assets[0].media_type",
+            "{path} {media_type}"
         );
     }
 }
