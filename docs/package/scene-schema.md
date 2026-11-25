@@ -869,7 +869,7 @@ Each fragment below is an invalid draft-v1 migration candidate. None is a future
 }
 ```
 
-**Cycle:** ordinary graph cycles are invalid in v1 and remain forbidden in the proposed typed graph, except for a separately specified and approved bounded-feedback node with owned finite state.
+**Cycle:** ordinary graph cycles are invalid in v1 and remain forbidden in the proposed typed graph. FX-015 admits no feedback node or cycle exception; any exception requires a separate future reviewed decision defining the bounded-feedback node and its contract first.
 
 ```json
 {
@@ -936,20 +936,45 @@ Each fragment below is an invalid draft-v1 migration candidate. None is a future
 {
   "scene_version": "2.0",
   "required_capabilities": ["typed-ports-v1", "signal-binding-v1"],
+  "seed": 7,
+  "nodes": [
+    {
+      "id": "source",
+      "kind": "solid",
+      "descriptor_version": 1,
+      "params": { "color": "#ffffffff" },
+      "outputs": { "frame": "character-grid" }
+    },
+    {
+      "id": "parallax",
+      "kind": "cell-parallax",
+      "descriptor_version": 1,
+      "inputs": { "frame": "character-grid" },
+      "outputs": { "frame": "character-grid" },
+      "parameter_schema": {
+        "offset-x": { "type": "scalar", "unit": "cells", "range": [-4, 4] }
+      },
+      "params": { "offset-x": 0 }
+    }
+  ],
+  "edges": [
+    { "from": "source", "from_port": "frame", "to": "parallax", "to_port": "frame", "slot": 0 }
+  ],
+  "output": { "node": "parallax", "port": "frame" },
   "bindings": [{
     "id": "pointer-parallax",
     "signal": "pointer.x",
     "source": { "type": "scalar", "range": [0, 1] },
     "capability": "pointer-position",
     "permission": "host-approved-only",
-    "target": { "node": "parallax", "parameter": "offset-x", "type": "cells", "range": [-4, 4] },
+    "target": { "node": "parallax", "parameter": "offset-x", "type": "scalar", "unit": "cells", "range": [-4, 4] },
     "operators": [
+      { "kind": "dead-zone", "fraction": 0.02, "range": [0, 0.5] },
+      { "kind": "easing", "curve": "smoothstep" },
       { "kind": "scale", "value": 8, "range": [-8, 8] },
       { "kind": "offset", "value": -4, "range": [-8, 8] },
-      { "kind": "clamp", "min": -4, "max": 4 },
       { "kind": "smoothing", "duration-ms": 100, "range-ms": [0, 2000] },
-      { "kind": "dead-zone", "fraction": 0.02, "range": [0, 0.5] },
-      { "kind": "easing", "curve": "smoothstep" }
+      { "kind": "clamp", "min": -4, "max": 4 }
     ],
     "missing": "zero-offset-pass-through"
   }]
@@ -962,7 +987,7 @@ An unsupported client rejects a package that requires an unknown schema version 
 
 ### FX-015 approval and verification status
 
-**Proposed for review; not approved or implemented.** Product choices still open: final schema/version and capability identifiers; which port types and conversion nodes to support; precise arities and numeric/operator bounds; signal required/optional and stale/revoked behavior; whether to admit bounded feedback and its state lifecycle; per-node resource, reduced-motion, and export policies; and feature-version, node-extension, or baked-fallback selection for each future family. No native limitation is claimed measured: environment-specific native support remains unverified unless separately measured and recorded.
+**Proposed for review; not approved or implemented.** Product choices still open: final schema/version and capability identifiers; which port types and conversion nodes to support; precise arities and numeric/operator bounds; signal required/optional and stale/revoked behavior; whether a separate future decision should consider bounded feedback at all; per-node resource, reduced-motion, and export policies; and feature-version, node-extension, or baked-fallback selection for each future family. No native limitation is claimed measured: environment-specific native support remains unverified unless separately measured and recorded.
 
 ## Behavior without optional feeds
 
