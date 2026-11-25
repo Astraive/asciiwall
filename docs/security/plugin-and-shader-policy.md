@@ -30,6 +30,8 @@ Community-library publication remains data-only until the extension security mod
 
 These tests establish only the portable document-validation boundary. The current repository has no application package loader or developer-mode implementation; catalog activation and hidden-URL paths are not package-validator inputs. Archive extraction, runtime execution, and native bridge behavior have not been audited or accepted by these tests.
 
+Stable manifest validation additionally admits only the declared v1 media-type/path pairs supported by the current local formats: JSON and plain-text data, PNG/JPEG images, WebM video, and TTF fonts. Unknown MIME declarations and mismatched or executable-looking extensions (including native libraries, WebAssembly, and scripts) fail public `validate_manifest`, even when inventory size and digest match. This is metadata admission only: inventory contains no byte-type evidence, so it does not establish that file contents match their declared type or make media/font parsing safe.
+
 ## Native shell integrations
 
 Plasma/GNOME companion components are trusted application adapters, not wallpaper plugins in the package sense. Users install/update them through a reviewed distribution path. Their code must be minimal because a fault can affect the desktop shell. They never execute user-provided conversion or media parser code in the shell process.

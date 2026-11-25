@@ -1,5 +1,48 @@
-use ascii_package::{AssetInventory, ErrorKind, validate_manifest, validate_scene};
+use std::collections::BTreeMap;
+
+use ascii_package::{AssetInventory, ErrorKind, InventoryEntry, validate_manifest, validate_scene};
 use serde_json::json;
+
+const ASSET_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn validate_asset(
+    path: &str,
+    media_type: &str,
+) -> Result<ascii_package::ValidatedManifest, ascii_package::Error> {
+    let manifest = json!({
+        "format": "asciiwall",
+        "format_version": "1.0",
+        "id": "example.package",
+        "version": "1.2.3",
+        "name": "Example",
+        "summary": "Test package",
+        "authors": [{ "name": "Fixture Author" }],
+        "license": "CC0-1.0",
+        "license_files": ["licenses/artwork.txt"],
+        "engine": { "min_version": "1.0.0", "features_required": [] },
+        "source": { "kind": "image", "path": path },
+        "capabilities": { "required": [], "optional": [] },
+        "settings": {},
+        "tags": [],
+        "assets": [{
+            "path": path,
+            "media_type": media_type,
+            "sha256": ASSET_HASH,
+            "size": 0,
+            "license": "CC0-1.0"
+        }]
+    });
+    let inventory = AssetInventory {
+        assets: BTreeMap::from([(
+            path.to_owned(),
+            InventoryEntry {
+                size: 0,
+                sha256: ASSET_HASH.to_owned(),
+            },
+        )]),
+    };
+    validate_manifest(&serde_json::to_vec(&manifest).unwrap(), &inventory)
+}
 
 #[test]
 fn accepts_builtin_scene_data_and_bounded_reaction_controls() {
@@ -87,4 +130,47 @@ fn package_settings_cannot_enable_developer_mode() {
     let error = validate_manifest(&bytes, &AssetInventory::default()).unwrap_err();
     assert_eq!(error.kind, ErrorKind::Structural);
     assert!(error.location.contains("settings"));
+}
+
+#[test]
+fn rejects_executable_asset_types_and_extensions_with_matching_inventory() {
+    for (path, media_type) in [
+        ("assets/plugin.so", "application/x-sharedlib"),
+        ("assets/plugin.dll", "application/x-msdownload"),
+        ("assets/plugin.wasm", "application/wasm"),
+        ("assets/run.js", "text/javascript"),
+        ("assets/run.sh", "text/x-shellscript"),
+        ("assets/run.exe", "application/octet-stream"),
+        ("assets/renamed.wasm", "image/png"),
+        ("assets/renamed.so", "text/plain"),
+    ] {
+        let error = validate_asset(path, media_type).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Structural, "{path} {media_type}");
+        assert_eq!(
+            error.location, "$.assets[0].media_type",
+            "{path} {media_type}"
+        );
+        assert!(
+            error.message.contains("package policy"),
+            "{path} {media_type}: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn accepts_supported_local_media_font_and_data_asset_types() {
+    for (path, media_type) in [
+        ("assets/scene.json", "application/json"),
+        ("licenses/artwork.txt", "text/plain"),
+        ("assets/image.png", "image/png"),
+        ("assets/image.jpg", "image/jpeg"),
+        ("assets/movie.webm", "video/webm"),
+        ("fonts/typeface.ttf", "font/ttf"),
+    ] {
+        assert!(
+            validate_asset(path, media_type).is_ok(),
+            "rejected supported asset {path} {media_type}"
+        );
+    }
 }

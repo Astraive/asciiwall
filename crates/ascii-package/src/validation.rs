@@ -101,8 +101,31 @@ pub fn validate_manifest(
     validate_schema(manifest_validator()?, &document, "manifest")?;
     let manifest: Manifest = serde_json::from_value(document)
         .map_err(|_| structural("$", "manifest type conversion failed"))?;
+    validate_asset_policy(&manifest)?;
     validate_asset_inventory(&manifest, inventory)?;
     Ok(ValidatedManifest { manifest })
+}
+
+fn validate_asset_policy(manifest: &Manifest) -> Result<(), Error> {
+    for (index, asset) in manifest.assets.iter().enumerate() {
+        let extension = asset.path.rsplit_once('.').map(|(_, extension)| extension);
+        let supported = match asset.media_type.as_str() {
+            "application/json" => extension == Some("json"),
+            "text/plain" => extension == Some("txt"),
+            "image/png" => extension == Some("png"),
+            "image/jpeg" => matches!(extension, Some("jpg" | "jpeg")),
+            "video/webm" => extension == Some("webm"),
+            "font/ttf" => extension == Some("ttf"),
+            _ => false,
+        };
+        if !supported {
+            return Err(structural(
+                &format!("$.assets[{index}].media_type"),
+                "asset media type or path extension is not permitted by package policy",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn check_json_depth(bytes: &[u8]) -> Result<(), Error> {

@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Corrected [docs/architecture.md](docs/architecture.md) to describe the existing library workspace and proposed, not-yet-implemented CLI accurately, while identifying desktop/native host integration as unimplemented ([CFG-001]).
 
 ### Fixed
+- Reject package manifest assets whose MIME type or path extension falls outside the explicit v1 data, image, video, and font allowlist, including executable native/Wasm/script declarations even when inventory hashes and sizes match; this is metadata policy, not byte-content validation (`[SEC-007]`).
 
 - Bound inline-table dotted-key nesting and setting-entry counts, retained restore failure counts through activation, redacted stale settings bytes from errors, and enforced owner-only Unix modes for existing settings, backups, and oversized repair archives with deterministic regressions ([CFG-001]).
 - Keep restore failures suppressed when the wall clock moves backward, preserving the failure window until elapsed time is known ([CFG-001]).
