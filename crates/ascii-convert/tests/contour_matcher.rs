@@ -92,6 +92,50 @@ fn source_tone_error(source: &[u8], mask: &[u8]) -> u64 {
         .sum()
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum Orientation {
+    Horizontal,
+    Vertical,
+    RisingDiagonal,
+    FallingDiagonal,
+}
+
+fn orientation(values: &[u8]) -> Orientation {
+    let mut count = 0.0;
+    let mut x_sum = 0.0;
+    let mut y_sum = 0.0;
+    for (index, value) in values.iter().enumerate() {
+        if *value >= 128 {
+            count += 1.0;
+            x_sum += (index % WIDTH as usize) as f64;
+            y_sum += (index / WIDTH as usize) as f64;
+        }
+    }
+    let x_mean = x_sum / count;
+    let y_mean = y_sum / count;
+    let (mut xx, mut yy, mut xy) = (0.0, 0.0, 0.0);
+    for (index, value) in values.iter().enumerate() {
+        if *value >= 128 {
+            let dx = (index % WIDTH as usize) as f64 - x_mean;
+            let dy = (index / WIDTH as usize) as f64 - y_mean;
+            xx += dx * dx;
+            yy += dy * dy;
+            xy += dx * dy;
+        }
+    }
+    if xy.abs() > (xx - yy).abs() {
+        if xy.is_sign_positive() {
+            Orientation::RisingDiagonal
+        } else {
+            Orientation::FallingDiagonal
+        }
+    } else if xx > yy {
+        Orientation::Horizontal
+    } else {
+        Orientation::Vertical
+    }
+}
+
 fn blank_glyph(table: &ascii_convert::GlyphTable) -> u32 {
     table
         .glyphs()
@@ -125,19 +169,41 @@ fn matched_source_comparison_measures_silhouette_tone_loss_and_work() {
         &CancellationToken::new(),
     )
     .expect("synthetic fixture font builds");
-    let source = source_shape('v', true);
+    let reference = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'B')
+        .expect("synthetic font contains its vertical reference glyph")
+        .mask();
+    let source = reference.to_vec();
+    let texture: Vec<u8> = source
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if *value == 0 && index.is_multiple_of(5) {
+                8
+            } else {
+                *value
+            }
+        })
+        .collect();
     let matched = run(&table, &source, options(0.0, 0.0));
-    let texture_suppressed = run(&table, &source, options(0.10, 0.02));
+    let texture_suppressed = run(&table, &texture, options(0.10, 0.02));
     let (matched_silhouette, matched_tone) = selected_errors(&table, &source, &matched);
     let (suppressed_silhouette, suppressed_tone) =
-        selected_errors(&table, &source, &texture_suppressed);
-    assert!(matched_silhouette <= source.len());
-    assert!(suppressed_silhouette <= source.len());
-    assert!(matched_tone <= source.len() as u64 * u64::from(u8::MAX));
+        selected_errors(&table, &texture, &texture_suppressed);
+    assert_eq!(
+        matched_silhouette, 0,
+        "exact reference retains its silhouette"
+    );
+    assert_eq!(matched_tone, 0, "exact reference has no tone loss");
+    assert!(suppressed_silhouette <= texture.len());
     assert!(
         suppressed_tone > 0,
-        "paired source/glyph luminance exposes tone loss"
+        "thresholded texture causes measurable tone loss"
     );
+    let required_rerank_work = u64::from(WIDTH * HEIGHT) * 2 * 4;
+    assert!(matched.work_units_bound() >= required_rerank_work);
     assert_eq!(
         matched.work_units_bound(),
         texture_suppressed.work_units_bound()
@@ -162,10 +228,13 @@ fn oriented_edge_matches_independent_horizontal_vertical_and_diagonal_shapes() {
         let source = source_shape(kind, false);
         let first = run(&table, &source, options(0.0, 0.0));
         assert_eq!(first, run(&table, &source, options(0.0, 0.0)));
+        let selected = &table.glyphs()[first.frame().cells()[0].glyph() as usize];
+        assert_eq!(orientation(&source), orientation(selected.mask()));
         let (silhouette_error, tone_error) = selected_errors(&table, &source, &first);
-        assert!(silhouette_error <= source.len());
-        assert!(tone_error <= source.len() as u64 * u64::from(u8::MAX));
-        assert!(first.work_units_bound() > 0);
+        assert!(silhouette_error < source.len());
+        assert!(tone_error < source.len() as u64 * u64::from(u8::MAX));
+        let rerank_work = u64::from(WIDTH * HEIGHT) * 2 * 4;
+        assert!(first.work_units_bound() >= rerank_work);
     }
 }
 
