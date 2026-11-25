@@ -279,8 +279,8 @@ impl ControlQueue {
 /// that acquisition leaves the prior publication intact. This replacement lease acquisition is
 /// the point of no return: cancellation during or after copying no longer aborts replacement
 /// publication. The staging buffer is charged to the shared memory budget. Consumed slots retain
-/// output permits until acknowledgement, generation invalidation, or pool destruction, without the
-/// slot pinning the pool.
+/// output permits after acknowledgement while their lease remains attached; lease release/drop,
+/// generation invalidation, or final pool-owner drop releases the permit without slot self-pinning.
 #[derive(Debug)]
 pub struct BoundedHandoff {
     operation: Mutex<()>,
