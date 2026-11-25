@@ -64,11 +64,7 @@ pub enum ArtisticAdjustments {
 /// The conversion boundary has no application cache owner; this function states pipeline reuse semantics.
 #[must_use]
 pub const fn adjustment_invalidation(change: ArtisticAdjustments) -> ArtisticAdjustments {
-    match change {
-        ArtisticAdjustments::NormalizedRaster => ArtisticAdjustments::NormalizedRaster,
-        ArtisticAdjustments::FittedSamples => ArtisticAdjustments::FittedSamples,
-        ArtisticAdjustments::QuantizedGlyphs => ArtisticAdjustments::QuantizedGlyphs,
-    }
+    change
 }
 
 /// Apply exposure, contrast, artistic gamma, saturation, then bounded edge emphasis to fitted samples.
