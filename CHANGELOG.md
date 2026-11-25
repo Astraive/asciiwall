@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, the `ascii-convert` glyph-table implementation, and PNG/JPEG image decoding. **No application binary or published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, PNG/JPEG decoding, and the bounded `ascii-scene` runtime. **No application binary or published release tag exists yet.**
 
 ### Added
 
@@ -26,9 +26,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
 - Added named strict-cell presets for printable ASCII/space, Unicode blocks, Braille, and their union, plus deterministic scalar-specific validation and fixed-cell metric classification ([font contract](docs/engine/glyph-matching-and-fonts.md)).
-- Added matcher-identical single-glyph previews with available, unavailable, invisible, and multi-cell states; source-generated font fixtures cover the complete supported repertoire and every Braille dot pattern at two raster sizes. Editor preview/coverage and full clip-reader integrations remain absent, so FNT-002 is incomplete ([FNT-002]).
-- Added `ascii-media::parse_clip_glyph_table` for the draft ASCII clip v1 glyph-table section, validating bounded lengths, UTF-8, exact counts, and the shared FNT-002 single-cell predicate; full clip header/index/frame decoding remains unimplemented (`[FNT-002]`).
+- Added matcher-identical single-glyph previews with available, unavailable, invisible, and multi-cell states; source-generated font fixtures cover the complete supported repertoire and every Braille dot pattern at two raster sizes. Production editor integration remains unclaimed.
+- Added a bounded ASCII clip v1 reader/import path with header, glyph table, frame index, payload range, CRC-32, glyph-index, and decoded-memory validation; frame glyphs reuse the shared strict single-cell predicate. The reader supports mandatory uncompressed complete frames and rejects optional codecs not enabled by v1 flags (`[FNT-002]`).
 - Added the `ascii-render` text/ANSI exporter, which shares the strict scalar predicate and uses tables produced by the measured-cell builder, with regression coverage proving the 8px synthetic glyph reaches serialization and a 4px over-advance returns `MultiCellMetrics` before export ([VID-010]).
+- Added the first-party `ascii-scene` SCN-001 contract: validated typed parameters and descriptor limits, a sealed executable generator trait with generic `SceneRuntime`, SplitMix64 node/effect streams, bounded Q16.16 simulation, reusable character buffers, capability-filtered snapshots, deterministic normalized-pointer attraction and recorded-event replay, aggregate resource reservations, and exact-step export with explicit idle fallback. No CFG/PKG schema, application UI, wallpaper, thumbnail, or native consumer is added.
 
 ### Changed
 
