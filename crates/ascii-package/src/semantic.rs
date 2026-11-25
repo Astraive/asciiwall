@@ -266,13 +266,14 @@ pub fn validate_scene_source_refs(
             }
             _ => None,
         };
-        if let Some(path) = path {
-            if !manifest.assets.iter().any(|asset| asset.path == path) {
+        match path {
+            Some(path) if !manifest.assets.iter().any(|asset| asset.path == path) => {
                 return Err(SceneSemanticError::InvalidGraph {
                     location: format!("$.nodes[{index}].params.path"),
                     reason: "source path does not resolve to a declared package asset",
                 });
             }
+            _ => {}
         }
     }
     Ok(())
@@ -358,10 +359,8 @@ pub fn validate_graph(scene: &Scene) -> Result<Vec<String>, SceneSemanticError> 
     let mut stack = vec![scene.output.as_str()];
     while let Some(id) = stack.pop() {
         if reachable.insert(id) {
-            if let Some(edges) = incoming.get(id) {
-                for (_, source) in edges {
-                    stack.push(source);
-                }
+            for (_, source) in incoming.get(id).into_iter().flatten() {
+                stack.push(source);
             }
         }
     }

@@ -339,8 +339,8 @@ fn schema_rejects_arbitrary_executable_node_kinds() {
 
 #[test]
 fn data_only_v1_registry_does_not_require_an_executor_or_host_access() {
-    assert_eq!(SCENE_NODE_DESCRIPTORS[6].embeds_conversion, true);
-    assert_eq!(SCENE_NODE_DESCRIPTORS[7].embeds_conversion, true);
+    assert!(SCENE_NODE_DESCRIPTORS[6].embeds_conversion);
+    assert!(SCENE_NODE_DESCRIPTORS[7].embeds_conversion);
     assert!(
         SCENE_NODE_DESCRIPTORS
             .iter()
