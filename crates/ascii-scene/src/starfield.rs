@@ -13,7 +13,7 @@ use crate::params::{
 };
 use crate::resource::GeneratorPreparationPermit;
 use crate::simulation::FixedStepContext;
-use crate::snapshots::{ApprovedSnapshots, SignalKind};
+use crate::snapshots::{ApprovedSnapshots, SignalKind, MAX_APPROVED_BUTTON_EVENTS};
 
 const Q16: i64 = 1 << 16;
 const MIN_DEPTH_Q16: i32 = 6_554; // rounded representation of 0.1
@@ -308,6 +308,21 @@ impl SceneGenerator for StarfieldGenerator<'_> {
         _dimensions: SceneDimensions,
     ) -> Result<u64, Error> {
         self.scratch_bytes(parameters)
+    }
+    fn additional_work_units_per_advance(
+        &self,
+        _dimensions: SceneDimensions,
+        parameters: &SceneParameters,
+        max_catch_up_steps: u8,
+    ) -> Result<u64, Error> {
+        if self.config.speed_q16 == 0 || parameters.is_static() {
+            return Ok(0);
+        }
+        // Each admitted event may be examined by every fixed step in a catch-up advance.
+        u64::try_from(MAX_APPROVED_BUTTON_EVENTS)
+            .map_err(|_| Error::SizeOverflow)?
+            .checked_mul(u64::from(max_catch_up_steps))
+            .ok_or(Error::SizeOverflow)
     }
     fn prepare(
         &mut self,
