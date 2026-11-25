@@ -18,6 +18,7 @@ use crate::color::{
     OutputEncoding, encode_output, normalize_raster,
 };
 use crate::color_fit::{ColorFitError, ColorFitStrategy, estimate_color_fit_work, fit_color_patch};
+use crate::dither::{DitherCacheIdentity, DitherMode, DitherState, cache_identity, estimate_work};
 use crate::font::GlyphTable;
 use crate::palette::{Palette, PaletteError, PaletteKind};
 use crate::sampling::{
@@ -181,7 +182,7 @@ impl GridSizing {
     }
 }
 
-/// Validated identity, sizing, sampling, cancellation, and luminance-polarity settings.
+/// Validated identity, sizing, sampling, dither, cancellation, and luminance-polarity settings.
 #[derive(Clone, Copy, Debug)]
 pub struct ConversionSettings<'a> {
     sizing: GridSizing,
@@ -191,6 +192,7 @@ pub struct ConversionSettings<'a> {
     background: LinearRgb,
     color_fit: Option<(&'a Palette, ColorFitStrategy)>,
     sampling: SamplingOptions,
+    dither: DitherMode,
 }
 
 impl<'a> ConversionSettings<'a> {
@@ -220,6 +222,7 @@ impl<'a> ConversionSettings<'a> {
             background,
             color_fit: None,
             sampling: SamplingOptions::default(),
+            dither: DitherMode::Off,
         })
     }
 
@@ -242,6 +245,20 @@ impl<'a> ConversionSettings<'a> {
     pub const fn with_sampling(mut self, sampling: SamplingOptions) -> Self {
         self.sampling = sampling;
         self
+    }
+
+    /// Selects deterministic density-coverage quantization. Dithering is not applied to
+    /// candidate-specific color fitting; such a combination is rejected during conversion.
+    #[must_use]
+    pub const fn with_dither(mut self, dither: DitherMode) -> Self {
+        self.dither = dither;
+        self
+    }
+
+    /// Returns the configured density-coverage quantization policy.
+    #[must_use]
+    pub const fn dither(self) -> DitherMode {
+        self.dither
     }
 
     /// Returns the fit, filter, and optional retained patch policy.
@@ -368,6 +385,7 @@ pub struct DensityConversion {
     transform: FitTransform,
     patches: Option<QualityPatches>,
     sampling_identity: SamplingIdentity,
+    dither_cache_identity: DitherCacheIdentity,
     normalization_warning: Option<ColorNormalizationWarning>,
     palette_kind: Option<PaletteKind>,
     palette_cache_identity: Option<[u8; 32]>,
@@ -398,6 +416,11 @@ impl DensityConversion {
     #[must_use]
     pub const fn sampling_identity(&self) -> SamplingIdentity {
         self.sampling_identity
+    }
+    /// Returns the stable cache identity of mode, kernel/pattern, and ordered phase seed.
+    #[must_use]
+    pub const fn dither_cache_identity(&self) -> DitherCacheIdentity {
+        self.dither_cache_identity
     }
 
     /// Returns any warning emitted when unknown input color metadata was assumed to be sRGB.
@@ -477,6 +500,9 @@ pub fn convert_density_detailed(
     resources: &NormalizedRasterResources,
 ) -> Result<DensityConversion, DensityConversionError> {
     let settings = *settings;
+    if settings.color_fit.is_some() && settings.dither != DitherMode::Off {
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration).into());
+    }
     if settings.cancellation.is_cancelled() {
         return Err(Error::Cancelled.into());
     }
@@ -510,7 +536,7 @@ pub fn convert_density_detailed(
     )?;
     let grid_budget = validate_grid_budget(size, budget, settings.cancellation)?;
     let glyph_count_u64 = u64::try_from(glyph_records.len()).map_err(|_| Error::SizeOverflow)?;
-    let (matching_work, color_samples_per_cell, palette_storage_bytes) =
+    let (mut matching_work, color_samples_per_cell, palette_storage_bytes) =
         if let Some((palette, strategy)) = settings.color_fit {
             let sample_count = u64::from(glyphs.cell_width())
                 .checked_mul(u64::from(glyphs.cell_height()))
@@ -545,6 +571,27 @@ pub fn convert_density_detailed(
                 0,
             )
         };
+    let dither_work = estimate_work(
+        settings.dither,
+        usize::try_from(size.columns()).map_err(|_| Error::SizeOverflow)?,
+        usize::try_from(size.rows()).map_err(|_| Error::SizeOverflow)?,
+    )?;
+    if dither_work > crate::dither::MAX_DITHER_WORK_UNITS {
+        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits).into());
+    }
+    matching_work = matching_work
+        .checked_add(dither_work)
+        .ok_or(Error::SizeOverflow)?;
+    let dither_scratch_bytes = if matches!(settings.dither, DitherMode::ErrorDiffusion { .. }) {
+        u64::from(size.columns())
+            .checked_add(2)
+            .and_then(|width| {
+                width.checked_mul(2 * u64::try_from(core::mem::size_of::<f64>()).ok()?)
+            })
+            .ok_or(Error::SizeOverflow)?
+    } else {
+        0
+    };
     let frame_validation_work = grid_budget.work_units();
     let bytes_per_pixel = match preflight_bytes_per_pixel {
         Some(bytes_per_pixel) => bytes_per_pixel,
@@ -561,7 +608,16 @@ pub fn convert_density_detailed(
         frame_validation_work,
         color_samples_per_cell,
         palette_storage_bytes,
+        dither_scratch_bytes,
         budget,
+    )?;
+    let mut dither = DitherState::new(
+        settings.dither,
+        usize::try_from(size.columns()).map_err(|_| Error::SizeOverflow)?,
+        usize::try_from(size.rows()).map_err(|_| Error::SizeOverflow)?,
+        glyph_records.len(),
+        budget,
+        settings.cancellation,
     )?;
 
     let normalized = normalize_raster(input, budget, settings.cancellation, resources)?;
@@ -691,9 +747,25 @@ pub fn convert_density_detailed(
             } else {
                 let target_coverage =
                     ((target_luminance - background_luminance) / luminance_span).clamp(0.0, 1.0);
+                let target_coverage = dither.adjusted(
+                    usize::try_from(row).map_err(|_| Error::SizeOverflow)?,
+                    usize::try_from(column).map_err(|_| Error::SizeOverflow)?,
+                    target_coverage,
+                )?;
                 let glyph = best_glyph(glyph_records.iter(), target_coverage, || {
                     settings.cancellation.is_cancelled()
                 })?;
+                let selected_coverage = glyph_records
+                    .get(usize::try_from(glyph).map_err(|_| Error::SizeOverflow)?)
+                    .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?
+                    .mean_coverage();
+                dither.record(
+                    usize::try_from(row).map_err(|_| Error::SizeOverflow)?,
+                    usize::try_from(column).map_err(|_| Error::SizeOverflow)?,
+                    target_coverage,
+                    f64::from(selected_coverage),
+                    settings.cancellation,
+                )?;
                 cells.push(AsciiCell::new(glyph, foreground, background));
             }
         }
@@ -723,6 +795,7 @@ pub fn convert_density_detailed(
         transform: sampling.transform(),
         patches,
         sampling_identity: sampling.identity(),
+        dither_cache_identity: cache_identity(settings.dither),
         normalization_warning,
         palette_kind,
         palette_cache_identity,

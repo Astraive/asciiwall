@@ -3,6 +3,7 @@
 mod color;
 mod color_fit;
 mod density;
+mod dither;
 mod font;
 mod font_preflight;
 mod glyphs;
@@ -24,6 +25,9 @@ pub use color_fit::{
 pub use density::{
     ConversionSettings, DensityConversion, DensityConversionError, GridSizing, convert_density,
     convert_density_detailed,
+};
+pub use dither::{
+    DitherCacheIdentity, DitherMode, ErrorDiffusionKernel, MAX_DITHER_WORK_UNITS, OrderedPattern,
 };
 pub use font::{
     GlyphConfig, GlyphRecord, GlyphRepertoire, GlyphTable, build_glyph_table,

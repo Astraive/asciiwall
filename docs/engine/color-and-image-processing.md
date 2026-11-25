@@ -91,9 +91,72 @@ Palette storage, source sampling, candidate fitting, and frame construction are 
 
 The frame stores explicit resolved sRGBA8 foreground and background colors, so downstream image encoders can consume those colors directly. This conversion contract does not implement a PNG exporter, GUI, terminal renderer, or promise of terminal appearance; the ANSI notice is metadata, not a display guarantee.
 
+## Dithering
+
+Density dithering is optional and defaults to `DitherMode::Off`, which preserves the existing
+nearest-mean-coverage choice. Ordered and diffusion modes operate only on normalized linear-light
+cell luminance after sampling and background compositing: the scalar target is
+`clamp((Y - Y_background) / (Y_foreground - Y_background), 0, 1)`. It is not applied to encoded
+bytes, individual RGB channels, retained quality-patch samples, or candidate-specific color-fit
+scores; combining a non-off mode with color fitting is rejected.
+
+`Ordered { pattern: Bayer8, seed }` adds a signed Bayer-8 threshold in coverage units with amplitude
+`1 / max(glyph_count - 1, 1)`. The seed is mixed with a fixed SplitMix64 finalizer to select one
+stable 8x8 phase; the phase depends on the seed and absolute output-cell coordinates, never frame
+number, wall clock, randomness, or thread scheduling. Quantization chooses the nearest measured
+glyph mean coverage, ties by glyph index then Unicode scalar. Thresholds are clamped to `[0,1]`.
+
+`ErrorDiffusion { kernel: FloydSteinberg }` processes cells serially in row-major, left-to-right
+order. It distributes the residual between adjusted target and chosen measured glyph coverage as
+7/16 to the next cell, 3/16 to next-row left, 5/16 to next-row same-column, and 1/16 to next-row
+right. Out-of-grid neighbors are discarded; adjusted values clamp to `[0,1]`; ties use the same
+glyph rule. This dependency chain is deliberately not parallelized. Two `f64` row buffers are the
+only diffusion scratch; their checked bytes join the conversion raster budget. The additional
+dither operations, including row-buffer initialization and clearing, are charged to the operation
+work budget and capped at 16,000,000 units. Cancellation is polled during scratch initialization,
+row clearing, and conversion. Nonfinite residuals, checked-size overflow, allocation failure,
+cancellation, or budget exhaustion fail without returning a partial frame.
+
+The detailed result exposes a SHA-256 dither cache identity that includes mode, selected kernel or
+pattern, and the ordered seed. Applications must combine it with source, glyph-table, sampling,
+color, and conversion settings in their overall cache key.
+
+### Retained synthetic comparison evidence
+
+The regression test `synthetic_motion_and_scene_change_metrics_match_retained_evidence` compares
+each mode against `Off` and asserts these deterministic values. The fixture is a 32×36 image of
+8-bit gray byte samples passed through `linear_gray_raster` (linear transfer): a moving horizontal
+gradient shifted one source pixel, followed by a 4×3 per-cell checker cut. The cut uses byte samples
+96 and 160, interpreted as linear gray and normalized to `96/255` and `160/255` on `[0,1]`; output
+cells are 8×12 pixels. Tone MAE is the mean absolute difference between each input cell's linear-gray mean and the selected glyph's measured mean
+coverage. Flicker is changed output glyphs between the two gradient frames divided by 12. Glyph
+deltas count cell positions different from `Off`; scene-cut carryover is the number of additional
+same-scene conversions before the cut frame equals a fresh deterministic conversion (zero here).
+
+| Mode | Gradient tone MAE | Gradient shift changes / flicker | Gradient glyph delta vs Off | Scene-cut tone MAE | Gradient→cut glyph changes | Cut glyph delta vs Off | Carryover frames |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Off | 0.32316176396082397 | 3 / 12 (0.25) | 0 | 0.26862744998698074 | 3 | 0 | 0 |
+| Ordered Bayer-8, seed 23 | 0.32406045685406576 | 0 / 12 (0.0) | 1 | 0.26862744998698074 | 2 | 0 | 0 |
+| Floyd–Steinberg | 0.3249591497473075 | 1 / 12 (0.08333333333333333) | 2 | 0.26862744998698074 | 1 | 0 | 0 |
+
+Fixture SHA-256: `73c009fc5946e391fcca501e89a4cfe96aba7bb385eef19422302eb9609aca33`.
+Configuration SHA-256: `9192795ae357a250499087e804163084cc222b03e0f17ab8c99369c8159a57c0`.
+The exact hashes and metrics are also asserted and printed by the regression test. Verification
+environment: Windows 10.0.26300.9974 x64, rustc 1.100.0, cargo 1.100.0. Exact evidence command:
+`CARGO_HOME=D:/target/cargo-home CARGO_TARGET_DIR=D:/worktrees/.targets/cnv-006-dither cargo test --locked --package ascii-convert --test density_matcher -- --nocapture`.
+
+This single synthetic fixture shows a slight gradient-tone error increase for both dither modes
+alongside fewer changed glyphs; the scene-cut tone and mode-vs-Off glyph deltas happen to be equal
+here. Zero carryover reflects frame-independent conversion, not perceptual lag or a temporal
+quality guarantee. The small, synthetic comparison is evidence for the tested inputs only; it does
+not claim still-image gains improve video or that dithering improves arbitrary scenes.
+
 ## Filtering and edges
 
-Area/box sampling is a practical baseline for shrink-heavy conversion. Compare alternatives with thin lines, checkerboards, text, and photographs. Edge enhancement should be bounded and operate before quantization; strong enhancement can introduce halos. Dithering is optional and can increase flicker in video unless its pattern is temporally stable.
+Area/box sampling is a practical baseline for shrink-heavy conversion. Compare alternatives with thin
+lines, checkerboards, text, and photographs. Edge enhancement should be bounded and operate before
+quantization; strong enhancement can introduce halos. Dithering is optional and can increase
+flicker in video unless its pattern is temporally stable.
 
 ## Input coverage
 
