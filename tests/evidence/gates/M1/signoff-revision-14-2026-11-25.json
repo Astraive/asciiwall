@@ -1,0 +1,97 @@
+{
+  "schema": "asciiwall.m1-gate-receipt/v1",
+  "receipt_version": "draft-14",
+  "recorded_on": "2026-11-25",
+  "decision": "no-go",
+  "record_status": "draft_pending_independent_signoff",
+  "amends": {
+    "revision": "draft-13",
+    "file": "signoff-revision-13-2026-11-25.json",
+    "sha256": "561de91e0193a20dc62569c0d75db2e8175ef729513d2ba79084756b6eb9dfc2",
+    "prior_revision_preserved_byte_for_byte": true
+  },
+  "gate": {
+    "issue": 211,
+    "state_observed": "OPEN",
+    "status": "In Review / Blocked",
+    "acceptance_status": "NO-GO",
+    "m1_completion_claimed": false,
+    "accepted_scope": []
+  },
+  "evidence_added": {
+    "qa102": {
+      "pull_request": 341,
+      "url": "https://github.com/Astraive/asciiwall/pull/341",
+      "state": "OPEN_DRAFT",
+      "head_sha": "884d65580f587c046d92cec5daaacf040cabb4b8",
+      "base": "main",
+      "base_sha": "a11f6ddad23976962d95a412ffd7aa2972d1be75",
+      "merge_parents": [
+        "1f14681b9db9480c4eb0db9775820691d0970520",
+        "a11f6ddad23976962d95a412ffd7aa2972d1be75"
+      ],
+      "merge_parent_interpretation": "The current QA-102 PR head is a merge commit whose first parent is the prior QA-102 head and whose second parent is the captured main base. This is not the PR merge commit; PR #341 remains open and draft.",
+      "hosted_component_run": {
+        "run_id": 45619139992,
+        "conclusion": "success",
+        "head_sha": "884d65580f587c046d92cec5daaacf040cabb4b8",
+        "checks": [
+          "Portable core: passed on Ubuntu, macOS, and Windows",
+          "Repository quality: passed"
+        ],
+        "scope": "Automated component checks only; not full M1 acceptance."
+      },
+      "hosted_security_run": {
+        "run_id": 45619140079,
+        "conclusion": "success",
+        "head_sha": "884d65580f587c046d92cec5daaacf040cabb4b8",
+        "check": "Python security analysis: passed"
+      },
+      "hosted_artifact": {
+        "name": "qa-102-hosted-component-evidence",
+        "run_id": 45619139992,
+        "run_json_sha256": "70031e5babb4e48518a83c331870ddba0f3bcedc58997e1ea3eefe8683e32e7c",
+        "validation": "Current-run run.json validated."
+      },
+      "ec_statuses": {
+        "EC-006": "PASS (automated component scope)",
+        "EC-007": "PASS (automated component scope)",
+        "EC-008": "PASS (automated component scope)",
+        "EC-009": "NOT RUN",
+        "EC-010": "PASS (automated component scope)"
+      },
+      "qa004_recorder_pin": "fb20e84ec196c421b954b90985dc2217a35767c6",
+      "independent_exact_head_review": {
+        "reviewer": "Luna",
+        "head_sha": "884d65580f587c046d92cec5daaacf040cabb4b8",
+        "status": "No actionable P0–P2 findings",
+        "tests_run_by_reviewer": false,
+        "scope": "Exact-head code review only; no authenticated acceptance or M1 sign-off."
+      },
+      "scope_limits": [
+        "Documented narrow scope only",
+        "EC-009 was NOT RUN",
+        "No authenticated human, native, or product acceptance"
+      ]
+    }
+  },
+  "remaining_blockers": [
+    "QA-004 issue #35 remains incomplete and is a hard prerequisite.",
+    "No integrated M1 candidate or binary exists.",
+    "No exact-candidate run or firewall-denied run exists; both scenarios remain untested.",
+    "No authenticated human acceptance or native/product acceptance exists; independent human signoffs remain absent.",
+    "The required settings digest remains unresolved/unavailable.",
+    "Rights and provenance remain unresolved."
+  ],
+  "independent_human_signoffs": {
+    "engine_maintainer": null,
+    "cli_reviewer": null
+  },
+  "disposition": {
+    "decision": "NO-GO",
+    "m1_completion_claimed": false,
+    "accepted_scope": [],
+    "issue_211_remains_open": true,
+    "reason": "QA-102 provides passing hosted automated component evidence at its exact current head, but EC-009 is NOT RUN and this evidence is not integrated M1 acceptance. QA-004 #35 remains incomplete and a hard prerequisite. There is no integrated M1 candidate or binary, no exact-candidate or firewall-denied run, no authenticated human/native/product acceptance, and settings digest and rights/provenance remain unresolved. The M1 gate remains blocked and NO-GO."
+  }
+}
