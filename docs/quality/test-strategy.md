@@ -6,6 +6,8 @@ Document-schema validation proves that examples match the proposed schema; it do
 
 Tag reports as document QA, unit/property, integration, fuzz, benchmark, native manual, or release acceptance. Record exact source/binary hash and environment. Never merge these into one vague 'tested' badge.
 
+The QA-102 hosted portable-component path records exact test-source, compiled-binary, and fixture hashes alongside the Actions run and PR-head SHAs. `scripts/record_qa_102_ci_evidence.py` calls the QA-004 recorder checked out at its pinned commit, copies the completed output tree, and validates records under `--evidence-root` only after the copy is quiescent. Its records indicate automated component evidence only; `ci-runner` is not a human reviewer. The workflow records missing EC-009 restricted-worker/UI coverage as `not-run`, never as a decoder-test pass. This is not native, product, or authenticated acceptance evidence.
+
 ## Engine correctness
 
 Unit-test color transforms, alpha composition, cell aspect ratio, glyph calibration, deterministic seeds, matcher score normalization, row strides, frame dimensions, timestamp arithmetic, and cache fingerprints. Property tests enforce checked multiplication, no out-of-range glyph IDs, finite values, valid buffers, and deterministic output under identical inputs.

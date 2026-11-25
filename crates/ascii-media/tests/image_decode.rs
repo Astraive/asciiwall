@@ -86,49 +86,6 @@ fn jpeg(width: u32, height: u32, samples: &[u8]) -> Vec<u8> {
     bytes
 }
 
-// The SOF advertises a large raster while the rights-cleared 2x1 JPEG entropy payload stays tiny.
-
-fn jpeg_with_dimensions(bytes: &[u8], width: u16, height: u16) -> Vec<u8> {
-    let mut patched = bytes.to_vec();
-    let mut offset = 2;
-    while offset < patched.len() {
-        assert_eq!(patched[offset], 0xff);
-        while offset < patched.len() && patched[offset] == 0xff {
-            offset += 1;
-        }
-        let marker = *patched.get(offset).expect("JPEG marker must exist");
-        offset += 1;
-        if marker == 0xda || marker == 0xd9 {
-            break;
-        }
-        if marker == 0x01 || (0xd0..=0xd8).contains(&marker) {
-            continue;
-        }
-
-        let length_end = offset.checked_add(2).expect("segment offset fits");
-        let segment_length = usize::from(u16::from_be_bytes(
-            patched
-                .get(offset..length_end)
-                .expect("JPEG segment length must exist")
-                .try_into()
-                .expect("JPEG segment length has two bytes"),
-        ));
-        let segment_end = offset
-            .checked_add(segment_length)
-            .expect("JPEG segment extent fits");
-        assert!(segment_end <= patched.len());
-        if marker == 0xc0 {
-            let height_start = offset.checked_add(3).expect("SOF offset fits");
-            let width_start = offset.checked_add(5).expect("SOF offset fits");
-            patched[height_start..height_start + 2].copy_from_slice(&height.to_be_bytes());
-            patched[width_start..width_start + 2].copy_from_slice(&width.to_be_bytes());
-            return patched;
-        }
-        offset = segment_end;
-    }
-    panic!("baseline JPEG must contain a SOF0 marker");
-}
-
 fn decode(bytes: &[u8]) -> Result<ascii_media::DecodedFrame, ascii_core::Error> {
     decode_image(
         &mut Cursor::new(bytes),
@@ -518,26 +475,6 @@ fn png_truecolor_and_gray_trns_preserve_nonpremultiplied_samples() {
     );
     assert_eq!(decode(&keyed_rgb).unwrap().pixels(), &[100, 150, 200, 0]);
     assert_eq!(decode(&keyed_gray).unwrap().pixels(), &[77, 77, 77, 0]);
-}
-
-#[test]
-fn small_jpeg_with_large_dimensions_is_rejected_before_raster_allocation() {
-    let bytes = jpeg_with_dimensions(&jpeg(2, 1, &[255, 0, 0, 0, 255, 0]), 4096, 4096);
-    assert!(bytes.len() < 1024);
-
-    let mut decode_limits = limits();
-    decode_limits.max_width = 8192;
-    decode_limits.max_height = 8192;
-    let error = decode_image(
-        &mut Cursor::new(bytes),
-        &decode_limits,
-        &CancellationToken::new(),
-    )
-    .unwrap_err();
-    assert_eq!(
-        error,
-        ascii_core::Error::BudgetExceeded(BudgetKind::RasterBytes)
-    );
 }
 
 #[test]

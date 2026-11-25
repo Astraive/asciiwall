@@ -19,6 +19,117 @@ This matrix defines **120 proposed scenarios** and expected outcomes. It is not 
 | EC-009 | P0 | Malformed/truncated image | Worker failure with safe UI error |
 | EC-010 | P0 | Small compressed image with huge dimensions | Reject against pixel/byte budget before full allocation |
 
+### QA-102 portable regression coverage
+
+The EC-006–EC-008 PASS rows below are historical portable CPU/API source/test evidence from revision `1d44523e9365a98bc4d301a53d71d5552eb99dfb`; that revision and its exact-revision run are recorded below. The exact final-head CI subject for that historical evidence update was PR #341's then-live docs-only tip `12ca2f03e4503c968beb1bc2229c2d876722cc3f`. PR #337 executions, including run `44917321240`, are historical and do not prove results for PR #341's verified tip. These results are limited to the named boundaries and are not a QA-004 #35 receipt or authenticated QA-102 acceptance receipt.
+
+#### QA-102 hosted component evidence path
+
+For PR #341, the `Portable core (ubuntu-latest)` job records EC-006, EC-007, EC-008, and EC-010 only after their focused Rust test commands succeed. It uses `scripts/record_qa_102_ci_evidence.py` with the QA-004 `scripts/evidence.py` checked out separately at exact commit `fb20e84ec196c421b954b90985dc2217a35767c6` from still-open PR #310; QA-004 is an explicit unmerged workflow dependency, not part of this branch's history or base. Each JSON record identifies the Actions run/attempt and PR head in `run.json`, source and compiled test-binary SHA-256, and the corresponding fixture hash. EC-006–EC-008 fixtures are inline in the hash-pinned test source; EC-010 hashes the persisted JPEG bytes.
+
+The workflow copies the completed evidence tree into its artifact directory and invokes the pinned recorder's `validate --evidence-root` only after that copy is complete and quiescent, then uploads the artifact. `ci-runner` is an automation identifier required by the record schema, not a human reviewer. These are automated component receipts only: they do not authenticate execution, establish QA-102 acceptance, or claim native/product behavior. EC-009 is explicitly recorded `NOT RUN`; decoder tests do not exercise the missing restricted-worker/UI path. No hosted result is claimed here until an exact-head Actions run has produced and validated the artifact.
+
+| ID | Exercised real interface | Remaining boundary |
+|---|---|---|
+| EC-006 | **HISTORICAL PASS (portable detailed conversion; source/test revision `1d44523e9365a98bc4d301a53d71d5552eb99dfb`).** PQ HDR-transfer and Rec.2020 wide-gamut metadata return their corresponding typed normalization causes and exact actionable `Display` limitations: `HDR transfer Pq is unsupported; provide SDR input or use an explicitly supported tone-mapping path`; `wide-gamut primaries Rec2020 are unsupported; convert to sRGB with tested color-managed tooling`. No frame is returned. | This does not exercise decoder-extracted metadata or CLI/UI messaging. The convenience `convert_density` API intentionally maps unsupported color to a generic core error. |
+| EC-007 | **HISTORICAL PASS (portable density conversion; source/test revision `1d44523e9365a98bc4d301a53d71d5552eb99dfb`).** All-black, all-white, and flat mid-gray Gray8 inputs convert repeatably with exact repeated cells; black selects blank space, white selects ink glyph `A`, descriptors/samples remain finite, gradients are zero, and endpoint luminance is exactly 0/1. | This covers the CPU conversion path only, not native preview/rendering. |
+| EC-008 | **HISTORICAL PASS (padded-raster converter and decoder-to-converter smoke; source/test revision `1d44523e9365a98bc4d301a53d71d5552eb99dfb`).** The exact-minimum 3×2 Gray8 view with stride 5 ignores poison padding and converts black/white rows deterministically; a separate odd-width 3×2 synthetic PNG was decoded with `ascii-media::decode_image`, borrowed via `DecodedFrame::view()`, and passed directly to `convert_density_detailed` (decoded RGB stride 9; output 3×2). | Portable CPU/API boundaries only: the decoder returns tightly packed output, so padding behavior is covered by the direct raster test, not decoder-added padding. Device-specific stride remains untested. |
+| EC-009 | **NOT RUN.** The separately named raw-raster backing validation regression verifies that the converter preserves `RasterBackingTooShort`; it is not EC-009 because it does not use malformed encoded input, a restricted worker, or a UI. | The current three-member workspace has no SEC-005 restricted media worker or UIX-001 application UI/safe-error surface. The required malformed/truncated encoded-input → worker failure → safe UI error path is unavailable; no worker/UI pass is claimed. |
+| EC-010 | **PASS (source/test revision `1d44523e9365a98bc4d301a53d71d5552eb99dfb`, [Actions run 44921683188](https://github.com/Astraive/asciiwall/actions/runs/44921683188); the then-live docs-only tip `12ca2f03e4503c968beb1bc2229c2d876722cc3f` also passed both decoder tests per OS in [run 44939088264](https://github.com/Astraive/asciiwall/actions/runs/44939088264)).** | Persisted-fixture decoder-budget coverage only; QA-004 #35 receipt integration/archive remains missing, as do EC-009 worker/UI and native/manual evidence. No authenticated QA-102 acceptance is claimed. |
+
+#### EC-010 persisted fixture and replacement-head regression
+
+`crates/ascii-media/tests/fixtures/ec010-oversized-budget.jpg` is 29,300 bytes (SHA-256 `7ea9607205ef59dd2be26c992ced846f679e58501f0462b86abe62c50b59a320`). It is a rights-cleared synthetic image generated in-repository with Pillow 12.2.0: a uniform RGB `(72, 116, 168)` raster from `Image.new("RGB", (1024, 1024), ...)`, encoded as JPEG with quality 75, subsampling 0, `optimize=False`, and `progressive=False`; no external image source was used. The valid JPEG's 1024×1024 RGB output is 3,145,728 bytes, exceeding the test's 1,048,576-byte raster budget, while the compressed fixture remains below 32 KiB.
+
+The public-API regression verifies that exact SHA-256 and requires `ascii_media::decode_image` to return `Error::BudgetExceeded(BudgetKind::RasterBytes)`, not a generic malformed/decode error. On source/test revision `1d44523e9365a98bc4d301a53d71d5552eb99dfb` (the parent of the then-live PR #341 docs-only tip `12ca2f03e4503c968beb1bc2229c2d876722cc3f`), [Actions run 44921683188](https://github.com/Astraive/asciiwall/actions/runs/44921683188) passed `cargo test --locked --package ascii-media` on `ubuntu-latest`, `macos-latest`, and `windows-latest`, including `oversized_jpeg_is_rejected_before_output_allocation` and `oversized_jpeg_fixture_is_rejected_by_public_decoder_with_raster_budget_error`. The earlier exact PR #337 head `6bb7c004adc2180436053d75d7896cc136ed3907` and [Actions run 44917321240](https://github.com/Astraive/asciiwall/actions/runs/44917321240) are historical evidence only, not proof for PR #341's verified tip. This is decoder-budget coverage only; QA-004 #35 receipt integration/archive, EC-009 worker/UI, native/manual evidence, and full QA-102 acceptance remain outstanding.
+
+#### EC-010 local portable execution (PR #341 exact head `e283576e17b87769d21982bf4b07cbc6c15b9b32`)
+
+On `2026-11-22T04:25:16.2584749+05:30`, two focused portable CPU/API tests ran locally at exact PR #341 head `e283576e17b87769d21982bf4b07cbc6c15b9b32` (base `main` `7552713a9c8b4515904d3e562c8b1c188a9d8676`). See [PR #341](https://github.com/Astraive/asciiwall/pull/341), the [public-decoder regression](../../crates/ascii-media/tests/image_decode_jpeg_controls.rs), and the [allocation-guard unit test](../../crates/ascii-media/src/image.rs):
+
+- `cargo test --locked --package ascii-media --test image_decode_jpeg_controls oversized_jpeg_fixture_is_rejected_by_public_decoder_with_raster_budget_error -- --exact` — **PASS**, 1 passed, 20 filtered; `decode_image` returned `BudgetExceeded(RasterBytes)` for the persisted fixture.
+- `cargo test --locked --package ascii-media --lib image::codec_cancellation_tests::oversized_jpeg_is_rejected_before_output_allocation -- --exact` — **PASS**, 1 passed, 11 filtered; asserted the budget error and that the output-allocation seam was not reached. Only these two successful focused runs count; the earlier shared-cache setup failure and zero-test short filter are not passes.
+
+The 29,300-byte baseline JPEG fixture has SHA-256 `7ea9607205ef59dd2be26c992ced846f679e58501f0462b86abe62c50b59a320`; it encodes a 1024×1024, three-component image with a 3,145,728-byte RGB output against a 1,048,576-byte raster budget. `reserve_plan` checks the raster budget before full decoded-output allocation; small encoded-input snapshot/header processing may allocate, so this is not a claim of rejection before any allocation.
+
+- **SHA-256 at tested head:** `crates/ascii-media/src/image.rs` `ebc68d7cb8d8a06602fee1468e75a806b2590660edee2e56d706810f67a77e99`; `crates/ascii-media/tests/image_decode_jpeg_controls.rs` `2f9bdac858bce36066ece90247fcbca6d634dda1d85702b7f920e03f72211c3f`; `crates/ascii-media/Cargo.toml` `a41cfb18a650c428398d40f6a44e0205b25d1f2b0823c6591a6528ec53bd0cca`; `Cargo.lock` `a1af433632c3d70a159a748480cec7eaae4018dbc66dfa13deb14b48108e6939`; fixture as above.
+- **Test harnesses, not application binaries:** `CARGO_HOME=D:/qa102-ec010-cargo-home-20261122-0419-RunEc010Receipt`; `CARGO_TARGET_DIR=D:/worktrees/asciiwall-qa102-ec010-receipt-e283576-20261122/.cargo-target`. The integration harness `debug/build/ascii-media/f10f71b2767415d5/out/image_decode_jpeg_controls-f10f71b2767415d5.exe` is 2,733,056 bytes (SHA-256 `d2cf51aa9443134dbfff1aa1c77fb8c471acc3a289300a3f6c7db747721c3bd8`); the unit harness `debug/build/ascii-media/594045a41a600b57/out/ascii_media-594045a41a600b57.exe` is 3,084,800 bytes (SHA-256 `3c3b4c5eca4d3c6652ef0d4c5882abeac5d1519d01e41621bc394dea26f4e1f3`).
+- **Host and reviewer:** Windows 11 Home Single Language x64, build `10.0.26300`; Rust/Cargo `1.100.0`, target `x86_64-pc-windows-msvc`; non-admin. Inventory listed Intel UHD and NVIDIA RTX 3050 6GB Laptop GPU; neither test used a GPU, compositor, or device. Session/compositor/driver were not exercised or reported. A fresh independent Luna max read-only review (`ReviewEc010Receipt`) approved only a narrow portable EC-010 PASS and confirmed the head, fixture/source/test/Cargo/harness hashes, commands/counts, allocation caveat, and host fields with no mismatch; it is not QA-102 or M1 sign-off.
+
+This documents a local portable execution, not CI or app/UI, restricted-worker, EC-009, QA-004 #35 archived-receipt, native/manual, GPU/device, or full QA-102 evidence. EC-009 remains NOT RUN; QA-004 #35 archived receipt and full QA-102/M1 sign-off remain incomplete, and issue #78 remains OPEN. This documentation-only update follows tested head `e283576e17b87769d21982bf4b07cbc6c15b9b32` and changes no source/test behavior.
+
+#### Historical QA-102 portable execution evidence
+
+The following checks were run on replacement source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8`. They remain historical evidence for that revision and do not establish results for later source/test snapshots:
+
+- `cargo test --locked -p ascii-convert --test qa_102_input_conversion` — **PASS**, 6 passed.
+- `ascii-convert` package test suites — **PASS**, 80 passed across 6 suites.
+- `ascii-media --lib` — **PASS**, 12 passed; `image_decode` — **PASS**, 20 passed.
+- `cargo fmt --all -- --check` — **PASS**.
+- Strict workspace Clippy (`cargo clippy --locked --workspace --all-targets -- -D warnings`) — **PASS**.
+
+At that time, PR commits `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c` and `27c8bc179436a1851a865f489d92c009e7ba2247` were docs-only and the QA-102 conversion suite was not rerun at either head. Those results are historical, not proof for PR #341; its separate source/test revision and final-head CI evidence are recorded below.
+
+#### Replacement PR #341 source/test revision portable execution evidence
+
+The portable conversion run used source/test revision `1d44523e9365a98bc4d301a53d71d5552eb99dfb` (the parent of the then-live final docs-only CI subject `12ca2f03e4503c968beb1bc2229c2d876722cc3f`) on base `7552713a9c8b4515904d3e562c8b1c188a9d8676`. In [Actions run 44921683188](https://github.com/Astraive/asciiwall/actions/runs/44921683188), `cargo test --locked --package ascii-convert --test qa_102_input_conversion` — **PASS**, 6 tests passed on each of `ubuntu-latest`, `macos-latest`, and `windows-latest`. This is exact-source/test-revision portable evidence for EC-006–EC-008; separate evidence for the final-head CI subject `12ca2f03e4503c968beb1bc2229c2d876722cc3f` follows. It does not close the QA-004 receipt, EC-009 worker/UI, native/manual, or authenticated full-acceptance gaps.
+
+#### Historical PR #341 exact final-head CI evidence
+
+At pre-update verification, PR #341 was OPEN/DRAFT at exact head `12ca2f03e4503c968beb1bc2229c2d876722cc3f` against base `main` `7552713a9c8b4515904d3e562c8b1c188a9d8676`; that head is the subject of [Portable CI run 44939088264](https://github.com/Astraive/asciiwall/actions/runs/44939088264). The `12ca...` docs-only tip has source/test parent `1d44523e9365a98bc4d301a53d71d5552eb99dfb` (the revision detailed above). Portable CI succeeded: repository quality passed, and on each of `ubuntu-latest`, `macos-latest`, and `windows-latest`, the QA-102 integration suite passed (6 tests) and both EC-010 decoder tests—`oversized_jpeg_is_rejected_before_output_allocation` and `oversized_jpeg_fixture_is_rejected_by_public_decoder_with_raster_budget_error`—passed. [Security run 44939088317](https://github.com/Astraive/asciiwall/actions/runs/44939088317) also succeeded for exact head `12ca2f03e4503c968beb1bc2229c2d876722cc3f`. This matrix update is a docs-only commit after the run; it changes no source/test code, and the update itself was not covered by those runs. The evidence does not close the QA-004 #35 receipt integration/archive gap, EC-009 worker/UI gap, or native/manual evidence gaps; it is not authenticated full QA-102 acceptance or ticket sign-off.
+
+#### Current-head component-CI evidence (PR #341 head `2f6fd69a102139add62679b9b49c59afd3adf9e1`)
+
+At exact PR #341 head `2f6fd69a102139add62679b9b49c59afd3adf9e1` against base `main` `7552713a9c8b4515904d3e562c8b1c188a9d8676`, [Portable CI run 45155875670](https://github.com/Astraive/asciiwall/actions/runs/45155875670) passed repository quality; its Ubuntu, macOS, and Windows portable jobs executed the QA-102 tests and decoder tests. [Python security run 45083660578](https://github.com/Astraive/asciiwall/actions/runs/45083660578) also passed. This is automated component-CI evidence, not a per-scenario receipt; it does not establish EC-009, full QA-102 acceptance, authenticated sign-off, or M1 acceptance. QA-004 #35 receipt integration/archive, EC-009 worker/UI, and native/manual acceptance remain blockers.
+
+#### Historical PR #337 exact-head portable execution evidence (EC-006–EC-008)
+
+The historical PR #337 run exercised EC-006–EC-008 at exact head `6bb7c004adc2180436053d75d7896cc136ed3907` with tested source/test revision `37f12f1afeefdab509f3315a47c90fc1a7e84d25`; it is not proof for replacement PR #341's current head:
+
+- `cargo test --locked -p ascii-convert` — **PASS**, 85 passed across 8 suites.
+- **Host/environment:** Windows x64; isolated `CARGO_HOME` and `CARGO_TARGET_DIR`; portable CPU test run.
+
+This tested snapshot includes the updated normalization/conversion/sampling code and QA-102 tests using `NormalizedRasterResources`. The explicit owner bounds concurrently retained owned normalized-output bytes; each operation's `Budget` remains separate for input extent and per-operation limits. This evidence is limited to the portable normalization/conversion API and resource-owner boundary. It does not claim QA-004 receipt integration, restricted-worker/UI behavior, native/manual evidence, or full QA-102 acceptance; existing NOT RUN limitations remain.
+
+#### Historical EC-010 source revision and exact-head evidence
+
+The original run below was on historical predecessor head `dd699e480f31c77e50f51f5831c81f5e240febaa`; `44688a862052f2e597ba7a61df80f3928d33158c` and `0e447854ec0e986e45678fdbfa31c889da2e5d41` were docs-only, with `0e447854ec0e986e45678fdbfa31c889da2e5d41` serving as prior-head evidence. The old in-memory-generated-JPEG test was verified on tested source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8` and rerun on exact PR #337 head `27c8bc179436a1851a865f489d92c009e7ba2247`; it did not persist or hash the JPEG. These historical runs do not execute the persisted-fixture public-API regression added above. PR commits `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c` and `27c8bc179436a1851a865f489d92c009e7ba2247` were docs-only; later documentation-only edits do not alter the tested source/test code.
+
+- `cargo test --locked -p ascii-media --lib oversized_jpeg_is_rejected_before_output_allocation -- --nocapture` — **PASS**, 1 passed, 11 filtered. The runner reports `image::codec_cancellation_tests::oversized_jpeg_is_rejected_before_output_allocation`.
+
+The same exact command was run on prior PR head `0e447854ec0e986e45678fdbfa31c889da2e5d41`:
+
+- `cargo test --locked -p ascii-media --lib oversized_jpeg_is_rejected_before_output_allocation -- --nocapture` — **PASS**, 1 passed.
+
+The exact command below was run on tested source/test revision `fb8ddb206df60a7083083e46754c32fe14f3ddd8` and on PR #337 head `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c` at that time:
+
+- `cargo test --locked -p ascii-media --lib oversized_jpeg_is_rejected_before_output_allocation -- --nocapture` — **PASS**, 1 passed, 11 filtered, on `fb8ddb206df60a7083083e46754c32fe14f3ddd8`.
+- `cargo test --locked -p ascii-media --lib oversized_jpeg_is_rejected_before_output_allocation -- --nocapture` — **PASS**, 1 passed, 11 filtered, on PR #337 head `4f2c01fdf9e12bbce2b831b3f5fdc2978f5c782c`.
+
+The same command was rerun on exact PR #337 head `27c8bc179436a1851a865f489d92c009e7ba2247`:
+
+- `cargo test --locked -p ascii-media --lib oversized_jpeg_is_rejected_before_output_allocation -- --nocapture` — **PASS**, 1 passed, 11 filtered.
+
+This confirms decoder budget-guard coverage only; it is not a QA-004 receipt and does not establish EC-009, native/manual, worker/UI, or full QA-102 acceptance. QA-004 #35 remains a hard dependency; no archived QA-004 receipt or full QA-102 acceptance is claimed.
+
+#### Historical local execution evidence (portable CPU snapshot; superseded base)
+
+The following recorded run used exact CNV-001 #314 base head `b78920f82ff496e2ee9bd9b5ea454d906a003fa0` (`feat/cnv-001-density-matching-linear`). All commands, counts, hashes, and outcomes in this subsection are historical evidence for that superseded snapshot only; they are not replacement-head verification for PR #337. The run records portable CPU/API behavior only; no application binary, UI, restricted worker, native/GPU, or manual-host scenario was run.
+
+- **Date:** 2026-11-20. **Host:** Microsoft Windows `[Version 10.0.26300.9974]`, x64. **Session/compositor/GPU/permissions:** N/A (headless CPU-only test process; no desktop or worker boundary used). **Reviewer:** this run did not produce a reviewer-linked QA-102 scenario receipt.
+- **Environment:** commands used `CARGO_HOME=D:/target/qa102-cargo-home` and `CARGO_TARGET_DIR=D:/target/qa102-target`.
+- **Focused QA-102 run:** `cargo test --locked -p ascii-convert --test qa_102_input_conversion -- --nocapture` — **PASS**, 6 passed, 0 failed. This covers EC-006, EC-007, direct padded-raster EC-008, and decoder-to-converter EC-008. The smoke reports `decoded=3x2 stride=9 converted=3x2`; PNG fixture SHA-256: `1d2a30b93e806b147de7b09d809331d041f520fcf39b2842e59ce4ae05b88012`.
+- **Workspace:** `cargo test --locked --workspace` — **PASS**, 155 passed, 0 failed.
+- **Formatting and lint:** `cargo fmt --all` and `cargo fmt --all -- --check` — **PASS**; `cargo clippy --locked --workspace --all-targets -- -D warnings` — **PASS**.
+- **Diff hygiene:** `git diff --check` — **PASS**.
+- **SHA-256, QA/conversion sources and binaries:** `crates/ascii-convert/tests/qa_102_input_conversion.rs` `0f1294da433520a1b7e6d459cbd8e59ca38fbc823fbb5f0535ba1a381add61b7`; focused test executable `qa_102_input_conversion-26e74f95670d2e50.exe` `7bccfb40855a914e0d9ff11b14569fdd2ec1a1a068a30be4f352b8039fed9c7e`.
+- `crates/ascii-media/tests/image_decode.rs` `ce6a699b7b3765e18d95c061d9e22c7462cf6c5030125b02aa7d438e400c0108`; decoder `crates/ascii-media/src/image.rs` `cf90f3bb1c6f503c823062589e33e07fc1a05ea6d596a9c1fdd24d8c529487c4`; existing decoder-test executable `image_decode-7773c6b353196bb5.exe` `a3379248a4fd57080ed78f1d41fcb6870daf6761c4b034dd630caa22607850f6`.
+- `ascii-convert/src/color.rs` `12b503c767b009d4c469fba7224f8fe7256fe6fe53d1f6a7bcad888d31c37afa`; `density.rs` `5ebd619fa34632bfdcf867b3122d6f976eaee36b0045684b714f01bd7c78278c`; `sampling.rs` `0b42905098eaf712ebe9bb71456a3b3d5834add4b64862009df265dc146970ea`; raster contract `ascii-core/src/frame.rs` `3d5d1a5832c2430de20ad81ff57134e05d0d42b9d2059e277f667fd03566bde2`; synthetic-font generator `ascii-convert/tests/support/synthetic_font.rs` `8a0b3b4e8ee150d6d16b084e51200525112ed6424855afa652a55ed3274176c8`; `Cargo.lock` `a1af433632c3d70a159a748480cec7eaae4018dbc66dfa13deb14b48108e6939`.
+- **Rights-cleared input hashes:** EC-006 RGB bytes `[40, 96, 180]` `9912b1bfd9248345293ccdccc67e378fde14311cf29e84897a556bec27aac5ea`; EC-007 black/gray-128/white buffers `2ea9ab9198d1638007400cd2c3bef1cc745b864b76011a0e1bc52180ac6452d4` / `1b34669db94decae583e183ee2ffeb07cf504b9f52fae0056c5cf343325157e4` / `ce65609cc564ce3d8cb72d46bc44cd5495afbad7bc61b5edfa0799baa5063191`.
+- EC-008 direct padded-raster buffers at stride 5 hash to `c19ddecee2e30d70144a5a3c78cae2896812fe7e4e8b9f49d48aca03bb9f20c0` and `177c9e1875457c6e32e1385bdebd2d919cae8f4c294e431aada3d1bd5945d324`; the separate encoded PNG hash is listed above. No external media was used.
+
+QA-004 issue [#35](https://github.com/Astraive/asciiwall/issues/35) remains an open hard dependency. These portable tests are not a QA-004 evidence-recorder receipt; no native/manual or restricted-worker/UI scenario, archived QA-004 receipt, or full QA-102 acceptance is claimed.
+
 ## Glyphs and rendering
 
 | ID | Priority | Condition | Required outcome |
