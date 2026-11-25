@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed design decision.
+Proposed design decision; no decision-scoped implementation and verification evidence is linked here. This status describes the architecture, not compiled behavior or approval for release.
 
 ## Options
 
@@ -21,3 +21,5 @@ Simple hosting and offline use, but no server-side popularity, automatic moderat
 ## Revisit when
 
 A clearly justified optional community service adds value without becoming a prerequisite for local use. Such a change requires an explicit privacy/product decision, not an unnoticed dependency introduced by a convenient library.
+
+No optional-service decision or offline/conformance verification is linked as evidence for this decision in the register.

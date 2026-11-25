@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed, accepted for this design; not implemented.
+Proposed design decision; no decision-scoped implementation and verification evidence is linked here. This status describes the architecture, not compiled behavior or approval for release.
 
 ## Context and options
 
@@ -21,3 +21,5 @@ More engineering work than wrapping a player, but clear ownership of quality/per
 ## Revisit when
 
 A concrete benchmark or maintenance issue shows a selected low-level library is unsuitable. Replace the adapter dependency without abandoning the shared core contracts. Do not switch to a web runtime simply because a prototype UI is easier unless the product constraints are explicitly reconsidered.
+
+No benchmark or implementation verification is linked as evidence for this decision in the register.
