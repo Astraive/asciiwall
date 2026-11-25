@@ -3591,4 +3591,42 @@ mod codec_cancellation_tests {
         assert_eq!(resources.cpu_bytes_in_use(), 0);
         assert_eq!(resources.active_decodes(), 0);
     }
+    #[test]
+    fn apng_cancellation_between_frames_releases_decode_resources() {
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut encoded, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_animated(2, 0).unwrap();
+            encoder.validate_sequence(true);
+            let mut writer = encoder.write_header().unwrap();
+            writer.set_frame_delay(1, 100).unwrap();
+            writer.write_image_data(&[255, 0, 0, 255]).unwrap();
+            writer.set_frame_delay(1, 100).unwrap();
+            writer.write_image_data(&[0, 255, 0, 255]).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let resources = DecodeResources::new(1, 1 << 20);
+        let limits = DecodeLimits::new(
+            Budget::new(1 << 20, 1 << 20, 1 << 20),
+            resources.clone(),
+            8,
+            8,
+            1 << 20,
+            1 << 20,
+        );
+        let polls = Cell::new(0);
+        let result = decode_apng_snapshot(&encoded, &limits, &CancellationToken::new(), || {
+            let poll = polls.get();
+            polls.set(poll + 1);
+            poll == 1
+        });
+
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert_eq!(polls.get(), 2, "cancellation is polled before frame two");
+        assert_eq!(resources.cpu_bytes_in_use(), 0);
+        assert_eq!(resources.active_decodes(), 0);
+    }
 }
