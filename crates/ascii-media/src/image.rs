@@ -432,10 +432,10 @@ fn decode_gif_snapshot(
         .checked_mul(u64::from(height))
         .ok_or(Error::SizeOverflow)?;
     let canvas_bytes = canvas_pixels.checked_mul(4).ok_or(Error::SizeOverflow)?;
+    // `decode_animation` already charges the owned encoded snapshot; this is decoder workspace only.
     let workspace_bytes = canvas_bytes
         .checked_mul(3)
         .and_then(|bytes| bytes.checked_add(canvas_pixels))
-        .and_then(|bytes| bytes.checked_add(encoded_bytes))
         .and_then(|bytes| bytes.checked_add(GIF_FIXED_SCRATCH_BYTES))
         .ok_or(Error::SizeOverflow)?;
     if workspace_bytes > limits.max_decoder_bytes {

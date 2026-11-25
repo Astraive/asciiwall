@@ -4,8 +4,11 @@ use ascii_core::{Budget, CancellationToken, Error, MalformedReason, UnsupportedR
 use ascii_media::{AnimationLoops, DecodeLimits, DecodeResources, decode_animation, decode_image};
 use sha2::{Digest, Sha256};
 
-const APNG_SETTINGS: &str = "png=0.18.0;canvas=2x1;frames=5;sample=rgba8;frame0=full:[10,20,30,255,0,0,0,0],dispose=none,blend=source,delay=0/100;frame1=rect(1,0,1,1):[255,0,0,128],dispose=previous,blend=over,delay=1/100;frame2=rect(1,0,1,1):[0,255,0,255],dispose=none,blend=source,delay=1/100;frame3=rect(0,0,1,1):[255,255,0,255],dispose=background,blend=source,delay=1/100;frame4=rect(0,0,1,1):[0,0,255,128],dispose=none,blend=over,delay=1/100;plays=2";
+const APNG_SETTINGS: &str = "png=0.18.0;canvas=2x1;frames=5;sample=rgba8;frame0=full:[10,20,30,255,0,255,0,255],dispose=none,blend=source,delay=0/100;frame1=rect(1,0,1,1):[255,0,0,128],dispose=previous,blend=over,delay=1/100;frame2=rect(1,0,1,1):[0,255,0,255],dispose=none,blend=source,delay=1/100;frame3=rect(0,0,1,1):[255,255,0,255],dispose=background,blend=source,delay=1/100;frame4=rect(1,0,1,1):[0,0,255,128],dispose=none,blend=over,delay=1/100;plays=2";
 const GIF_SETTINGS: &str = "gif=0.14.0;canvas=2x1;frames=4;palette=0:black,1:red,2:green,3:blue;frame0=full:[1,1],keep,delay=0;frame1=rect(1,0,1,1):[2],previous,delay=1;frame2=rect(1,0,1,1):[3],background,delay=2;frame3=rect(0,0,1,1):[0],transparent=0,any,delay=0;repeat=1";
+fn assert_sha256(bytes: &[u8], expected: &str) {
+    assert_eq!(format!("{:x}", Sha256::digest(bytes)), expected);
+}
 
 fn partial_disposal_gif(repeat: Option<gif::Repeat>) -> Vec<u8> {
     let palette = [0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255];
@@ -63,7 +66,7 @@ fn partial_rect_previous_apng(play_count: u32) -> Vec<u8> {
         writer.set_dispose_op(png::DisposeOp::None).unwrap();
         writer.set_blend_op(png::BlendOp::Source).unwrap();
         writer
-            .write_image_data(&[10, 20, 30, 255, 0, 0, 0, 0])
+            .write_image_data(&[10, 20, 30, 255, 0, 255, 0, 255])
             .unwrap();
 
         writer.set_frame_dimension(1, 1).unwrap();
@@ -91,7 +94,7 @@ fn partial_rect_previous_apng(play_count: u32) -> Vec<u8> {
 
         writer.reset_frame_position().unwrap();
         writer.set_frame_dimension(1, 1).unwrap();
-        writer.set_frame_position(0, 0).unwrap();
+        writer.set_frame_position(1, 0).unwrap();
         writer.set_frame_delay(1, 100).unwrap();
         writer.set_dispose_op(png::DisposeOp::None).unwrap();
         writer.set_blend_op(png::BlendOp::Over).unwrap();
@@ -113,6 +116,12 @@ fn apng_subframes_compose_full_canvas_and_share_a_bounded_timeline() {
     assert_sha256(
         &encoded,
         "9a2efd0e082adadd8e166d92a8dd2724bf27484378375c9fac7fa91d5bd5e079",
+        APNG_SETTINGS.as_bytes(),
+        "4960c500b02bfa20654df299568b29dea2554e0ace6299284b8e9e175e82f28f",
+    );
+    assert_sha256(
+        &encoded,
+        "9a2efd0e082adadd8e166d92a8dd2724bf27484378375c9fac7fa91d5bd5e079",
     );
 
     let animation = decode_animation(
@@ -127,11 +136,11 @@ fn apng_subframes_compose_full_canvas_and_share_a_bounded_timeline() {
     assert_eq!(animation.frames()[0].duration(), Duration::from_millis(10));
     assert_eq!(
         animation.frames()[0].image().pixels(),
-        &[10, 20, 30, 255, 0, 0, 0, 0]
+        &[10, 20, 30, 255, 0, 255, 0, 255]
     );
     assert_eq!(
         animation.frames()[1].image().pixels(),
-        &[10, 20, 30, 255, 255, 0, 0, 128]
+        &[10, 20, 30, 255, 128, 127, 0, 255]
     );
     assert_eq!(
         animation.frames()[2].image().pixels(),
@@ -143,7 +152,7 @@ fn apng_subframes_compose_full_canvas_and_share_a_bounded_timeline() {
     );
     assert_eq!(
         animation.frames()[4].image().pixels(),
-        &[0, 0, 255, 128, 0, 255, 0, 255]
+        &[0, 0, 0, 0, 0, 127, 128, 255]
     );
     assert_eq!(
         animation.frame_at(Duration::ZERO).image().pixels(),
@@ -313,6 +322,14 @@ fn gif_subframes_compose_disposal_transparency_and_repeat_timeline() {
         Sha256::digest(GIF_SETTINGS.as_bytes())
     );
     println!("GIF fixture_sha256={:x}", Sha256::digest(&encoded));
+    assert_sha256(
+        GIF_SETTINGS.as_bytes(),
+        "dc797df0c1e556719cea89374be0017617b45ac9abb97cd7acb4ca71f65b1092",
+    );
+    assert_sha256(
+        &encoded,
+        "d5a5dc5f85f99530aab8862e84a9c5b4c8536dec155cda61bc1bb013edf8be29",
+    );
     let animation = decode_animation(
         &mut Cursor::new(&encoded),
         &limits(resources.clone()),
@@ -364,6 +381,37 @@ fn gif_subframes_compose_disposal_transparency_and_repeat_timeline() {
         animation.frames()[3].image().pixels()
     );
     assert!(resources.cpu_bytes_in_use() > 0);
+    drop(animation);
+    assert_eq!(resources.cpu_bytes_in_use(), 0);
+    assert_eq!(resources.active_decodes(), 0);
+}
+
+#[test]
+fn gif_exact_budget_does_not_double_charge_the_encoded_snapshot() {
+    let encoded = partial_disposal_gif(Some(gif::Repeat::Finite(1)));
+    let encoded_bytes = u64::try_from(encoded.len()).unwrap();
+    let canvas_pixels = 2_u64;
+    let canvas_bytes = canvas_pixels * 4;
+    let workspace_bytes = canvas_bytes * 3 + canvas_pixels + 64 * 1024;
+    let retained_frame_bytes = canvas_bytes * 4;
+    let raster_budget = encoded_bytes + workspace_bytes + retained_frame_bytes;
+    let resources = DecodeResources::new(1, raster_budget);
+    let limits = DecodeLimits::new(
+        Budget::new(1 << 20, raster_budget, 1 << 20),
+        resources.clone(),
+        8,
+        8,
+        encoded_bytes,
+        workspace_bytes,
+    );
+
+    let animation = decode_animation(
+        &mut Cursor::new(&encoded),
+        &limits,
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    assert_eq!(animation.frames().len(), 4);
     drop(animation);
     assert_eq!(resources.cpu_bytes_in_use(), 0);
     assert_eq!(resources.active_decodes(), 0);
@@ -455,6 +503,13 @@ fn apng_first_previous_disposal_restores_the_initial_canvas() {
         "90446459a823e11715c4e128960ece9b97cb820e7876aa92e31e7b7dfa85f5ca",
     );
     assert_sha256(
+        &encoded,
+        "90446459a823e11715c4e128960ece9b97cb820e7876aa92e31e7b7dfa85f5ca",
+    );
+    assert_sha256(
+        settings.as_bytes(),
+        "a17c43ba4d9d5d33e02c1eb270db702f96a3a2ac4a3c8dedee9ae4ddef9644aa",
+    );
     println!(
         "APNG first_previous config_sha256={:x} settings={settings}",
         Sha256::digest(settings.as_bytes())
