@@ -19,7 +19,51 @@ Generator descriptors declare a local parameter schema/version, limits, supporte
 | Particle garden | particles/cells | emission, lifetime, drag | pointer attraction/repulsion |
 | Clock typography | character layout | format, alignment, locale | none required |
 
-These are first-party generator proposals, not third-party downloadable code. Only the bounded particle field below is implemented in `ascii-scene`; the other families remain proposals. A community package must select a reviewed generator through a separately owned package contract and cannot provide executable code.
+These are first-party generator proposals, not third-party downloadable code. The bounded particle field and the incomplete SCN-002 matrix-rain generator are implemented in `ascii-scene`; the other families remain proposals. Matrix-rain does not yet have an executable portable registry, colored-frame/native consumer, or generic offline export. A community package must select a reviewed generator through a separately owned package contract and cannot provide executable code.
+
+### SCN-002 matrix-rain generator (partial; issue remains blocked)
+
+`ascii-scene::MatrixRainGenerator` now keeps one bounded stream record per grid column, derives a separate deterministic random stream for each column from the node stream, advances heads in the SCN-001 fixed-step runtime, and clips every trail cell to the grid before indexing the caller-owned frame. It borrows the existing immutable `ascii_convert::GlyphTable` and selects glyphs by its exposed table order; it does not copy or regenerate font records. Density, speed, trail length, and `#RRGGBBAA` configuration are validated before the runtime allocates its frame and stream buffers. A zero-speed generator freezes the simulation and does not refresh its frame.
+
+This is generator-core behavior, not a complete portable node or application feature. SCN-001's export context is still specialized to `ParticleFieldGenerator`; the current schema is documentation rather than a shared executable registry, so missing/unknown-key and arity rejection have not been proven through that registry. The character-frame API carries no RGBA value, so the color is retained in configuration but is not rendered; consequently neither the safe-preset flash criterion nor native appearance is verified. No matrix-specific pointer-deflection or click-burst reaction operator is wired in. FNT-002/FNT-003 remain open, so the borrowed immutable glyph table is used without claiming an accepted font mapping. These limits, plus open SCN-001 integration (#124) and the separate AST-001/006/010/017 consumers, keep SCN-002 open and Blocked Yes.
+
+#### Deterministic fixture
+
+The focused fixture is generated from `crates/ascii-convert/tests/support/synthetic_font.rs::synthetic_font(false)` (rights-cleared, source-generated SFNT), repertoire `BA `, and `GlyphConfig(8.0, 8, 12, 9)`. With node `matrix`, seed `0x0153`, ambient configuration, a `32 × 16` grid, empty approved snapshots, and 600 steps at 60 Hz, the immutable glyph-table fingerprint is `4ddc3a1585b233278e7050a05eb95b777916375d3e619efb8c76cbd85db648e0`; row-major scalar-wise FNV-1a-64 cell hash is `5e536b47a9c9df32`. Both are pinned in `crates/ascii-scene/tests/matrix_rain.rs`. This pins the SCN-002 generator output against this synthetic table; it is not a claim that FNT-002's portable font mapping is accepted.
+
+#### Host-side simulation benchmark
+
+Command: `CARGO_HOME=C:/Users/gskne/.cargo/asciiwall-img001 CARGO_TARGET_DIR=D:/target cargo test -p ascii-scene --test contracts --test matrix_rain -- --nocapture`. Verification host: Windows x64 (`x86_64-pc-windows-msvc`), Rust `1.100.0` (`0ef1bc386`, LLVM `23.1.5`), debug test profile. Each row supplied exactly 60 seconds of elapsed time over its requested frame count; dynamic presets reached 3,600 fixed 60-Hz steps, while static correctly advanced zero steps. p50/p95/p99 are `Instant` durations around each `SceneRuntime::advance`, in nanoseconds. Peak bytes are the checked logical requested frame-plus-column-buffer estimate, excluding allocator overhead/RSS. Work units are the checked per-advance upper bound. These are local debug-profile simulation measurements, not native renderer performance or cross-machine limits.
+
+| Preset | Columns | FPS | p50 ns | p95 ns | p99 ns | Peak bytes | Work units | Steps |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ambient | 160 | 20 | 20,100 | 21,900 | 31,800 | 34,560 | 11,520 | 3,600 |
+| dense | 160 | 20 | 102,000 | 121,500 | 122,700 | 34,560 | 17,920 | 3,600 |
+| static | 160 | 20 | 0 | 100 | 100 | 34,560 | 7,680 | 0 |
+| ambient | 160 | 30 | 19,400 | 21,400 | 24,000 | 34,560 | 11,520 | 3,600 |
+| dense | 160 | 30 | 101,500 | 120,400 | 124,500 | 34,560 | 17,920 | 3,600 |
+| static | 160 | 30 | 0 | 100 | 100 | 34,560 | 7,680 | 0 |
+| ambient | 160 | 60 | 18,800 | 20,900 | 21,500 | 34,560 | 11,520 | 3,600 |
+| dense | 160 | 60 | 101,300 | 120,600 | 157,700 | 34,560 | 17,920 | 3,600 |
+| static | 160 | 60 | 0 | 100 | 100 | 34,560 | 7,680 | 0 |
+| ambient | 240 | 20 | 31,400 | 34,200 | 37,900 | 51,840 | 17,280 | 3,600 |
+| dense | 240 | 20 | 153,800 | 182,800 | 185,200 | 51,840 | 26,880 | 3,600 |
+| static | 240 | 20 | 0 | 100 | 100 | 51,840 | 11,520 | 0 |
+| ambient | 240 | 30 | 30,700 | 33,400 | 35,200 | 51,840 | 17,280 | 3,600 |
+| dense | 240 | 30 | 153,200 | 181,500 | 185,200 | 51,840 | 26,880 | 3,600 |
+| static | 240 | 30 | 0 | 100 | 100 | 51,840 | 11,520 | 0 |
+| ambient | 240 | 60 | 30,000 | 32,700 | 33,900 | 51,840 | 17,280 | 3,600 |
+| dense | 240 | 60 | 152,500 | 181,000 | 184,300 | 51,840 | 26,880 | 3,600 |
+| static | 240 | 60 | 0 | 100 | 100 | 51,840 | 11,520 | 0 |
+| ambient | 320 | 20 | 43,400 | 47,500 | 48,600 | 69,120 | 23,040 | 3,600 |
+| dense | 320 | 20 | 211,100 | 251,300 | 261,300 | 69,120 | 35,840 | 3,600 |
+| static | 320 | 20 | 0 | 100 | 100 | 69,120 | 15,360 | 0 |
+| ambient | 320 | 30 | 42,500 | 46,600 | 47,500 | 69,120 | 23,040 | 3,600 |
+| dense | 320 | 30 | 210,400 | 248,900 | 252,100 | 69,120 | 35,840 | 3,600 |
+| static | 320 | 30 | 0 | 100 | 100 | 69,120 | 15,360 | 0 |
+| ambient | 320 | 60 | 41,600 | 45,800 | 47,800 | 69,120 | 23,040 | 3,600 |
+| dense | 320 | 60 | 473,100 | 928,900 | 2,526,400 | 69,120 | 35,840 | 3,600 |
+| static | 320 | 60 | 100 | 100 | 100 | 69,120 | 15,360 | 0 |
 
 ## Simulation
 

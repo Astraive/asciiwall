@@ -118,13 +118,7 @@ impl FixedStepSimulation {
         parameters: SceneParameters,
     ) -> Result<AdvanceReport, Error> {
         if parameters.is_static() {
-            self.accumulator_units = 0;
-            return Ok(AdvanceReport {
-                simulation_steps: 0,
-                elapsed_clamped: false,
-                final_step_index: self.step_index,
-                output_refreshed: false,
-            });
+            return Ok(self.freeze());
         }
 
         let elapsed_units = elapsed
@@ -160,6 +154,16 @@ impl FixedStepSimulation {
             final_step_index,
             output_refreshed: simulation_steps > 0,
         })
+    }
+
+    pub(crate) fn freeze(&mut self) -> AdvanceReport {
+        self.accumulator_units = 0;
+        AdvanceReport {
+            simulation_steps: 0,
+            elapsed_clamped: false,
+            final_step_index: self.step_index,
+            output_refreshed: false,
+        }
     }
 
     pub(crate) fn advance_exact_steps(

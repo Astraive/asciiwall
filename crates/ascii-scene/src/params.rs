@@ -147,6 +147,21 @@ impl SceneParameters {
         generator_scratch_bytes: u64,
         max_catch_up_steps: u8,
     ) -> Result<ResourceEstimate, Error> {
+        self.estimate_resources_with_additional_work(
+            dimensions,
+            generator_scratch_bytes,
+            max_catch_up_steps,
+            0,
+        )
+    }
+
+    pub(crate) fn estimate_resources_with_additional_work(
+        self,
+        dimensions: SceneDimensions,
+        generator_scratch_bytes: u64,
+        max_catch_up_steps: u8,
+        additional_work_units: u64,
+    ) -> Result<ResourceEstimate, Error> {
         if !(1..=MAX_CATCH_UP_STEPS).contains(&max_catch_up_steps) {
             return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
         }
@@ -165,7 +180,9 @@ impl SceneParameters {
             (dimensions.cell_count() as u64)
                 .checked_add(particle_work)
                 .ok_or(Error::SizeOverflow)?
-        };
+        }
+        .checked_add(additional_work_units)
+        .ok_or(Error::SizeOverflow)?;
         let total_bytes = character_bytes
             .checked_add(generator_scratch_bytes)
             .ok_or(Error::SizeOverflow)?;
