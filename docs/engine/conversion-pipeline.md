@@ -23,7 +23,7 @@ Normalize orientation, alpha interpretation, color transfer, and range first; ap
 
 Optional quality patches contain validated row-major per-cell linear-luminance samples (each dimension 1–64, at most 4096 values per cell) and mean-luminance/mean-absolute finite-difference descriptors. The stable sampling identity includes resolved source/display geometry, grid and cell dimensions, filter, and patch dimensions. The aggregate operation preflights normalized/input/patch byte bounds and total normalization, matching, sampling, patch-initialization/descriptor, and frame-validation work before allocating patch or output storage.
 
-Fast density matching uses calibrated glyph coverage. The structural path first shortlists masks by coverage, normalized gradients, and edge orientation; this ticket does not implement expensive reconstruction scoring or temporal stabilization. A contour mode emphasizes structure and intentionally discards low-contrast texture; it must not be sold as universally more faithful.
+Density matching is the fast coverage baseline. Structural matching shortlists masks by coverage, normalized gradients, and edge orientation, then reranks by reconstruction. Contour matching reuses the same normalized quality patches, calibrated glyph masks, and bounded structural shortlist before contour-weighted reranking. It emphasizes oriented silhouette edges and intentionally discards low-contrast texture; it is a structure/aesthetic tradeoff, not a universally more faithful mode.
 
 ### Bounded structural shortlist (CNV-007)
 
@@ -34,6 +34,16 @@ Before ranking, the shortlist deterministically resamples source samples to the 
 Tone, shape-gradient, and edge-orientation distances and each configured weight are in `[0, 1]`. The three nonnegative weights are validated to sum to one, so the combined shortlist score stays in `[0, 1]`. `StructuralIdentity` binds the descriptor version, sampling identity, source patch dimensions and native/common feature values, glyph-table mask fingerprint, foreground/background range, candidate limit, and normalized weights. Scratch bytes plus common feature extraction and scoring/heap work are checked against the caller's `Budget`; cancellation is polled in bounded work tiles and an error returns no partial shortlist.
 
 The deterministic matcher fixtures build their small font masks from source-defined synthetic outlines; no downloaded font or runtime network access is involved.
+
+### Contour mode (CNV-009)
+
+`convert_contour` takes validated `ContourOptions`: a 1–4096 candidate cap no larger than the glyph repertoire; normalized `contrast_threshold` and `edge_threshold`; and tone, oriented-contour, and shape weights in `[0,1]` summing to one. Samples are normalized against the configured foreground/background luminance. Samples below the contrast threshold are treated as background, and gradients weaker than the edge threshold do not contribute to the contour descriptor. The thresholded contour orientation and calibrated coverage are compared against the top-K glyph shortlist; stable ties use score, font glyph index, and scalar.
+
+The empty-background policy is explicit: a cell with no surviving thresholded edge emits the least-coverage glyph (then lowest glyph index), including uniform light, uniform dark, and suppressed faint-texture cells. This preserves flat-field backgrounds instead of replacing them with arbitrary repertoire characters. Output colors remain the caller's configured fixed foreground/background pair; palette fitting is not part of this mode.
+
+`ContourIdentity` includes algorithm version, resolved sampling identity (fit/crop/grid/filter/patch), glyph-mask fingerprint, every threshold and weight, shortlist limit, foreground/background luminance and RGB, output dimensions, patch samples, and structural patch identities. Sampling work is given only the budget left after aggregate shortlist and reranking work is reserved. Scratch, output, cancellation and patch storage stay bounded by the supplied budget. Contour matching costs more than density because it samples retained per-cell patches, ranks the structural shortlist, and evaluates oriented edges; lower tone fidelity is expected where configured suppression removes texture.
+
+For a matched comparison, use one synthetic source, font fingerprint, grid/cell geometry, crop/filter, fixed color pair and candidate budget in each mode. Report oriented-edge/silhouette agreement, raw tone reconstruction loss before and after thresholding, and measured runtime or checked work units separately; do not collapse these into a universal quality ranking. CNV-009's source-generated tests use the same synthetic mask, raster, grid and fixed color pair without external images or network access.
 
 ## Parallelism
 
