@@ -1,5 +1,6 @@
 //! Bounded CPU density conversion, font rasterization, immutable glyph-table primitives, shared geometry, color normalization, and alpha compositing.
 
+mod adjustments;
 mod color;
 mod density;
 mod font;
@@ -8,6 +9,10 @@ mod glyphs;
 
 mod sampling;
 
+pub use adjustments::{
+    AdjustmentError, AdjustmentSettings, ArtisticAdjustments, EdgeSettings,
+    adjustment_invalidation, apply_adjustments,
+};
 pub use color::{
     Alpha, ColorNormalizationError, ColorNormalizationWarning, EncodedOutputColor, EncodedSrgb,
     InvalidColorSample, LinearPremultipliedRgba, LinearRgb, Luminance, NormalizedRaster,
