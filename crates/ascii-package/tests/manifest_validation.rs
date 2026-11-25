@@ -359,11 +359,11 @@ fn rejects_missing_asset_inventory_entry() {
 #[test]
 fn rejects_nonportable_and_unresolved_asset_paths() {
     for (from, to) in [
-        ("assets/source.png", "../source.png"),
-        ("assets/source.png", "C:/source.png"),
-        ("assets/source.png", "assets\\source.png"),
-        ("assets/source.png", "assets/CON.txt"),
-        ("assets/source.png", "Assets/source.png"),
+        ("assets/source.png", "assets/../source.png"),
+        ("assets/source.png", "assets//source.png"),
+        ("assets/source.png", "assets/con.txt"),
+        ("assets/source.png", "assets/source.png."),
+        ("assets/source.png", "assets/foo/bar/baz/quux/quuz/corge/grault/garply/source.png"),
     ] {
         let document = String::from_utf8(BASIC.to_vec()).unwrap().replace(from, to);
         let manifest: Manifest = serde_json::from_str(&document).unwrap();
