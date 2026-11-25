@@ -151,25 +151,16 @@ pub struct Scene {
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum SceneNode {
     #[serde(rename = "solid")]
-    Solid {
-        id: String,
-        params: SolidParams,
-    },
+    Solid { id: String, params: SolidParams },
     #[serde(rename = "matrix-rain")]
     MatrixRain {
         id: String,
         params: MatrixRainParams,
     },
     #[serde(rename = "starfield")]
-    Starfield {
-        id: String,
-        params: StarfieldParams,
-    },
+    Starfield { id: String, params: StarfieldParams },
     #[serde(rename = "waves")]
-    Waves {
-        id: String,
-        params: WavesParams,
-    },
+    Waves { id: String, params: WavesParams },
     #[serde(rename = "noise-field")]
     NoiseField {
         id: String,
@@ -181,15 +172,9 @@ pub enum SceneNode {
         params: CubeWireframeParams,
     },
     #[serde(rename = "image-source")]
-    ImageSource {
-        id: String,
-        params: PathParams,
-    },
+    ImageSource { id: String, params: PathParams },
     #[serde(rename = "video-source")]
-    VideoSource {
-        id: String,
-        params: PathParams,
-    },
+    VideoSource { id: String, params: PathParams },
     #[serde(rename = "glyph-color")]
     GlyphColor {
         id: String,
@@ -210,14 +195,10 @@ pub enum SceneNode {
         id: String,
         params: WindowAvoidParams,
     },
-    Trails {
-        id: String,
-        params: TrailsParams,
-    },
-    Composite {
-        id: String,
-        params: CompositeParams,
-    },
+    #[serde(rename = "trails")]
+    Trails { id: String, params: TrailsParams },
+    #[serde(rename = "composite")]
+    Composite { id: String, params: CompositeParams },
 }
 
 macro_rules! params {

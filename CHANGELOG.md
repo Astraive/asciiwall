@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [CFG-001] New-file publication uses Linux `renameat2(RENAME_NOREPLACE)` or macOS `renamex_np(RENAME_EXCL)` where supported, then a no-replace hard-link fallback; if neither is available, it returns `io::ErrorKind::Unsupported` instead of using overwriting `rename`.
 - Added fixed-seed, bounded `proptest` coverage for range endpoints, overflow, nesting, duplicate keys, invalid UTF-8, unsupported schemas, disk loss, interrupted writes, stale revisions, and rollback; migration golden cases cover absent defaults and explicit overrides ([CFG-001]).
 - Added `ascii-package` draft v1 manifest/scene models, checked-in local Draft 2020-12 schemas, bounded schema-backed validation and asset-inventory reconciliation, plus a CFG-registry drift comparison; CFG domain descriptors/defaults remain absent from the prerequisite foundation.
+- Added the PKG-003 v1 scene registry and data-only semantic preflight for bounded unique-key input, graph topology/arity, and explicit supported/unknown/unavailable/denied/unsupported capability states. Feed reason codes use a private, sanitized lowercase ASCII token capped at 64 bytes; only supported, usable, policy-enabled feeds are effective. Native WPH-001 snapshot/reason mapping remains unimplemented; CFG domain descriptors/defaults and authoritative aggregate/time budgets also block activation. No runtime executor or host sensor integration is claimed.
 
 ### Changed
 

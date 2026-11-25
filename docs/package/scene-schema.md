@@ -780,3 +780,9 @@ Per-node parameter editing is available in the editor through the node schema. A
 Maximum 128 nodes and 256 edges; global cell, particle, decoder, memory, and time budgets also apply. Several individually small nodes can still exceed an aggregate budget. Reject or require a cheaper preset before activation rather than allocating first and hoping the OS kills the worker.
 
 Each node is deterministic for seed, effective settings, normalized input stream, and time, subject to documented floating-point/GPU tolerance. No node may query the OS directly. Host signals enter through a separate capability-filtered event layer.
+
+## Current Rust preflight boundary
+
+`ascii-package` implements a closed v1 descriptor table backed by the checked-in node parameter schema, duplicate-key rejection, graph arity/topology/reachability checks, capability declaration/feed planning, and checked aggregate estimates before execution allocation. It returns a data-only plan; it does not execute nodes, query the host, grant observation, or claim a supported wallpaper runtime.
+
+The semantic activation path consumes the CFG portable registry and explicit renderer-owned resource limits. It does not synthesize missing setting descriptors/defaults or choose particle, decoder, memory, or time caps. The checked-in CFG foundation does not yet contain the CFG-004–CFG-016 domain descriptors/defaults. COR-001 exposes frame/raster byte and work-unit budgets, not a calibrated wall-time conversion; work units are not wall-clock milliseconds. Until those authorities exist, controls and a complete activation-time budget cannot be independently certified.

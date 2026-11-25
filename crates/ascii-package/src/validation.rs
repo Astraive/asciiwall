@@ -29,10 +29,10 @@ pub fn validate_scene(bytes: &[u8]) -> Result<Scene, Error> {
         });
     }
     check_json_depth(bytes)?;
-    let document: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| Error {
+    let document = crate::unique_json::parse(bytes).map_err(|error| Error {
         kind: ErrorKind::Structural,
         location: json_location(&error),
-        message: "scene document is not valid JSON".into(),
+        message: "scene document is not valid unique-key JSON".into(),
     })?;
     if document
         .get("scene_version")
@@ -82,10 +82,10 @@ pub fn validate_manifest(
         });
     }
     check_json_depth(bytes)?;
-    let document: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| Error {
+    let document = crate::unique_json::parse(bytes).map_err(|error| Error {
         kind: ErrorKind::Structural,
         location: json_location(&error),
-        message: "manifest document is not valid JSON".into(),
+        message: "manifest document is not valid unique-key JSON".into(),
     })?;
     if document
         .get("format_version")
