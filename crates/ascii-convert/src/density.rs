@@ -492,9 +492,6 @@ pub fn convert_structural(
     if settings.cancellation.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    if settings.color_fit.is_some() {
-        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
-    }
     if settings.metadata.glyph_table_id() != GlyphTableId::new(*glyphs.fingerprint()) {
         return Err(Error::Malformed(MalformedReason::GlyphTableMismatch));
     }
@@ -513,7 +510,8 @@ pub fn convert_structural(
         settings.sampling.filter(),
         Some(patch_dimensions),
     );
-    let structural_settings = settings.with_sampling(sampling);
+    let mut structural_settings = settings.with_sampling(sampling);
+    structural_settings.color_fit = None;
     let resources = NormalizedRasterResources::new(budget.max_raster_bytes());
     let conversion = convert_density_detailed_impl(
         input,
@@ -540,19 +538,54 @@ pub fn convert_structural(
         ShortlistOptions::new(candidate_count, StructuralWeights::new(0.34, 0.33, 0.33)?)?;
     let foreground_luminance = settings.foreground.luminance().value();
     let background_luminance = settings.background.luminance().value();
-    let output_foreground = output_color(settings.foreground);
-    let output_background = output_color(settings.background);
     let cell_count = patches.cell_count();
     if previous.is_some_and(|frame| frame.size() != size) {
         return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
     }
-    let rerank_work = patch_dimensions
-        .sample_count()
-        .checked_mul(u64::try_from(candidate_count).map_err(|_| Error::SizeOverflow)?)
+    let sample_count =
+        usize::try_from(patch_dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
+    let sample_count_u64 = u64::try_from(sample_count).map_err(|_| Error::SizeOverflow)?;
+    let fit_work_per_candidate = settings
+        .color_fit
+        .map(|(palette, strategy)| estimate_color_fit_work(sample_count, palette, strategy))
+        .transpose()
+        .map_err(|error| DensityConversionError::ColorFit(error).into_core())?
+        .unwrap_or(0);
+    let palette_storage_bytes = settings
+        .color_fit
+        .map(|(palette, _)| palette.retained_storage_bytes())
+        .transpose()?
+        .unwrap_or(0);
+    let rerank_work = sample_count_u64
+        .checked_mul(3)
+        .and_then(|work| work.checked_add(fit_work_per_candidate))
+        .and_then(|work| work.checked_mul(u64::try_from(candidate_count).ok()?))
         .and_then(|work| work.checked_mul(u64::try_from(cell_count).ok()?))
         .ok_or(Error::SizeOverflow)?;
-    if rerank_work > budget.max_work_units() {
-        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
+    let grid_budget = validate_grid_budget(size, budget, settings.cancellation)?;
+    let source = SamplingSource::new(input)
+        .map_err(|error| DensityConversionError::from(error).into_core())?;
+    let structural_sampling = prepare_sampling(
+        source,
+        size,
+        glyphs.cell_width(),
+        glyphs.cell_height(),
+        sampling,
+        rerank_work,
+        grid_budget.work_units(),
+        sample_count_u64,
+        palette_storage_bytes,
+        budget,
+    )
+    .map_err(|error| DensityConversionError::from(error).into_core())?;
+    let normalized = normalize_raster(input, budget, settings.cancellation, &resources)
+        .map_err(|error| DensityConversionError::ColorNormalization(error).into_core())?;
+    let mut color_samples = Vec::new();
+    color_samples
+        .try_reserve_exact(sample_count)
+        .map_err(|_| Error::AllocationFailed)?;
+    if color_samples.capacity() != sample_count {
+        return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
     }
     let mut cells = reserve_output_cells(cell_count, settings.cancellation)?;
     let mut scratch = StructuralScratch::default();
@@ -581,28 +614,46 @@ pub fn convert_structural(
             budget,
             settings.cancellation,
         )?;
+        let columns = usize::try_from(size.columns()).map_err(|_| Error::SizeOverflow)?;
+        let column = u32::try_from(cell_index % columns).map_err(|_| Error::SizeOverflow)?;
+        let row = u32::try_from(cell_index / columns).map_err(|_| Error::SizeOverflow)?;
+        structural_sampling.sample_color_patch(
+            &normalized,
+            column,
+            row,
+            glyphs.cell_width(),
+            glyphs.cell_height(),
+            settings.background,
+            settings.cancellation,
+            &mut color_samples,
+        )?;
         let previous_glyph = previous
             .and_then(|frame| frame.cells().get(cell_index))
             .map(|cell| cell.glyph());
         let selected = rerank_candidates(
             ReconstructionInput {
                 samples,
+                color_samples: &color_samples,
                 dimensions: patch_dimensions,
                 descriptor: &descriptor,
                 glyphs,
                 candidates: shortlist.candidates(),
+                foreground: settings.foreground,
+                background: settings.background,
                 foreground_luminance,
                 background_luminance,
+                color_fit: settings.color_fit,
                 previous_glyph,
                 weights: settings.reconstruction_weights,
             },
             budget,
             settings.cancellation,
-        )?;
+        )
+        .map_err(|error| DensityConversionError::ColorFit(error).into_core())?;
         cells.push(AsciiCell::new(
-            selected.table_position(),
-            output_foreground,
-            output_background,
+            selected.candidate.table_position(),
+            output_color(selected.foreground),
+            output_color(selected.background),
         ));
     }
     AsciiFrame::try_new(

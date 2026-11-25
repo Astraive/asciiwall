@@ -52,15 +52,15 @@ score          = w_tone * tone_distance + w_shape * shape_distance + w_edge * ed
 
 `StructuralIdentity` is SHA-256 over structural descriptor version 2, the resolved `SamplingIdentity`, source patch dimensions and native/common feature values, the glyph-table mask fingerprint, foreground/background luminance, maximum candidates, and normalized weights. The common cell-grid features are part of the ranking semantics, while source dimensions still invalidate identity when sampling geometry changes. The scratch byte envelope and checked patch-feature, scoring, and heap work are validated against the supplied `Budget`; cancellation is polled at bounded work checkpoints. Malformed controls, budget exhaustion, arithmetic overflow, allocation failure, and cancellation retain their distinct `ascii_core::Error` variants, and failure returns no partial shortlist.
 
-`convert_structural` runs a bounded shortlist and then scores each shortlisted mask using normalized linear-light luminance reconstruction `R = B + (F - B) M`, descriptor distance, mean-coverage error, and an optional temporal glyph-change penalty. The finite weights are supplied with `ConversionSettings::with_reconstruction_weights`; their sum is one, the default is `(0.70, 0.20, 0.05, 0.05)`, and zero temporal weight makes the result independent of `previous`. The default candidate cap is 64. Equal scores resolve by font glyph index and then table position. Sampling patches are at measured glyph-cell dimensions, and patch, shortlist, rerank, output, and cancellation work are bounded by the call's budget.
+`convert_structural` runs a bounded shortlist and scores each shortlisted mask using normalized linear-light RGB reconstruction `R = B + (F - B) M`, descriptor distance, tone mean error, and an optional temporal glyph-change penalty. The finite weights are supplied with `ConversionSettings::with_reconstruction_weights`; their sum is one, the default is `(0.70, 0.20, 0.05, 0.05)`, and zero temporal weight makes the result independent of `previous`. The default candidate cap is 64. Equal scores resolve by font glyph index and then table position. Sampling patches are at measured glyph-cell dimensions, and patch, shortlist, rerank, output, and cancellation work are bounded by the call's budget.
 
-The initial `convert_structural` contract supports the fixed configured foreground/background reconstruction baseline. It does not yet integrate CNV-005 candidate-specific palette/color fitting into this objective; `with_color_fit` settings are therefore rejected instead of silently comparing candidates under a different palette-fit objective. This draft must not be treated as complete CNV-008 acceptance until that integration is implemented.
+Candidate-specific palette fitting uses CNV-005's configured strategy for each shortlisted mask, retaining the fitted foreground/background pair and scoring that candidate's reconstructed linear-light RGB error alongside the same descriptor, tone, and temporal terms. All candidates in one call use the same configured fixed-color or palette-fit path; color-fit work and palette storage are included in the budget preflight.
 
 The synthetic vertical-edge regression uses two same-density masks. It checks that explicit per-pixel reconstruction picks the vertical mask for a vertical edge, repeats deterministically, and ignores a previous frame when temporal weight is zero. This demonstrates a shape-sensitive fixture only; it is not a reproduction of the cited research paper and does not establish universally better fidelity or a performance improvement over density mode.
 
 ## Structural matcher evidence
 
-The deterministic synthetic vertical-edge fixture is generated in-process by `equal_area_orientation_font()` in `crates/ascii-convert/tests/support/synthetic_font.rs`; raster samples are copied from the generated vertical glyph mask. No external image, network fetch, or runtime asset is used. The fixture compares equal-density horizontal and vertical masks and asserts stable selection, repeated output equality, and no change with a zero temporal weight.
+The deterministic synthetic vertical-edge fixture is generated in-process by `equal_area_orientation_font()` in `crates/ascii-convert/tests/support/synthetic_font.rs`; raster samples are copied from the generated vertical glyph mask. No external image, network fetch, or runtime asset is used. The fixture compares equal-density horizontal and vertical masks and asserts stable selection, repeated output equality, no change with a zero temporal weight, and successful CNV-005 two-color least-squares fitting on the same candidate set.
 
 Targeted commands (with the isolated offline dependency cache):
 `CARGO_HOME='D:/worktrees/cnv-008-cargo-home-isolated' CARGO_TARGET_DIR='D:/worktrees/cnv-008-target' cargo test --offline --locked -p ascii-convert --test structural_matcher`
@@ -72,10 +72,10 @@ Results: structural matcher **11 passed**, density matcher **29 passed**. `CARGO
 
 Fingerprint basis (SHA-256):
 - Fixture generator: `b052dfbf80e227d85b0f0a3ba0dfceaed2bf0bc47b1e653661b5c31cc398d270` (`tests/support/synthetic_font.rs`).
-- Test and fixture parameters: `75de0184e7b900abef86f67427a37405742ef01561f9456c774d335a6bf43725` (`tests/structural_matcher.rs`).
+- Test and fixture parameters: `b8ebc86cb83c27b43c4ea751b92f34856e0f855fd6ad4bc6e257ab53a68c25d5` (`tests/structural_matcher.rs`).
 - Locked dependency/config inputs: `a2c482e2f1b033b44d2a9166610a88046dc2084201678df206ae175e2c77b8f4` (`Cargo.lock`), `5ff5c32ec18a9806226a3445e38afc072eb65ecb4b3b65488c32a7ca06516630` (`Cargo.toml`), and `c3dcaa2e4c0d9b494b33f2d1539f78166c78b3f1355bb68934405d559af4db43` (`rust-toolchain.toml`).
 
-The scores are a static quality objective only. No throughput, broad fidelity, or paper-reproduction claim is made. CNV-005 candidate-specific color-fit integration remains outstanding, so this evidence does not establish full CNV-008 acceptance.
+The scores are a static quality objective only. No throughput, broad fidelity, or paper-reproduction claim is made. Full CNV-008 acceptance remains blocked pending independent review and hosted checks.
 
 ## Temporal stabilization
 

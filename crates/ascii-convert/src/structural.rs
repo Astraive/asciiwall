@@ -10,8 +10,11 @@ use ascii_core::{Budget, BudgetKind, CancellationToken, Error, MalformedReason};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    color::LinearRgb,
+    color_fit::{ColorFitError, ColorFitStrategy, fit_color_patch},
     font::{GlyphRecord, GlyphTable},
     glyphs::{EdgeOrientation, GradientDescriptor, edge_orientation_from_samples},
+    palette::Palette,
     sampling::{PatchDimensions, SamplingIdentity},
 };
 
@@ -172,42 +175,57 @@ impl ReconstructionWeights {
 /// Inputs shared by one candidate-reranking pass.
 pub(crate) struct ReconstructionInput<'a> {
     pub(crate) samples: &'a [f32],
+    pub(crate) color_samples: &'a [LinearRgb],
     pub(crate) dimensions: PatchDimensions,
     pub(crate) descriptor: &'a StructuralDescriptor<'a>,
     pub(crate) glyphs: &'a GlyphTable,
     pub(crate) candidates: &'a [StructuralCandidate],
+    pub(crate) foreground: LinearRgb,
+    pub(crate) background: LinearRgb,
     pub(crate) foreground_luminance: f64,
     pub(crate) background_luminance: f64,
+    pub(crate) color_fit: Option<(&'a Palette, ColorFitStrategy)>,
     pub(crate) previous_glyph: Option<u32>,
     pub(crate) weights: ReconstructionWeights,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReconstructionResult {
+    pub(crate) candidate: StructuralCandidate,
+    pub(crate) foreground: LinearRgb,
+    pub(crate) background: LinearRgb,
+}
+
 /// Selects the best shortlisted glyph under one fixed reconstruction objective.
 ///
-/// `samples` is row-major normalized linear-light luminance in `[0, 1]`; reconstruction uses
-/// `R = B + (F - B) M` with the configured luminance polarity. The shortlist's descriptor score
-/// is retained as a separate term, tone error compares mask and sample mean coverage, and a
-/// nonzero temporal weight adds one penalty when the candidate differs from `previous_glyph`.
-/// Exact score ties choose the smaller glyph-table index, then table position.
+/// `samples` are normalized linear-light luminances for descriptor/tone comparison. `color_samples`
+/// contain the same cell in linear-light RGB and drive normalized per-channel pixel MSE. With a
+/// palette, each glyph is fitted and scored using that glyph's exact resolved foreground/background
+/// pair before the weighted objective is compared.
 pub(crate) fn rerank_candidates(
     input: ReconstructionInput<'_>,
     budget: &Budget,
     cancellation: &CancellationToken,
-) -> Result<StructuralCandidate, Error> {
+) -> Result<ReconstructionResult, ColorFitError> {
     let ReconstructionInput {
         samples,
+        color_samples,
         dimensions,
         descriptor,
         glyphs,
         candidates,
+        foreground,
+        background,
         foreground_luminance,
         background_luminance,
+        color_fit,
         previous_glyph,
         weights,
     } = input;
     let sample_count =
         usize::try_from(dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
     if samples.len() != sample_count
+        || color_samples.len() != sample_count
         || descriptor.dimensions != dimensions
         || candidates.is_empty()
         || !foreground_luminance.is_finite()
@@ -216,19 +234,20 @@ pub(crate) fn rerank_candidates(
         || !(0.0..=1.0).contains(&background_luminance)
         || foreground_luminance == background_luminance
     {
-        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration).into());
     }
     let work_bound = u64::try_from(sample_count)
         .map_err(|_| Error::SizeOverflow)?
         .checked_mul(u64::try_from(candidates.len()).map_err(|_| Error::SizeOverflow)?)
+        .and_then(|work| work.checked_mul(3))
         .ok_or(Error::SizeOverflow)?;
     if work_bound > budget.max_work_units() {
-        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
+        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits).into());
     }
-    let mut best: Option<(f64, StructuralCandidate)> = None;
+    let mut best: Option<(f64, ReconstructionResult)> = None;
     for candidate in candidates {
         if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
+            return Err(Error::Cancelled.into());
         }
         let position =
             usize::try_from(candidate.table_position()).map_err(|_| Error::SizeOverflow)?;
@@ -237,29 +256,62 @@ pub(crate) fn rerank_candidates(
             .get(position)
             .ok_or(Error::Malformed(MalformedReason::GlyphIndexOutOfRange))?;
         if glyph.glyph_index() != candidate.glyph_index() || glyph.mask().len() != sample_count {
-            return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+            return Err(Error::Malformed(MalformedReason::InvalidConfiguration).into());
         }
-        let mut squared_error = 0.0_f64;
+        let (pixel_mse, candidate_foreground, candidate_background) =
+            if let Some((palette, strategy)) = color_fit {
+                let fit = fit_color_patch(
+                    color_samples,
+                    glyph.mask(),
+                    palette,
+                    strategy,
+                    budget,
+                    cancellation,
+                )?;
+                (
+                    fit.mean_squared_error(),
+                    fit.foreground().color(),
+                    fit.background().color(),
+                )
+            } else {
+                let mut squared_error = 0.0_f64;
+                for (index, (sample, &mask)) in color_samples.iter().zip(glyph.mask()).enumerate() {
+                    if index.is_multiple_of(CANCELLATION_TILE as usize)
+                        && cancellation.is_cancelled()
+                    {
+                        return Err(Error::Cancelled.into());
+                    }
+                    let coverage = f64::from(mask) / 255.0;
+                    for (source, fg, bg) in [
+                        (sample.red(), foreground.red(), background.red()),
+                        (sample.green(), foreground.green(), background.green()),
+                        (sample.blue(), foreground.blue(), background.blue()),
+                    ] {
+                        let reconstructed = bg + (fg - bg) * coverage;
+                        let error = source - reconstructed;
+                        squared_error += error * error;
+                    }
+                }
+                (
+                    squared_error / (sample_count as f64 * 3.0),
+                    foreground,
+                    background,
+                )
+            };
         let mut target_coverage = 0.0_f64;
-        for (index, (&sample, &mask)) in samples.iter().zip(glyph.mask()).enumerate() {
+        for (index, &sample) in samples.iter().enumerate() {
             if index.is_multiple_of(CANCELLATION_TILE as usize) && cancellation.is_cancelled() {
-                return Err(Error::Cancelled);
+                return Err(Error::Cancelled.into());
             }
             if !sample.is_finite() || !(0.0..=1.0).contains(&sample) {
-                return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+                return Err(Error::Malformed(MalformedReason::InvalidConfiguration).into());
             }
-            let coverage = f64::from(mask) / 255.0;
-            let reconstructed =
-                background_luminance + (foreground_luminance - background_luminance) * coverage;
-            let error = f64::from(sample) - reconstructed;
-            squared_error += error * error;
             target_coverage += normalized_coverage(
                 f64::from(sample),
                 foreground_luminance,
                 background_luminance,
             );
         }
-        let pixel_mse = squared_error / sample_count as f64;
         let tone_error =
             (target_coverage / sample_count as f64 - f64::from(glyph.mean_coverage())).abs();
         let temporal_penalty = if weights.temporal > 0.0
@@ -274,23 +326,31 @@ pub(crate) fn rerank_candidates(
             + tone_error * weights.tone
             + temporal_penalty * weights.temporal;
         if !score.is_finite() {
-            return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+            return Err(Error::Malformed(MalformedReason::InvalidConfiguration).into());
         }
+        let result = ReconstructionResult {
+            candidate: *candidate,
+            foreground: candidate_foreground,
+            background: candidate_background,
+        };
         let replace = best.is_none_or(|(best_score, current)| {
             score < best_score
                 || (score == best_score
                     && (candidate.glyph_index(), candidate.table_position())
-                        < (current.glyph_index(), current.table_position()))
+                        < (
+                            current.candidate.glyph_index(),
+                            current.candidate.table_position(),
+                        ))
         });
         if replace {
-            best = Some((score, *candidate));
+            best = Some((score, result));
         }
     }
     if cancellation.is_cancelled() {
-        return Err(Error::Cancelled);
+        return Err(Error::Cancelled.into());
     }
-    best.map(|(_, candidate)| candidate)
-        .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))
+    best.map(|(_, result)| result)
+        .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration).into())
 }
 
 /// Coverage, dimensionless gradient variation, and edge orientation for one sampled patch.

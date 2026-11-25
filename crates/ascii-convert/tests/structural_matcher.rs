@@ -2,8 +2,9 @@
 mod support;
 
 use ascii_convert::{
-    ConversionSettings, FitMode, GlyphConfig, GlyphRepertoire, GlyphTable, GridSizing, LinearRgb,
-    MAX_STRUCTURAL_CANDIDATES, NormalizedRasterResources, PatchDimensions, ReconstructionWeights,
+    ColorFitStrategy, ConversionSettings, FitMode, GlyphConfig, GlyphRepertoire, GlyphTable,
+    GridSizing, LinearRgb, MAX_STRUCTURAL_CANDIDATES, NormalizedRasterResources, Palette,
+    PaletteDefinition, PaletteDistanceSpace, PatchDimensions, ReconstructionWeights,
     SamplingFilter, SamplingIdentity, SamplingOptions, ShortlistOptions, StructuralDescriptor,
     StructuralScratch, StructuralWeights, build_glyph_table, convert_density_detailed,
     convert_structural,
@@ -714,6 +715,18 @@ fn structural_conversion_reconstructs_the_shape_of_a_vertical_edge() {
         convert_structural(raster, &table, &settings, Some(&prior), &BUDGET)
             .expect("zero-weight temporal conversion succeeds");
     assert_eq!(first, with_zero_temporal_weight);
+
+    let palette = Palette::new(
+        PaletteDefinition::Original,
+        PaletteDistanceSpace::LinearRgb,
+        &BUDGET,
+        &cancellation,
+    )
+    .expect("original-color palette is valid");
+    let fitted_settings = settings.with_color_fit(&palette, ColorFitStrategy::TwoColorLeastSquares);
+    let fitted = convert_structural(raster, &table, &fitted_settings, None, &BUDGET)
+        .expect("candidate-specific color fitting succeeds");
+    assert_eq!(fitted.cells()[0].glyph(), vertical_position as u32);
 }
 
 #[test]
