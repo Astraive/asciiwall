@@ -52,11 +52,12 @@ fn decode_hex(hex: &str) -> Vec<u8> {
         }
     }
 
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in hex.as_bytes().chunks_exact(2) {
+    let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty());
+    let mut bytes = Vec::with_capacity(pairs.len());
+    for pair in pairs {
         bytes.push((nibble(pair[0]) << 4) | nibble(pair[1]));
     }
-    assert_eq!(hex.len() % 2, 0);
     bytes
 }
 
