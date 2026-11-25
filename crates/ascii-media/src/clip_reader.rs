@@ -516,7 +516,7 @@ pub fn parse_ascii_clip(bytes: &[u8]) -> Result<AsciiClip, ClipReadError> {
         cells
             .try_reserve_exact(cell_count as usize)
             .map_err(|_| ClipReadError::AllocationFailed)?;
-        for (cell_index, chunk) in payload.chunks_exact(CELL_LEN).enumerate() {
+        for (cell_index, chunk) in payload.as_chunks::<CELL_LEN>().0.iter().enumerate() {
             let glyph_index = u32::from_le_bytes(chunk[0..4].try_into().expect("fixed-size field"));
             if glyph_index as usize >= glyph_table.glyphs().len() {
                 return Err(ClipReadError::InvalidFrame {
