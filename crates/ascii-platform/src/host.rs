@@ -1,16 +1,67 @@
 //! Host adapter boundary and generation-checked display-surface leases.
 
 use ascii_core::{Generation, MonitorIdentity};
+use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{CapabilitySnapshot, HostEventBatch};
+use crate::{CapabilitySnapshot, HostEventBatch, HostStateSnapshot};
+
+static NEXT_REGISTRY_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+fn next_registry_epoch() -> Option<NonZeroU64> {
+    NEXT_REGISTRY_EPOCH
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |epoch| {
+            if epoch == 0 {
+                None
+            } else {
+                Some(epoch.checked_add(1).unwrap_or(0))
+            }
+        })
+        .ok()
+        .and_then(NonZeroU64::new)
+}
 
 /// Portable host contract. Native handles and OS actions remain inside the adapter implementation.
 pub trait HostAdapter {
     /// Current bounded host/feed capability snapshot.
     fn capabilities(&self) -> CapabilitySnapshot;
 
+    /// Authoritative feed and lease values captured at one revision from the capability revision
+    /// sequence. The snapshot includes matching host identity and capability metadata.
+    ///
+    /// Adapters must include every currently known value and active lease. Capacity overflow is
+    /// reported by the snapshot itself; consumers must not treat a truncated snapshot as complete.
+    fn reconciliation_snapshot(&self) -> HostStateSnapshot;
+
+    /// Returns authoritative current state only if it covers the dropped-event revision.
+    ///
+    /// A successful result may still be truncated; check `HostStateSnapshot::is_complete` before
+    /// marking all feeds and leases reconciled.
+    fn reconcile(&self, minimum_revision: u64) -> Result<HostStateSnapshot, ReconciliationError> {
+        let snapshot = self.reconciliation_snapshot();
+        if snapshot.revision() < minimum_revision {
+            return Err(ReconciliationError::SnapshotBehind {
+                requested_revision: minimum_revision,
+                snapshot_revision: snapshot.revision(),
+            });
+        }
+        Ok(snapshot)
+    }
+
     /// Drains a bounded batch of observations; event overflow is reported for reconciliation.
     fn poll(&mut self) -> HostEventBatch;
+}
+
+/// A reconciliation request cannot be satisfied by the returned authoritative revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconciliationError {
+    /// The current snapshot does not cover the requested dropped-event revision.
+    SnapshotBehind {
+        /// Minimum revision requested by the event batch.
+        requested_revision: u64,
+        /// Revision of the snapshot the adapter returned.
+        snapshot_revision: u64,
+    },
 }
 
 /// A generation-bound permission to use one adapter-owned native presentation surface.
@@ -22,6 +73,7 @@ pub struct SurfaceLease {
     owner: crate::HostIdentity,
     display: MonitorIdentity,
     generation: Generation,
+    registry_epoch: NonZeroU64,
 }
 
 impl SurfaceLease {
@@ -41,6 +93,12 @@ impl SurfaceLease {
     #[must_use]
     pub const fn generation(self) -> Generation {
         self.generation
+    }
+
+    /// Non-reusable identity of the registry that issued this lease.
+    #[must_use]
+    pub const fn registry_epoch(self) -> u64 {
+        self.registry_epoch.get()
     }
 }
 
@@ -66,8 +124,12 @@ pub enum SurfaceLeaseError {
     CapacityExhausted,
     /// The generation counter cannot advance without wrapping.
     GenerationExhausted,
+    /// A process-local registry identity could not be allocated without reuse.
+    RegistryIdentityExhausted,
     /// The token belongs to another host instance.
     WrongOwner,
+    /// The token was issued by a different registry for the same host.
+    WrongRegistry,
     /// The display has a different active generation than this token.
     StaleGeneration,
     /// The caller is presenting against a different display identity than the token names.
@@ -83,19 +145,25 @@ pub enum SurfaceLeaseError {
 #[derive(Debug, Eq, PartialEq)]
 pub struct SurfaceLeaseRegistry<const CAPACITY: usize> {
     owner: crate::HostIdentity,
+    registry_epoch: NonZeroU64,
     leases: [Option<SurfaceLease>; CAPACITY],
     next_generation: Option<Generation>,
 }
 
 impl<const CAPACITY: usize> SurfaceLeaseRegistry<CAPACITY> {
-    /// Creates an empty per-host registry with the first generation at zero.
-    #[must_use]
-    pub const fn new(owner: crate::HostIdentity) -> Self {
-        Self {
+    /// Creates an empty per-host registry with a unique process-local identity and generation zero.
+    ///
+    /// Fails closed if the registry identity space is exhausted rather than reusing an identity.
+    pub fn new(owner: crate::HostIdentity) -> Result<Self, SurfaceLeaseError> {
+        let Some(registry_epoch) = next_registry_epoch() else {
+            return Err(SurfaceLeaseError::RegistryIdentityExhausted);
+        };
+        Ok(Self {
             owner,
+            registry_epoch,
             leases: [None; CAPACITY],
             next_generation: Some(Generation::INITIAL),
-        }
+        })
     }
 
     /// Host identity whose surfaces this registry may authorize.
@@ -108,6 +176,11 @@ impl<const CAPACITY: usize> SurfaceLeaseRegistry<CAPACITY> {
     #[must_use]
     pub fn active_count(&self) -> usize {
         self.leases.iter().filter(|lease| lease.is_some()).count()
+    }
+
+    /// Iterates current active lease tokens without allocation.
+    pub fn active_leases(&self) -> impl Iterator<Item = &SurfaceLease> {
+        self.leases.iter().flatten()
     }
 
     /// Registers a newly created adapter-owned surface for one display.
@@ -131,6 +204,7 @@ impl<const CAPACITY: usize> SurfaceLeaseRegistry<CAPACITY> {
             owner: self.owner,
             display,
             generation,
+            registry_epoch: self.registry_epoch,
         };
         self.leases[slot] = Some(lease);
         Ok(lease)
@@ -140,14 +214,14 @@ impl<const CAPACITY: usize> SurfaceLeaseRegistry<CAPACITY> {
     pub fn retire(&mut self, lease: SurfaceLease) -> Result<SurfaceLease, SurfaceLeaseError> {
         self.check_owner(lease)?;
         for slot in &mut self.leases {
-            if let Some(current) = *slot {
-                if current.display == lease.display {
-                    if current.generation != lease.generation {
-                        return Err(SurfaceLeaseError::StaleGeneration);
-                    }
-                    *slot = None;
-                    return Ok(current);
+            if let Some(current) = *slot
+                && current.display == lease.display
+            {
+                if current.generation != lease.generation {
+                    return Err(SurfaceLeaseError::StaleGeneration);
                 }
+                *slot = None;
+                return Ok(current);
             }
         }
         Err(SurfaceLeaseError::RetiredLease)
@@ -182,6 +256,8 @@ impl<const CAPACITY: usize> SurfaceLeaseRegistry<CAPACITY> {
     fn check_owner(&self, lease: SurfaceLease) -> Result<(), SurfaceLeaseError> {
         if lease.owner != self.owner {
             Err(SurfaceLeaseError::WrongOwner)
+        } else if lease.registry_epoch != self.registry_epoch {
+            Err(SurfaceLeaseError::WrongRegistry)
         } else {
             Ok(())
         }

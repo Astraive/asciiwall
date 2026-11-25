@@ -2,7 +2,9 @@
 
 use ascii_core::{Generation, MonitorIdentity};
 
-use crate::{CapabilityChange, SurfaceLease, SurfaceRetirementReason};
+use crate::{
+    CapabilityChange, CapabilitySnapshot, HostIdentity, SurfaceLease, SurfaceRetirementReason,
+};
 
 /// Hard upper bound on events retained by one poll batch or queue.
 pub const MAX_HOST_EVENTS: usize = 32;
@@ -206,6 +208,192 @@ pub enum FeedEvent {
         /// Monotonic observation time in milliseconds.
         observed_at_ms: u64,
     },
+}
+
+/// Maximum distinct current feed values retained by a reconciliation snapshot.
+pub const MAX_RECONCILIATION_FEEDS: usize = MAX_HOST_EVENTS;
+/// Maximum active surface leases retained by a reconciliation snapshot.
+pub const MAX_RECONCILIATION_LEASES: usize = MAX_HOST_EVENTS;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FeedKey {
+    PointerPosition,
+    PointerButtons,
+    WindowRectangle(WindowIdentity),
+    WindowState(WindowIdentity),
+    SessionLock,
+    Battery,
+    OutputScale(MonitorIdentity),
+    StaticWallpaper(Option<MonitorIdentity>),
+    Tray,
+}
+
+impl FeedEvent {
+    const fn key(self) -> FeedKey {
+        match self {
+            Self::PointerPosition(_) => FeedKey::PointerPosition,
+            Self::PointerButtons(_) => FeedKey::PointerButtons,
+            Self::WindowRectangle(value) => FeedKey::WindowRectangle(value.window),
+            Self::WindowState { window, .. } => FeedKey::WindowState(window),
+            Self::SessionLock { .. } => FeedKey::SessionLock,
+            Self::Battery(_) => FeedKey::Battery,
+            Self::OutputScale { display, .. } => FeedKey::OutputScale(display),
+            Self::StaticWallpaper { display, .. } => FeedKey::StaticWallpaper(display),
+            Self::Tray { .. } => FeedKey::Tray,
+        }
+    }
+}
+
+/// Why a bounded authoritative reconciliation snapshot could not retain a supplied value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostStateSnapshotError {
+    /// More distinct current feed values were supplied than the fixed capacity permits.
+    FeedCapacityExhausted,
+    /// More active surface leases were supplied than the fixed capacity permits.
+    LeaseCapacityExhausted,
+    /// A lease from another host was supplied to this snapshot.
+    LeaseOwnerMismatch,
+}
+
+/// Allocation-free authoritative current host state at one capability revision.
+///
+/// Feed values are unique by feed and logical key; setting an existing key replaces its current
+/// value. Lease values are unique by display and setting an existing display replaces its lease.
+/// Adapters must populate every currently known value and active lease. A failed capacity insert
+/// marks that category truncated, and the snapshot must not be treated as complete.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostStateSnapshot {
+    capabilities: CapabilitySnapshot,
+    feeds: [Option<FeedEvent>; MAX_RECONCILIATION_FEEDS],
+    feed_count: u8,
+    leases: [Option<SurfaceLease>; MAX_RECONCILIATION_LEASES],
+    lease_count: u8,
+    feeds_truncated: bool,
+    leases_truncated: bool,
+}
+
+impl HostStateSnapshot {
+    /// Creates an empty snapshot tied to one exact capability revision and host identity.
+    #[must_use]
+    pub const fn new(capabilities: CapabilitySnapshot) -> Self {
+        Self {
+            capabilities,
+            feeds: [None; MAX_RECONCILIATION_FEEDS],
+            feed_count: 0,
+            leases: [None; MAX_RECONCILIATION_LEASES],
+            lease_count: 0,
+            feeds_truncated: false,
+            leases_truncated: false,
+        }
+    }
+
+    /// Capability metadata, host identity, and revision captured with this state.
+    #[must_use]
+    pub const fn capabilities(&self) -> &CapabilitySnapshot {
+        &self.capabilities
+    }
+
+    /// Host identity that owns the feed and lease values.
+    #[must_use]
+    pub const fn host(&self) -> HostIdentity {
+        self.capabilities.host()
+    }
+
+    /// Revision that covers the capability metadata and every supplied current value.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.capabilities.revision()
+    }
+
+    /// Number of distinct retained current feed values.
+    #[must_use]
+    pub const fn feed_count(&self) -> usize {
+        self.feed_count as usize
+    }
+
+    /// Number of retained active surface leases.
+    #[must_use]
+    pub const fn lease_count(&self) -> usize {
+        self.lease_count as usize
+    }
+
+    /// Whether the current feed set exceeded its fixed capacity.
+    #[must_use]
+    pub const fn feeds_truncated(&self) -> bool {
+        self.feeds_truncated
+    }
+
+    /// Whether the active lease set exceeded its fixed capacity.
+    #[must_use]
+    pub const fn leases_truncated(&self) -> bool {
+        self.leases_truncated
+    }
+
+    /// Whether every supplied feed and lease fit without truncation.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        !self.feeds_truncated && !self.leases_truncated
+    }
+
+    /// Iterates retained current feed values without allocation.
+    pub fn feeds(&self) -> impl Iterator<Item = &FeedEvent> {
+        self.feeds[..usize::from(self.feed_count)].iter().flatten()
+    }
+
+    /// Iterates retained active leases without allocation.
+    pub fn leases(&self) -> impl Iterator<Item = &SurfaceLease> {
+        self.leases[..usize::from(self.lease_count)]
+            .iter()
+            .flatten()
+    }
+
+    /// Inserts or replaces the current value for a feed key without allocating.
+    pub fn set_feed(&mut self, feed: FeedEvent) -> Result<(), HostStateSnapshotError> {
+        let key = feed.key();
+        let mut index = 0;
+        while index < usize::from(self.feed_count) {
+            match self.feeds[index] {
+                Some(current) if current.key() == key => {
+                    self.feeds[index] = Some(feed);
+                    return Ok(());
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        if usize::from(self.feed_count) == MAX_RECONCILIATION_FEEDS {
+            self.feeds_truncated = true;
+            return Err(HostStateSnapshotError::FeedCapacityExhausted);
+        }
+        self.feeds[usize::from(self.feed_count)] = Some(feed);
+        self.feed_count += 1;
+        Ok(())
+    }
+
+    /// Inserts or replaces the active lease for one display without allocating.
+    pub fn set_lease(&mut self, lease: SurfaceLease) -> Result<(), HostStateSnapshotError> {
+        if lease.owner() != self.host() {
+            return Err(HostStateSnapshotError::LeaseOwnerMismatch);
+        }
+        let mut index = 0;
+        while index < usize::from(self.lease_count) {
+            match self.leases[index] {
+                Some(current) if current.display() == lease.display() => {
+                    self.leases[index] = Some(lease);
+                    return Ok(());
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        if usize::from(self.lease_count) == MAX_RECONCILIATION_LEASES {
+            self.leases_truncated = true;
+            return Err(HostStateSnapshotError::LeaseCapacityExhausted);
+        }
+        self.leases[usize::from(self.lease_count)] = Some(lease);
+        self.lease_count += 1;
+        Ok(())
+    }
 }
 
 /// Result of an OS static-wallpaper operation.

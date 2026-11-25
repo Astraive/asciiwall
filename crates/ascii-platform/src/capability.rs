@@ -945,9 +945,15 @@ impl CapabilitySnapshot {
             let dependency_state =
                 self.effective_inner(dependency, scope, now_ms, visited, check_freshness);
             if !dependency_state.is_available() {
+                let reason = if dependency_state.reason() == Some(CapabilityReason::DependencyCycle)
+                {
+                    CapabilityReason::DependencyCycle
+                } else {
+                    CapabilityReason::DependencyUnavailable
+                };
                 return effective(
                     CapabilityAvailability::Unavailable,
-                    Some(CapabilityReason::DependencyUnavailable),
+                    Some(reason),
                     Some(dependency),
                 );
             }

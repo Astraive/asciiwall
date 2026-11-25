@@ -1,9 +1,9 @@
-#![cfg(windows)]
 #![deny(unsafe_code)]
 
 mod capability;
 mod events;
 mod host;
+#[cfg(windows)]
 mod probe;
 
 pub use capability::{
@@ -15,13 +15,16 @@ pub use capability::{
     PresentationResolution, resolve_capability, resolve_presentation,
 };
 pub use events::{
-    BatteryUpdate, FeedEvent, HostEvent, HostEventBatch, HostEventQueue, MAX_HOST_EVENTS,
+    BatteryUpdate, FeedEvent, HostEvent, HostEventBatch, HostEventQueue, HostStateSnapshot,
+    HostStateSnapshotError, MAX_HOST_EVENTS, MAX_RECONCILIATION_FEEDS, MAX_RECONCILIATION_LEASES,
     PointerButtons, PointerButtonsUpdate, PointerPosition, SessionLockState, StaticWallpaperUpdate,
     WindowIdentity, WindowRectangle, WindowState,
 };
 pub use host::{
-    HostAdapter, SurfaceLease, SurfaceLeaseError, SurfaceLeaseRegistry, SurfaceRetirementReason,
+    HostAdapter, ReconciliationError, SurfaceLease, SurfaceLeaseError, SurfaceLeaseRegistry,
+    SurfaceRetirementReason,
 };
+#[cfg(windows)]
 pub use probe::{
     Architecture, EnvironmentTuple, GateObservations, GpuBackend, HierarchyObservation,
     HierarchySummary, HostProbeReport, Observation, ObservationReason, ProbeStatus, SessionKind,
