@@ -55,7 +55,6 @@ fn malformed_webp_container_is_rejected() {
     ));
 }
 
-
 #[test]
 fn empty_size_consistent_webp_container_is_malformed() {
     let fixture = b"RIFF\x04\0\0\0WEBP";
