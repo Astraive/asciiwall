@@ -463,7 +463,7 @@ fn enforces_entry_and_expanded_size_budgets() {
 
 #[test]
 fn requires_license_text_evidence_and_package_font_asset() {
-    let custom_license = String::from_utf8(BASIC.to_vec()).replacen(
+    let custom_license = String::from_utf8(BASIC.to_vec()).unwrap().replacen(
         "\"license\": \"CC0-1.0\"",
         "\"license\": \"LicenseRef-Example\"",
         1,
