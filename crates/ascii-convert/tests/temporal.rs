@@ -283,9 +283,29 @@ fn cancellation_and_budget_failures_do_not_publish_and_budget_recovers() {
         [5, 5]
     );
 }
+
 #[test]
-fn synthetic_metrics_pair_churn_with_error_and_cut_responsiveness() {
-    let changed_fraction = |before: &[u32], after: &[u32]| -> f64 {
+fn synthetic_metrics_measure_selected_glyph_fidelity_and_responsiveness() {
+    let glyph_value = |glyph: u32| match glyph {
+        10 => 0.45,
+        11 => 0.55,
+        12 => 0.46,
+        13 => 0.54,
+        30 => 0.10,
+        31 => 0.90,
+        40 => 0.20,
+        41 => 0.80,
+        _ => panic!("unexpected synthetic glyph {glyph}"),
+    };
+    let reconstruction_error = |selected: &[u32], reference: &[f64]| {
+        selected
+            .iter()
+            .zip(reference)
+            .map(|(glyph, expected)| (glyph_value(*glyph) - expected).abs())
+            .sum::<f64>()
+            / reference.len() as f64
+    };
+    let changed_fraction = |before: &[u32], after: &[u32]| {
         before
             .iter()
             .zip(after)
@@ -293,55 +313,79 @@ fn synthetic_metrics_pair_churn_with_error_and_cut_responsiveness() {
             .count() as f64
             / before.len() as f64
     };
+    let frame = |glyphs: [u32; 2], best_score, previous_score, motion| {
+        glyphs.map(|glyph_id| TemporalCandidate {
+            glyph_id,
+            best_score,
+            previous_score,
+            motion,
+        })
+    };
+
     let mut state = TemporalScratch::default();
+    let static_reference = [0.5, 0.5];
     let initial = state
         .stabilize(
             context(0),
-            &candidates(10, 0.1, 0.1, 0.0),
+            &frame([10, 11], 0.05, 0.05, 0.0),
             options(1.0),
             &GOOD_BUDGET,
             &CancellationToken::new(),
         )
         .expect("initial frame starts clean")
         .to_vec();
+    let noisy_independent = [12, 13];
     let noisy = state
         .stabilize(
             context(1_000_000_000),
-            &candidates(11, 0.1, 0.2, 0.0),
+            &frame(noisy_independent, 0.04, 0.05, 0.0),
             options(1.0),
             &GOOD_BUDGET,
             &CancellationToken::new(),
         )
         .expect("static noise can be retained")
         .to_vec();
+    let noisy_error = reconstruction_error(&noisy, &static_reference);
+    let noisy_independent_error = reconstruction_error(&noisy_independent, &static_reference);
     assert_eq!(changed_fraction(&initial, &noisy), 0.0);
-    let noisy_reconstruction_error = (0.2 + 0.2) / 2.0;
-    assert_eq!(noisy_reconstruction_error, 0.2);
+    assert_eq!(changed_fraction(&initial, &noisy_independent), 1.0);
+    assert!(
+        noisy_error <= noisy_independent_error + 0.02,
+        "retention fidelity regression exceeded tolerance: selected={noisy_error}, independent={noisy_independent_error}"
+    );
 
-    let pan = state
+    let motion_reference = [0.1, 0.9];
+    let moving_independent = [30, 31];
+    let moving = state
         .stabilize(
             context(1_100_000_000),
-            &candidates(12, 0.05, 0.3, 0.9),
+            &frame(moving_independent, 0.0, 0.4, 0.9),
             options(1.0),
             &GOOD_BUDGET,
             &CancellationToken::new(),
         )
         .expect("motion remains responsive")
         .to_vec();
-    assert_eq!(changed_fraction(&noisy, &pan), 1.0);
-    let pan_reconstruction_error = (0.05 + 0.05) / 2.0;
-    assert_eq!(pan_reconstruction_error, 0.05);
+    assert_eq!(changed_fraction(&noisy, &moving), 1.0);
+    assert_eq!(
+        reconstruction_error(&moving, &motion_reference),
+        reconstruction_error(&moving_independent, &motion_reference)
+    );
 
+    let cut_reference = [0.2, 0.8];
     let cut = state
         .stabilize(
             context(1_200_000_000).with_reset(TemporalReset::HardCut),
-            &candidates(13, 0.1, 0.1, 0.0),
+            &frame([40, 41], 0.0, 0.0, 0.0),
             options(1.0),
             &GOOD_BUDGET,
             &CancellationToken::new(),
         )
         .expect("cut responds in the first frame")
         .to_vec();
-    assert_eq!(changed_fraction(&pan, &cut), 1.0);
-    assert_eq!(cut, [13, 13]);
+    assert_eq!(changed_fraction(&moving, &cut), 1.0);
+    assert_eq!(
+        reconstruction_error(&cut, &cut_reference),
+        reconstruction_error(&[40, 41], &cut_reference)
+    );
 }
