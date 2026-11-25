@@ -52,6 +52,31 @@ score          = w_tone * tone_distance + w_shape * shape_distance + w_edge * ed
 
 `StructuralIdentity` is SHA-256 over structural descriptor version 2, the resolved `SamplingIdentity`, source patch dimensions and native/common feature values, the glyph-table mask fingerprint, foreground/background luminance, maximum candidates, and normalized weights. The common cell-grid features are part of the ranking semantics, while source dimensions still invalidate identity when sampling geometry changes. The scratch byte envelope and checked patch-feature, scoring, and heap work are validated against the supplied `Budget`; cancellation is polled at bounded work checkpoints. Malformed controls, budget exhaustion, arithmetic overflow, allocation failure, and cancellation retain their distinct `ascii_core::Error` variants, and failure returns no partial shortlist.
 
+`convert_structural` runs a bounded shortlist and scores each shortlisted mask using normalized linear-light RGB reconstruction `R = B + (F - B) M`, descriptor distance, tone mean error, and an optional temporal glyph-change penalty. The finite weights are supplied with `ConversionSettings::with_reconstruction_weights`; their sum is one, the default is `(0.70, 0.20, 0.05, 0.05)`, and zero temporal weight makes the result independent of `previous`. The default candidate cap is 64. Equal scores resolve by font glyph index and then table position. Sampling patches are at measured glyph-cell dimensions, and patch, shortlist, rerank, output, and cancellation work are bounded by the call's budget.
+
+Candidate-specific palette fitting uses CNV-005's configured strategy for each shortlisted mask, retaining the fitted foreground/background pair and scoring that candidate's reconstructed linear-light RGB error alongside the same descriptor, tone, and temporal terms. All candidates in one call use the same configured fixed-color or palette-fit path; color-fit work and palette storage are included in the budget preflight. The structural phase's checked aggregate work bound is reserved before density matching, so both phase preflights share one operation-wide work limit.
+
+The synthetic vertical-edge regression uses two same-density masks. It checks that explicit per-pixel reconstruction picks the vertical mask for a vertical edge, repeats deterministically, and ignores a previous frame when temporal weight is zero. This demonstrates a shape-sensitive fixture only; it is not a reproduction of the cited research paper and does not establish universally better fidelity or a performance improvement over density mode.
+
+## Structural matcher evidence
+
+The deterministic synthetic vertical-edge fixture is generated in-process by `equal_area_orientation_font()` in `crates/ascii-convert/tests/support/synthetic_font.rs`; raster samples are copied from the generated vertical glyph mask. No external image, network fetch, or runtime asset is used. The fixture compares equal-density horizontal and vertical masks and asserts stable selection, repeated output equality, no change with a zero temporal weight, and successful CNV-005 two-color least-squares fitting on the same candidate set. A separate deterministic two-cell case succeeds for one cell under a 7,500-unit cap but returns `BudgetExceeded(WorkUnits)` for the two-cell operation; the same call then succeeds under the full budget.
+
+Targeted commands (with the isolated offline dependency cache):
+`CARGO_HOME='D:/worktrees/cnv-008-cargo-home-isolated' CARGO_TARGET_DIR='D:/worktrees/cnv-008-target' cargo test --offline --locked -p ascii-convert --test structural_matcher`
+`CARGO_HOME='D:/worktrees/cnv-008-cargo-home-isolated' CARGO_TARGET_DIR='D:/worktrees/cnv-008-target' cargo test --offline --locked -p ascii-convert --test density_matcher`
+
+Supported environment verified: Windows 10 x64, `x86_64-pc-windows-msvc`, Rust/Cargo 1.100.0.
+
+Results: structural matcher **12 passed**, density matcher **29 passed**. `CARGO_HOME='D:/worktrees/cnv-008-cargo-home-isolated' CARGO_TARGET_DIR='D:/worktrees/cnv-008-target' cargo clippy --offline --locked --workspace --all-targets -- -D warnings` passed; `cargo fmt --all -- --check` passed; `python scripts/check-repository.py` passed.
+
+Fingerprint basis (SHA-256):
+- Fixture generator: `b052dfbf80e227d85b0f0a3ba0dfceaed2bf0bc47b1e653661b5c31cc398d270` (`tests/support/synthetic_font.rs`).
+- Test and fixture parameters: `bdfa1d2a58c3644d5ddfc4c70351223f08aa4b8ea752f4534dfeb5e4e1fa402b` (`tests/structural_matcher.rs`).
+- Locked dependency/config inputs: `a2c482e2f1b033b44d2a9166610a88046dc2084201678df206ae175e2c77b8f4` (`Cargo.lock`), `5ff5c32ec18a9806226a3445e38afc072eb65ecb4b3b65488c32a7ca06516630` (`Cargo.toml`), and `c3dcaa2e4c0d9b494b33f2d1539f78166c78b3f1355bb68934405d559af4db43` (`rust-toolchain.toml`).
+
+The scores are a static quality objective only. No throughput, broad fidelity, or paper-reproduction claim is made. Full CNV-008 acceptance remains blocked pending independent exact-head review.
+
 ## Temporal stabilization
 
 A prior glyph can be retained when the new candidate's improvement is smaller than a hysteresis threshold. Make the threshold sensitive to time and local motion so noise is reduced without freezing legitimate changes. Clear history on scene cuts, seek, source change, font/grid change, and decode discontinuity. A global high penalty may look stable while destroying moving detail; measure both stability and reconstruction quality.

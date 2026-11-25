@@ -2,10 +2,12 @@
 mod support;
 
 use ascii_convert::{
-    ConversionSettings, FitMode, GlyphConfig, GlyphRepertoire, GlyphTable, GridSizing, LinearRgb,
-    MAX_STRUCTURAL_CANDIDATES, NormalizedRasterResources, PatchDimensions, SamplingFilter,
-    SamplingIdentity, SamplingOptions, ShortlistOptions, StructuralDescriptor, StructuralScratch,
-    StructuralWeights, build_glyph_table, convert_density_detailed,
+    ColorFitStrategy, ConversionSettings, FitMode, GlyphConfig, GlyphRepertoire, GlyphTable,
+    GridSizing, LinearRgb, MAX_STRUCTURAL_CANDIDATES, NormalizedRasterResources, Palette,
+    PaletteDefinition, PaletteDistanceSpace, PatchDimensions, ReconstructionWeights,
+    SamplingFilter, SamplingIdentity, SamplingOptions, ShortlistOptions, StructuralDescriptor,
+    StructuralScratch, StructuralWeights, build_glyph_table, convert_density_detailed,
+    convert_structural,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, Error,
@@ -651,4 +653,163 @@ fn invalid_candidate_and_work_limits_return_typed_errors() {
         .err(),
         Some(Error::BudgetExceeded(BudgetKind::WorkUnits))
     );
+}
+
+#[test]
+fn structural_conversion_reconstructs_the_shape_of_a_vertical_edge() {
+    let table = build_table(&equal_area_orientation_font(), "BA");
+    let vertical = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'B')
+        .expect("fixture includes vertical mask");
+    let horizontal = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'A')
+        .expect("fixture includes horizontal mask");
+    close(vertical.mean_coverage(), horizontal.mean_coverage());
+
+    let cancellation = CancellationToken::new();
+    let settings = ConversionSettings::new(
+        GridSizing::fixed_pixel_surface(CELL_WIDTH, CELL_HEIGHT),
+        FrameMetadata::new(GlyphTableId::new(*table.fingerprint()), 3, 1, 0, 1),
+        &cancellation,
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .expect("valid fixed-background settings")
+    .with_reconstruction_weights(
+        ReconstructionWeights::new(0.80, 0.15, 0.05, 0.0)
+            .expect("finite normalized objective weights"),
+    );
+    let pixels = vertical.mask();
+    let raster = RasterFrameView::new(
+        CELL_WIDTH,
+        CELL_HEIGHT,
+        CELL_WIDTH as usize,
+        PixelFormat::gray8(),
+        ColorDescription::new(
+            ColorPrimaries::Srgb,
+            TransferFunction::Linear,
+            AlphaMode::Opaque,
+        ),
+        RasterOrientation::TopDown,
+        pixels,
+    );
+    let first = convert_structural(raster, &table, &settings, None, &BUDGET)
+        .expect("structural reconstruction succeeds");
+    let vertical_position = table
+        .glyphs()
+        .iter()
+        .position(|glyph| glyph.character() == 'B')
+        .expect("vertical mask position fits table");
+    assert_eq!(first.cells()[0].glyph(), vertical_position as u32);
+    let repeated = convert_structural(raster, &table, &settings, None, &BUDGET)
+        .expect("repeated structural reconstruction succeeds");
+    assert_eq!(first, repeated);
+
+    let prior = convert_structural(raster, &table, &settings, None, &BUDGET)
+        .expect("prior frame conversion succeeds");
+    let with_zero_temporal_weight =
+        convert_structural(raster, &table, &settings, Some(&prior), &BUDGET)
+            .expect("zero-weight temporal conversion succeeds");
+    assert_eq!(first, with_zero_temporal_weight);
+
+    let palette = Palette::new(
+        PaletteDefinition::Original,
+        PaletteDistanceSpace::LinearRgb,
+        &BUDGET,
+        &cancellation,
+    )
+    .expect("original-color palette is valid");
+    let fitted_settings = settings.with_color_fit(&palette, ColorFitStrategy::TwoColorLeastSquares);
+    let fitted = convert_structural(raster, &table, &fitted_settings, None, &BUDGET)
+        .expect("candidate-specific color fitting succeeds");
+    assert_eq!(fitted.cells()[0].glyph(), vertical_position as u32);
+}
+
+#[test]
+fn structural_conversion_preflights_total_work_across_cells() {
+    let table = build_table(&equal_area_orientation_font(), "BA");
+    let cancellation = CancellationToken::new();
+    let metadata = FrameMetadata::new(GlyphTableId::new(*table.fingerprint()), 5, 1, 0, 1);
+    let settings = ConversionSettings::new(
+        GridSizing::fixed_pixel_surface(CELL_WIDTH * 2, CELL_HEIGHT),
+        metadata,
+        &cancellation,
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .expect("valid two-cell settings")
+    .with_reconstruction_weights(
+        ReconstructionWeights::new(0.80, 0.15, 0.05, 0.0)
+            .expect("finite normalized objective weights"),
+    );
+    let vertical_mask = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'B')
+        .expect("fixture includes vertical mask")
+        .mask();
+    let mut pixels = Vec::with_capacity((CELL_WIDTH * CELL_HEIGHT * 2) as usize);
+    for row in 0..CELL_HEIGHT as usize {
+        let start = row * CELL_WIDTH as usize;
+        let row = &vertical_mask[start..start + CELL_WIDTH as usize];
+        pixels.extend_from_slice(row);
+        pixels.extend_from_slice(row);
+    }
+    let raster = RasterFrameView::new(
+        CELL_WIDTH * 2,
+        CELL_HEIGHT,
+        (CELL_WIDTH * 2) as usize,
+        PixelFormat::gray8(),
+        ColorDescription::new(
+            ColorPrimaries::Srgb,
+            TransferFunction::Linear,
+            AlphaMode::Opaque,
+        ),
+        RasterOrientation::TopDown,
+        &pixels,
+    );
+    let single_settings = ConversionSettings::new(
+        GridSizing::fixed_pixel_surface(CELL_WIDTH, CELL_HEIGHT),
+        FrameMetadata::new(GlyphTableId::new(*table.fingerprint()), 5, 1, 0, 1),
+        &cancellation,
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .expect("valid one-cell settings")
+    .with_reconstruction_weights(
+        ReconstructionWeights::new(0.80, 0.15, 0.05, 0.0)
+            .expect("finite normalized objective weights"),
+    );
+    let single_raster = RasterFrameView::new(
+        CELL_WIDTH,
+        CELL_HEIGHT,
+        CELL_WIDTH as usize,
+        PixelFormat::gray8(),
+        ColorDescription::new(
+            ColorPrimaries::Srgb,
+            TransferFunction::Linear,
+            AlphaMode::Opaque,
+        ),
+        RasterOrientation::TopDown,
+        vertical_mask,
+    );
+    let tight_budget = Budget::new(1_000_000, 2_000_000, 7_500);
+    assert!(
+        convert_structural(single_raster, &table, &single_settings, None, &tight_budget).is_ok()
+    );
+    assert_eq!(
+        convert_structural(raster, &table, &settings, None, &tight_budget).err(),
+        Some(Error::BudgetExceeded(BudgetKind::WorkUnits))
+    );
+    assert!(convert_structural(raster, &table, &settings, None, &BUDGET).is_ok());
+}
+
+#[test]
+fn reconstruction_weights_reject_nonfinite_and_unnormalized_values() {
+    assert!(ReconstructionWeights::new(f64::NAN, 0.0, 0.0, 0.0).is_err());
+    assert!(ReconstructionWeights::new(0.5, 0.2, 0.2, 0.0).is_err());
 }
