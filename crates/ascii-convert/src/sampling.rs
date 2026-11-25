@@ -567,15 +567,16 @@ impl QualityPatches {
         cell_count: usize,
         patch_value_count: usize,
         cancellation: &CancellationToken,
+        mut is_current: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
-        if cancellation.is_cancelled() {
+        if cancellation.is_cancelled() || !is_current() {
             return Err(Error::Cancelled);
         }
         let mut luminance = Vec::new();
         luminance
             .try_reserve_exact(patch_value_count)
             .map_err(|_| Error::AllocationFailed)?;
-        if cancellation.is_cancelled() {
+        if cancellation.is_cancelled() || !is_current() {
             return Err(Error::Cancelled);
         }
         let mut descriptors = Vec::new();
@@ -583,8 +584,21 @@ impl QualityPatches {
             .try_reserve_exact(cell_count)
             .map_err(|_| Error::AllocationFailed)?;
         zero_fill_patch_values(&mut luminance, patch_value_count, || {
-            cancellation.is_cancelled()
+            cancellation.is_cancelled() || !is_current()
         })?;
+        let empty = PatchDescriptors {
+            mean_luminance: 0.0,
+            mean_absolute_dx: 0.0,
+            mean_absolute_dy: 0.0,
+        };
+        for index in 0..cell_count {
+            if index.is_multiple_of(PATCH_INITIALIZATION_CANCEL_INTERVAL)
+                && (cancellation.is_cancelled() || !is_current())
+            {
+                return Err(Error::Cancelled);
+            }
+            descriptors.push(empty);
+        }
         Ok(Self {
             dimensions,
             luminance,
@@ -592,23 +606,20 @@ impl QualityPatches {
         })
     }
 
-    pub(crate) fn luminance_for_cell_mut(
-        &mut self,
-        cell_index: usize,
-    ) -> Result<&mut [f32], Error> {
-        let patch_len =
-            usize::try_from(self.dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
-        let start = cell_index
-            .checked_mul(patch_len)
-            .ok_or(Error::SizeOverflow)?;
-        let end = start.checked_add(patch_len).ok_or(Error::SizeOverflow)?;
-        self.luminance
-            .get_mut(start..end)
-            .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))
+    pub(crate) fn into_parts(self) -> (PatchDimensions, Vec<f32>, Vec<PatchDescriptors>) {
+        (self.dimensions, self.luminance, self.descriptors)
     }
 
-    pub(crate) fn push_descriptor(&mut self, descriptor: PatchDescriptors) {
-        self.descriptors.push(descriptor);
+    pub(crate) fn from_parts(
+        dimensions: PatchDimensions,
+        luminance: Vec<f32>,
+        descriptors: Vec<PatchDescriptors>,
+    ) -> Self {
+        Self {
+            dimensions,
+            luminance,
+            descriptors,
+        }
     }
 }
 
@@ -671,7 +682,14 @@ pub(crate) struct SamplingPlan {
     transform: FitTransform,
     options: SamplingOptions,
     identity: SamplingIdentity,
+    memory_bytes: u64,
     work_units: u64,
+}
+
+impl SamplingPlan {
+    pub(crate) const fn memory_bytes(self) -> u64 {
+        self.memory_bytes
+    }
 }
 
 impl SamplingPlan {
@@ -692,6 +710,7 @@ impl SamplingPlan {
         self,
         cell_count: usize,
         cancellation: &CancellationToken,
+        mut is_current: impl FnMut() -> bool,
     ) -> Result<Option<QualityPatches>, Error> {
         let Some(dimensions) = self.options.patch else {
             return Ok(None);
@@ -706,6 +725,7 @@ impl SamplingPlan {
             cell_count,
             value_count,
             cancellation,
+            &mut is_current,
         )?))
     }
 
@@ -1409,6 +1429,8 @@ pub(crate) fn prepare_sampling(
     frame_validation_work: u64,
     color_samples_per_cell: u64,
     palette_storage_bytes: u64,
+    additional_memory_bytes: u64,
+
     budget: &Budget,
 ) -> Result<SamplingPlan, SamplingError> {
     let bytes_per_pixel = source.bytes_per_pixel;
@@ -1504,6 +1526,8 @@ pub(crate) fn prepare_sampling(
     };
     let initialization_work = if patch_dimensions.is_some() {
         sample_count
+            .checked_add(cell_count)
+            .ok_or(Error::SizeOverflow)?
     } else {
         0
     };
@@ -1584,7 +1608,10 @@ pub(crate) fn prepare_sampling(
         .and_then(|bytes| bytes.checked_add(retained_patch_bytes))
         .and_then(|bytes| bytes.checked_add(color_buffer_bytes))
         .and_then(|bytes| bytes.checked_add(palette_storage_bytes))
+        .and_then(|bytes| bytes.checked_add(additional_memory_bytes))
         .ok_or(Error::SizeOverflow)?;
+    let _whole_raster_layout =
+        isize::try_from(whole_raster_bytes).map_err(|_| Error::SizeOverflow)?;
     if whole_raster_bytes > budget.max_raster_bytes() {
         return Err(Error::BudgetExceeded(BudgetKind::RasterBytes).into());
     }
@@ -1594,6 +1621,7 @@ pub(crate) fn prepare_sampling(
         transform,
         options,
         identity,
+        memory_bytes: whole_raster_bytes,
         work_units: total_work,
     })
 }
@@ -1762,6 +1790,7 @@ mod tests {
                 1,
                 1,
                 &cancellation,
+                || true,
             )
             .err(),
             Some(Error::Cancelled)

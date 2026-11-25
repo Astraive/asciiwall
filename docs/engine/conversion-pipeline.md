@@ -47,9 +47,11 @@ For a matched comparison, use one synthetic source, font fingerprint, grid/cell 
 
 ## Parallelism
 
-Independent cell descriptors and candidate evaluation can be split across rows/tiles using a bounded pool. Error-diffusion dithering introduces order dependencies; do not parallelize it as though each pixel/cell were independent. Ordered dithering is a simpler deterministic parallel alternative.
+Conversion matching uses a bounded shared worker admission owner and stable contiguous four-row tiles. Workers reuse their color-sample and structural scratch buffers, share immutable glyph descriptors, and write disjoint row ranges; stable per-cell candidate tie-breaking and serial error-diffusion dependencies preserve reproducibility. No work queue is created. When conversions share a `ConversionResources` owner, aggregate reservations include the whole preflighted input/output, glyph table, normalized raster, patch, scratch, and worker footprint across active previews.
 
-The density path checks cancellation every 32 output cells, every 64 glyph candidates, and every 256 sampling, patch-initialization, or descriptor operations. It polls again immediately before output-cell allocation, and its aggregate work ceiling includes final frame-cell validation. A cancelled operation returns no partial frame or patch result; the in-flight quality-patch regression also verifies that the normalized-raster reservation acquired before sampling is released on cancellation. Results carry the caller's original generation, frame and timing identity so stale conversions can be discarded after settings change.
+Every work range carries the frame generation. Workers poll cancellation and generation freshness at tile boundaries, and stale jobs release their RAII reservations rather than completing a publishable frame. A caller publishes completed preview/runtime state only through `GenerationController::publish_if_current`, which serializes publication against generation advancement. Image decoding and post-render tint are outside this conversion API; callers keep tint-only changes from re-enqueuing decode or matching.
+
+The converter polls cancellation during sampling, descriptor creation, and matching as well as at tile boundaries. A cancelled or failed job publishes no partial frame and releases its worker/memory reservations. Error-diffusion remains dependency-aware and is not scheduled in the independent-cell pool.
 
 ## Numerical behavior
 

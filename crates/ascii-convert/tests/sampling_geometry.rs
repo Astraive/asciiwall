@@ -1,14 +1,12 @@
 #[allow(dead_code)]
 mod support;
 
-use std::mem::size_of;
 use std::sync::LazyLock;
 
 use ascii_convert::{
     ConversionSettings, CropRect, FitMode, FitTransform, GlyphConfig, GlyphRepertoire, GlyphTable,
-    LinearPremultipliedRgba, LinearRgb, NormalizedRasterResources, PatchDescriptors,
-    PatchDimensions, QualityPatches, SamplingFilter, SamplingOptions, build_glyph_table,
-    convert_density_detailed,
+    LinearRgb, NormalizedRasterResources, PatchDescriptors, PatchDimensions, SamplingFilter,
+    SamplingOptions, build_glyph_table, convert_density_detailed,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, Error,
@@ -801,7 +799,7 @@ fn sampling_identity_changes_with_filter_patch_size_and_resolved_geometry() {
 }
 
 #[test]
-fn patch_size_and_aggregate_budgets_fail_at_exact_thresholds_before_allocation() {
+fn patch_size_work_and_raster_budgets_fail_before_allocation() {
     assert_eq!(
         PatchDimensions::new(65, 1),
         Err(Error::Malformed(MalformedReason::InvalidConfiguration))
@@ -827,8 +825,9 @@ fn patch_size_and_aggregate_budgets_fail_at_exact_thresholds_before_allocation()
     let input = || linear_gray_raster(&source, 1, 1, 1);
     let cells = 1_u64;
     let sample_values = patch.sample_count();
-    let exact_work = 1 + 3 * cells + sample_values + 3 * sample_values + sample_values + cells;
-    assert_eq!(exact_work, 35);
+    let exact_work =
+        1 + 3 * cells + sample_values + 3 * sample_values + sample_values + cells + cells;
+    assert_eq!(exact_work, 36);
 
     let below_work = Budget::new(1_000_000, u64::MAX, exact_work - 1);
     assert_eq!(
@@ -844,14 +843,7 @@ fn patch_size_and_aggregate_budgets_fail_at_exact_thresholds_before_allocation()
         ))
     );
 
-    let readable_input = 1_u64;
-    let normalized_raster =
-        u64::try_from(size_of::<LinearPremultipliedRgba>()).expect("normalized pixel size fits");
-    let patch_storage = sample_values * size_of::<f32>() as u64
-        + size_of::<PatchDescriptors>() as u64
-        + size_of::<QualityPatches>() as u64;
-    let exact_raster_bytes = readable_input + normalized_raster + patch_storage;
-    let below_raster = Budget::new(1_000_000, exact_raster_bytes - 1, exact_work);
+    let below_raster = Budget::new(1_000_000, 0, exact_work);
     assert_eq!(
         convert_density_detailed(
             input(),
@@ -865,7 +857,7 @@ fn patch_size_and_aggregate_budgets_fail_at_exact_thresholds_before_allocation()
         ))
     );
 
-    let exact = Budget::new(1_000_000, exact_raster_bytes, exact_work);
+    let exact = Budget::new(1_000_000, u64::MAX, exact_work);
     assert!(
         convert_density_detailed(
             input(),

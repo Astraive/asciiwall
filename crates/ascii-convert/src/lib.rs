@@ -1,4 +1,4 @@
-//! Bounded CPU density conversion, font rasterization, immutable glyph-table primitives, shared geometry, color normalization, and alpha compositing.
+//! Bounded CPU conversion, generation-aware worker admission, raster normalization, glyph matching, and portable frame primitives.
 
 mod color;
 mod color_fit;
@@ -11,6 +11,9 @@ mod palette;
 
 mod sampling;
 mod structural;
+mod worker;
+
+pub use worker::{ConversionResources, GenerationController};
 
 pub use color::{
     Alpha, ColorNormalizationError, ColorNormalizationWarning, EncodedOutputColor, EncodedSrgb,
