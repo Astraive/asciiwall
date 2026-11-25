@@ -115,6 +115,7 @@ struct NativeScan {
     shell_window: Hwnd,
     shell_process_id: u32,
     current_root_class: WindowClass,
+    current_root_is_shell_window: bool,
     deadline: Instant,
     work_units: u64,
     budget: Budget,
@@ -134,6 +135,7 @@ impl NativeScan {
             shell_window,
             shell_process_id,
             current_root_class: WindowClass::Unknown,
+            current_root_is_shell_window: false,
             deadline,
             work_units: 0,
             budget: Budget::new(0, 0, MAX_ENUMERATION_WORK),
@@ -281,6 +283,7 @@ unsafe fn scan_root(
         class,
         parent_class: WindowClass::Unknown,
         root_class: class,
+        root_is_shell_window: is_shell_window,
         shell_owned,
         top_level: true,
     };
@@ -291,6 +294,7 @@ unsafe fn scan_root(
         // SAFETY: scan_ptr was validated from the synchronous Win32 callback parameter.
         let scan = unsafe { &mut *scan_ptr };
         scan.current_root_class = class;
+        scan.current_root_is_shell_window = is_shell_window;
         if is_shell_window && from_top_level_enumeration {
             scan.snapshot.shell_window_enumerated = true;
         }
@@ -327,13 +331,17 @@ unsafe fn scan_child(scan_ptr: *mut NativeScan, window: Hwnd) -> bool {
         return false;
     };
     // SAFETY: scan_ptr was validated from the synchronous Win32 callback parameter.
-    let root_class = unsafe { (&*scan_ptr).current_root_class };
+    let (root_class, root_is_shell_window) = unsafe {
+        let scan = &*scan_ptr;
+        (scan.current_root_class, scan.current_root_is_shell_window)
+    };
     push_record(
         scan_ptr,
         WindowRecord {
             class,
             parent_class,
             root_class,
+            root_is_shell_window,
             shell_owned,
             top_level: false,
         },

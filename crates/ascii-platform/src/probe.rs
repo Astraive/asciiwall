@@ -143,8 +143,11 @@ pub struct HierarchySummary {
     pub top_level_progman_count: u16,
     /// Number of top-level `WorkerW` windows observed.
     pub top_level_workerw_count: u16,
-    /// Number of `SHELLDLL_DefView` descendants, regardless of owner.
+    /// Number of `SHELLDLL_DefView` descendants under `GetShellWindow`, `Progman`, or `WorkerW`
+    /// roots, regardless of owner.
     pub desktop_view_count: u16,
+    /// Number of views under other roots, kept separate from plausible desktop hierarchy.
+    pub non_desktop_shell_view_count: u16,
     /// Number of those desktop views owned by the shell-window process.
     pub shell_owned_desktop_view_count: u16,
     /// Shell-owned desktop views whose direct parent class was `Progman`.
@@ -208,6 +211,7 @@ struct WindowRecord {
     class: WindowClass,
     parent_class: WindowClass,
     root_class: WindowClass,
+    root_is_shell_window: bool,
     shell_owned: bool,
     top_level: bool,
 }
@@ -217,6 +221,7 @@ impl WindowRecord {
         class: WindowClass::Unknown,
         parent_class: WindowClass::Unknown,
         root_class: WindowClass::Unknown,
+        root_is_shell_window: false,
         shell_owned: false,
         top_level: false,
     };
@@ -293,6 +298,15 @@ fn classify_snapshot(snapshot: &HierarchySnapshot) -> HierarchyObservation {
         }
 
         if record.class != WindowClass::ShellDefView {
+            continue;
+        }
+        let desktop_root = record.root_is_shell_window
+            || matches!(
+                record.root_class,
+                WindowClass::Progman | WindowClass::WorkerW
+            );
+        if !desktop_root {
+            summary.non_desktop_shell_view_count += 1;
             continue;
         }
         summary.desktop_view_count += 1;
@@ -405,11 +419,16 @@ mod tests {
         snapshot
     }
 
-    fn view(parent_class: WindowClass, root_class: WindowClass) -> WindowRecord {
+    fn view(
+        parent_class: WindowClass,
+        root_class: WindowClass,
+        root_is_shell_window: bool,
+    ) -> WindowRecord {
         WindowRecord {
             class: WindowClass::ShellDefView,
             parent_class,
             root_class,
+            root_is_shell_window,
             shell_owned: true,
             top_level: false,
         }
@@ -432,10 +451,11 @@ mod tests {
                 class: WindowClass::WorkerW,
                 parent_class: WindowClass::Unknown,
                 root_class: WindowClass::WorkerW,
+                root_is_shell_window: false,
                 shell_owned: true,
                 top_level: true,
             },
-            view(WindowClass::WorkerW, WindowClass::WorkerW),
+            view(WindowClass::WorkerW, WindowClass::WorkerW, false),
         ];
         let result = classify_snapshot(&snapshot(true, &records));
         assert_eq!(result.observation.status, ProbeStatus::Experimental);
@@ -448,8 +468,8 @@ mod tests {
     }
 
     #[test]
-    fn unrecognized_shell_owned_hierarchy_is_reported_as_experimental() {
-        let records = [view(WindowClass::Other, WindowClass::Other)];
+    fn unrecognized_parent_under_desktop_root_is_reported_as_experimental() {
+        let records = [view(WindowClass::Other, WindowClass::Progman, false)];
         let result = classify_snapshot(&snapshot(true, &records));
         assert_eq!(result.observation.status, ProbeStatus::Experimental);
         assert_eq!(
@@ -459,8 +479,37 @@ mod tests {
     }
 
     #[test]
+    fn shell_view_under_unrelated_root_is_not_misreported_as_desktop() {
+        let records = [view(WindowClass::Other, WindowClass::Other, false)];
+        let result = classify_snapshot(&snapshot(true, &records));
+        assert_eq!(result.observation.status, ProbeStatus::Unavailable);
+        assert_eq!(
+            result.observation.reason,
+            ObservationReason::DesktopViewNotFound
+        );
+        assert_eq!(result.summary.desktop_view_count, 0);
+        assert_eq!(result.summary.non_desktop_shell_view_count, 1);
+        assert_eq!(result.summary.shell_owned_desktop_view_count, 0);
+    }
+
+    #[test]
+    fn unrecognized_actual_shell_root_is_still_a_desktop_candidate() {
+        let records = [view(WindowClass::Other, WindowClass::Other, true)];
+        let result = classify_snapshot(&snapshot(true, &records));
+        assert_eq!(result.observation.status, ProbeStatus::Experimental);
+        assert_eq!(
+            result.observation.reason,
+            ObservationReason::UnexpectedHierarchy
+        );
+        assert_eq!(result.summary.desktop_view_count, 1);
+    }
+
+    #[test]
     fn enumeration_timeout_is_unavailable_and_keeps_partial_counts_non_authoritative() {
-        let mut snapshot = snapshot(true, &[view(WindowClass::Progman, WindowClass::Progman)]);
+        let mut snapshot = snapshot(
+            true,
+            &[view(WindowClass::Progman, WindowClass::Progman, false)],
+        );
         snapshot.failure = Some(ScanFailure::TimedOut);
         let result = classify_snapshot(&snapshot);
         assert_eq!(result.observation.status, ProbeStatus::Unavailable);
