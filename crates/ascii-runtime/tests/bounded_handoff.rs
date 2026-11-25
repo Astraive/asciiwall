@@ -623,7 +623,7 @@ fn releasing_completed_lease_drops_its_pool_handle() {
 }
 
 #[test]
-fn active_handoff_output_holds_the_shared_output_permit_until_completion() {
+fn active_handoff_output_holds_the_shared_output_permit_until_lease_release() {
     let resources = runtime_budget();
     let handoff = BoundedHandoff::new(&resources, 1, 1, 3, 1, 1).unwrap();
     handoff
@@ -654,8 +654,9 @@ fn active_handoff_output_holds_the_shared_output_permit_until_completion() {
         RuntimeError::ConcurrencyLimit(PermitKind::Output)
     );
     lease.completion_token().unwrap().acknowledge();
-    assert_eq!(resources.snapshot().outputs, 0);
+    assert_eq!(resources.snapshot().outputs, 1);
     lease.release().unwrap();
+    assert_eq!(resources.snapshot().outputs, 0);
 }
 
 #[test]
