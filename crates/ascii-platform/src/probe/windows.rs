@@ -204,7 +204,7 @@ pub(super) fn environment_tuple() -> EnvironmentTuple {
     }
 }
 
-/// Enumerates the shell and top-level/descendant classes under an item/time budget.
+/// Inspects the known shell window first, then top-level roots under the shared work/time budget.
 pub(super) fn enumerate_hierarchy() -> HierarchySnapshot {
     // SAFETY: GetShellWindow is a read-only query and returns a borrowed system window handle.
     let shell_window = unsafe { GetShellWindow() };
@@ -226,26 +226,32 @@ pub(super) fn enumerate_hierarchy() -> HierarchySnapshot {
 
     let mut scan = NativeScan::new(shell_window, shell_process_id, shell_class);
     let scan_ptr = &mut scan as *mut NativeScan;
-    // SAFETY: EnumWindows invokes the callback synchronously while `scan` remains alive; the
-    // callback uses only this pointer and stops before the fixed record/work limits are exceeded.
-    let enumerated = unsafe { EnumWindows(Some(top_level_callback), scan_ptr as Lparam) };
-    if enumerated == 0 && scan.snapshot.failure.is_none() {
+    let succeeded = scan_shell_before_top_level(
+        || {
+            // SAFETY: the shell handle is borrowed from GetShellWindow immediately above, and
+            // scan_ptr remains live for this synchronous traversal.
+            unsafe { scan_root(scan_ptr, shell_window, true) }
+        },
+        || {
+            // SAFETY: EnumWindows invokes the callback synchronously while `scan` remains alive;
+            // the callback stops before the fixed record/work limits are exceeded.
+            unsafe { EnumWindows(Some(top_level_callback), scan_ptr as Lparam) != 0 }
+        },
+    );
+    if !succeeded && scan.snapshot.failure.is_none() {
         scan.snapshot.failure = Some(ScanFailure::NativeEnumerationFailed(last_error()));
-    }
-    if scan.snapshot.failure.is_none() && !scan.snapshot.shell_window_enumerated {
-        // Some shell windows can be returned by GetShellWindow without appearing in the top-level
-        // pass. Inspect that exact borrowed window separately rather than relying on FindWindow.
-        // SAFETY: this call is synchronous, uses the same live scan context, and the shell handle
-        // was returned by GetShellWindow immediately above.
-        let succeeded = unsafe { scan_root(scan_ptr, shell_window, true, false) };
-        if !succeeded && scan.snapshot.failure.is_none() {
-            scan.snapshot.failure = Some(ScanFailure::NativeEnumerationFailed(last_error()));
-        }
     }
     if scan.snapshot.failure.is_none() && Instant::now() >= scan.deadline {
         scan.snapshot.failure = Some(ScanFailure::TimedOut);
     }
     scan.snapshot
+}
+
+fn scan_shell_before_top_level(
+    inspect_shell: impl FnOnce() -> bool,
+    enumerate_top_level: impl FnOnce() -> bool,
+) -> bool {
+    inspect_shell() && enumerate_top_level()
 }
 
 unsafe extern "system" fn top_level_callback(window: Hwnd, parameter: Lparam) -> Bool {
@@ -254,7 +260,14 @@ unsafe extern "system" fn top_level_callback(window: Hwnd, parameter: Lparam) ->
         return 0;
     }
     // SAFETY: the caller supplies a live NativeScan pointer for the duration of synchronous EnumWindows.
-    unsafe { scan_root(scan_ptr, window, window == (*scan_ptr).shell_window, true) as Bool }
+    if window == unsafe { (*scan_ptr).shell_window } {
+        // The known shell root and its descendants were already inspected before EnumWindows.
+        // SAFETY: scan_ptr is live and this callback owns its sequential mutation window.
+        unsafe { note_shell_window_enumerated(&mut *scan_ptr) };
+        return 1;
+    }
+    // SAFETY: scan_ptr is live for this synchronous callback.
+    unsafe { scan_root(scan_ptr, window, false) as Bool }
 }
 
 unsafe extern "system" fn child_callback(window: Hwnd, parameter: Lparam) -> Bool {
@@ -266,12 +279,7 @@ unsafe extern "system" fn child_callback(window: Hwnd, parameter: Lparam) -> Boo
     unsafe { scan_child(scan_ptr, window) as Bool }
 }
 
-unsafe fn scan_root(
-    scan_ptr: *mut NativeScan,
-    window: Hwnd,
-    is_shell_window: bool,
-    from_top_level_enumeration: bool,
-) -> bool {
+unsafe fn scan_root(scan_ptr: *mut NativeScan, window: Hwnd, is_shell_window: bool) -> bool {
     if !reserve_work(scan_ptr) {
         return false;
     }
@@ -279,37 +287,25 @@ unsafe fn scan_root(
     let Some(shell_owned) = belongs_to_shell_process(scan_ptr, window) else {
         return false;
     };
-    let root = WindowRecord {
-        class,
-        parent_class: WindowClass::Unknown,
-        root_class: class,
-        root_is_shell_window: is_shell_window,
-        shell_owned,
-        top_level: true,
-    };
-    if !push_record(scan_ptr, root) {
-        return false;
-    }
-    {
-        // SAFETY: scan_ptr was validated from the synchronous Win32 callback parameter.
-        let scan = unsafe { &mut *scan_ptr };
-        scan.current_root_class = class;
-        scan.current_root_is_shell_window = is_shell_window;
-        if is_shell_window && from_top_level_enumeration {
-            scan.snapshot.shell_window_enumerated = true;
+    // SAFETY: scan_ptr was validated by reserve_work and is live for the synchronous callback.
+    let action = unsafe { record_root(&mut *scan_ptr, class, shell_owned, is_shell_window) };
+    match action {
+        RootScanAction::Abort => false,
+        RootScanAction::SkipChildren => true,
+        RootScanAction::EnumerateChildren => {
+            let parameter = scan_ptr as Lparam;
+            // SAFETY: EnumChildWindows is synchronous; `scan_ptr` remains valid and all callbacks
+            // are bounded by the shared deadline, work ceiling, and fixed-size snapshot.
+            let succeeded = unsafe { EnumChildWindows(window, Some(child_callback), parameter) };
+            if succeeded == 0 {
+                // SAFETY: GetLastError has no pointer arguments and records the immediately preceding API failure.
+                unsafe { set_native_failure(scan_ptr, last_error()) };
+                return false;
+            }
+            // SAFETY: the scan remains live until enumerate_hierarchy returns.
+            unsafe { (&*scan_ptr).snapshot.failure.is_none() }
         }
     }
-    let parameter = scan_ptr as Lparam;
-    // SAFETY: EnumChildWindows is synchronous; `scan_ptr` remains valid and all callbacks are
-    // bounded by the shared deadline, work ceiling, and fixed-size snapshot.
-    let succeeded = unsafe { EnumChildWindows(window, Some(child_callback), parameter) };
-    if succeeded == 0 {
-        // SAFETY: GetLastError has no pointer arguments and records the immediately preceding API failure.
-        unsafe { set_native_failure(scan_ptr, last_error()) };
-        return false;
-    }
-    // SAFETY: the scan remains live until enumerate_hierarchy returns.
-    unsafe { (&*scan_ptr).snapshot.failure.is_none() }
 }
 
 unsafe fn scan_child(scan_ptr: *mut NativeScan, window: Hwnd) -> bool {
@@ -330,22 +326,66 @@ unsafe fn scan_child(scan_ptr: *mut NativeScan, window: Hwnd) -> bool {
     let Some(shell_owned) = belongs_to_shell_process(scan_ptr, window) else {
         return false;
     };
-    // SAFETY: scan_ptr was validated from the synchronous Win32 callback parameter.
-    let (root_class, root_is_shell_window) = unsafe {
-        let scan = &*scan_ptr;
-        (scan.current_root_class, scan.current_root_is_shell_window)
+    // SAFETY: scan_ptr was validated by reserve_work and is live for the synchronous callback.
+    let scan = unsafe { &mut *scan_ptr };
+    let succeeded = record_child(scan, class, parent_class, shell_owned);
+    succeeded && scan.snapshot.failure.is_none()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootScanAction {
+    Abort,
+    SkipChildren,
+    EnumerateChildren,
+}
+
+fn record_root(
+    scan: &mut NativeScan,
+    class: WindowClass,
+    shell_owned: bool,
+    is_shell_window: bool,
+) -> RootScanAction {
+    let root = WindowRecord {
+        class,
+        parent_class: WindowClass::Unknown,
+        root_class: class,
+        root_is_shell_window: is_shell_window,
+        shell_owned,
+        top_level: true,
     };
-    push_record(
-        scan_ptr,
-        WindowRecord {
-            class,
-            parent_class,
-            root_class,
-            root_is_shell_window,
-            shell_owned,
-            top_level: false,
-        },
-    )
+    if !scan.push(root) {
+        return RootScanAction::Abort;
+    }
+    scan.current_root_class = class;
+    scan.current_root_is_shell_window = is_shell_window;
+    if is_shell_window
+        || shell_owned
+        || matches!(class, WindowClass::Progman | WindowClass::WorkerW)
+    {
+        RootScanAction::EnumerateChildren
+    } else {
+        RootScanAction::SkipChildren
+    }
+}
+
+fn record_child(
+    scan: &mut NativeScan,
+    class: WindowClass,
+    parent_class: WindowClass,
+    shell_owned: bool,
+) -> bool {
+    scan.push(WindowRecord {
+        class,
+        parent_class,
+        root_class: scan.current_root_class,
+        root_is_shell_window: scan.current_root_is_shell_window,
+        shell_owned,
+        top_level: false,
+    })
+}
+
+fn note_shell_window_enumerated(scan: &mut NativeScan) {
+    scan.snapshot.shell_window_enumerated = true;
 }
 
 fn reserve_work(scan_ptr: *mut NativeScan) -> bool {
@@ -354,14 +394,6 @@ fn reserve_work(scan_ptr: *mut NativeScan) -> bool {
     }
     // SAFETY: only the active synchronous enumeration callback mutates this context.
     unsafe { (&mut *scan_ptr).reserve_work() }
-}
-
-fn push_record(scan_ptr: *mut NativeScan, record: WindowRecord) -> bool {
-    if scan_ptr.is_null() {
-        return false;
-    }
-    // SAFETY: only the active synchronous enumeration callback mutates this context.
-    unsafe { (&mut *scan_ptr).push(record) }
 }
 
 fn belongs_to_shell_process(scan_ptr: *mut NativeScan, window: Hwnd) -> Option<bool> {
@@ -439,4 +471,106 @@ fn version_tuple() -> Option<WindowsVersion> {
         minor: info.minor,
         build: info.build,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_ENUMERATION_WORK, NativeScan, RootScanAction, WindowClass, note_shell_window_enumerated,
+        record_child, record_root, scan_shell_before_top_level,
+    };
+    use super::super::{ObservationReason, ProbeStatus, classify_snapshot};
+    use std::cell::RefCell;
+
+    fn visit_synthetic_root(
+        scan: &mut NativeScan,
+        class: WindowClass,
+        shell_owned: bool,
+        is_shell_window: bool,
+        descendants: &[WindowClass],
+    ) -> bool {
+        if !scan.reserve_work() {
+            return false;
+        }
+        match record_root(scan, class, shell_owned, is_shell_window) {
+            RootScanAction::Abort => false,
+            RootScanAction::SkipChildren => true,
+            RootScanAction::EnumerateChildren => {
+                let parent_class = scan.current_root_class;
+                descendants.iter().all(|child_class| {
+                    scan.reserve_work()
+                        && record_child(scan, *child_class, parent_class, true)
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_descendants_cannot_starve_known_shell_inspection() {
+        let shell_window = std::ptr::NonNull::<std::ffi::c_void>::dangling().as_ptr();
+        let scan = RefCell::new(NativeScan::new(shell_window, 1, WindowClass::Progman));
+        let unrelated_descendants = [WindowClass::Other; MAX_ENUMERATION_WORK as usize];
+
+        let succeeded = scan_shell_before_top_level(
+            || {
+                let mut scan = scan.borrow_mut();
+                visit_synthetic_root(
+                    &mut scan,
+                    WindowClass::Progman,
+                    true,
+                    true,
+                    &[WindowClass::ShellDefView],
+                )
+            },
+            || {
+                // This synthetic EnumWindows stream yields an unrelated tree before the shell
+                // handle, matching the order that could starve the old fallback inspection.
+                let mut scan = scan.borrow_mut();
+                let unrelated_scanned = visit_synthetic_root(
+                    &mut scan,
+                    WindowClass::Other,
+                    false,
+                    false,
+                    &unrelated_descendants,
+                );
+                let workerw_scanned = unrelated_scanned
+                    && visit_synthetic_root(
+                        &mut scan,
+                        WindowClass::WorkerW,
+                        false,
+                        false,
+                        &[WindowClass::ShellDefView],
+                    );
+                let folder_view_scanned = workerw_scanned
+                    && visit_synthetic_root(
+                        &mut scan,
+                        WindowClass::Other,
+                        true,
+                        false,
+                        &[WindowClass::ShellDefView],
+                    );
+                note_shell_window_enumerated(&mut scan);
+                folder_view_scanned
+            },
+        );
+        let scan = scan.into_inner();
+
+        assert!(succeeded);
+        assert_eq!(scan.snapshot.failure, None);
+        assert_eq!(scan.work_units, 7);
+        assert_eq!(scan.snapshot.record_count, 7);
+        assert!(scan.snapshot.shell_window_enumerated);
+        assert!(scan.snapshot.records[0].root_is_shell_window);
+        assert_eq!(scan.snapshot.records[1].class, WindowClass::ShellDefView);
+
+        let hierarchy = classify_snapshot(&scan.snapshot);
+        assert_eq!(hierarchy.observation.status, ProbeStatus::Experimental);
+        assert_eq!(
+            hierarchy.observation.reason,
+            ObservationReason::ShellHierarchyObserved
+        );
+        assert_eq!(hierarchy.summary.shell_owned_desktop_view_count, 2);
+        assert_eq!(hierarchy.summary.desktop_views_parented_by_workerw, 1);
+        assert_eq!(hierarchy.summary.non_desktop_shell_view_count, 1);
+    }
 }
