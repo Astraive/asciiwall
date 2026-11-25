@@ -7,6 +7,12 @@
 
 use core::fmt;
 
+use core::mem::size_of;
+use core::num::NonZeroUsize;
+use std::thread;
+
+use crate::worker::{ConversionResources, GenerationController, JobExecution, WorkerRange};
+
 use ascii_core::{
     AsciiCell, AsciiFrame, Budget, BudgetKind, CancellationToken, Error, FrameMetadata,
     GlyphTableId, GridSize, MalformedReason, RasterFrameView, UnsupportedReason,
@@ -14,8 +20,8 @@ use ascii_core::{
 };
 
 use crate::color::{
-    ColorNormalizationError, ColorNormalizationWarning, LinearRgb, NormalizedRasterResources,
-    OutputEncoding, encode_output, normalize_raster,
+    ColorNormalizationError, ColorNormalizationWarning, LinearRgb, NormalizedRaster,
+    NormalizedRasterResources, OutputEncoding, encode_output, normalize_raster,
 };
 use crate::color_fit::{ColorFitError, ColorFitStrategy, estimate_color_fit_work, fit_color_patch};
 use crate::font::GlyphTable;
@@ -23,16 +29,73 @@ use crate::palette::{Palette, PaletteError, PaletteKind};
 #[cfg(test)]
 use crate::sampling::SampleCancellationPoll;
 use crate::sampling::{
-    FitMode, FitTransform, PatchDimensions, QualityPatches, SamplingError, SamplingIdentity,
-    SamplingOptions, SamplingSource, prepare_sampling,
+    FitMode, FitTransform, PatchDescriptors, PatchDimensions, QualityPatches, SamplingError,
+    SamplingIdentity, SamplingOptions, SamplingPlan, SamplingSource, prepare_sampling,
 };
 use crate::structural::{
     MAX_STRUCTURAL_CANDIDATES, ReconstructionInput, ReconstructionWeights, ShortlistOptions,
-    StructuralDescriptor, StructuralScratch, StructuralWeights, rerank_candidates,
+    StructuralCandidate, StructuralDescriptor, StructuralScratch, StructuralWeights,
+    rerank_candidates,
 };
 
 const CANCELLATION_CELL_INTERVAL: usize = 32;
 const CANCELLATION_GLYPH_INTERVAL: usize = 64;
+const WORKER_STACK_SIZE_BYTES: u64 = 256 * 1024;
+
+fn extra_job_memory_bytes(
+    glyphs: &GlyphTable,
+    size: GridSize,
+    workers: usize,
+    color_samples_per_worker: u64,
+    structural_candidates_per_worker: usize,
+    previous: Option<&AsciiFrame>,
+) -> Result<u64, Error> {
+    let workers_u64 = u64::try_from(workers).map_err(|_| Error::SizeOverflow)?;
+    let cell_count = size.cell_count();
+    let output_bytes = cell_count
+        .checked_mul(u64::try_from(size_of::<AsciiCell>()).map_err(|_| Error::SizeOverflow)?)
+        .and_then(|bytes| bytes.checked_add(u64::try_from(size_of::<AsciiFrame>()).ok()?))
+        .ok_or(Error::SizeOverflow)?;
+    let candidate_scratch = u64::try_from(structural_candidates_per_worker)
+        .map_err(|_| Error::SizeOverflow)?
+        .checked_mul(
+            u64::try_from(size_of::<StructuralCandidate>()).map_err(|_| Error::SizeOverflow)?,
+        )
+        .and_then(|bytes| bytes.checked_mul(workers_u64))
+        .ok_or(Error::SizeOverflow)?;
+    let additional_color_scratch = color_samples_per_worker
+        .checked_mul(u64::try_from(size_of::<LinearRgb>()).map_err(|_| Error::SizeOverflow)?)
+        .and_then(|bytes| bytes.checked_mul(workers_u64.saturating_sub(1)))
+        .ok_or(Error::SizeOverflow)?;
+    let per_worker_control = u64::try_from(
+        size_of::<WorkerRange>() + size_of::<StructuralScratch>() + 3 * size_of::<usize>(),
+    )
+    .map_err(|_| Error::SizeOverflow)?
+    .checked_mul(workers_u64)
+    .ok_or(Error::SizeOverflow)?;
+    let worker_stacks = if workers > 1 {
+        WORKER_STACK_SIZE_BYTES
+            .checked_mul(workers_u64)
+            .ok_or(Error::SizeOverflow)?
+    } else {
+        0
+    };
+    let prior_frame_bytes = previous.map_or(0, |frame| {
+        u64::try_from(frame.cells().len())
+            .ok()
+            .and_then(|count| count.checked_mul(size_of::<AsciiCell>() as u64))
+            .unwrap_or(u64::MAX)
+    });
+    glyphs
+        .retained_storage_bytes()?
+        .checked_add(output_bytes)
+        .and_then(|bytes| bytes.checked_add(candidate_scratch))
+        .and_then(|bytes| bytes.checked_add(additional_color_scratch))
+        .and_then(|bytes| bytes.checked_add(per_worker_control))
+        .and_then(|bytes| bytes.checked_add(worker_stacks))
+        .and_then(|bytes| bytes.checked_add(prior_frame_bytes))
+        .ok_or(Error::SizeOverflow)
+}
 
 /// How an output cell grid is sized before density matching.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -188,7 +251,7 @@ impl GridSizing {
     }
 }
 
-/// Validated identity, sizing, sampling, cancellation, and luminance-polarity settings.
+/// Validated identity, sizing, sampling, generation, and worker-admission settings.
 #[derive(Clone, Copy, Debug)]
 pub struct ConversionSettings<'a> {
     sizing: GridSizing,
@@ -199,6 +262,9 @@ pub struct ConversionSettings<'a> {
     color_fit: Option<(&'a Palette, ColorFitStrategy)>,
     sampling: SamplingOptions,
     reconstruction_weights: ReconstructionWeights,
+    worker_resources: Option<&'a ConversionResources>,
+    worker_limit: NonZeroUsize,
+    generation: Option<&'a GenerationController>,
 }
 
 impl<'a> ConversionSettings<'a> {
@@ -229,7 +295,36 @@ impl<'a> ConversionSettings<'a> {
             color_fit: None,
             sampling: SamplingOptions::default(),
             reconstruction_weights: ReconstructionWeights::new(0.70, 0.20, 0.05, 0.05)?,
+            worker_resources: None,
+            worker_limit: NonZeroUsize::new(1).expect("one is nonzero"),
+            generation: None,
         })
+    }
+
+    /// Enables a shared bounded worker pool and sets this job's worker ceiling.
+    ///
+    /// Conversions that share `resources` also share its aggregate active-memory and worker-slot
+    /// limits. If no slot is available, the job is rejected with a typed work-budget error rather
+    /// than creating an unbounded queue or thread pool.
+    #[must_use]
+    pub const fn with_worker_pool(
+        mut self,
+        resources: &'a ConversionResources,
+        worker_limit: NonZeroUsize,
+    ) -> Self {
+        self.worker_resources = Some(resources);
+        self.worker_limit = worker_limit;
+        self
+    }
+
+    /// Binds this conversion to the active generation used to supersede stale preview work.
+    #[must_use]
+    pub const fn with_generation_controller(
+        mut self,
+        generation: &'a GenerationController,
+    ) -> Self {
+        self.generation = Some(generation);
+        self
     }
 
     /// Enables candidate-specific reconstruction against this validated palette.
@@ -301,6 +396,22 @@ impl<'a> ConversionSettings<'a> {
     pub const fn background(self) -> LinearRgb {
         self.background
     }
+    pub(crate) fn begin_job(self, rows: usize) -> Result<JobExecution<'a>, Error> {
+        JobExecution::begin(
+            self.worker_resources,
+            self.generation,
+            self.metadata.generation(),
+            self.worker_limit,
+            rows,
+        )
+    }
+
+    fn without_worker_pool(mut self) -> Self {
+        self.worker_resources = None;
+        self.worker_limit = NonZeroUsize::new(1).expect("one is nonzero");
+        self
+    }
+
 }
 
 /// A density conversion failure, retaining the original core or color-normalization error.
@@ -510,38 +621,29 @@ pub fn convert_structural(
         settings.sampling.filter(),
         Some(patch_dimensions),
     );
-    let mut structural_settings = settings.with_sampling(sampling);
-    structural_settings.color_fit = None;
-    let resources = NormalizedRasterResources::new(budget.max_raster_bytes());
-    let conversion = convert_density_detailed_impl(
-        input,
-        glyphs,
-        &structural_settings,
-        budget,
-        &resources,
-        #[cfg(test)]
-        None,
-    )
-    .map_err(DensityConversionError::into_core)?;
-    let DensityConversion {
-        frame,
-        patches,
-        sampling_identity,
-        ..
-    } = conversion;
-    let size = frame.size();
-    drop(frame);
-    let patches = patches.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+    let size = settings.sizing.resolve_for_sampling(
+        input.width(),
+        input.height(),
+        glyphs.cell_width(),
+        glyphs.cell_height(),
+        sampling,
+    )?;
+    let rows = usize::try_from(size.rows()).map_err(|_| Error::SizeOverflow)?;
+    let columns = usize::try_from(size.columns()).map_err(|_| Error::SizeOverflow)?;
+    let mut execution = settings.begin_job(rows)?;
+    execution.check(settings.cancellation)?;
+    let grid_budget = validate_grid_budget(size, budget, settings.cancellation)?;
+    if previous.is_some_and(|frame| frame.size() != size) {
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+    }
+
     let glyph_count = u32::try_from(glyphs.glyphs().len()).map_err(|_| Error::SizeOverflow)?;
     let candidate_count = glyphs.glyphs().len().min(64).min(MAX_STRUCTURAL_CANDIDATES);
     let shortlist_options =
         ShortlistOptions::new(candidate_count, StructuralWeights::new(0.34, 0.33, 0.33)?)?;
     let foreground_luminance = settings.foreground.luminance().value();
     let background_luminance = settings.background.luminance().value();
-    let cell_count = patches.cell_count();
-    if previous.is_some_and(|frame| frame.size() != size) {
-        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
-    }
+    let cell_count = grid_budget.cell_count_usize();
     let sample_count =
         usize::try_from(patch_dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
     let sample_count_u64 = u64::try_from(sample_count).map_err(|_| Error::SizeOverflow)?;
@@ -562,7 +664,14 @@ pub fn convert_structural(
         .and_then(|work| work.checked_mul(u64::try_from(candidate_count).ok()?))
         .and_then(|work| work.checked_mul(u64::try_from(cell_count).ok()?))
         .ok_or(Error::SizeOverflow)?;
-    let grid_budget = validate_grid_budget(size, budget, settings.cancellation)?;
+    let additional_memory_bytes = extra_job_memory_bytes(
+        glyphs,
+        size,
+        execution.worker_count(),
+        sample_count_u64,
+        candidate_count,
+        previous,
+    )?;
     let source = SamplingSource::new(input)
         .map_err(|error| DensityConversionError::from(error).into_core())?;
     let structural_sampling = prepare_sampling(
@@ -575,87 +684,59 @@ pub fn convert_structural(
         grid_budget.work_units(),
         sample_count_u64,
         palette_storage_bytes,
+        additional_memory_bytes,
         budget,
     )
     .map_err(|error| DensityConversionError::from(error).into_core())?;
+    execution.reserve_memory(structural_sampling.memory_bytes())?;
+    execution.check(settings.cancellation)?;
+
+    let mut structural_settings = settings.with_sampling(sampling).without_worker_pool();
+    structural_settings.color_fit = None;
+    let resources = NormalizedRasterResources::new(budget.max_raster_bytes());
+    let conversion = convert_density_detailed_impl(
+        input,
+        glyphs,
+        &structural_settings,
+        budget,
+        &resources,
+        #[cfg(test)]
+        None,
+    )
+    .map_err(DensityConversionError::into_core)?;
+    let DensityConversion {
+        frame,
+        patches,
+        sampling_identity,
+        ..
+    } = conversion;
+    drop(frame);
+    let patches = patches.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+    if patches.cell_count() != cell_count {
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+    }
     let normalized = normalize_raster(input, budget, settings.cancellation, &resources)
         .map_err(|error| DensityConversionError::ColorNormalization(error).into_core())?;
-    let mut color_samples = Vec::new();
-    color_samples
-        .try_reserve_exact(sample_count)
-        .map_err(|_| Error::AllocationFailed)?;
-    if color_samples.capacity() != sample_count {
-        return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
-    }
     let mut cells = reserve_output_cells(cell_count, settings.cancellation)?;
-    let mut scratch = StructuralScratch::default();
-    for cell_index in 0..cell_count {
-        if cell_index.is_multiple_of(CANCELLATION_CELL_INTERVAL)
-            && settings.cancellation.is_cancelled()
-        {
-            return Err(Error::Cancelled);
-        }
-        let samples = patches
-            .luminance_for_cell(cell_index)
-            .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
-        let descriptor = StructuralDescriptor::from_luminance(
-            samples,
-            patch_dimensions,
-            foreground_luminance,
-            background_luminance,
-            budget,
-            settings.cancellation,
-        )?;
-        let shortlist = scratch.shortlist(
-            &descriptor,
-            glyphs,
-            sampling_identity,
-            shortlist_options,
-            budget,
-            settings.cancellation,
-        )?;
-        let columns = usize::try_from(size.columns()).map_err(|_| Error::SizeOverflow)?;
-        let column = u32::try_from(cell_index % columns).map_err(|_| Error::SizeOverflow)?;
-        let row = u32::try_from(cell_index / columns).map_err(|_| Error::SizeOverflow)?;
-        structural_sampling.sample_color_patch(
-            &normalized,
-            column,
-            row,
-            glyphs.cell_width(),
-            glyphs.cell_height(),
-            settings.background,
-            settings.cancellation,
-            &mut color_samples,
-        )?;
-        let previous_glyph = previous
-            .and_then(|frame| frame.cells().get(cell_index))
-            .map(|cell| cell.glyph());
-        let selected = rerank_candidates(
-            ReconstructionInput {
-                samples,
-                color_samples: &color_samples,
-                dimensions: patch_dimensions,
-                descriptor: &descriptor,
-                glyphs,
-                candidates: shortlist.candidates(),
-                foreground: settings.foreground,
-                background: settings.background,
-                foreground_luminance,
-                background_luminance,
-                color_fit: settings.color_fit,
-                previous_glyph,
-                weights: settings.reconstruction_weights,
-            },
-            budget,
-            settings.cancellation,
-        )
-        .map_err(|error| DensityConversionError::ColorFit(error).into_core())?;
-        cells.push(AsciiCell::new(
-            selected.candidate.table_position(),
-            output_color(selected.foreground),
-            output_color(selected.background),
-        ));
-    }
+    run_structural_workers(
+        settings,
+        &execution,
+        rows,
+        columns,
+        &mut cells,
+        &patches,
+        patch_dimensions,
+        &normalized,
+        glyphs,
+        structural_sampling,
+        sampling_identity,
+        shortlist_options,
+        foreground_luminance,
+        background_luminance,
+        previous,
+        budget,
+    )?;
+    execution.check(settings.cancellation)?;
     AsciiFrame::try_new(
         size,
         settings.metadata,
@@ -738,6 +819,9 @@ fn convert_density_detailed_impl(
         glyphs.cell_height(),
         settings.sampling,
     )?;
+    let rows = usize::try_from(size.rows()).map_err(|_| Error::SizeOverflow)?;
+    let mut execution = settings.begin_job(rows)?;
+    execution.check(settings.cancellation)?;
     let grid_budget = validate_grid_budget(size, budget, settings.cancellation)?;
     let glyph_count_u64 = u64::try_from(glyph_records.len()).map_err(|_| Error::SizeOverflow)?;
     let (matching_work, color_samples_per_cell, palette_storage_bytes) =
@@ -780,6 +864,14 @@ fn convert_density_detailed_impl(
         Some(source) => source,
         None => SamplingSource::new(input)?,
     };
+    let additional_memory_bytes = extra_job_memory_bytes(
+        glyphs,
+        size,
+        execution.worker_count(),
+        color_samples_per_cell,
+        0,
+        None,
+    )?;
     let sampling = prepare_sampling(
         source,
         size,
@@ -790,151 +882,52 @@ fn convert_density_detailed_impl(
         frame_validation_work,
         color_samples_per_cell,
         palette_storage_bytes,
+        additional_memory_bytes,
         budget,
     )?;
-
+    execution.reserve_memory(sampling.memory_bytes())?;
+    execution.check(settings.cancellation)?;
     let normalized = normalize_raster(input, budget, settings.cancellation, resources)?;
     let normalization_warning = normalized.warning();
-    let mut patches =
-        sampling.allocate_patches(grid_budget.cell_count_usize(), settings.cancellation)?;
-    let mut color_samples = if settings.color_fit.is_some() {
-        if settings.cancellation.is_cancelled() {
-            return Err(Error::Cancelled.into());
+    let patches = sampling.allocate_patches(grid_budget.cell_count_usize(), settings.cancellation)?;
+    let (patch_dimensions, mut patch_values, mut patch_descriptors) = match patches {
+        Some(patches) => {
+            let (dimensions, luminance, descriptors) = patches.into_parts();
+            (Some(dimensions), luminance, descriptors)
         }
-        let sample_count =
-            usize::try_from(color_samples_per_cell).map_err(|_| Error::SizeOverflow)?;
-        let mut samples = Vec::new();
-        samples
-            .try_reserve_exact(sample_count)
-            .map_err(|_| Error::AllocationFailed)?;
-        if samples.capacity() != sample_count {
-            return Err(Error::BudgetExceeded(BudgetKind::RasterBytes).into());
-        }
-        Some(samples)
-    } else {
-        None
+        None => (None, Vec::new(), Vec::new()),
     };
     let foreground_luminance = settings.foreground.luminance().value();
     let background_luminance = settings.background.luminance().value();
     let luminance_span = foreground_luminance - background_luminance;
     let foreground = output_color(settings.foreground);
     let background = output_color(settings.background);
-
     let mut cells = reserve_output_cells(grid_budget.cell_count_usize(), settings.cancellation)?;
-
-    for row in 0..size.rows() {
-        for column in 0..size.columns() {
-            let index = cells.len();
-            if index.is_multiple_of(CANCELLATION_CELL_INTERVAL)
-                && settings.cancellation.is_cancelled()
-            {
-                return Err(Error::Cancelled.into());
-            }
-            let (target_luminance, descriptors) =
-                if settings.color_fit.is_some() && patches.is_none() {
-                    (0.0, None)
-                } else if let Some(patches) = patches.as_mut() {
-                    let patch_output = patches.luminance_for_cell_mut(index)?;
-                    sampling.sample_cell(
-                        &normalized,
-                        column,
-                        row,
-                        glyphs.cell_width(),
-                        glyphs.cell_height(),
-                        settings.background,
-                        settings.cancellation,
-                        Some(patch_output),
-                        #[cfg(test)]
-                        sample_cancel_poll,
-                    )?
-                } else {
-                    sampling.sample_cell(
-                        &normalized,
-                        column,
-                        row,
-                        glyphs.cell_width(),
-                        glyphs.cell_height(),
-                        settings.background,
-                        settings.cancellation,
-                        None,
-                        #[cfg(test)]
-                        sample_cancel_poll,
-                    )?
-                };
-            if let (Some(patches), Some(descriptor)) = (patches.as_mut(), descriptors) {
-                patches.push_descriptor(descriptor);
-            }
-            if let Some((palette, strategy)) = settings.color_fit {
-                let samples = color_samples
-                    .as_mut()
-                    .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
-                sampling.sample_color_patch(
-                    &normalized,
-                    column,
-                    row,
-                    glyphs.cell_width(),
-                    glyphs.cell_height(),
-                    settings.background,
-                    settings.cancellation,
-                    samples,
-                )?;
-                let mut best: Option<(usize, f64, u16, u32, crate::color_fit::ColorFit)> = None;
-                for (table_position, glyph) in glyph_records.iter().enumerate() {
-                    if table_position.is_multiple_of(CANCELLATION_GLYPH_INTERVAL)
-                        && settings.cancellation.is_cancelled()
-                    {
-                        return Err(Error::Cancelled.into());
-                    }
-                    let fit = fit_color_patch(
-                        samples,
-                        glyph.mask(),
-                        palette,
-                        strategy,
-                        budget,
-                        settings.cancellation,
-                    )?;
-                    let score = fit.mean_squared_error();
-                    let glyph_key = (glyph.glyph_index(), glyph.character() as u32);
-                    let replace = match best {
-                        None => true,
-                        Some((_, best_score, best_glyph_index, best_scalar, _)) => {
-                            score < best_score
-                                || (score == best_score
-                                    && glyph_key < (best_glyph_index, best_scalar))
-                        }
-                    };
-                    if replace {
-                        best = Some((
-                            table_position,
-                            score,
-                            glyph.glyph_index(),
-                            glyph.character() as u32,
-                            fit,
-                        ));
-                    }
-                }
-                let (table_position, _, _, _, fit) =
-                    best.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
-                let glyph = u32::try_from(table_position).map_err(|_| Error::SizeOverflow)?;
-                cells.push(AsciiCell::new(
-                    glyph,
-                    output_color(fit.foreground().color()),
-                    output_color(fit.background().color()),
-                ));
-            } else {
-                let target_coverage =
-                    ((target_luminance - background_luminance) / luminance_span).clamp(0.0, 1.0);
-                let glyph = best_glyph(glyph_records.iter(), target_coverage, || {
-                    settings.cancellation.is_cancelled()
-                })?;
-                cells.push(AsciiCell::new(glyph, foreground, background));
-            }
-        }
-    }
-
-    if settings.cancellation.is_cancelled() {
-        return Err(Error::Cancelled.into());
-    }
+    run_density_workers(
+        settings,
+        &execution,
+        rows,
+        usize::try_from(size.columns()).map_err(|_| Error::SizeOverflow)?,
+        &mut cells,
+        &mut patch_values,
+        &mut patch_descriptors,
+        patch_dimensions,
+        &normalized,
+        glyphs,
+        sampling,
+        foreground_luminance,
+        background_luminance,
+        luminance_span,
+        foreground,
+        background,
+        budget,
+        #[cfg(test)]
+        sample_cancel_poll,
+    )?;
+    execution.check(settings.cancellation)?;
+    let patches = patch_dimensions.map(|dimensions| {
+        QualityPatches::from_parts(dimensions, patch_values, patch_descriptors)
+    });
     let frame = AsciiFrame::try_new(
         size,
         settings.metadata,
@@ -964,6 +957,521 @@ fn convert_density_detailed_impl(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_structural_workers(
+    settings: ConversionSettings<'_>,
+    execution: &JobExecution<'_>,
+    rows: usize,
+    columns: usize,
+    cells: &mut [AsciiCell],
+    patches: &QualityPatches,
+    patch_dimensions: PatchDimensions,
+    normalized: &NormalizedRaster,
+    glyphs: &GlyphTable,
+    sampling: SamplingPlan,
+    sampling_identity: SamplingIdentity,
+    shortlist_options: ShortlistOptions,
+    foreground_luminance: f64,
+    background_luminance: f64,
+    previous: Option<&AsciiFrame>,
+    budget: &Budget,
+) -> Result<(), Error> {
+    let worker_count = execution.worker_count();
+    if worker_count == 1 {
+        let range = execution
+            .ranges(rows)
+            .next()
+            .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+        return process_structural_range(
+            range,
+            settings,
+            execution,
+            columns,
+            cells,
+            patches,
+            patch_dimensions,
+            normalized,
+            glyphs,
+            sampling,
+            sampling_identity,
+            shortlist_options,
+            foreground_luminance,
+            background_luminance,
+            previous,
+            budget,
+        );
+    }
+    thread::scope(|scope| {
+        let mut handles = Vec::new();
+        handles
+            .try_reserve_exact(worker_count)
+            .map_err(|_| Error::AllocationFailed)?;
+        let mut remaining_cells = cells;
+        for range in execution.ranges(rows) {
+            let cell_len = range
+                .end_row
+                .checked_sub(range.first_row)
+                .and_then(|range_rows| range_rows.checked_mul(columns))
+                .ok_or(Error::SizeOverflow)?;
+            let (worker_cells, rest) = remaining_cells.split_at_mut(cell_len);
+            remaining_cells = rest;
+            let handle = thread::Builder::new()
+                .stack_size(WORKER_STACK_SIZE_BYTES as usize)
+                .spawn_scoped(scope, move || {
+                    process_structural_range(
+                        range,
+                        settings,
+                        execution,
+                        columns,
+                        worker_cells,
+                        patches,
+                        patch_dimensions,
+                        normalized,
+                        glyphs,
+                        sampling,
+                        sampling_identity,
+                        shortlist_options,
+                        foreground_luminance,
+                        background_luminance,
+                        previous,
+                        budget,
+                    )
+                })
+                .map_err(|_| Error::AllocationFailed)?;
+            handles.push(handle);
+        }
+        for handle in handles {
+            match handle.join() {
+                Ok(result) => result?,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
+        Ok(())
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_structural_range(
+    range: WorkerRange,
+    settings: ConversionSettings<'_>,
+    execution: &JobExecution<'_>,
+    columns: usize,
+    cells: &mut [AsciiCell],
+    patches: &QualityPatches,
+    patch_dimensions: PatchDimensions,
+    normalized: &NormalizedRaster,
+    glyphs: &GlyphTable,
+    sampling: SamplingPlan,
+    sampling_identity: SamplingIdentity,
+    shortlist_options: ShortlistOptions,
+    foreground_luminance: f64,
+    background_luminance: f64,
+    previous: Option<&AsciiFrame>,
+    budget: &Budget,
+) -> Result<(), Error> {
+    let sample_count =
+        usize::try_from(patch_dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
+    let mut color_samples = Vec::new();
+    color_samples
+        .try_reserve_exact(sample_count)
+        .map_err(|_| Error::AllocationFailed)?;
+    if color_samples.capacity() != sample_count {
+        return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
+    }
+    let mut scratch = StructuralScratch::default();
+    let first_cell = range
+        .first_row
+        .checked_mul(columns)
+        .ok_or(Error::SizeOverflow)?;
+    for (tile_start, tile_end) in range.tiles() {
+        execution.check_range(range, settings.cancellation)?;
+        for row in tile_start..tile_end {
+            for column in 0..columns {
+                let cell_index = row
+                    .checked_mul(columns)
+                    .and_then(|start| start.checked_add(column))
+                    .ok_or(Error::SizeOverflow)?;
+                let local_index = cell_index
+                    .checked_sub(first_cell)
+                    .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+                let samples = patches
+                    .luminance_for_cell(cell_index)
+                    .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+                let descriptor = StructuralDescriptor::from_luminance(
+                    samples,
+                    patch_dimensions,
+                    foreground_luminance,
+                    background_luminance,
+                    budget,
+                    settings.cancellation,
+                )?;
+                let shortlist = scratch.shortlist(
+                    &descriptor,
+                    glyphs,
+                    sampling_identity,
+                    shortlist_options,
+                    budget,
+                    settings.cancellation,
+                )?;
+                sampling.sample_color_patch(
+                    normalized,
+                    u32::try_from(column).map_err(|_| Error::SizeOverflow)?,
+                    u32::try_from(row).map_err(|_| Error::SizeOverflow)?,
+                    glyphs.cell_width(),
+                    glyphs.cell_height(),
+                    settings.background,
+                    settings.cancellation,
+                    &mut color_samples,
+                )?;
+                let previous_glyph = previous
+                    .and_then(|frame| frame.cells().get(cell_index))
+                    .map(|cell| cell.glyph());
+                let selected = rerank_candidates(
+                    ReconstructionInput {
+                        samples,
+                        color_samples: &color_samples,
+                        dimensions: patch_dimensions,
+                        descriptor: &descriptor,
+                        glyphs,
+                        candidates: shortlist.candidates(),
+                        foreground: settings.foreground,
+                        background: settings.background,
+                        foreground_luminance,
+                        background_luminance,
+                        color_fit: settings.color_fit,
+                        previous_glyph,
+                        weights: settings.reconstruction_weights,
+                    },
+                    budget,
+                    settings.cancellation,
+                )
+                .map_err(|error| DensityConversionError::ColorFit(error).into_core())?;
+                cells[local_index] = AsciiCell::new(
+                    selected.candidate.table_position(),
+                    output_color(selected.foreground),
+                    output_color(selected.background),
+                );
+            }
+        }
+        execution.check_range(range, settings.cancellation)?;
+    }
+    Ok(())
+}
+
+fn run_density_workers(
+    settings: ConversionSettings<'_>,
+    execution: &JobExecution<'_>,
+    rows: usize,
+    columns: usize,
+    cells: &mut [AsciiCell],
+    patch_values: &mut [f32],
+    patch_descriptors: &mut [PatchDescriptors],
+    patch_dimensions: Option<PatchDimensions>,
+    normalized: &NormalizedRaster,
+    glyphs: &GlyphTable,
+    sampling: SamplingPlan,
+    foreground_luminance: f64,
+    background_luminance: f64,
+    luminance_span: f64,
+    foreground: [u8; 4],
+    background: [u8; 4],
+    budget: &Budget,
+    #[cfg(test)] sample_cancel_poll: Option<&SampleCancellationPoll<'_>>,
+) -> Result<(), DensityConversionError> {
+    #[cfg(test)]
+    if sample_cancel_poll.is_some() {
+        return process_density_range(
+            WorkerRange {
+                first_row: 0,
+                end_row: rows,
+                generation_id: execution.generation_id(),
+            },
+            settings,
+            execution,
+            columns,
+            cells,
+            patch_values,
+            patch_descriptors,
+            patch_dimensions,
+            normalized,
+            glyphs,
+            sampling,
+            foreground_luminance,
+            background_luminance,
+            luminance_span,
+            foreground,
+            background,
+            budget,
+            sample_cancel_poll,
+        );
+    }
+
+    let worker_count = execution.worker_count();
+    if worker_count == 1 {
+        let range = execution
+            .ranges(rows)
+            .next()
+            .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+        return process_density_range(
+            range,
+            settings,
+            execution,
+            columns,
+            cells,
+            patch_values,
+            patch_descriptors,
+            patch_dimensions,
+            normalized,
+            glyphs,
+            sampling,
+            foreground_luminance,
+            background_luminance,
+            luminance_span,
+            foreground,
+            background,
+            budget,
+            #[cfg(test)]
+            None,
+        );
+    }
+
+    let patch_len = patch_dimensions
+        .map(|dimensions| {
+            usize::try_from(dimensions.sample_count()).map_err(|_| Error::SizeOverflow)
+        })
+        .transpose()?
+        .unwrap_or(0);
+    thread::scope(|scope| {
+        let mut handles = Vec::new();
+        handles
+            .try_reserve_exact(worker_count)
+            .map_err(|_| Error::AllocationFailed)?;
+        let mut remaining_cells = cells;
+        let mut remaining_values = patch_values;
+        let mut remaining_descriptors = patch_descriptors;
+        for range in execution.ranges(rows) {
+            let cell_len = range
+                .end_row
+                .checked_sub(range.first_row)
+                .and_then(|range_rows| range_rows.checked_mul(columns))
+                .ok_or(Error::SizeOverflow)?;
+            let (worker_cells, rest) = remaining_cells.split_at_mut(cell_len);
+            remaining_cells = rest;
+            let patch_value_len = cell_len
+                .checked_mul(patch_len)
+                .ok_or(Error::SizeOverflow)?;
+            let (worker_values, rest) = remaining_values.split_at_mut(patch_value_len);
+            remaining_values = rest;
+            let (worker_descriptors, rest) = if patch_dimensions.is_some() {
+                remaining_descriptors.split_at_mut(cell_len)
+            } else {
+                (&mut [], remaining_descriptors)
+            };
+            remaining_descriptors = rest;
+            let builder =
+                thread::Builder::new().stack_size(WORKER_STACK_SIZE_BYTES as usize);
+            let handle = builder
+                .spawn_scoped(scope, move || {
+                    process_density_range(
+                        range,
+                        settings,
+                        execution,
+                        columns,
+                        worker_cells,
+                        worker_values,
+                        worker_descriptors,
+                        patch_dimensions,
+                        normalized,
+                        glyphs,
+                        sampling,
+                        foreground_luminance,
+                        background_luminance,
+                        luminance_span,
+                        foreground,
+                        background,
+                        budget,
+                        #[cfg(test)]
+                        None,
+                    )
+                })
+                .map_err(|_| Error::AllocationFailed)?;
+            handles.push(handle);
+        }
+        for handle in handles {
+            match handle.join() {
+                Ok(result) => result?,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
+        Ok(())
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_density_range(
+    range: WorkerRange,
+    settings: ConversionSettings<'_>,
+    execution: &JobExecution<'_>,
+    columns: usize,
+    cells: &mut [AsciiCell],
+    patch_values: &mut [f32],
+    patch_descriptors: &mut [PatchDescriptors],
+    patch_dimensions: Option<PatchDimensions>,
+    normalized: &NormalizedRaster,
+    glyphs: &GlyphTable,
+    sampling: SamplingPlan,
+    foreground_luminance: f64,
+    background_luminance: f64,
+    luminance_span: f64,
+    foreground: [u8; 4],
+    background: [u8; 4],
+    budget: &Budget,
+    #[cfg(test)] sample_cancel_poll: Option<&SampleCancellationPoll<'_>>,
+) -> Result<(), DensityConversionError> {
+    let patch_len = patch_dimensions
+        .map(|dimensions| {
+            usize::try_from(dimensions.sample_count()).map_err(|_| Error::SizeOverflow)
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let sample_count = usize::try_from(
+        u64::from(glyphs.cell_width())
+            .checked_mul(u64::from(glyphs.cell_height()))
+            .ok_or(Error::SizeOverflow)?,
+    )
+    .map_err(|_| Error::SizeOverflow)?;
+    let mut color_samples = Vec::new();
+    if settings.color_fit.is_some() {
+        execution.check_range(range, settings.cancellation)?;
+        color_samples
+            .try_reserve_exact(sample_count)
+            .map_err(|_| Error::AllocationFailed)?;
+        if color_samples.capacity() != sample_count {
+            return Err(Error::BudgetExceeded(BudgetKind::RasterBytes).into());
+        }
+    }
+    let first_cell = range
+        .first_row
+        .checked_mul(columns)
+        .ok_or(Error::SizeOverflow)?;
+    for (tile_start, tile_end) in range.tiles() {
+        execution.check_range(range, settings.cancellation)?;
+        for row in tile_start..tile_end {
+            for column in 0..columns {
+                let index = row
+                    .checked_mul(columns)
+                    .and_then(|start| start.checked_add(column))
+                    .ok_or(Error::SizeOverflow)?;
+                let local_index = index
+                    .checked_sub(first_cell)
+                    .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+                let (target_luminance, descriptor) =
+                    if settings.color_fit.is_some() && patch_dimensions.is_none() {
+                        (0.0, None)
+                    } else {
+                        let patch_output = if patch_dimensions.is_some() {
+                            let start = local_index
+                                .checked_mul(patch_len)
+                                .ok_or(Error::SizeOverflow)?;
+                            let end = start.checked_add(patch_len).ok_or(Error::SizeOverflow)?;
+                            Some(
+                                patch_values
+                                    .get_mut(start..end)
+                                    .ok_or(Error::Malformed(
+                                        MalformedReason::InvalidConfiguration,
+                                    ))?,
+                            )
+                        } else {
+                            None
+                        };
+                        sampling.sample_cell(
+                            normalized,
+                            u32::try_from(column).map_err(|_| Error::SizeOverflow)?,
+                            u32::try_from(row).map_err(|_| Error::SizeOverflow)?,
+                            glyphs.cell_width(),
+                            glyphs.cell_height(),
+                            settings.background,
+                            settings.cancellation,
+                            patch_output,
+                            #[cfg(test)]
+                            sample_cancel_poll,
+                        )?
+                    };
+                if let Some(descriptor) = descriptor {
+                    *patch_descriptors
+                        .get_mut(local_index)
+                        .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))? =
+                        descriptor;
+                }
+
+                if let Some((palette, strategy)) = settings.color_fit {
+                    sampling.sample_color_patch(
+                        normalized,
+                        u32::try_from(column).map_err(|_| Error::SizeOverflow)?,
+                        u32::try_from(row).map_err(|_| Error::SizeOverflow)?,
+                        glyphs.cell_width(),
+                        glyphs.cell_height(),
+                        settings.background,
+                        settings.cancellation,
+                        &mut color_samples,
+                    )?;
+                    let mut best: Option<(usize, f64, u16, u32, crate::color_fit::ColorFit)> = None;
+                    for (table_position, glyph) in glyphs.glyphs().iter().enumerate() {
+                        if table_position.is_multiple_of(CANCELLATION_GLYPH_INTERVAL) {
+                            execution.check_range(range, settings.cancellation)?;
+                        }
+                        let fit = fit_color_patch(
+                            &color_samples,
+                            glyph.mask(),
+                            palette,
+                            strategy,
+                            budget,
+                            settings.cancellation,
+                        )?;
+                        let score = fit.mean_squared_error();
+                        let glyph_key = (glyph.glyph_index(), glyph.character() as u32);
+                        let replace = match best {
+                            None => true,
+                            Some((_, best_score, best_glyph_index, best_scalar, _)) => {
+                                score < best_score
+                                    || (score == best_score
+                                        && glyph_key < (best_glyph_index, best_scalar))
+                            }
+                        };
+                        if replace {
+                            best = Some((
+                                table_position,
+                                score,
+                                glyph.glyph_index(),
+                                glyph.character() as u32,
+                                fit,
+                            ));
+                        }
+                    }
+                    let (table_position, _, _, _, fit) =
+                        best.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+                    let glyph = u32::try_from(table_position).map_err(|_| Error::SizeOverflow)?;
+                    cells[local_index] = AsciiCell::new(
+                        glyph,
+                        output_color(fit.foreground().color()),
+                        output_color(fit.background().color()),
+                    );
+                } else {
+                    let target_coverage =
+                        ((target_luminance - background_luminance) / luminance_span)
+                            .clamp(0.0, 1.0);
+                    let glyph = best_glyph(glyphs.glyphs().iter(), target_coverage, || {
+                        settings.cancellation.is_cancelled() || !execution.is_current()
+                    })?;
+                    cells[local_index] = AsciiCell::new(glyph, foreground, background);
+                }
+            }
+        }
+        execution.check_range(range, settings.cancellation)?;
+    }
+    Ok(())
+}
+
 fn reserve_output_cells(
     cell_count: usize,
     cancellation: &CancellationToken,
@@ -976,6 +1484,16 @@ fn reserve_output_cells(
     cells
         .try_reserve_exact(cell_count)
         .map_err(|_| Error::AllocationFailed)?;
+    let empty_cell = AsciiCell::new(0, [0; 4], [0; 4]);
+    for index in 0..cell_count {
+        if index.is_multiple_of(CANCELLATION_CELL_INTERVAL * 8) && cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        cells.push(empty_cell);
+    }
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     Ok(cells)
 }
 

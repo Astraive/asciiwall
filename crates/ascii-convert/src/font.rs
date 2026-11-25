@@ -232,6 +232,20 @@ impl GlyphTable {
     pub fn glyphs(&self) -> &[GlyphRecord] {
         &self.glyphs
     }
+    pub(crate) fn retained_storage_bytes(&self) -> Result<u64, Error> {
+        let mut bytes = u64::try_from(self.glyphs.capacity())
+            .map_err(|_| Error::SizeOverflow)?
+            .checked_mul(
+                u64::try_from(core::mem::size_of::<GlyphRecord>())
+                    .map_err(|_| Error::SizeOverflow)?,
+            )
+            .ok_or(Error::SizeOverflow)?;
+        for glyph in &self.glyphs {
+            let mask_bytes = u64::try_from(glyph.mask.capacity()).map_err(|_| Error::SizeOverflow)?;
+            bytes = bytes.checked_add(mask_bytes).ok_or(Error::SizeOverflow)?;
+        }
+        bytes
+    }
 }
 
 /// Builds a fully measured, cell-clipped table from a validated repertoire. No table is
