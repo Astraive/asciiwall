@@ -16,8 +16,14 @@ pub struct ImageCapabilities {
 pub struct PngCapabilities {
     /// Non-animated PNG, including supported indexed, grayscale, RGB/RGBA, and Adam7 inputs.
     pub still: bool,
-    /// Whether APNG frame animation is decoded and composed.
+    /// Whether the supported APNG subset is decoded and composed.
     pub animated: bool,
+    /// APNG frames with 8-bit source samples.
+    pub apng_8bit: bool,
+    /// APNG frames with 16-bit source samples.
+    pub apng_16bit: bool,
+    /// APNG whose default PNG image is separate from its animation frames.
+    pub apng_separate_default_image: bool,
 }
 
 /// Supported JPEG decode variants.
@@ -44,24 +50,28 @@ pub struct WebpCapabilities {
 
 /// Returns the capabilities of this exact `ascii-media` build.
 ///
-/// `webp` enables the direct `image-webp` still decoder; this build's fixtures cover lossy,
-/// lossless, and alpha inputs. Animated WebP is classified as `Unsupported(AnimatedImage)` before
-/// static pixel decoding, but no animation/timeline handler is available here.
+/// APNG composition supports 8-bit samples when the default PNG image is the first animation
+/// frame. It composes all APNG blend and disposal operations. 16-bit APNG, GIF, and animated WebP
+/// remain unavailable. WebP decoding is disabled until the pinned decoder's allocation behavior
+/// can be bounded by the resource ledger.
 #[must_use]
 pub const fn image_capabilities() -> ImageCapabilities {
     ImageCapabilities {
         png: PngCapabilities {
             still: true,
-            animated: false,
+            animated: true,
+            apng_8bit: true,
+            apng_16bit: false,
+            apng_separate_default_image: false,
         },
         jpeg: JpegCapabilities {
             baseline: true,
             progressive: true,
         },
         webp: WebpCapabilities {
-            lossy: cfg!(feature = "webp"),
-            lossless: cfg!(feature = "webp"),
-            alpha: cfg!(feature = "webp"),
+            lossy: false,
+            lossless: false,
+            alpha: false,
             animated: false,
         },
     }

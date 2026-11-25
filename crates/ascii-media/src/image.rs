@@ -13,6 +13,7 @@ use zune_jpeg::{JpegDecoder, errors::DecodeErrors};
 use crate::DecodedFrame;
 use crate::decoded_frame::DecodedFrameData;
 use crate::resources::{DecodeResources, MemoryPermit};
+use crate::animation::{Animation, AnimationLoops, MAX_ANIMATION_FRAMES};
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const INPUT_PREFIX_BYTES: usize = 12;
@@ -109,6 +110,443 @@ pub fn decode_image(
         check_cancel_periodically(cancel, offset)
     })
 }
+/// Decodes an APNG into budgeted, full-canvas frames with one normalized timeline.
+///
+/// GIF and animated WebP are rejected until their pinned decoder paths can provide bounded,
+/// cancellation-aware subframes. The caller's input remains local and is never opened by path.
+pub fn decode_animation(
+    input: &mut dyn ReadSeek,
+    limits: &DecodeLimits,
+    cancel: &CancellationToken,
+) -> Result<Animation, Error> {
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    if limits.max_width == 0
+        || limits.max_height == 0
+        || limits.max_encoded_bytes == 0
+        || limits.max_decoder_bytes == 0
+    {
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+    }
+    let _decode_permit = limits.resources.try_acquire_decode()?;
+    let (start, encoded_len) = inspect_extent(input, limits.max_encoded_bytes, cancel)?;
+    if encoded_len == 0 || encoded_len > limits.budget.max_raster_bytes() {
+        return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
+    }
+    let mut prefix = [0_u8; INPUT_PREFIX_BYTES];
+    let prefix_len = read_prefix(input, start, encoded_len, &mut prefix, cancel)?;
+    let codec = sniff_format(&prefix[..prefix_len])?;
+    if codec != Codec::Png {
+        if codec == Codec::Webp {
+            return Err(Error::Unsupported(UnsupportedReason::AnimatedImage));
+        }
+        return Err(Error::Unsupported(UnsupportedReason::UnsupportedFormat));
+    }
+    let header_work = encoded_len
+        .checked_mul(PNG_CRC_WORK_PER_BYTE)
+        .ok_or(Error::SizeOverflow)?;
+    if header_work > limits.budget.max_work_units() {
+        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
+    }
+    let snapshot_permit = limits.resources.try_reserve_memory(encoded_len)?;
+    let mut snapshot =
+        zeroed_bytes(usize::try_from(encoded_len).map_err(|_| Error::SizeOverflow)?)?;
+    snapshot[..prefix_len].copy_from_slice(&prefix[..prefix_len]);
+    read_snapshot_remainder(input, &mut snapshot[prefix_len..], cancel)?;
+    let result = decode_apng_snapshot(&snapshot, limits, cancel);
+    drop(snapshot);
+    drop(snapshot_permit);
+    result
+}
+
+fn decode_apng_snapshot(
+    encoded: &[u8],
+    limits: &DecodeLimits,
+    cancel: &CancellationToken,
+) -> Result<Animation, Error> {
+    let header = inspect_png(encoded, cancel)?;
+    let (declared_frames, play_count) = header
+        .animation
+        .ok_or(Error::Unsupported(UnsupportedReason::UnsupportedFormat))?;
+    let frame_count = usize::try_from(declared_frames).map_err(|_| Error::SizeOverflow)?;
+    if frame_count > MAX_ANIMATION_FRAMES {
+        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
+    }
+    if let Some(reason) = header.unsupported {
+        return Err(Error::Unsupported(reason));
+    }
+    if header.bit_depth != 8 {
+        return Err(Error::Unsupported(UnsupportedReason::SampleDepth));
+    }
+    let plan = plan_raster(
+        header.width,
+        header.height,
+        SampleLayout::Rgba8,
+        header.orientation,
+        limits,
+    )?;
+    let canvas_bytes = u64::from(header.width)
+        .checked_mul(u64::from(header.height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(Error::SizeOverflow)?;
+    let retained_bytes = plan
+        .output_bytes
+        .checked_mul(u64::try_from(frame_count).map_err(|_| Error::SizeOverflow)?)
+        .ok_or(Error::SizeOverflow)?;
+    let encoded_bytes = u64::try_from(encoded.len()).map_err(|_| Error::SizeOverflow)?;
+    let png_scratch = png_scratch_bound(&header, plan)?;
+    let workspace_bytes = png_scratch
+        .checked_add(canvas_bytes.checked_mul(3).ok_or(Error::SizeOverflow)?)
+        .ok_or(Error::SizeOverflow)?;
+    let total_bytes = encoded_bytes
+        .checked_add(workspace_bytes)
+        .and_then(|bytes| bytes.checked_add(retained_bytes))
+        .ok_or(Error::SizeOverflow)?;
+    if workspace_bytes > limits.max_decoder_bytes || total_bytes > limits.budget.max_raster_bytes()
+    {
+        return Err(Error::BudgetExceeded(BudgetKind::RasterBytes));
+    }
+    let canvas_pixels = u64::from(header.width)
+        .checked_mul(u64::from(header.height))
+        .ok_or(Error::SizeOverflow)?;
+    let frame_work = canvas_pixels
+        .checked_mul(u64::try_from(frame_count).map_err(|_| Error::SizeOverflow)?)
+        .and_then(|work| work.checked_mul(4))
+        .ok_or(Error::SizeOverflow)?;
+    let work_units = encoded_bytes
+        .checked_mul(PNG_CRC_WORK_PER_BYTE)
+        .and_then(|work| work.checked_add(frame_work))
+        .ok_or(Error::SizeOverflow)?;
+    if work_units > limits.budget.max_work_units() {
+        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
+    }
+    let _workspace_permit = limits.resources.try_reserve_memory(workspace_bytes)?;
+    let mut canvas = zeroed_bytes(usize::try_from(canvas_bytes).map_err(|_| Error::SizeOverflow)?)?;
+    let mut raw = zeroed_bytes(usize::try_from(canvas_bytes).map_err(|_| Error::SizeOverflow)?)?;
+
+    let buffered = BufReader::with_capacity(
+        CODEC_READER_BUFFER_BYTES,
+        SnapshotReader::new(encoded, cancel),
+    );
+    let mut decoder = png::Decoder::new_with_limits(
+        buffered,
+        png::Limits {
+            bytes: usize::try_from(png_scratch).map_err(|_| Error::SizeOverflow)?,
+        },
+    );
+    decoder.set_ignore_text_chunk(true);
+    decoder.set_ignore_iccp_chunk(true);
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let mut reader = decoder
+        .read_info()
+        .map_err(|error| map_png_error(error, cancel))?;
+    if reader.info().width != header.width
+        || reader.info().height != header.height
+        || reader
+            .info()
+            .animation_control()
+            .is_none_or(|control| control.num_frames != declared_frames)
+    {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+    }
+    let (source_layout, source_is_16_bit) = png_output_layout(reader.output_color_type())?;
+    if source_is_16_bit
+        || !matches!(
+            source_layout,
+            SampleLayout::Gray8
+                | SampleLayout::GrayAlpha8
+                | SampleLayout::Rgb8
+                | SampleLayout::Rgba8
+        )
+        || reader
+            .output_buffer_size()
+            .is_none_or(|required| required > raw.len())
+    {
+        return Err(Error::Unsupported(UnsupportedReason::SampleDepth));
+    }
+
+    let mut frames = Vec::with_capacity(frame_count);
+    let mut pending_disposal = None;
+    for frame_index in 0..frame_count {
+        check_cancel(cancel)?;
+        let control = if frame_index == 0 {
+            reader.info().frame_control().cloned()
+        } else {
+            Some(
+                reader
+                    .next_frame_info()
+                    .map_err(|error| map_png_error(error, cancel))?
+                    .clone(),
+            )
+        }
+        .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
+        validate_frame_rect(
+            control.x_offset,
+            control.y_offset,
+            control.width,
+            control.height,
+            header.width,
+            header.height,
+        )?;
+
+        if let Some((dispose, rect, previous)) = pending_disposal.take() {
+            match dispose {
+                png::DisposeOp::None => {}
+                png::DisposeOp::Background => clear_canvas_rect(&mut canvas, header.width, rect),
+                png::DisposeOp::Previous => {
+                    let previous = previous
+                        .as_deref()
+                        .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
+                    restore_canvas_rect(&mut canvas, header.width, rect, previous);
+                }
+            }
+        }
+
+        let current_rect = (control.x_offset, control.y_offset, control.width, control.height);
+        let history = if control.dispose_op == png::DisposeOp::Previous {
+            if frame_index == 0 {
+                return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+            }
+            Some(copy_canvas_rect(&canvas, header.width, current_rect)?)
+        } else {
+            None
+        };
+        let decoded = reader
+            .next_frame(&mut raw)
+            .map_err(|error| map_png_error(error, cancel))?;
+        if decoded.width != control.width || decoded.height != control.height {
+            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+        }
+        compose_apng_subframe(
+            &mut canvas,
+            header.width,
+            &raw,
+            decoded.line_size,
+            source_layout,
+            current_rect,
+            control.blend_op,
+            cancel,
+        )?;
+        let duration = apng_frame_duration(control.delay_num, control.delay_den)?;
+        let output_permit = limits.resources.try_reserve_memory(plan.output_bytes)?;
+        let mut normalized =
+            zeroed_bytes(usize::try_from(plan.output_bytes).map_err(|_| Error::SizeOverflow)?)?;
+        normalize_pixels(&canvas, &mut normalized, plan, true, &mut || check_cancel(cancel))?;
+        let color = ColorDescription::new(
+            ColorPrimaries::Srgb,
+            TransferFunction::Srgb,
+            AlphaMode::Straight,
+        )
+        .with_source_metadata(header.source_profile, ColorRange::Full);
+        let frame = DecodedFrame::new(
+            DecodedFrameData {
+                width: plan.output_width,
+                height: plan.output_height,
+                row_stride: plan.row_stride,
+                channels: PixelChannels::Rgba,
+                color,
+                pixels: normalized,
+                memory_permit: output_permit,
+            },
+            &limits.budget,
+            cancel,
+        )?;
+        frames.push((frame, duration));
+        pending_disposal = Some((control.dispose_op, current_rect, history));
+    }
+    reader
+        .finish()
+        .map_err(|error| map_png_error(error, cancel))?;
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let loops = if play_count == 0 {
+        AnimationLoops::Infinite
+    } else {
+        AnimationLoops::Finite(play_count)
+    };
+    Animation::from_composed_frames(frames, loops)
+        .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))
+}
+
+fn validate_frame_rect(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Result<(), Error> {
+    if width == 0
+        || height == 0
+        || x.checked_add(width).is_none_or(|end| end > canvas_width)
+        || y.checked_add(height).is_none_or(|end| end > canvas_height)
+    {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+    }
+    Ok(())
+}
+
+fn apng_frame_duration(numerator: u16, denominator: u16) -> Result<std::time::Duration, Error> {
+    let denominator = if denominator == 0 { 100 } else { denominator };
+    let micros =
+        u128::from(numerator).checked_mul(1_000_000).ok_or(Error::SizeOverflow)?
+            / u128::from(denominator);
+    Ok(std::time::Duration::from_micros(
+        u64::try_from(micros).map_err(|_| Error::SizeOverflow)?,
+    ))
+}
+
+fn compose_apng_subframe(
+    canvas: &mut [u8],
+    canvas_width: u32,
+    source: &[u8],
+    source_stride: usize,
+    layout: SampleLayout,
+    rect: (u32, u32, u32, u32),
+    blend: png::BlendOp,
+    cancel: &CancellationToken,
+) -> Result<(), Error> {
+    let (x, y, width, height) = rect;
+    let source_bpp = layout.bytes_per_pixel();
+    let source_row = usize::try_from(width)
+        .map_err(|_| Error::SizeOverflow)?
+        .checked_mul(source_bpp)
+        .ok_or(Error::SizeOverflow)?;
+    if source_stride < source_row
+        || source.len()
+            < source_stride
+                .checked_mul(usize::try_from(height).map_err(|_| Error::SizeOverflow)?)
+                .ok_or(Error::SizeOverflow)?
+    {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+    }
+    for row in 0..height {
+        check_cancel(cancel)?;
+        for col in 0..width {
+            let source_offset = usize::try_from(row)
+                .map_err(|_| Error::SizeOverflow)?
+                .checked_mul(source_stride)
+                .and_then(|offset| {
+                    usize::try_from(col)
+                        .ok()
+                        .and_then(|col| col.checked_mul(source_bpp))
+                        .and_then(|col| offset.checked_add(col))
+                })
+                .ok_or(Error::SizeOverflow)?;
+            let destination_offset = usize::try_from(y + row)
+                .map_err(|_| Error::SizeOverflow)?
+                .checked_mul(usize::try_from(canvas_width).map_err(|_| Error::SizeOverflow)?)
+                .and_then(|offset| {
+                    usize::try_from(x + col)
+                        .ok()
+                        .and_then(|col| col.checked_mul(4))
+                        .and_then(|col| offset.checked_add(col))
+                })
+                .ok_or(Error::SizeOverflow)?;
+            let pixel = source_pixel(source, source_offset, layout)?;
+            if blend == png::BlendOp::Source {
+                canvas[destination_offset..destination_offset + 4].copy_from_slice(&pixel);
+            } else {
+                source_over(&mut canvas[destination_offset..destination_offset + 4], pixel);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn source_pixel(source: &[u8], offset: usize, layout: SampleLayout) -> Result<[u8; 4], Error> {
+    match layout {
+        SampleLayout::Gray8 => Ok([source[offset], source[offset], source[offset], 255]),
+        SampleLayout::GrayAlpha8 => Ok([
+            source[offset],
+            source[offset],
+            source[offset],
+            source[offset + 1],
+        ]),
+        SampleLayout::Rgb8 => Ok([
+            source[offset],
+            source[offset + 1],
+            source[offset + 2],
+            255,
+        ]),
+        SampleLayout::Rgba8 => Ok([
+            source[offset],
+            source[offset + 1],
+            source[offset + 2],
+            source[offset + 3],
+        ]),
+        _ => Err(Error::Unsupported(UnsupportedReason::SampleDepth)),
+    }
+}
+
+fn source_over(destination: &mut [u8], source: [u8; 4]) {
+    let source_alpha = u32::from(source[3]);
+    let destination_alpha = u32::from(destination[3]);
+    let inverse_source_alpha = 255 - source_alpha;
+    let alpha_numerator = source_alpha * 255 + destination_alpha * inverse_source_alpha;
+    if alpha_numerator == 0 {
+        destination.copy_from_slice(&[0, 0, 0, 0]);
+        return;
+    }
+    for channel in 0..3 {
+        let numerator = u32::from(source[channel]) * source_alpha * 255
+            + u32::from(destination[channel]) * destination_alpha * inverse_source_alpha;
+        destination[channel] =
+            u8::try_from((numerator + alpha_numerator / 2) / alpha_numerator).unwrap_or(255);
+    }
+    destination[3] = u8::try_from((alpha_numerator + 127) / 255).unwrap_or(255);
+}
+
+fn clear_canvas_rect(canvas: &mut [u8], canvas_width: u32, rect: (u32, u32, u32, u32)) {
+    let (x, y, width, height) = rect;
+    for row in y..y + height {
+        let start = ((row as usize * canvas_width as usize) + x as usize) * 4;
+        let end = start + width as usize * 4;
+        canvas[start..end].fill(0);
+    }
+}
+
+fn copy_canvas_rect(
+    canvas: &[u8],
+    canvas_width: u32,
+    rect: (u32, u32, u32, u32),
+) -> Result<Vec<u8>, Error> {
+    let (_, _, width, height) = rect;
+    let len = usize::try_from(width)
+        .map_err(|_| Error::SizeOverflow)?
+        .checked_mul(usize::try_from(height).map_err(|_| Error::SizeOverflow)?)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(Error::SizeOverflow)?;
+    let mut copy = zeroed_bytes(len)?;
+    let row_bytes = usize::try_from(width).map_err(|_| Error::SizeOverflow)? * 4;
+    let (x, y, _, _) = rect;
+    for row in 0..height {
+        let source_start = ((y as usize + row as usize) * canvas_width as usize + x as usize) * 4;
+        let destination_start = row as usize * row_bytes;
+        copy[destination_start..destination_start + row_bytes]
+            .copy_from_slice(&canvas[source_start..source_start + row_bytes]);
+    }
+    Ok(copy)
+}
+
+fn restore_canvas_rect(
+    canvas: &mut [u8],
+    canvas_width: u32,
+    rect: (u32, u32, u32, u32),
+    previous: &[u8],
+) {
+    let (x, y, width, height) = rect;
+    let row_bytes = width as usize * 4;
+    for row in 0..height {
+        let destination_start =
+            ((y as usize + row as usize) * canvas_width as usize + x as usize) * 4;
+        let source_start = row as usize * row_bytes;
+        canvas[destination_start..destination_start + row_bytes]
+            .copy_from_slice(&previous[source_start..source_start + row_bytes]);
+    }
+}
 
 fn decode_image_with_jpeg_poller<F>(
     input: &mut dyn ReadSeek,
@@ -184,7 +622,7 @@ where
     let result = match codec {
         Codec::Png => decode_png(&snapshot, limits, cancel, &mut normalization_cancel_poller),
         #[cfg(feature = "webp")]
-        Codec::Webp => decode_webp(&snapshot, limits, cancel, &mut normalization_cancel_poller),
+        Codec::Webp => reject_webp(&snapshot, cancel),
         #[cfg(not(feature = "webp"))]
         Codec::Webp => Err(Error::Unsupported(UnsupportedReason::UnsupportedFormat)),
         Codec::Jpeg => decode_jpeg_with_reader_and_pollers(
@@ -423,6 +861,16 @@ fn reserve_plan_with_reserved_scratch(
 }
 
 #[cfg(feature = "webp")]
+fn reject_webp(encoded: &[u8], cancel: &CancellationToken) -> Result<DecodedFrame, Error> {
+    let container = inspect_webp_container(encoded, cancel)?;
+    if container.animated {
+        Err(Error::Unsupported(UnsupportedReason::AnimatedImage))
+    } else {
+        Err(Error::Unsupported(UnsupportedReason::UnsupportedFormat))
+    }
+}
+
+#[cfg(feature = "webp")]
 fn decode_webp(
     encoded: &[u8],
     limits: &DecodeLimits,
@@ -601,6 +1049,9 @@ where
     F: FnMut() -> Result<(), Error>,
 {
     let header = inspect_png(encoded, cancel)?;
+    if header.animation.is_some() {
+        return Err(Error::Unsupported(UnsupportedReason::AnimatedImage));
+    }
     if let Some(reason) = header.unsupported {
         return Err(Error::Unsupported(reason));
     }
@@ -713,6 +1164,7 @@ struct PngHeader {
     has_srgb: bool,
     gamma: Option<u32>,
     chromaticities: Option<[u32; 8]>,
+    animation: Option<(u32, u32)>,
     unsupported: Option<UnsupportedReason>,
 }
 
@@ -757,6 +1209,7 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
         has_srgb: false,
         gamma: None,
         chromaticities: None,
+        animation: None,
         unsupported: None,
     };
     let mut offset = PNG_SIGNATURE.len();
@@ -939,11 +1392,26 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
                     }
                 }
             }
-            b"acTL" | b"fcTL" | b"fdAT" => {
-                header
-                    .unsupported
-                    .get_or_insert(UnsupportedReason::UnsupportedFormat);
+            b"acTL" => {
+                if header.animation.is_some() || seen_idat || chunk_len != 8 {
+                    return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+                }
+                let frame_count = u32::from_be_bytes(
+                    payload[0..4]
+                        .try_into()
+                        .map_err(|_| Error::Malformed(MalformedReason::InvalidEncodedData))?,
+                );
+                let plays = u32::from_be_bytes(
+                    payload[4..8]
+                        .try_into()
+                        .map_err(|_| Error::Malformed(MalformedReason::InvalidEncodedData))?,
+                );
+                if frame_count == 0 {
+                    return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+                }
+                header.animation = Some((frame_count, plays));
             }
+            b"fcTL" | b"fdAT" => {}
             b"cICP" | b"mDCv" | b"cLLi" => {
                 header
                     .unsupported

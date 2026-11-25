@@ -98,75 +98,45 @@ fn malformed_webp_container_is_rejected() {
 
 #[cfg(feature = "webp")]
 #[test]
-fn decodes_pinned_lossy_lossless_and_alpha_webp_fixtures() {
+fn still_webp_is_disabled_until_decoder_allocations_are_bounded() {
     const SETTINGS: &str = "pillow=12.2.0;libwebp=1.6.0;size=3x2;rgb=255,0,0|0,255,0|0,0,255|255,255,255|64,128,192|12,34,56;rgba=255,0,0,0|0,255,0,64|0,0,255,128|255,255,255,192|64,128,192,255|12,34,56,100;lossy=quality75,method6;lossless=quality100,method6;lossy_alpha=exact;animation=2frames,100ms,loop0";
     println!(
         "WebP fixture settings_sha256={:x} settings={SETTINGS}",
         Sha256::digest(SETTINGS.as_bytes())
     );
-    let lossy_rgb = checked_fixture(
-        "lossy_rgb",
-        WEBP_LOSSY_RGB_HEX,
-        "6572694ee1d61d75c576ac2a06814aad5d22bc764dbad28dbf80cf9d4c52a14e",
-    );
-    let lossless_rgb = checked_fixture(
-        "lossless_rgb",
-        WEBP_LOSSLESS_RGB_HEX,
-        "c5328c391d6e687347f7700507725d74544f36dadadf4042dcb2bb2d2133bda2",
-    );
-    let lossy_rgba = checked_fixture(
-        "lossy_rgba",
-        WEBP_LOSSY_RGBA_HEX,
-        "531d0a9bd04a054844397ec748604127c91e45545a8f32aff13331a9591e75e3",
-    );
-    let lossless_rgba = checked_fixture(
-        "lossless_rgba",
-        WEBP_LOSSLESS_RGBA_HEX,
-        "7e0d46bb4497d2c65804e12947b5fb2ac0d621108979fccd14bc8ce91d4e52c9",
-    );
-
-    let lossy_rgb = decode(&lossy_rgb).unwrap();
-    let lossless_rgb = decode(&lossless_rgb).unwrap();
-    let lossy_rgba = decode(&lossy_rgba).unwrap();
-    let lossless_rgba = decode(&lossless_rgba).unwrap();
-    for frame in [&lossy_rgb, &lossless_rgb, &lossy_rgba, &lossless_rgba] {
-        assert_eq!((frame.width(), frame.height()), (3, 2));
-        assert_eq!(frame.color().source_profile(), SourceProfile::AssumedSrgb);
-        assert_eq!(frame.color().range(), ColorRange::Unspecified);
+    for (name, hex, hash) in [
+        (
+            "lossy_rgb",
+            WEBP_LOSSY_RGB_HEX,
+            "6572694ee1d61d75c576ac2a06814aad5d22bc764dbad28dbf80cf9d4c52a14e",
+        ),
+        (
+            "lossless_rgb",
+            WEBP_LOSSLESS_RGB_HEX,
+            "c5328c391d6e687347f7700507725d74544f36dadadf4042dcb2bb2d2133bda2",
+        ),
+        (
+            "lossy_rgba",
+            WEBP_LOSSY_RGBA_HEX,
+            "531d0a9bd04a054844397ec748604127c91e45545a8f32aff13331a9591e75e3",
+        ),
+        (
+            "lossless_rgba",
+            WEBP_LOSSLESS_RGBA_HEX,
+            "7e0d46bb4497d2c65804e12947b5fb2ac0d621108979fccd14bc8ce91d4e52c9",
+        ),
+    ] {
+        let bytes = checked_fixture(name, hex, hash);
+        assert!(matches!(
+            decode(&bytes),
+            Err(Error::Unsupported(UnsupportedReason::UnsupportedFormat))
+        ));
     }
-    assert_eq!(lossless_rgb.color().alpha_mode(), AlphaMode::Opaque);
-    assert_eq!(
-        lossless_rgb.pixels(),
-        &[
-            255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 64, 128, 192, 12, 34, 56,
-        ]
-    );
-    assert_eq!(lossy_rgb.pixels().len(), 3 * 2 * 3);
-    assert!(lossy_rgb.pixels().iter().any(|sample| *sample != 0));
-
-    for frame in [&lossy_rgba, &lossless_rgba] {
-        assert_eq!(frame.pixels().len() % 4, 0);
-        assert_eq!(
-            frame
-                .pixels()
-                .chunks(4)
-                .map(|pixel| pixel[3])
-                .collect::<Vec<_>>(),
-            [0, 64, 128, 192, 255, 100]
-        );
-    }
-    assert_eq!(
-        lossless_rgba.pixels(),
-        &[
-            255, 0, 0, 0, 0, 255, 0, 64, 0, 0, 255, 128, 255, 255, 255, 192, 64, 128, 192, 255, 12,
-            34, 56, 100,
-        ]
-    );
 }
 
 #[cfg(feature = "webp")]
 #[test]
-fn webp_exif_orientation_is_applied_once() {
+fn webp_exif_orientation_fixture_is_rejected_while_feature_is_disabled() {
     const SETTINGS: &str = "pillow=12.2.0;libwebp=1.6.0;webp=lossless-rgb-3x2;exif=TIFF-MM;IFD0.Orientation=SHORT,count1,value6";
     println!(
         "WebP orientation settings_sha256={:x} settings={SETTINGS}",
@@ -177,14 +147,10 @@ fn webp_exif_orientation_is_applied_once() {
         WEBP_ORIENTATION_HEX,
         "9de5e8fc73091d2ade011874871beb6c6a37110faf7e839269e3a0a8d83eb6e5",
     );
-    let frame = decode(&bytes).unwrap();
-    assert_eq!((frame.width(), frame.height()), (2, 3));
-    assert_eq!(
-        frame.pixels(),
-        &[
-            255, 255, 255, 255, 0, 0, 64, 128, 192, 0, 255, 0, 12, 34, 56, 0, 0, 255,
-        ]
-    );
+    assert!(matches!(
+        decode(&bytes),
+        Err(Error::Unsupported(UnsupportedReason::UnsupportedFormat))
+    ));
 }
 
 #[cfg(feature = "webp")]
@@ -206,11 +172,14 @@ fn reports_only_variants_implemented_by_this_build() {
     let capabilities = image_capabilities();
 
     assert!(capabilities.png.still);
-    assert!(!capabilities.png.animated);
+    assert!(capabilities.png.animated);
+    assert!(capabilities.png.apng_8bit);
+    assert!(!capabilities.png.apng_16bit);
+    assert!(!capabilities.png.apng_separate_default_image);
     assert!(capabilities.jpeg.baseline);
     assert!(capabilities.jpeg.progressive);
-    assert_eq!(capabilities.webp.lossy, cfg!(feature = "webp"));
-    assert_eq!(capabilities.webp.lossless, cfg!(feature = "webp"));
-    assert_eq!(capabilities.webp.alpha, cfg!(feature = "webp"));
+    assert!(!capabilities.webp.lossy);
+    assert!(!capabilities.webp.lossless);
+    assert!(!capabilities.webp.alpha);
     assert!(!capabilities.webp.animated);
 }
