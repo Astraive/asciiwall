@@ -31,7 +31,7 @@ pub use params::{
     MAX_CATCH_UP_STEPS, MAX_GRID_CELLS, MAX_GRID_DIMENSION, MAX_PARTICLES,
     MAX_RUNTIME_RESOURCE_BYTES, MAX_SIMULATION_WORK_UNITS, SceneDimensions, SceneParameters,
 };
-pub use resource::SceneResourceBudget;
+pub use resource::{GeneratorPreparationPermit, SceneResourceBudget};
 pub use simulation::{AdvanceReport, FixedStepContext, SimulationLimits};
 pub use snapshots::{
     ApprovedSnapshots, BatterySnapshot, NormalizedButtonEvent, NormalizedPoint, NormalizedRect,

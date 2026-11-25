@@ -223,7 +223,7 @@ pub const GENERATOR_DESCRIPTOR: GeneratorDescriptor = GeneratorDescriptor {
         max_acceleration_q16: MAX_ACCELERATION_Q16,
         max_lifetime_ticks: MAX_PARTICLE_LIFETIME_TICKS,
     },
-    supported_signals: &[],
+    supported_signals: &[SignalKind::PointerPosition],
     reduced_motion: MotionPolicy::FreezeWhenBackgroundMotionDisabled,
     deterministic_export: true,
     presets: PRESETS,
