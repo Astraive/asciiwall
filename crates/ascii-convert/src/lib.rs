@@ -9,6 +9,10 @@ mod glyphs;
 
 mod sampling;
 
+pub use adjustments::{
+    AdjustmentError, AdjustmentSettings, ArtisticAdjustments, EdgeSettings,
+    adjustment_invalidation, apply_adjustments,
+};
 pub use color::{
     Alpha, ColorNormalizationError, ColorNormalizationWarning, EncodedOutputColor, EncodedSrgb,
     InvalidColorSample, LinearPremultipliedRgba, LinearRgb, Luminance, NormalizedRaster,
@@ -28,6 +32,4 @@ pub use glyphs::{Centroid, EdgeOrientation, GlyphBounds, GlyphMetrics};
 pub use sampling::{
     CropRect, FitMode, FitTransform, PatchDescriptors, PatchDimensions, QualityPatches,
     SamplingFilter, SamplingIdentity, SamplingOptions, SamplingRect,
-};
-pub use adjustments::{
 };
