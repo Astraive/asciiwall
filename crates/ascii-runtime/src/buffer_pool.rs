@@ -734,6 +734,9 @@ impl core::fmt::Debug for CompletionToken {
 
 impl CompletionToken {
     /// Explicitly acknowledges completion and reclaims a lease already dropped by its consumer.
+    ///
+    /// If the consumer lease is still attached, its output permit stays charged until the lease is
+    /// released or dropped.
     pub fn acknowledge(self) {
         let output_permit = {
             let mut inner = lock_unpoisoned(&self.inner);
@@ -751,14 +754,15 @@ impl CompletionToken {
                             }) =>
                     {
                         slot.completion_acknowledged = true;
-                        let output_permit = slot.output_permit.take();
                         if !slot.lease_attached {
                             slot.state = SlotState::Free;
                             slot.written_len = 0;
                             slot.descriptor = None;
                             slot.completion_token_issued = false;
+                            slot.output_permit.take()
+                        } else {
+                            None
                         }
-                        output_permit
                     }
                     Some(_) | None => None,
                 }
@@ -868,7 +872,8 @@ impl FrameLease {
     /// Changes the slot from `Consumed` to `Released` only after explicit external completion.
     ///
     /// Calling this before the matching [`CompletionToken`] is acknowledged returns
-    /// `CompletionPending` and leaves the lease usable for a later retry.
+    /// `CompletionPending` and leaves the lease usable for a later retry. After acknowledgement,
+    /// releasing the lease drops its shared output permit; the pool later reclaims the slot.
     pub fn release(&mut self) -> Result<(), RuntimeError> {
         if self.released {
             return Ok(());
@@ -877,11 +882,11 @@ impl FrameLease {
             self.released = true;
             return Ok(());
         };
-        let result = {
+        let (result, output_permit) = {
             let mut inner = lock_unpoisoned(&pool);
             if inner.generation != self.descriptor.generation {
                 // Generation invalidation already severed this lease from the active mapping.
-                Ok(())
+                (Ok(()), None)
             } else {
                 let index = self.descriptor.slot_id as usize;
                 match inner.slots.get_mut(index) {
@@ -893,17 +898,18 @@ impl FrameLease {
                             }) =>
                     {
                         if !slot.completion_acknowledged {
-                            Err(RuntimeError::CompletionPending)
+                            (Err(RuntimeError::CompletionPending), None)
                         } else {
                             slot.state = SlotState::Released;
                             slot.lease_attached = false;
-                            Ok(())
+                            (Ok(()), slot.output_permit.take())
                         }
                     }
-                    Some(_) | None => Err(RuntimeError::StaleLease),
+                    Some(_) | None => (Err(RuntimeError::StaleLease), None),
                 }
             }
         };
+        drop(output_permit);
         if result.is_ok() {
             self.released = true;
         } else {
