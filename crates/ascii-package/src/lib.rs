@@ -14,10 +14,11 @@ pub use scene_registry::{
 };
 pub use semantic::{
     MAX_DECODED_IMAGE_BYTES, MAX_DECODED_IMAGE_PIXELS, MAX_SCENE_EDGES, MAX_SCENE_NODES,
-    SceneCapabilityPlan, SceneFeeds, ScenePolicy, SceneResourceEstimate, SceneResourceInputs,
-    SceneResourceLimits, SceneSemanticError, SceneValidationPlan, SourceResource,
-    estimate_scene_resources, validate_graph, validate_scene_capabilities,
-    validate_scene_semantics, validate_scene_source_refs,
+    SceneCapabilityPlan, SceneFeedDecision, SceneFeedReason, SceneFeedState, SceneFeedStatus,
+    SceneFeeds, ScenePolicy, SceneResourceEstimate, SceneResourceInputs, SceneResourceLimits,
+    SceneSemanticError, SceneValidationPlan, SourceResource, estimate_scene_resources,
+    validate_graph, validate_scene_capabilities, validate_scene_semantics,
+    validate_scene_source_refs,
 };
 pub use settings::{RegistryComparisonError, RegistryDrift, compare_portable_settings};
 pub use validation::{

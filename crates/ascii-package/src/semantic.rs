@@ -14,13 +14,68 @@ pub const MAX_SCENE_EDGES: usize = 256;
 pub const MAX_DECODED_IMAGE_PIXELS: u64 = 64_000_000;
 pub const MAX_DECODED_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Capability feeds supplied by the host. This value is data only; validation
+/// Availability states use WPH-001 terminology without pretending to provide
+/// the native adapter snapshot itself.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum SceneFeedState {
+    Supported,
+    Unknown,
+    Unavailable,
+    Denied,
+    Unsupported,
+}
+
+/// Stable adapter-provided reason code. It is carried through unchanged.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SceneFeedReason {
+    pub code: String,
+}
+
+/// Data-only observation for one capability. `usable` is meaningful only when
+/// the state is `Supported`; no platform state is probed by this crate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SceneFeedStatus {
+    pub state: SceneFeedState,
+    pub usable: bool,
+    pub reason: SceneFeedReason,
+}
+
+impl SceneFeedStatus {
+    fn not_reported() -> Self {
+        Self {
+            state: SceneFeedState::Unknown,
+            usable: false,
+            reason: SceneFeedReason {
+                code: "not-reported".to_owned(),
+            },
+        }
+    }
+}
+
+/// Capability feeds supplied by a host. Missing entries are explicit unknown /
+/// `not-reported`; reason codes are opaque until WPH-001 defines the adapter
+/// snapshot and package-to-host mapping. This value is data only: validation
 /// never queries the operating system or changes observation policy.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SceneFeeds {
-    pub available: BTreeSet<Capability>,
-    /// A click event feed is usable only when the host provides its actual position.
-    pub click_position_usable: bool,
+    pub capabilities: BTreeMap<Capability, SceneFeedStatus>,
+}
+
+impl SceneFeeds {
+    fn status(&self, capability: Capability) -> SceneFeedStatus {
+        self.capabilities
+            .get(&capability)
+            .cloned()
+            .unwrap_or_else(SceneFeedStatus::not_reported)
+    }
+}
+
+/// The observed feed and the deterministic activation decision derived from it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SceneFeedDecision {
+    pub status: SceneFeedStatus,
+    pub effective_available: bool,
+    pub blocked_by_policy: bool,
 }
 
 /// Global policy constraints captured with a deterministic validation result.
@@ -77,6 +132,7 @@ pub struct SceneValidationPlan {
     pub optional_capabilities: BTreeSet<Capability>,
     pub pass_through_nodes: Vec<String>,
     pub suppressed_nodes: Vec<String>,
+    pub feed_decisions: BTreeMap<Capability, SceneFeedDecision>,
     pub activation_allowed: bool,
     pub seed: u32,
     pub effective_settings: BTreeMap<String, serde_json::Value>,
@@ -94,14 +150,37 @@ pub fn validate_scene_capabilities(
     policy: &ScenePolicy,
 ) -> Result<SceneCapabilityPlan, SceneSemanticError> {
     let (required, optional) = capability_sets(manifest)?;
-    for capability in inferred_capabilities(scene) {
-        if !required.contains(&capability) && !optional.contains(&capability) {
+    let inferred = inferred_capabilities(scene);
+    for capability in &inferred {
+        if !required.contains(capability) && !optional.contains(capability) {
             return Err(SceneSemanticError::InvalidCapability {
-                capability,
+                capability: *capability,
                 reason: "node capability is absent from both manifest declarations",
             });
         }
     }
+
+    let mut feed_decisions = BTreeMap::new();
+    for capability in &inferred {
+        let status = feeds.status(*capability);
+        validate_feed_status(*capability, &status)?;
+        feed_decisions.insert(
+            *capability,
+            feed_decision(status, policy.observation_disabled),
+        );
+    }
+    let has_click_ripple = scene
+        .nodes
+        .iter()
+        .any(|node| matches!(node, SceneNode::ClickRipple { .. }));
+    if has_click_ripple {
+        let position_status = feeds.status(Capability::PointerPosition);
+        validate_feed_status(Capability::PointerPosition, &position_status)?;
+        feed_decisions
+            .entry(Capability::PointerPosition)
+            .or_insert_with(|| feed_decision(position_status, policy.observation_disabled));
+    }
+
     let mut pass_through_nodes = Vec::new();
     let mut suppressed_nodes = Vec::new();
     for node in &scene.nodes {
@@ -111,12 +190,27 @@ pub fn validate_scene_capabilities(
         let Some(capability) = descriptor_for_node(node).capability else {
             continue;
         };
-        let available = !policy.observation_disabled
-            && feeds.available.contains(&capability)
-            && (capability != Capability::PointerButtons || feeds.click_position_usable);
-        if !available {
+        let position_status = if matches!(node, SceneNode::ClickRipple { .. }) {
+            Some(feed_decisions[&Capability::PointerPosition].status.clone())
+        } else {
+            None
+        };
+        let position_available = !matches!(node, SceneNode::ClickRipple { .. })
+            || feed_decisions[&Capability::PointerPosition].effective_available;
+        let position_blocked_by_policy = matches!(node, SceneNode::ClickRipple { .. })
+            && feed_decisions[&Capability::PointerPosition].blocked_by_policy;
+        let decision = feed_decisions
+            .get(&capability)
+            .expect("inferred capability has a feed decision");
+        let effective_available = decision.effective_available && position_available;
+        if !effective_available {
             if required.contains(&capability) {
-                return Err(SceneSemanticError::MissingRequiredCapability(capability));
+                return Err(SceneSemanticError::MissingRequiredCapability {
+                    capability,
+                    status: decision.status.clone(),
+                    position_status,
+                    blocked_by_policy: decision.blocked_by_policy || position_blocked_by_policy,
+                });
             }
             pass_through_nodes.push(node_id(node).to_owned());
         }
@@ -126,6 +220,7 @@ pub fn validate_scene_capabilities(
         optional,
         pass_through_nodes,
         suppressed_nodes,
+        feed_decisions,
     })
 }
 
@@ -139,13 +234,14 @@ pub fn estimate_scene_resources(
     estimate_resources(scene, inputs, effective_settings, normalized_time_millis)
 }
 
-/// Capability declarations and pass-through decision made without host side effects.
+/// Capability declarations and deterministic feed decisions without host side effects.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SceneCapabilityPlan {
     pub required: BTreeSet<Capability>,
     pub optional: BTreeSet<Capability>,
     pub pass_through_nodes: Vec<String>,
     pub suppressed_nodes: Vec<String>,
+    pub feed_decisions: BTreeMap<Capability, SceneFeedDecision>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -158,7 +254,12 @@ pub enum SceneSemanticError {
         capability: Capability,
         reason: &'static str,
     },
-    MissingRequiredCapability(Capability),
+    MissingRequiredCapability {
+        capability: Capability,
+        status: SceneFeedStatus,
+        position_status: Option<SceneFeedStatus>,
+        blocked_by_policy: bool,
+    },
     InvalidControl {
         location: String,
         reason: &'static str,
@@ -178,12 +279,16 @@ impl fmt::Display for SceneSemanticError {
             Self::InvalidCapability { capability, reason } => {
                 write!(formatter, "{reason}: {capability:?}")
             }
-            Self::MissingRequiredCapability(capability) => {
-                write!(
-                    formatter,
-                    "required capability feed is unavailable: {capability:?}"
-                )
-            }
+            Self::MissingRequiredCapability {
+                capability,
+                status,
+                position_status,
+                blocked_by_policy,
+            } => write!(
+                formatter,
+                "required capability {capability:?} is not effective: state={:?}, usable={}, reason={:?}, click_position={position_status:?}, blocked_by_policy={blocked_by_policy}",
+                status.state, status.usable, status.reason
+            ),
             Self::InvalidControl { location, reason } => {
                 write!(formatter, "{reason} at {location}")
             }
@@ -226,11 +331,6 @@ pub fn validate_scene_semantics(
 ) -> Result<SceneValidationPlan, SceneSemanticError> {
     let topological_order = validate_graph(scene)?;
     validate_scene_source_refs(scene, manifest)?;
-    let feeds = if policy.observation_disabled {
-        SceneFeeds::default()
-    } else {
-        feeds
-    };
     let capability_plan = validate_scene_capabilities(scene, manifest, &feeds, &policy)?;
     // Global comparison deliberately exposes CFG metadata drift rather than creating
     // package-owned defaults or treating a partial registry as authoritative.
@@ -244,6 +344,7 @@ pub fn validate_scene_semantics(
         required_capabilities: capability_plan.required,
         optional_capabilities: capability_plan.optional,
         pass_through_nodes: capability_plan.pass_through_nodes,
+        feed_decisions: capability_plan.feed_decisions,
         suppressed_nodes: capability_plan.suppressed_nodes,
         activation_allowed: !policy.locked,
         seed: scene.seed,
@@ -425,6 +526,38 @@ fn inferred_capabilities(scene: &Scene) -> BTreeSet<Capability> {
         .iter()
         .filter_map(|node| descriptor_for_node(node).capability)
         .collect()
+}
+
+fn validate_feed_status(
+    capability: Capability,
+    status: &SceneFeedStatus,
+) -> Result<(), SceneSemanticError> {
+    if status.usable && status.state != SceneFeedState::Supported {
+        return Err(SceneSemanticError::InvalidCapability {
+            capability,
+            reason: "only supported feeds may be marked usable",
+        });
+    }
+    if status.reason.code.trim().is_empty() {
+        return Err(SceneSemanticError::InvalidCapability {
+            capability,
+            reason: "feed status requires a non-empty reason code",
+        });
+    }
+    Ok(())
+}
+
+fn feed_available(status: &SceneFeedStatus) -> bool {
+    status.state == SceneFeedState::Supported && status.usable
+}
+
+fn feed_decision(status: SceneFeedStatus, observation_disabled: bool) -> SceneFeedDecision {
+    let effective_available = feed_available(&status) && !observation_disabled;
+    SceneFeedDecision {
+        status,
+        effective_available,
+        blocked_by_policy: observation_disabled,
+    }
 }
 
 fn validate_controls(scene: &Scene, registry: &Registry) -> Result<(), SceneSemanticError> {

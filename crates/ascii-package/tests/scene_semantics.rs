@@ -1,64 +1,215 @@
 use ascii_package::{SCENE_NODE_DESCRIPTORS, parameter_schema, validate_graph, validate_scene};
 use serde_json::json;
 
+fn feed_status(
+    state: ascii_package::SceneFeedState,
+    usable: bool,
+    reason: &str,
+) -> ascii_package::SceneFeedStatus {
+    ascii_package::SceneFeedStatus {
+        state,
+        usable,
+        reason: ascii_package::SceneFeedReason {
+            code: reason.to_owned(),
+        },
+    }
+}
+
+fn click_feeds(buttons: ascii_package::SceneFeedStatus) -> ascii_package::SceneFeeds {
+    ascii_package::SceneFeeds {
+        capabilities: [
+            (ascii_package::Capability::PointerButtons, buttons),
+            (
+                ascii_package::Capability::PointerPosition,
+                feed_status(ascii_package::SceneFeedState::Supported, true, "supported"),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
 #[test]
-fn capability_declarations_drive_optional_pass_through_and_required_failure() {
-    let manifest: ascii_package::Manifest =
+fn optional_and_required_capabilities_preserve_every_feed_state_and_reason() {
+    let mut optional: ascii_package::Manifest =
         serde_json::from_str(include_str!("fixtures/manifest.json")).unwrap();
+    optional.capabilities.optional = vec![ascii_package::Capability::PointerButtons];
     let click = validate_scene(
         br##"{"scene_version":"1.0","seed":1,"nodes":[{"id":"click","kind":"click-ripple","params":{"radius_cells":1,"duration_ms":50,"strength":0}}],"edges":[],"output":"click","controls":[]}"##,
     )
     .unwrap();
-    let feeds = ascii_package::SceneFeeds {
-        available: [ascii_package::Capability::PointerButtons]
-            .into_iter()
-            .collect(),
-        click_position_usable: false,
-    };
-    let policy = ascii_package::ScenePolicy::default();
-    let optional =
-        ascii_package::validate_scene_capabilities(&click, &manifest, &feeds, &policy).unwrap();
-    assert_eq!(optional.pass_through_nodes, ["click"]);
-
-    let mut required = manifest.clone();
-    required.capabilities.required = vec![ascii_package::Capability::PointerButtons];
-    required.capabilities.optional.clear();
-    assert_eq!(
-        ascii_package::validate_scene_capabilities(&click, &required, &feeds, &policy),
-        Err(
-            ascii_package::SceneSemanticError::MissingRequiredCapability(
-                ascii_package::Capability::PointerButtons
-            )
+    let cases = [
+        (ascii_package::SceneFeedState::Supported, true, "supported"),
+        (
+            ascii_package::SceneFeedState::Supported,
+            false,
+            "no-usable-events",
+        ),
+        (
+            ascii_package::SceneFeedState::Unknown,
+            false,
+            "probe-not-run",
+        ),
+        (
+            ascii_package::SceneFeedState::Unavailable,
+            false,
+            "adapter-unavailable",
+        ),
+        (
+            ascii_package::SceneFeedState::Denied,
+            false,
+            "permission-denied",
+        ),
+        (
+            ascii_package::SceneFeedState::Unsupported,
+            false,
+            "host-unsupported",
+        ),
+    ];
+    for (state, usable, reason) in cases {
+        let status = feed_status(state, usable, reason);
+        let feeds = click_feeds(status.clone());
+        let plan = ascii_package::validate_scene_capabilities(
+            &click,
+            &optional,
+            &feeds,
+            &ascii_package::ScenePolicy::default(),
         )
-    );
-    let usable = ascii_package::SceneFeeds {
-        available: [ascii_package::Capability::PointerButtons]
-            .into_iter()
-            .collect(),
-        click_position_usable: true,
-    };
-    assert!(
-        ascii_package::validate_scene_capabilities(&click, &required, &usable, &policy).is_ok()
-    );
-    let disabled = ascii_package::ScenePolicy {
+        .unwrap();
+        let decision = &plan.feed_decisions[&ascii_package::Capability::PointerButtons];
+        assert_eq!(decision.status, status, "{state:?}");
+        assert_eq!(
+            decision.effective_available,
+            state == ascii_package::SceneFeedState::Supported && usable
+        );
+        assert_eq!(
+            plan.pass_through_nodes.is_empty(),
+            state == ascii_package::SceneFeedState::Supported && usable,
+            "{state:?}"
+        );
+        assert_eq!(
+            plan.feed_decisions[&ascii_package::Capability::PointerPosition]
+                .status
+                .state,
+            ascii_package::SceneFeedState::Supported
+        );
+
+        let mut required = optional.clone();
+        required.capabilities.required = vec![ascii_package::Capability::PointerButtons];
+        required.capabilities.optional.clear();
+        let result = ascii_package::validate_scene_capabilities(
+            &click,
+            &required,
+            &feeds,
+            &ascii_package::ScenePolicy::default(),
+        );
+        if state == ascii_package::SceneFeedState::Supported && usable {
+            assert!(result.is_ok());
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    ascii_package::SceneSemanticError::MissingRequiredCapability {
+                        capability: ascii_package::Capability::PointerButtons,
+                        status: observed,
+                        position_status: Some(position),
+                        blocked_by_policy: false,
+                    } if observed == &status
+                        && position.state == ascii_package::SceneFeedState::Supported
+                        && position.usable
+                ),
+                "{error}"
+            );
+            assert!(error.to_string().contains(reason));
+        }
+    }
+    let supported = feed_status(ascii_package::SceneFeedState::Supported, true, "supported");
+    let feeds = click_feeds(supported.clone());
+    let disabled_policy = ascii_package::ScenePolicy {
         observation_disabled: true,
         ..Default::default()
     };
+    let disabled =
+        ascii_package::validate_scene_capabilities(&click, &optional, &feeds, &disabled_policy)
+            .unwrap();
+    let decision = &disabled.feed_decisions[&ascii_package::Capability::PointerButtons];
+    assert_eq!(decision.status, supported);
+    assert!(!decision.effective_available);
+    assert!(decision.blocked_by_policy);
     assert_eq!(
-        ascii_package::validate_scene_capabilities(&click, &required, &usable, &disabled),
-        Err(
-            ascii_package::SceneSemanticError::MissingRequiredCapability(
-                ascii_package::Capability::PointerButtons
-            )
-        )
+        feeds.capabilities[&ascii_package::Capability::PointerButtons],
+        supported
     );
+}
 
-    let mut undeclared = manifest;
-    undeclared.capabilities.optional.clear();
-    assert!(matches!(
-        ascii_package::validate_scene_capabilities(&click, &undeclared, &feeds, &policy),
-        Err(ascii_package::SceneSemanticError::InvalidCapability { .. })
-    ));
+#[test]
+fn click_position_state_is_preserved_for_required_and_optional_behavior() {
+    let mut manifest: ascii_package::Manifest =
+        serde_json::from_str(include_str!("fixtures/manifest.json")).unwrap();
+    manifest.capabilities.optional = vec![ascii_package::Capability::PointerButtons];
+    let click = validate_scene(
+        br##"{"scene_version":"1.0","seed":1,"nodes":[{"id":"click","kind":"click-ripple","params":{"radius_cells":1,"duration_ms":50,"strength":0}}],"edges":[],"output":"click","controls":[]}"##,
+    )
+    .unwrap();
+    for state in [
+        ascii_package::SceneFeedState::Supported,
+        ascii_package::SceneFeedState::Unknown,
+        ascii_package::SceneFeedState::Unavailable,
+        ascii_package::SceneFeedState::Denied,
+        ascii_package::SceneFeedState::Unsupported,
+    ] {
+        let position = feed_status(state, false, "position-feed-not-usable");
+        let feeds = ascii_package::SceneFeeds {
+            capabilities: [
+                (
+                    ascii_package::Capability::PointerButtons,
+                    feed_status(ascii_package::SceneFeedState::Supported, true, "supported"),
+                ),
+                (ascii_package::Capability::PointerPosition, position.clone()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let optional_plan = ascii_package::validate_scene_capabilities(
+            &click,
+            &manifest,
+            &feeds,
+            &ascii_package::ScenePolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(optional_plan.pass_through_nodes, ["click"]);
+        assert!(
+            optional_plan.feed_decisions[&ascii_package::Capability::PointerButtons]
+                .effective_available
+        );
+        assert!(
+            !optional_plan.feed_decisions[&ascii_package::Capability::PointerPosition]
+                .effective_available
+        );
+        assert_eq!(
+            optional_plan.feed_decisions[&ascii_package::Capability::PointerPosition].status,
+            position
+        );
+
+        manifest.capabilities.required = vec![ascii_package::Capability::PointerButtons];
+        manifest.capabilities.optional.clear();
+        assert!(matches!(
+            ascii_package::validate_scene_capabilities(
+                &click,
+                &manifest,
+                &feeds,
+                &ascii_package::ScenePolicy::default()
+            ),
+            Err(ascii_package::SceneSemanticError::MissingRequiredCapability {
+                capability: ascii_package::Capability::PointerButtons,
+                position_status: Some(observed),
+                ..
+            }) if observed == position
+        ));
+        manifest.capabilities.required.clear();
+        manifest.capabilities.optional = vec![ascii_package::Capability::PointerButtons];
+    }
 }
 
 #[test]
@@ -80,6 +231,10 @@ fn window_feed_and_media_asset_refs_are_checked_without_host_queries() {
     )
     .unwrap();
     assert_eq!(plan.pass_through_nodes, ["avoid"]);
+    let window_status = &plan.feed_decisions[&ascii_package::Capability::WindowRectangles].status;
+    assert_eq!(window_status.state, ascii_package::SceneFeedState::Unknown);
+    assert!(!window_status.usable);
+    assert_eq!(window_status.reason.code.as_str(), "not-reported");
 
     let source = validate_scene(
         br##"{"scene_version":"1.0","seed":1,"nodes":[{"id":"image","kind":"image-source","params":{"path":"not-declared.png"}}],"edges":[],"output":"image","controls":[]}"##,
