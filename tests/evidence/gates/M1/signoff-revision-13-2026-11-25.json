@@ -79,7 +79,7 @@
         "artifact_status": "No downloadable artifacts are attached to this run; artifact API returned an empty list."
       },
       "qa004_pin": "fb20e84ec196c421b954b90985dc2217a35767c6",
-      "portable_repository_and_security_checks": "Passed; Portable core passed Ubuntu/macOS/Windows and Repository quality and Python security analysis passed at the exact QA-101 head in hosted runs 45612493349 and 45612484177.",
+      "portable_repository_and_security_checks": "Portable core passed Ubuntu/macOS/Windows and Repository quality passed in run 45612493349; Python security analysis passed in run 45612493327. All checks were at exact QA-101 head 68ecb191b9d336291021a23e67c78bd7829c837f. Hosted EC-001–EC-005 run 45612484177 is separate.",
       "focused_local_regression_tests": "Passed (reported for exact QA-101 head in source-verified review evidence).",
       "independent_exact_head_review": {
         "reviewer": "Luna",
