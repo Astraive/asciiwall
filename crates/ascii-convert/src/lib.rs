@@ -1,5 +1,6 @@
 //! Bounded CPU density conversion, font rasterization, immutable glyph-table primitives, shared geometry, color normalization, and alpha compositing.
 
+mod adjustments;
 mod color;
 mod density;
 mod font;
@@ -27,4 +28,8 @@ pub use glyphs::{Centroid, EdgeOrientation, GlyphBounds, GlyphMetrics};
 pub use sampling::{
     CropRect, FitMode, FitTransform, PatchDescriptors, PatchDimensions, QualityPatches,
     SamplingFilter, SamplingIdentity, SamplingOptions, SamplingRect,
+};
+pub use adjustments::{
+    AdjustmentError, AdjustmentSettings, ArtisticAdjustments, EdgeSettings, apply_adjustments,
+    adjustment_invalidation,
 };
