@@ -15,7 +15,7 @@ const BASIC: &[u8] = br#"{
   "settings": {},
   "capabilities": {"required": [], "optional": []},
   "tags": [],
-  "assets": [{"path": "assets/source.png", "media_type": "image/png", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 0, "license": "CC0-1.0"}]
+  "assets": [{"path": "assets/source.png", "media_type": "image/png", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 0, "license": "CC0-1.0"}, {"path": "licenses/artwork.txt", "media_type": "text/plain", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size": 0, "license": "CC0-1.0"}]
 }"#;
 
 fn inventory_for(bytes: &[u8]) -> AssetInventory {
@@ -34,6 +34,9 @@ fn inventory_for(bytes: &[u8]) -> AssetInventory {
                 )
             })
             .collect(),
+        directories: std::collections::BTreeSet::new(),
+        duplicate_paths: Vec::new(),
+        license_texts: std::collections::BTreeSet::new(),
     }
 }
 
@@ -351,4 +354,141 @@ fn rejects_missing_asset_inventory_entry() {
     let error = validate_manifest(BASIC, &AssetInventory::default()).unwrap_err();
     assert_eq!(error.kind, ErrorKind::InventoryMismatch);
     assert!(error.location.contains("assets[0]"));
+}
+
+#[test]
+fn rejects_nonportable_and_unresolved_asset_paths() {
+    for (from, to) in [
+        ("assets/source.png", "../source.png"),
+        ("assets/source.png", "C:/source.png"),
+        ("assets/source.png", "assets\\source.png"),
+        ("assets/source.png", "assets/CON.txt"),
+        ("assets/source.png", "Assets/source.png"),
+    ] {
+        let document = String::from_utf8(BASIC.to_vec()).unwrap().replace(from, to);
+        let manifest: Manifest = serde_json::from_str(&document).unwrap();
+        let inventory = inventory_for(document.as_bytes());
+        let error = validate_manifest(document.as_bytes(), &inventory).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Semantic, "{manifest:?}");
+    }
+    let document = String::from_utf8(BASIC.to_vec())
+        .unwrap()
+        .replace("assets/source.png", "assets/other.png");
+    let inventory = inventory_for(document.as_bytes());
+    let missing = document.replace("assets/other.png", "assets/missing.png");
+    assert_eq!(
+        validate_manifest(missing.as_bytes(), &inventory)
+            .unwrap_err()
+            .kind,
+        ErrorKind::InventoryMismatch
+    );
+}
+
+#[test]
+fn rejects_overlapping_capabilities_and_undeclared_files() {
+    let document = String::from_utf8(BASIC.to_vec()).unwrap().replace(
+        "\"required\": [], \"optional\": []",
+        "\"required\": [\"local-clock\"], \"optional\": [\"local-clock\"]",
+    );
+    assert_eq!(
+        validate_manifest(document.as_bytes(), &inventory_for(document.as_bytes()))
+            .unwrap_err()
+            .kind,
+        ErrorKind::Semantic
+    );
+    let mut inventory = inventory_for(BASIC);
+    inventory.assets.insert(
+        "unused/readme.txt".into(),
+        InventoryEntry {
+            size: 0,
+            sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+        },
+    );
+    assert_eq!(
+        validate_manifest(BASIC, &inventory).unwrap_err().kind,
+        ErrorKind::InventoryMismatch
+    );
+    let mut inventory = inventory_for(BASIC);
+    inventory.directories.insert("assets/source.png".into());
+    assert_eq!(
+        validate_manifest(BASIC, &inventory).unwrap_err().kind,
+        ErrorKind::Semantic
+    );
+    let mut inventory = inventory_for(BASIC);
+    inventory.duplicate_paths.push("Assets/source.png".into());
+    assert_eq!(
+        validate_manifest(BASIC, &inventory).unwrap_err().kind,
+        ErrorKind::InventoryMismatch
+    );
+}
+
+#[test]
+fn enforces_entry_and_expanded_size_budgets() {
+    let mut inventory = inventory_for(BASIC);
+    for index in 0..4093 {
+        inventory.directories.insert(format!("dir{index}"));
+    }
+    assert!(validate_manifest(BASIC, &inventory).is_ok());
+    inventory.directories.insert("dir4093".into());
+    assert_eq!(
+        validate_manifest(BASIC, &inventory).unwrap_err().kind,
+        ErrorKind::Semantic
+    );
+    let mut document = String::from_utf8(BASIC.to_vec()).unwrap();
+    document = document.replace("\"size\": 0", "\"size\": 1073741824");
+    let mut manifest: Manifest = serde_json::from_str(&document).unwrap();
+    let mut inventory = inventory_for(document.as_bytes());
+    let source = manifest
+        .assets
+        .iter_mut()
+        .find(|asset| asset.path == "assets/source.png")
+        .unwrap();
+    source.size = 1073741824;
+    inventory.assets.get_mut("assets/source.png").unwrap().size = 1073741824;
+    manifest.assets[1].size = 1073741824;
+    inventory.assets.get_mut("licenses/artwork.txt").unwrap().size = 1073741824;
+    let document = serde_json::to_vec(&manifest).unwrap();
+    assert_eq!(
+        validate_manifest(&document, &inventory).unwrap_err().kind,
+        ErrorKind::Semantic
+    );
+}
+
+#[test]
+fn requires_license_text_evidence_and_package_font_asset() {
+    let custom_license = String::from_utf8(BASIC.to_vec())
+        .replacen("\"license\": \"CC0-1.0\"", "\"license\": \"LicenseRef-Example\"", 1);
+    let mut inventory = inventory_for(custom_license.as_bytes());
+    let error = validate_manifest(custom_license.as_bytes(), &inventory).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Semantic);
+    inventory
+        .license_texts
+        .insert(("licenses/artwork.txt".into(), "LicenseRef-Example".into()));
+    assert!(validate_manifest(custom_license.as_bytes(), &inventory).is_ok());
+
+    let package_font = String::from_utf8(BASIC.to_vec())
+        .unwrap()
+        .replace("\"settings\": {}", "\"settings\": {\"font.face\": \"package-font\"}");
+    assert_eq!(
+        validate_manifest(package_font.as_bytes(), &inventory_for(package_font.as_bytes()))
+            .unwrap_err()
+            .kind,
+        ErrorKind::Semantic
+    );
+}
+
+#[test]
+fn accepts_only_display_http_urls_without_fetching() {
+    let https = String::from_utf8(BASIC.to_vec()).unwrap().replace(
+        "{\"name\": \"Fixture Author\"}",
+        "{\"name\": \"Fixture Author\", \"url\": \"https://example.invalid/about\"}",
+    );
+    assert!(validate_manifest(https.as_bytes(), &inventory_for(https.as_bytes())).is_ok());
+    let invalid = https.replace("https://example.invalid/about", "file:///secret");
+    assert_eq!(
+        validate_manifest(invalid.as_bytes(), &inventory_for(invalid.as_bytes()))
+            .unwrap_err()
+            .kind,
+        ErrorKind::Semantic
+    );
 }

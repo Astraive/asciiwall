@@ -26,10 +26,16 @@ pub struct Asset {
     pub attribution: Option<String>,
 }
 
-/// Read-only actual asset information supplied by an archive/filesystem phase.
+/// Read-only actual package entries supplied by an archive/filesystem phase.
+/// `assets` contains regular files other than the root manifest; directory
+/// records, duplicate-entry facts, and license-text evidence are separate.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AssetInventory {
     pub assets: BTreeMap<String, InventoryEntry>,
+    pub directories: std::collections::BTreeSet<String>,
+    pub duplicate_paths: Vec<String>,
+    /// `(license file path, LicenseRef identifier)` facts established by the caller.
+    pub license_texts: std::collections::BTreeSet<(String, String)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
