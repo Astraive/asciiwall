@@ -3,12 +3,13 @@ use std::time::Duration;
 use ascii_core::{BudgetKind, MalformedReason};
 use ascii_scene::Error;
 use ascii_scene::{
-    ApprovedSnapshots, ExportContext, ExportSignalTrack, GENERATOR_DESCRIPTOR, MAX_CATCH_UP_STEPS,
-    MAX_GRID_CELLS, MAX_NODE_ID_BYTES, MAX_PARTICLES, MAX_RECORDED_EVENTS,
-    MAX_RUNTIME_RESOURCE_BYTES, NormalizedPoint, NormalizedRect, ParameterDefault, ParameterKind,
-    ParticleFieldGenerator, PresetMotion, RandomStream, RecordedEvent, RecordedEventKind,
-    SceneDimensions, SceneParameters, SceneResourceBudget, SceneRuntime, SimulationLimits,
-    SnapshotCandidates, SnapshotCapabilities, derive_effect_seed, derive_node_seed,
+    ApprovedSnapshots, ExportContext, ExportSignalTrack, GENERATOR_DESCRIPTOR,
+    MAX_APPROVED_BUTTON_EVENTS, MAX_CATCH_UP_STEPS, MAX_GRID_CELLS, MAX_NODE_ID_BYTES,
+    MAX_PARTICLES, MAX_RECORDED_EVENTS, MAX_RUNTIME_RESOURCE_BYTES, NormalizedPoint,
+    NormalizedRect, ParameterDefault, ParameterKind, ParticleFieldGenerator, PresetMotion,
+    RandomStream, RecordedEvent, RecordedEventKind, SceneDimensions, SceneParameters,
+    SceneResourceBudget, SceneRuntime, SimulationLimits, SnapshotCandidates, SnapshotCapabilities,
+    derive_effect_seed, derive_node_seed,
 };
 
 fn parameters(
@@ -470,6 +471,41 @@ fn snapshots_are_filtered_by_explicit_host_capabilities() {
         candidates,
     );
     assert_eq!(battery_only.battery_state(), Some(battery));
+}
+
+#[test]
+fn over_limit_button_tracks_are_rejected_without_retaining_a_prefix() {
+    let event = ascii_scene::NormalizedButtonEvent::new(0, true);
+    let events = vec![event; MAX_APPROVED_BUTTON_EVENTS + 1];
+    let capabilities = SnapshotCapabilities::new(false, true, false, false);
+
+    let accepted = ApprovedSnapshots::filter(
+        capabilities,
+        SnapshotCandidates::new(
+            None,
+            Some(&events[..MAX_APPROVED_BUTTON_EVENTS]),
+            None,
+            None,
+        ),
+    );
+    assert_eq!(
+        accepted.pointer_buttons().map(|track| track.len()),
+        Some(MAX_APPROVED_BUTTON_EVENTS)
+    );
+    assert!(!accepted.pointer_buttons_rejected());
+
+    let rejected = ApprovedSnapshots::filter(
+        capabilities,
+        SnapshotCandidates::new(None, Some(&events), None, None),
+    );
+    assert_eq!(rejected.pointer_buttons(), None);
+    assert!(rejected.pointer_buttons_rejected());
+
+    let denied = ApprovedSnapshots::filter(
+        SnapshotCapabilities::default(),
+        SnapshotCandidates::new(None, Some(&events), None, None),
+    );
+    assert!(!denied.pointer_buttons_rejected());
 }
 #[test]
 fn synthetic_pointer_snapshots_drive_deterministic_local_interaction() {
