@@ -21,10 +21,10 @@ pub use frame::{
 };
 pub use generation::Generation;
 pub use ids::{
-    AssignmentBinding, AssignmentBindingConflict, AssignmentId, ContentDigest, DecodeError,
-    ForkLineage, ID_BYTES, IdentityError, MonitorFallbackMatch, MonitorId, MonitorIdentity,
-    PACKAGE_RELEASE_WIRE_BYTES, PackageId, PackageRelease, PackageVersion, ReleaseConflict,
-    CONTENT_DIGEST_BYTES,
+    AssignmentBinding, AssignmentBindingConflict, AssignmentId, CONTENT_DIGEST_BYTES,
+    ContentDigest, DecodeError, ForkLineage, ID_BYTES, IdentityError, MonitorFallbackMatch,
+    MonitorId, MonitorIdentity, PACKAGE_RELEASE_WIRE_BYTES, PackageId, PackageRelease,
+    PackageVersion, ReleaseConflict,
 };
 #[cfg(test)]
 extern crate std;
