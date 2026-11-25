@@ -2,8 +2,8 @@ use std::vec::Vec;
 
 use ascii_core::{
     AssignmentBinding, AssignmentId, ContentDigest, DecodeError, Generation, IdentityError,
-    MonitorFallbackMatch, MonitorId, MonitorIdentity, PackageId, PackageRelease, PackageVersion,
-    ReleaseConflict, PACKAGE_RELEASE_WIRE_BYTES,
+    MonitorFallbackMatch, MonitorId, MonitorIdentity, PACKAGE_RELEASE_WIRE_BYTES, PackageId,
+    PackageRelease, PackageVersion, ReleaseConflict,
 };
 
 const RELEASE_GOLDEN_HEX: &str = concat!(
@@ -40,11 +40,7 @@ fn digest(byte: u8) -> ContentDigest {
 }
 
 fn release() -> PackageRelease {
-    PackageRelease::new(
-        package_id(0x11),
-        package_version(0x0102_0304),
-        digest(0xa5),
-    )
+    PackageRelease::new(package_id(0x11), package_version(0x0102_0304), digest(0xa5))
 }
 
 fn decode_hex(hex: &str) -> Vec<u8> {
@@ -219,12 +215,7 @@ fn package_release_decoder_rejects_malformed_headers_and_values() {
 #[test]
 fn immutable_release_conflicts_are_visible_and_forks_keep_upstream_identity() {
     let stored = release();
-    let changed = PackageRelease::new(
-        stored.package_id(),
-        stored.package_version(),
-        digest(0xb6),
-    );
-
+    let changed = PackageRelease::new(stored.package_id(), stored.package_version(), digest(0xb6));
     assert_eq!(
         stored.conflict_with(changed),
         Some(ReleaseConflict::ContentDigestChanged {
@@ -270,7 +261,10 @@ fn assignment_binding_and_monitor_fallback_are_explicit_local_records() {
     let binding = AssignmentBinding::new(assignment_id, release(), digest(0x41), digest(0x51));
     let changed = AssignmentBinding::new(assignment_id, release(), digest(0x41), digest(0x52));
 
-    assert_eq!(binding.conflict_with(changed).unwrap().assignment_id(), assignment_id);
+    assert_eq!(
+        binding.conflict_with(changed).unwrap().assignment_id(),
+        assignment_id
+    );
 
     let fallback = MonitorFallbackMatch::new(-1920, 0, 1920, 1080).unwrap();
     let monitor = MonitorIdentity::new(MonitorId::new([0x61; 16]).unwrap(), fallback);

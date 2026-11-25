@@ -16,7 +16,6 @@ const WIRE_VERSION: u8 = 1;
 const PACKAGE_RELEASE_KIND: u8 = 1;
 const FLAG_HAS_FORK_LINEAGE: u16 = 1;
 const PACKAGE_RELEASE_PAYLOAD_BYTES: u32 = 104;
-const HEADER_BYTES: usize = 12;
 
 /// An invalid identity or descriptor construction request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -264,7 +263,8 @@ impl PackageRelease {
     /// version must preserve both its content digest and its fork lineage.
     #[must_use]
     pub fn conflict_with(self, proposed: Self) -> Option<ReleaseConflict> {
-        if self.package_id != proposed.package_id || self.package_version != proposed.package_version
+        if self.package_id != proposed.package_id
+            || self.package_version != proposed.package_version
         {
             return None;
         }
@@ -344,11 +344,11 @@ impl PackageRelease {
 
         let mut package_id_bytes = [0; ID_BYTES];
         package_id_bytes.copy_from_slice(&wire[12..28]);
-        let package_id = PackageId::new(package_id_bytes).map_err(|_| DecodeError::InvalidPackageId)?;
-        let package_version = PackageVersion::new(u32::from_le_bytes([
-            wire[28], wire[29], wire[30], wire[31],
-        ]))
-        .map_err(|_| DecodeError::InvalidPackageVersion)?;
+        let package_id =
+            PackageId::new(package_id_bytes).map_err(|_| DecodeError::InvalidPackageId)?;
+        let package_version =
+            PackageVersion::new(u32::from_le_bytes([wire[28], wire[29], wire[30], wire[31]]))
+                .map_err(|_| DecodeError::InvalidPackageVersion)?;
         let mut content_digest_bytes = [0; CONTENT_DIGEST_BYTES];
         content_digest_bytes.copy_from_slice(&wire[32..64]);
         let content_digest = ContentDigest::new(content_digest_bytes);
@@ -361,10 +361,9 @@ impl PackageRelease {
             if lineage_id == package_id {
                 return Err(DecodeError::ForkMustUseNewPackageId);
             }
-            let lineage_version = PackageVersion::new(u32::from_le_bytes([
-                wire[80], wire[81], wire[82], wire[83],
-            ]))
-            .map_err(|_| DecodeError::InvalidLineageVersion)?;
+            let lineage_version =
+                PackageVersion::new(u32::from_le_bytes([wire[80], wire[81], wire[82], wire[83]]))
+                    .map_err(|_| DecodeError::InvalidLineageVersion)?;
             let mut lineage_digest_bytes = [0; CONTENT_DIGEST_BYTES];
             lineage_digest_bytes.copy_from_slice(&wire[84..116]);
             Some(ForkLineage {
@@ -473,7 +472,9 @@ impl core::fmt::Display for DecodeError {
             Self::UnsupportedVersion => formatter.write_str("unsupported wire-format version"),
             Self::UnsupportedRecordKind => formatter.write_str("unsupported descriptor kind"),
             Self::InvalidFlags => formatter.write_str("invalid package-release flags"),
-            Self::InvalidPayloadLength => formatter.write_str("invalid package-release payload length"),
+            Self::InvalidPayloadLength => {
+                formatter.write_str("invalid package-release payload length")
+            }
             Self::InvalidPackageId => formatter.write_str("invalid package ID"),
             Self::InvalidPackageVersion => formatter.write_str("invalid package version"),
             Self::InvalidLineageId => formatter.write_str("invalid fork-lineage package ID"),
@@ -575,7 +576,11 @@ impl AssignmentBindingConflict {
 
 impl core::fmt::Display for AssignmentBindingConflict {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(formatter, "immutable binding changed for assignment {:?}", self.assignment_id)
+        write!(
+            formatter,
+            "immutable binding changed for assignment {:?}",
+            self.assignment_id
+        )
     }
 }
 
