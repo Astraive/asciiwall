@@ -10,6 +10,7 @@ mod palette;
 
 mod sampling;
 mod structural;
+mod temporal;
 
 pub use color::{
     Alpha, ColorNormalizationError, ColorNormalizationWarning, EncodedOutputColor, EncodedSrgb,
@@ -44,4 +45,9 @@ pub use structural::{
     MAX_STRUCTURAL_CANDIDATES, ReconstructionWeights, ShortlistOptions, StructuralCandidate,
     StructuralDescriptor, StructuralIdentity, StructuralScratch, StructuralShortlist,
     StructuralWeights,
+};
+pub use temporal::{
+    MAX_TEMPORAL_CELLS, MAX_TEMPORAL_HISTORY_GAP_NS, MAX_TEMPORAL_WORK_UNITS,
+    TEMPORAL_HYSTERESIS_RAMP_NS, TemporalCandidate, TemporalFrameContext, TemporalOptions,
+    TemporalReset, TemporalScratch,
 };
