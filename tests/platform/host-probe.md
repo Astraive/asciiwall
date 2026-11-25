@@ -21,16 +21,16 @@ This is hierarchy observation only. It is not evidence that a surface can be pla
 
 ## Windows test evidence
 
-**Local Windows evidence:** `cargo fmt --package ascii-platform -- --check` passed; `cargo clippy --locked --package ascii-platform --all-targets -- -D warnings` passed; `cargo test --locked --package ascii-platform` passed (8 tests across 3 suites). The test command is non-disruptive and does not create a window:
+**Local Windows evidence:** `cargo fmt --package ascii-platform -- --check` passed; `cargo clippy --locked --package ascii-platform --all-targets -- -D warnings` passed; `cargo test --locked --package ascii-platform` passed (9 tests across 3 suites). The test command is non-disruptive and does not create a window:
 
 ```text
 cargo test --locked --package ascii-platform
 ```
 
-The package includes deterministic injected hierarchy tests for an absent shell, changed WorkerW layout, Explorer-folder views excluded from desktop classification, unknown direct parents under recognized desktop roots, an unreadable actual shell-root class, timeout, and core work-budget exhaustion, plus one native read-only report test. The source hashes below were captured immediately before the Clippy/test run and match the source revision that passed those checks:
+The package includes deterministic injected hierarchy tests for an absent shell, changed WorkerW layout, Explorer-folder views excluded from desktop classification, unexpected-parent precedence when recognized and unknown views coexist, an unreadable actual shell-root class, timeout, and core work-budget exhaustion, plus one native read-only report test. The source hashes below were captured immediately before the Clippy/test run and match the source revision that passed those checks:
 
 - `crates/ascii-platform/src/lib.rs`: `5cbb5ea5a0d2fd07f283050934bce27101f8dd229c963a33ba7af7e1f3589e6b`
-- `crates/ascii-platform/src/probe.rs`: `3fb29390e628317f1de7dc8bb32a7a30f5ff5ce88f17bd6f10a72e50b013945f`
+- `crates/ascii-platform/src/probe.rs`: `4546e1bb121cf662a907262c89bf1762c624df1bd3ab46eb8d65b1b0766e25d7`
 - `crates/ascii-platform/src/probe/windows.rs`: `971572e35d0d8c20fbc749b4ace1379f7d50a5de2cfd4da2d7e86e0a8737a5a4`
 - `crates/ascii-platform/tests/host_probe.rs`: `ddef24f1fb9e7a509f7a2c0d9e3c4eac4038137d78fa8cd7e5e21615b899c00c`
 
