@@ -150,8 +150,7 @@ pub fn decode_animation(
         let mut snapshot =
             zeroed_bytes(usize::try_from(encoded_len).map_err(|_| Error::SizeOverflow)?)?;
         snapshot[..prefix_len].copy_from_slice(&prefix[..prefix_len]);
-        read_snapshot_remainder(input, &mut snapshot[prefix_len..], cancel)?;
-        let result = decode_gif_snapshot(&snapshot, limits, cancel);
+        let result = decode_gif_snapshot(&snapshot, limits, cancel, || cancel.is_cancelled());
         drop(snapshot);
         drop(snapshot_permit);
         return result;
@@ -170,7 +169,7 @@ pub fn decode_animation(
         zeroed_bytes(usize::try_from(encoded_len).map_err(|_| Error::SizeOverflow)?)?;
     snapshot[..prefix_len].copy_from_slice(&prefix[..prefix_len]);
     read_snapshot_remainder(input, &mut snapshot[prefix_len..], cancel)?;
-    let result = decode_apng_snapshot(&snapshot, limits, cancel);
+    let result = decode_apng_snapshot(&snapshot, limits, cancel, || cancel.is_cancelled());
     drop(snapshot);
     drop(snapshot_permit);
     result
@@ -180,6 +179,7 @@ fn decode_apng_snapshot(
     encoded: &[u8],
     limits: &DecodeLimits,
     cancel: &CancellationToken,
+    mut is_cancelled: impl FnMut() -> bool,
 ) -> Result<Animation, Error> {
     let header = inspect_png(encoded, cancel)?;
     let (declared_frames, play_count) = header
@@ -285,7 +285,9 @@ fn decode_apng_snapshot(
     let mut frames = Vec::with_capacity(frame_count);
     let mut pending_disposal: Option<PendingApngDisposal> = None;
     for frame_index in 0..frame_count {
-        check_cancel(cancel)?;
+        if is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         let control = if frame_index == 0 {
             reader.info().frame_control().copied()
         } else {
@@ -405,6 +407,7 @@ fn decode_gif_snapshot(
     encoded: &[u8],
     limits: &DecodeLimits,
     cancel: &CancellationToken,
+    mut is_cancelled: impl FnMut() -> bool,
 ) -> Result<Animation, Error> {
     let encoded_bytes = u64::try_from(encoded.len()).map_err(|_| Error::SizeOverflow)?;
     if encoded_bytes > limits.budget.max_work_units() {
@@ -481,7 +484,9 @@ fn decode_gif_snapshot(
     let mut work_units = encoded_bytes;
 
     loop {
-        check_cancel(cancel)?;
+        if is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         let metadata = decoder
             .next_frame_info()
             .map_err(|error| map_gif_error(error, cancel))?
@@ -3553,5 +3558,37 @@ mod codec_cancellation_tests {
             ),
             Error::PermissionDenied
         );
+    }
+    #[test]
+    fn gif_cancellation_between_frames_releases_decode_resources() {
+        let palette = [0, 0, 0, 255, 0, 0];
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = gif::Encoder::new(&mut encoded, 1, 1, &palette).unwrap();
+            for _ in 0..2 {
+                let frame = gif::Frame::from_indexed_pixels(1, 1, vec![1], None);
+                encoder.write_frame(&frame).unwrap();
+            }
+        }
+
+        let resources = DecodeResources::new(1, 1 << 20);
+        let limits = DecodeLimits::new(
+            Budget::new(1 << 20, 1 << 20, 1 << 20),
+            resources.clone(),
+            8,
+            8,
+            1 << 20,
+            1 << 20,
+        );
+        let polls = Cell::new(0);
+        let result = decode_gif_snapshot(&encoded, &limits, &CancellationToken::new(), || {
+            let poll = polls.get();
+            polls.set(poll + 1);
+            poll == 1
+        });
+
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert_eq!(resources.cpu_bytes_in_use(), 0);
+        assert_eq!(resources.active_decodes(), 0);
     }
 }
