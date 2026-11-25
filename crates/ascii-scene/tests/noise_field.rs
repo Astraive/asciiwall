@@ -84,30 +84,37 @@ fn seeded_presets_repeat_and_parameters_stay_exact_v1() {
             .collect::<Vec<_>>(),
         ["cloud", "fine-noise", "terrain"]
     );
-    for preset in NOISE_FIELD_PRESETS {
+    let expected = [
+        ("cloud", 0x9589_0574_32bb_37a3, 0x6d18_0171_bde3_4b25),
+        ("fine-noise", 0xaa69_94c4_fd36_aeed, 0x6d18_0171_bde3_4b25),
+        ("terrain", 0xcc60_df6d_b371_e31f, 0x3beb_2df9_04f6_8d25),
+    ];
+    for (preset, (expected_name, expected_config, expected_cells)) in
+        NOISE_FIELD_PRESETS.iter().zip(expected)
+    {
+        assert_eq!(preset.name, expected_name, "preset order/name changed");
         let terrain = if preset.name == "terrain" {
             preset.terrain
         } else {
             None
         };
-        let first = render(
+        let cells = render(
             1,
             preset.config,
             terrain,
             SceneDimensions::new(32, 16).unwrap(),
         );
-        let second = render(
-            1,
-            preset.config,
-            terrain,
-            SceneDimensions::new(32, 16).unwrap(),
-        );
-        assert_eq!(first, second);
-        eprintln!(
-            "noise preset={} config={:016x} hash={:016x}",
-            preset.name,
+        assert_eq!(
             config_hash(preset.config),
-            hash(&first)
+            expected_config,
+            "noise preset={} configuration golden changed",
+            preset.name
+        );
+        assert_eq!(
+            hash(&cells),
+            expected_cells,
+            "noise preset={} cell golden changed",
+            preset.name
         );
     }
     assert_ne!(
