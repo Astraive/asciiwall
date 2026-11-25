@@ -14,23 +14,7 @@ pub(crate) fn validate_manifest_semantics(
 ) -> Result<(), Error> {
     for (index, author) in manifest.authors.iter().enumerate() {
         if let Some(url) = &author.url {
-            let Some((scheme, authority)) = url.split_once("://") else {
-                return Err(semantic(
-                    &format!("$.authors[{index}].url"),
-                    "author URL must use HTTP or HTTPS",
-                ));
-            };
-            let host = authority
-                .split(|character| matches!(character, '/' | '?' | '#'))
-                .next()
-                .unwrap_or_default();
-            if !matches!(scheme, "http" | "https")
-                || host.is_empty()
-                || !host.bytes().any(|byte| byte.is_ascii_alphanumeric())
-                || authority.chars().any(char::is_whitespace)
-                || authority.contains('@')
-                || url.chars().any(char::is_control)
-            {
+            if !valid_display_http_url(url) {
                 return Err(semantic(
                     &format!("$.authors[{index}].url"),
                     "author URL must be a display-only HTTP(S) URL",
@@ -322,4 +306,129 @@ fn semantic(location: &str, message: &str) -> Error {
         location: location.into(),
         message: message.into(),
     }
+}
+
+fn valid_display_http_url(url: &str) -> bool {
+    if !url.is_ascii()
+        || url
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return false;
+    }
+    let Some((scheme, remainder)) = url.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme, "http" | "https") {
+        return false;
+    }
+    let authority_end = remainder
+        .find(|character| matches!(character, '/' | '?' | '#'))
+        .unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    let suffix = &remainder[authority_end..];
+    if authority.is_empty() || authority.contains('@') || !valid_http_authority(authority) {
+        return false;
+    }
+    valid_uri_suffix(suffix)
+}
+
+fn valid_http_authority(authority: &str) -> bool {
+    if let Some(after_open) = authority.strip_prefix('[') {
+        let Some((address, remainder)) = after_open.split_once(']') else {
+            return false;
+        };
+        if address.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        return remainder.is_empty() || remainder.strip_prefix(':').is_some_and(valid_http_port);
+    }
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) if !port.contains(':') => (host, Some(port)),
+        Some(_) => return false,
+        None => (authority, None),
+    };
+    if host.is_empty() || port.is_some_and(|port| !valid_http_port(port)) {
+        return false;
+    }
+    let host = host.strip_suffix('.').unwrap_or(host);
+    !host.is_empty()
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && label
+                    .bytes()
+                    .next_back()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
+fn valid_http_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
+}
+
+fn valid_uri_suffix(suffix: &str) -> bool {
+    let (path, rest) = if suffix.starts_with('/') {
+        let end = suffix
+            .find(|character| matches!(character, '?' | '#'))
+            .unwrap_or(suffix.len());
+        (&suffix[..end], &suffix[end..])
+    } else {
+        ("", suffix)
+    };
+    if !valid_uri_component(path, true, false) {
+        return false;
+    }
+    let (query, rest) = if let Some(query) = rest.strip_prefix('?') {
+        let end = query.find('#').unwrap_or(query.len());
+        (&query[..end], &query[end..])
+    } else {
+        ("", rest)
+    };
+    if !valid_uri_component(query, true, true) {
+        return false;
+    }
+    let fragment = if let Some(fragment) = rest.strip_prefix('#') {
+        fragment
+    } else if rest.is_empty() {
+        ""
+    } else {
+        return false;
+    };
+    valid_uri_component(fragment, true, true)
+}
+
+fn valid_uri_component(value: &str, slash: bool, question: bool) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+        if !(byte.is_ascii_alphanumeric()
+            || b"-._~!$&'()*+,;=:@".contains(&byte)
+            || (slash && byte == b'/')
+            || (question && byte == b'?'))
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }

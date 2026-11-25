@@ -498,6 +498,11 @@ fn accepts_only_display_http_urls_without_fetching() {
         "{\"name\": \"Fixture Author\", \"url\": \"https://example.invalid/about\"}",
     );
     assert!(validate_manifest(https.as_bytes(), &inventory_for(https.as_bytes())).is_ok());
+    let encoded = https.replace(
+        "https://example.invalid/about",
+        "https://example.invalid/a%20b",
+    );
+    assert!(validate_manifest(encoded.as_bytes(), &inventory_for(encoded.as_bytes())).is_ok());
     let invalid = https.replace("https://example.invalid/about", "file:///secret");
     assert_eq!(
         validate_manifest(invalid.as_bytes(), &inventory_for(invalid.as_bytes()))
@@ -505,4 +510,18 @@ fn accepts_only_display_http_urls_without_fetching() {
             .kind,
         ErrorKind::Semantic
     );
+    for url in [
+        "https://example.invalid/a b",
+        "https://example.invalid/a\\u0001b",
+        "https:///about",
+        "https://example.invalid:bad/about",
+    ] {
+        let invalid = https.replace("https://example.invalid/about", url);
+        let error =
+            validate_manifest(invalid.as_bytes(), &inventory_for(invalid.as_bytes())).unwrap_err();
+        assert!(
+            matches!(error.kind, ErrorKind::Structural | ErrorKind::Semantic),
+            "invalid URL was accepted"
+        );
+    }
 }
