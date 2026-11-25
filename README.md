@@ -1,7 +1,7 @@
 # AsciiWall
 
 > **Project status:** **Early Rust implementation** alongside repository infrastructure and product specifications.
-> The workspace currently contains `ascii-core`, `ascii-convert`, and `ascii-media`, with implemented core, conversion, and PNG/JPEG image-decoding boundaries. There is no application binary or CLI, buildable installer, or distributable release; native-host, video, catalog, and profiling work is not yet implemented. See [docs/development.md](docs/development.md) for the verified boundaries and gaps.
+> The workspace currently contains `ascii-core`, `ascii-convert`, `ascii-media`, and `ascii-scene`, with implemented core, conversion, PNG/JPEG image-decoding, and bounded deterministic scene-runtime boundaries. There is no application binary or CLI, buildable installer, or distributable release; native-host, video, catalog, and profiling work is not yet implemented. See [docs/development.md](docs/development.md) for the verified boundaries and gaps.
 
 AsciiWall is a planned open-source, local-first, offline-capable desktop wallpaper application and CLI powered by an original Rust ASCII conversion, procedural scene, and `wgpu`/`egui` rendering engine. It is designed around **capability-aware native desktop adapters** (targeting Windows first, followed by independently gated macOS and named Linux X11, layer-shell Wayland, KDE Plasma, and GNOME adapters) and **declarative `.asciiwall` packages** without accounts, telemetry, hosted servers, or executable package code.
 
@@ -34,8 +34,8 @@ This repository contains project documentation, policies, tooling, and an implem
 
 | Path | Current Contents |
 | --- | --- |
-| `Cargo.toml` | Rust workspace manifest (resolver 3; members: `ascii-core`, `ascii-convert`, `ascii-media`) |
-| `crates/` | Workspace packages for core invariants, conversion, and PNG/JPEG image decoding |
+| `Cargo.toml` | Rust workspace manifest (resolver 3; members: `ascii-core`, `ascii-convert`, `ascii-media`, `ascii-scene`) |
+| `crates/` | Workspace packages for core invariants, conversion, PNG/JPEG image decoding, and bounded deterministic scene runtime |
 | `LICENSE` | MIT License (`Copyright (c) 2026 Astraive`) |
 | `docs/` | 100 original specification documents, 11 planning entrypoints, GitHub setup guide, and backlog validation/publication guides |
 | `scripts/` | `check-repository.py`, `check-conventions.py`, `check-powershell.ps1`, `validate-backlog.py`, `publish-issues.ps1`, `configure-github.ps1` |
@@ -43,7 +43,7 @@ This repository contains project documentation, policies, tooling, and an implem
 | `.githooks/` | Read-only `pre-commit` / `commit-msg` hooks and opt-in `install.ps1` ([.githooks/README.md](.githooks/README.md)) |
 | Root files | `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `GOVERNANCE.md`, `CODE_OF_CONDUCT.md`, `CHANGELOG.md`, `VERSIONING.md`, `.editorconfig`, `.gitattributes`, `.gitignore` |
 
-> **No fake scaffolds:** the workspace packages contain implemented core, conversion, and image-decoding boundaries; no application binary/CLI, installer, native host, video, catalog, or profiling package is added just to suggest completion. Planned module layouts in [docs/architecture/repository-structure.md](docs/architecture/repository-structure.md) are introduced only as real implementation milestones execute.
+> **No fake scaffolds:** the workspace packages contain implemented core, conversion, image-decoding, and bounded deterministic scene-runtime boundaries; no application binary/CLI, installer, native host, video, catalog, or profiling package is added just to suggest completion. Planned module layouts in [docs/architecture/repository-structure.md](docs/architecture/repository-structure.md) are introduced only as real implementation milestones execute.
 
 ---
 
