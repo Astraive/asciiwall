@@ -1,13 +1,15 @@
 //! Build-accurate capabilities for the statically linked image decoder.
 
-/// Image formats implemented by this decoder build.
+/// Image formats and variants reported by this decoder build.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ImageCapabilities {
-    /// PNG variants accepted by the static-image decoder.
+    /// PNG variants accepted by the still and animation decoders.
     pub png: PngCapabilities,
     /// JPEG variants accepted by the static-image decoder.
     pub jpeg: JpegCapabilities,
-    /// WebP variants accepted by the static-image decoder.
+    /// GIF variants accepted by this build.
+    pub gif: GifCapabilities,
+    /// WebP variants accepted by this build.
     pub webp: WebpCapabilities,
 }
 
@@ -35,6 +37,15 @@ pub struct JpegCapabilities {
     pub progressive: bool,
 }
 
+/// Supported GIF decode variants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GifCapabilities {
+    /// Whether a static GIF image can be decoded.
+    pub still: bool,
+    /// Whether animated GIF frames are composed.
+    pub animated: bool,
+}
+
 /// Supported WebP decode variants.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebpCapabilities {
@@ -52,8 +63,9 @@ pub struct WebpCapabilities {
 ///
 /// APNG composition supports 8-bit samples when the default PNG image is the first animation
 /// frame. It composes all APNG blend and disposal operations. 16-bit APNG, GIF, and animated WebP
-/// remain unavailable. WebP decoding is disabled until the pinned decoder's allocation behavior
-/// can be bounded by the resource ledger.
+/// remain unavailable. WebP is recognized only for safe format/animation classification; all pixel
+/// decoding remains disabled because pinned `image-webp` lossless Huffman groups exceed the memory
+/// ledger.
 #[must_use]
 pub const fn image_capabilities() -> ImageCapabilities {
     ImageCapabilities {
@@ -67,6 +79,10 @@ pub const fn image_capabilities() -> ImageCapabilities {
         jpeg: JpegCapabilities {
             baseline: true,
             progressive: true,
+        },
+        gif: GifCapabilities {
+            still: false,
+            animated: false,
         },
         webp: WebpCapabilities {
             lossy: false,

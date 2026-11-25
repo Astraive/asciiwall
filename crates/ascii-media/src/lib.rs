@@ -3,8 +3,9 @@
 //! Input is copied once into a size-bounded snapshot so codec metadata inspection and decoding
 //! cannot observe different source bytes. PNGs are checked through IEND and every chunk CRC;
 //! JPEG uses strict pure-Rust `zune-jpeg`. APNG subframes are composed into budgeted full-canvas
-//! frames with a shared normalized timeline. WebP and GIF animation are unavailable until their
-//! decoders have bounded allocation and cancellation behavior.
+//! frames with a shared normalized timeline. WebP is restricted to safe RIFF/animation
+//! classification and is not pixel-decoded; GIF animation is unavailable until its decoder can
+//! provide bounded allocation and cancellation behavior.
 
 mod animation;
 mod capabilities;
@@ -17,7 +18,8 @@ pub use animation::{
     MIN_FRAME_DURATION,
 };
 pub use capabilities::{
-    ImageCapabilities, JpegCapabilities, PngCapabilities, WebpCapabilities, image_capabilities,
+    GifCapabilities, ImageCapabilities, JpegCapabilities, PngCapabilities, WebpCapabilities,
+    image_capabilities,
 };
 pub use decoded_frame::DecodedFrame;
 pub use image::{DecodeLimits, ReadSeek, decode_animation, decode_image};

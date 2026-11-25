@@ -91,10 +91,10 @@ Area/box sampling is a practical baseline for shrink-heavy conversion. Compare a
 
 ## Input coverage
 
-This build implements PNG/JPEG and feature-gated still WebP; add GIF, APNG, and other formats
-only when the exact codec feature set and animation semantics are tested. Extensions are not
-codec guarantees. Check dimensions and allocation limits before large buffers; codec limits are
-one layer of defense, not a substitute for process budgets. [S27](../research/source-register.md#s27) [S28](../research/source-register.md#s28)
+This build decodes PNG/JPEG. WebP is recognized only for bounded RIFF structure and animation
+classification; pixel decoding remains disabled until an allocation-safe codec is available.
+Extensions are not codec guarantees. Check dimensions and allocation limits before large buffers;
+codec limits are one layer of defense, not a substitute for process budgets.
 
 ### Image decoder implementation status (IMG-001)
 
@@ -103,61 +103,53 @@ it does not open paths or URLs. The stream is copied into a size-bounded, budget
 before codec parsing so all validation and decode passes observe identical bytes. PNG handling
 uses `png` 0.18.0 and validates every chunk CRC through an exact terminal IEND. JPEG handling
 uses the strict, safe-mode pure-Rust `zune-jpeg` 0.5.5 decoder; it does not cross a native
-decoder callback boundary. Still WebP uses the direct `image-webp` 0.2.4 decoder behind the
-`ascii-media/webp` feature; the `image` 0.25.10 dependency remains for PNG/JPEG and orientation
-metadata.
+decoder callback boundary. WebP has no pixel decoder enabled: the pinned `image-webp` 0.2.4
+lossless parser derives Huffman-group allocations from untrusted meta-code IDs without bounding
+them by the canvas group grid. Current upstream main has the same issue.
 
-Published rasters are top-down and tightly packed as 8-bit RGB or straight-alpha RGBA. Gray
-samples expand to RGB; indexed PNG transparency expands to RGBA; 16-bit PNG samples are rounded
-to 8 bits. PNG Adam7, JPEG baseline/progressive, and still WebP lossy/lossless with alpha are
-supported when their build capabilities are enabled. JPEG and WebP EXIF display orientation is
-applied before enforcing output dimensions. Each `DecodedFrame` carries a copyable,
-allocation-free `ColorDescription`: accepted sRGB primaries/transfer interpretation, actual alpha
-semantics, compact source-profile provenance, and source range metadata.
+Published PNG/JPEG rasters are top-down and tightly packed as 8-bit RGB or straight-alpha RGBA.
+Gray samples expand to RGB; indexed PNG transparency expands to RGBA; 16-bit PNG samples are
+rounded to 8 bits. PNG Adam7 and JPEG baseline/progressive are supported. JPEG EXIF display
+orientation is applied before enforcing output dimensions. Each `DecodedFrame` carries a
+copyable, allocation-free `ColorDescription`: accepted sRGB primaries/transfer interpretation,
+actual alpha semantics, compact source-profile provenance, and source range metadata.
 
 `DecodeLimits` carries the core per-operation `Budget`, decoder-local encoded/scratch limits,
 dimensions, and a shared `DecodeResources` ledger for concurrent decode slots and retained
 memory. The owned input snapshot, codec scratch and temporary rasters are preflighted and
 charged before output allocation. PNG scratch includes row/inflater and reader buffers plus the
 largest non-IDAT chunk buffer; large IDAT payloads are streamed and are not counted again as
-codec scratch. JPEG scan-block work and WebP pixel/chunk work are budgeted with encoded-input
-work. WebP scratch reserves 512 KiB fixed, 32 KiB per source pixel, and two encoded-input
-extents; EXIF data is borrowed from the owned snapshot rather than copied. Retained output
-remains charged until its `DecodedFrame` is dropped; its `RasterFrameView` borrows from that
-owner. Snapshot acquisition requests at most 128 bytes per caller `Read` and checks the token
-between completed calls; cancellation cannot interrupt an underlying `Read` while it is blocked.
-Codec compressed-input reads use a 128-byte buffer, and JPEG marker/entropy FF-fill loops poll
-at 8 KiB offsets. WebP container scans poll between chunk headers. Pixel normalization polls at
-each row boundary and after each 128 pixels within a row. These checks bound work intervals but
+codec scratch. JPEG scan-block work is budgeted with encoded-input work. WebP is only a linear,
+allocation-free RIFF chunk scan and is charged as header work; no WebP pixel codec or decoder
+scratch is enabled. Retained output remains charged until its `DecodedFrame` is dropped; its
+`RasterFrameView` borrows from that owner. Snapshot acquisition requests at most 128 bytes per
+caller `Read` and checks cancellation between completed calls; a blocked underlying `Read` cannot
+be interrupted. Codec compressed-input reads use a 128-byte buffer; JPEG marker/entropy FF-fill
+loops poll at 8 KiB offsets. WebP container scans poll between chunk headers. Pixel normalization
+polls at each row boundary and after each 128 pixels within a row.
+These checks bound work intervals but
 are not CPU or I/O preemption: codec work may continue until its next poll, and a caller's
 in-progress `Read` cannot be interrupted until that call returns. Malformed input, cancellation,
 and failed budget checks release reservations without publishing partial frames.
 Codec-provided allocation limits remain defense in depth; application accounting is not an
 allocator-enforced process memory limit.
 
-Rights-cleared generated fixtures exercise PNG color/depth/interlace variants, JPEG baseline and
-progressive scans, and WebP lossy/lossless RGB and RGBA alpha plus animated-input rejection.
-Their generated configuration and SHA-256 values are printed/asserted by focused tests. The
-WebP fixtures are generated with Pillow 12.2.0/libwebp 1.6.0. Settings
-`pillow=12.2.0;libwebp=1.6.0;size=3x2;rgb=255,0,0|0,255,0|0,0,255|255,255,255|64,128,192|12,34,56;rgba=255,0,0,0|0,255,0,64|0,0,255,128|255,255,255,192|64,128,192,255|12,34,56,100;lossy=quality75,method6;lossless=quality100,method6;lossy_alpha=exact;animation=2frames,100ms,loop0`
-have SHA-256 `5a96886b8f939d20359a0cf06da1b79385170b048c1274427839ff029d4c9999`; lossy RGB
-`6572694ee1d61d75c576ac2a06814aad5d22bc764dbad28dbf80cf9d4c52a14e`, lossless RGB
-`c5328c391d6e687347f7700507725d74544f36dadadf4042dcb2bb2d2133bda2`, lossy RGBA
-`531d0a9bd04a054844397ec748604127c91e45545a8f32aff13331a9591e75e3`, lossless RGBA
-`7e0d46bb4497d2c65804e12947b5fb2ac0d621108979fccd14bc8ce91d4e52c9`, animated WebP
-`441f56c14aa8f83a84bf7f57c6624834b22de219cc6f18b363c8590e24de5280`.
-The EXIF orientation fixture uses settings `pillow=12.2.0;libwebp=1.6.0;webp=lossless-rgb-3x2;exif=TIFF-MM;IFD0.Orientation=SHORT,count1,value6`,
-SHA-256 `6e99fb4f37eedf4c8ce8c3cc125c84baa0a5f278909fb6b9ced55da47becef6b`; fixture
-SHA-256 `9de5e8fc73091d2ade011874871beb6c6a37110faf7e839269e3a0a8d83eb6e5`.
+Rights-cleared generated fixtures exercise PNG color/depth/interlace variants and JPEG baseline
+and progressive scans. A valid two-frame WebP fixture generated with Pillow 12.2.0/libwebp 1.6.0
+(`2frames,100ms,loop0`, SHA-256
+`441f56c14aa8f83a84bf7f57c6624834b22de219cc6f18b363c8590e24de5280`) verifies animation
+classification only; WebP pixel decoding is disabled and no still-variant fixture is claimed as
+decoded evidence. A malformed odd-sized RIFF chunk with nonzero padding is rejected.
+
 These fixture checks do not imply native-codec, performance, or platform-support claims.
 ### Image capability contract (IMG-002)
 
-`ascii-media::image_capabilities()` reports this build's static decoder variants: still PNG,
-baseline/progressive JPEG, and, with the default `webp` feature, still WebP lossy/lossless and
-alpha variants. APNG and animated WebP are disabled; APNG support is represented solely by
-`png.animated`. The pinned direct `image-webp` 0.2.4 decoder inspects animation before pixel
-decode and returns `Unsupported(AnimatedImage)` rather than publishing the first frame. A build
-without the `webp` feature reports all WebP still variants disabled.
+`ascii-media::image_capabilities()` reports still PNG and baseline/progressive JPEG as enabled.
+APNG and all WebP pixel-decoding variants are disabled. The WebP classifier validates RIFF
+extents, chunk bounds, and zero padding, and returns `Unsupported(AnimatedImage)` for animation
+markers before any pixel-decoding path. WebP remains disabled because the pinned upstream
+`image-webp` 0.2.4 lossless decoder can allocate Huffman groups based on untrusted meta-code IDs
+without bounding them to the canvas group grid; a safe scratch/work bound is not established.
 
 JPEG display orientation is applied once while producing the normalized top-down raster. The
 returned `RasterFrameView` carries `RasterOrientation::TopDown`; consumers must use that pixel
@@ -171,16 +163,15 @@ The repository currently has no CLI doctor or import-error surface to consume th
 report. Those user-facing diagnostics remain blocked until those product surfaces exist; callers
 can query the media-library API in the meantime.
 
-For accepted PNG, JPEG, and WebP, `ColorDescription::source_profile()` distinguishes observed
-sRGB metadata from untagged data handled under the documented sRGB assumption. PNG sample range
-is full; JPEG and WebP source range is unspecified because these decoders have no authoritative
-range tag. WebP alpha is preserved as straight alpha. Untagged values are not claimed to have
-undergone profile conversion. Embedded ICC, uncalibrated/unknown EXIF color space, non-sRGB PNG
-`gAMA`/`cHRM`, and unsupported transfer/HDR metadata fail with typed color-description errors;
-no ICC or HDR conversion accuracy is claimed.
+For accepted PNG and JPEG, `ColorDescription::source_profile()` distinguishes observed sRGB
+metadata from untagged data handled under the documented sRGB assumption. PNG sample range is
+full; JPEG source range is unspecified because the decoder has no authoritative range tag.
+Untagged values are not claimed to have undergone profile conversion. Embedded ICC,
+uncalibrated/unknown EXIF color space, non-sRGB PNG `gAMA`/`cHRM`, and unsupported transfer/HDR
+metadata fail with typed color-description errors; no ICC or HDR conversion accuracy is claimed.
 
-Animated-image routing remains blocked: no animation handler exists in the current repository.
-The static decoder classifies animated WebP as `Unsupported(AnimatedImage)` before `read_image`,
-so no first frame can enter the still-image path. A future IMG-003 integration must handle that
-typed signal and route frames through timeline/composition, disposal/blend, cancellation, and
-bounded-history semantics.
+The bounded WebP classifier recognizes animation markers and returns
+`Unsupported(AnimatedImage)` without publishing pixels. Animated-image routing remains blocked
+because no animation handler exists in the current repository. A future IMG-003 integration must
+handle that typed signal and route frames through timeline/composition, disposal/blend,
+cancellation, and bounded-history semantics.

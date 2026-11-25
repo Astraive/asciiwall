@@ -1,49 +1,15 @@
 use std::io::Cursor;
 
-#[cfg(feature = "webp")]
-use ascii_core::{AlphaMode, ColorRange, SourceProfile};
 use ascii_core::{Budget, CancellationToken, Error, MalformedReason, UnsupportedReason};
 use ascii_media::{DecodeLimits, DecodeResources, decode_image, image_capabilities};
-#[cfg(feature = "webp")]
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "webp")]
-const WEBP_LOSSY_RGB_HEX: &str = concat!(
-    "5249464652000000574542505650382046000000b001009d012a030002000200",
-    "3425a80274010efe02ec00fede3fbbb403cf6a53533d23944ac7ff26dfa6afc9",
-    "dfc9bffff20cff9abe9abf277f26ffaa976b48591b180b640000",
-);
-#[cfg(feature = "webp")]
-const WEBP_LOSSLESS_RGB_HEX: &str = concat!(
-    "524946462e000000574542505650384c210000002f024000001008105a943ab7",
-    "2110200488f23f452040c892ef4cff8319e0bf520100",
-);
-#[cfg(feature = "webp")]
-const WEBP_LOSSY_RGBA_HEX: &str = concat!(
-    "524946467400000057454250565038580a00000010000000020000010000414c",
-    "50480700000000004080c0ff64005650382046000000d001009d012a03000200",
-    "02003425a80274010efe038e0000fede3fbbb403cf6a53533d23944ac7ff43cc",
-    "a67e7ffc9bffff380fff80a6c7cfff937fe2bdeeb7e4e6f474abdc00",
-);
-#[cfg(feature = "webp")]
-const WEBP_LOSSLESS_RGBA_HEX: &str = concat!(
-    "5249464638000000574542505650384c2b0000002f024000101008105a943ab7",
-    "2110200488f23f452040c892ef0c41004968c10c32da6607c320dc7fd5d50000",
-);
-#[cfg(feature = "webp")]
 const WEBP_ANIMATED_HEX: &str = concat!(
     "524946468200000057454250565038580a00000012000000020000010000414e",
     "494d06000000000000000000414e4d4626000000000000000000020000010000",
     "640000025650384c0e0000002f02400000b98ce87f20e63f2202414e4d462800",
     "0000000000000000020000010000640000025650384c0f0000002f0240001000",
     "08c2ffb689e87f015300",
-);
-#[cfg(feature = "webp")]
-const WEBP_ORIENTATION_HEX: &str = concat!(
-    "524946466200000057454250565038580a000000080000000200000100005650",
-    "384c210000002f024000001008105a943ab72110200488f23f452040c892ef4c",
-    "ff8319e0bf520100455849461a0000004d4d002a000000080001011200030000",
-    "00010006000000000000",
 );
 
 fn limits() -> DecodeLimits {
@@ -57,7 +23,6 @@ fn limits() -> DecodeLimits {
     )
 }
 
-#[cfg(feature = "webp")]
 fn bytes_from_hex(hex: &str) -> Vec<u8> {
     assert_eq!(hex.len() % 2, 0);
     hex.as_bytes()
@@ -66,7 +31,6 @@ fn bytes_from_hex(hex: &str) -> Vec<u8> {
         .collect()
 }
 
-#[cfg(feature = "webp")]
 fn checked_fixture(name: &str, hex: &str, expected_sha256: &str) -> Vec<u8> {
     let bytes = bytes_from_hex(hex);
     let digest = format!("{:x}", Sha256::digest(&bytes));
@@ -85,75 +49,22 @@ fn decode(bytes: &[u8]) -> Result<ascii_media::DecodedFrame, Error> {
 
 #[test]
 fn malformed_webp_container_is_rejected() {
-    let expected = if cfg!(feature = "webp") {
-        Error::Malformed(MalformedReason::InvalidEncodedData)
-    } else {
-        Error::Unsupported(UnsupportedReason::UnsupportedFormat)
-    };
-    match decode(b"RIFF\0\0\0\0WEBP") {
-        Err(error) => assert_eq!(error, expected),
-        Ok(_) => panic!("invalid RIFF extent unexpectedly published an image"),
-    }
-}
-
-#[cfg(feature = "webp")]
-#[test]
-fn still_webp_is_disabled_until_decoder_allocations_are_bounded() {
-    const SETTINGS: &str = "pillow=12.2.0;libwebp=1.6.0;size=3x2;rgb=255,0,0|0,255,0|0,0,255|255,255,255|64,128,192|12,34,56;rgba=255,0,0,0|0,255,0,64|0,0,255,128|255,255,255,192|64,128,192,255|12,34,56,100;lossy=quality75,method6;lossless=quality100,method6;lossy_alpha=exact;animation=2frames,100ms,loop0";
-    println!(
-        "WebP fixture settings_sha256={:x} settings={SETTINGS}",
-        Sha256::digest(SETTINGS.as_bytes())
-    );
-    for (name, hex, hash) in [
-        (
-            "lossy_rgb",
-            WEBP_LOSSY_RGB_HEX,
-            "6572694ee1d61d75c576ac2a06814aad5d22bc764dbad28dbf80cf9d4c52a14e",
-        ),
-        (
-            "lossless_rgb",
-            WEBP_LOSSLESS_RGB_HEX,
-            "c5328c391d6e687347f7700507725d74544f36dadadf4042dcb2bb2d2133bda2",
-        ),
-        (
-            "lossy_rgba",
-            WEBP_LOSSY_RGBA_HEX,
-            "531d0a9bd04a054844397ec748604127c91e45545a8f32aff13331a9591e75e3",
-        ),
-        (
-            "lossless_rgba",
-            WEBP_LOSSLESS_RGBA_HEX,
-            "7e0d46bb4497d2c65804e12947b5fb2ac0d621108979fccd14bc8ce91d4e52c9",
-        ),
-    ] {
-        let bytes = checked_fixture(name, hex, hash);
-        assert!(matches!(
-            decode(&bytes),
-            Err(Error::Unsupported(UnsupportedReason::UnsupportedFormat))
-        ));
-    }
-}
-
-#[cfg(feature = "webp")]
-#[test]
-fn webp_exif_orientation_fixture_is_rejected_while_feature_is_disabled() {
-    const SETTINGS: &str = "pillow=12.2.0;libwebp=1.6.0;webp=lossless-rgb-3x2;exif=TIFF-MM;IFD0.Orientation=SHORT,count1,value6";
-    println!(
-        "WebP orientation settings_sha256={:x} settings={SETTINGS}",
-        Sha256::digest(SETTINGS.as_bytes())
-    );
-    let bytes = checked_fixture(
-        "orientation_6",
-        WEBP_ORIENTATION_HEX,
-        "9de5e8fc73091d2ade011874871beb6c6a37110faf7e839269e3a0a8d83eb6e5",
-    );
     assert!(matches!(
-        decode(&bytes),
-        Err(Error::Unsupported(UnsupportedReason::UnsupportedFormat))
+        decode(b"RIFF\0\0\0\0WEBP"),
+        Err(Error::Malformed(MalformedReason::InvalidEncodedData))
     ));
 }
 
-#[cfg(feature = "webp")]
+
+#[test]
+fn nonzero_odd_riff_chunk_padding_is_rejected() {
+    let fixture = b"RIFF\x0e\0\0\0WEBPJUNK\x01\0\0\0\0\x01";
+    assert!(matches!(
+        decode(fixture),
+        Err(Error::Malformed(MalformedReason::InvalidEncodedData))
+    ));
+}
+
 #[test]
 fn animated_webp_is_identified_without_publishing_a_static_frame() {
     let bytes = checked_fixture(
@@ -177,6 +88,8 @@ fn reports_only_variants_implemented_by_this_build() {
     assert!(!capabilities.png.apng_16bit);
     assert!(!capabilities.png.apng_separate_default_image);
     assert!(capabilities.jpeg.baseline);
+    assert!(!capabilities.gif.still);
+    assert!(!capabilities.gif.animated);
     assert!(capabilities.jpeg.progressive);
     assert!(!capabilities.webp.lossy);
     assert!(!capabilities.webp.lossless);

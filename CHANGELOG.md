@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, feature-gated PNG/JPEG/still-WebP decoding, and the bounded `ascii-scene` runtime. **No application binary or published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, PNG/JPEG decoding with WebP RIFF classification only, and the bounded `ascii-scene` runtime. **No application binary or published release tag exists yet.**
 
 ### Added
 
@@ -23,8 +23,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Bounded `ascii-convert` glyph tables with measured cell-clipped masks, descriptors, deterministic fingerprints, and typed font-validation failures ([FNT-001](docs/engine/glyph-matching-and-fonts.md)).
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
-- Added a build-accurate `ascii-media::image_capabilities()` report for PNG/JPEG and feature-gated still WebP lossy/lossless/alpha variants; APNG and animated WebP remain disabled (`[IMG-002]`).
-- Added budgeted still WebP decoding with typed animated-input classification, ICC rejection, and rights-cleared Pillow/libwebp lossy/lossless/alpha fixtures (`[IMG-002]`).
+- Added a build-accurate `ascii-media::image_capabilities()` report for PNG/JPEG; APNG and all WebP pixel-decoding variants are disabled (`[IMG-002]`).
+- Added bounded WebP RIFF chunk/padding validation and animated-input classification without decoding pixels; disabled the pinned WebP codec because lossless meta-codes can request unbounded Huffman-group allocations (`[IMG-002]`).
 - Consolidated APNG support into the single `png.animated` capability flag to prevent contradictory reports (`[IMG-002]`).
 - Added allocation-free source-profile/range provenance to `ColorDescription`/`DecodedFrame`; unsupported profiles and ranges remain typed capability errors without ICC/HDR conversion (`[IMG-002]`).
 - Kept generic `ColorDescription::srgb()` provenance unspecified and made malformed EXIF Orientation/ExifIFD metadata fail with typed encoded-data errors instead of silent fallback (`[IMG-002]`).
