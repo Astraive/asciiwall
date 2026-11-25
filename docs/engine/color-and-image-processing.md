@@ -83,9 +83,15 @@ black. Ordinary opaque wallpaper continues to use its existing opaque-background
 
 ## Palettes
 
-Support original per-cell color, monochrome foreground/background, fixed palettes, ANSI-16, ANSI-256, and user gradients. Palette matching space is a configurable algorithm choice; do not confuse a named terminal palette with the actual colors a user's terminal may display. PNG export uses explicit colors, while ANSI export is subject to terminal interpretation.
+`ConversionSettings::with_color_fit` adds color fitting to the existing density conversion; leaving it unset preserves density-only output. The validated palette modes are original sampled color, an explicit monochrome pair, an ordered fixed palette, canonical xterm ANSI-16/ANSI-256 colors, and a user gradient. `PaletteDistanceSpace::LinearRgb` compares squared Euclidean distance in linear-light RGB. `PaletteDistanceSpace::EncodedSrgb` compares normalized sRGB8 output bytes after quantization. Fixed and ANSI ties select the earliest palette entry.
 
-Background/foreground separation can be a single fixed background for speed or a two-color cell fit for quality. The latter must evaluate the character mask and color solution together; selecting a glyph only by average brightness then changing both colors can undermine its meaning.
+Gradient stops are finite, lie in `[0, 1]`, are strictly increasing, and must include positions `0` and `1`. Positions are unique, while repeated colors at distinct positions are valid. Gradients interpolate in linear-light RGB. Linear-RGB matching projects onto every segment; encoded-sRGB matching uses bounded global search and returns a result within `1e-6` of the global minimum, retaining the earliest segment for ties within that search tolerance. If bounded work cannot establish the tolerance, resolution fails rather than returning an unchecked approximation. Empty, malformed, nonfinite, unordered, or over-limit definitions return typed errors.
+
+Color fitting compares each glyph using its own mask and resolved colors. For row-major cell samples `C(p)` and byte coverage `M(p) = coverage(p) / 255`, it minimizes mean squared error across pixels and linear RGB channels for `R(p) = B + (F - B)M(p)`. Fixed-background fitting holds the requested background fixed (or resolves it to the selected palette) and solves the foreground. Two-color least squares solves each channel with foreground and background clamped to `[0, 1]`; empty, full, and near-degenerate masks deterministically use the sampled channel mean for both colors. A glyph is selected only after scoring its fitted colors, with stable glyph-index/Unicode tie-breaking.
+
+Palette storage, source sampling, candidate fitting, and frame construction are preflighted against checked operation budgets; cancellation or a failed limit publishes no partial frame. Fixed palettes are capped at 4,096 colors, gradients at 128 stops, and one color-fit patch at 65,536 samples, with lower effective limits where the work budget requires them. A detailed conversion retains the palette kind and cache identity, selected strategy, and—when using ANSI palettes—a notice that names in the xterm table do not determine actual terminal appearance.
+
+The frame stores explicit resolved sRGBA8 foreground and background colors, so downstream image encoders can consume those colors directly. This conversion contract does not implement a PNG exporter, GUI, terminal renderer, or promise of terminal appearance; the ANSI notice is metadata, not a display guarantee.
 
 ## Filtering and edges
 

@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, the `ascii-convert` glyph-table implementation, and PNG/JPEG image decoding. **No application binary or published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, PNG/JPEG decoding, and the bounded `ascii-scene` runtime. **No application binary or published release tag exists yet.**
 
 ### Added
 
@@ -25,6 +25,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
 - [CNV-007] Bounded patch coverage/gradient/orientation descriptors, glyph-cell-resolution candidate comparisons, normalized weighted glyph shortlists, reusable cancellation-safe scratch, and semantic candidate identity, with source-generated deterministic matcher regressions.
+- Added bounded original, monochrome, fixed, ANSI-16/ANSI-256, and gradient palette resolution plus glyph-specific fixed-background and two-color least-squares fitting with explicit resolved cell colors, typed errors, cancellation, and operation-budget accounting ([CNV-005]).
+- Added the first-party `ascii-scene` SCN-001 contract: validated typed parameters and descriptor limits, a sealed executable generator trait with generic `SceneRuntime`, SplitMix64 node/effect streams, bounded Q16.16 simulation, reusable character buffers, capability-filtered snapshots, deterministic normalized-pointer attraction and recorded-event replay, aggregate resource reservations, and exact-step export with explicit idle fallback. No CFG/PKG schema, application UI, wallpaper, thumbnail, or native consumer is added.
 
 ### Changed
 
