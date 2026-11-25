@@ -682,14 +682,17 @@ fn limits_and_ownership_cancel_and_errors_release_all_ledger_permits() {
     assert_eq!(resources.cpu_bytes_in_use(), 0);
     assert_eq!(resources.active_decodes(), 0);
 
+    let jpeg = jpeg(1, 1, &[20, 40, 60]);
     let frame = decode_image(
-        &mut Cursor::new(&bytes),
+        &mut Cursor::new(&jpeg),
         &decode_limits,
         &CancellationToken::new(),
     )
     .unwrap();
+    assert_eq!((frame.width(), frame.height()), (1, 1));
     drop(frame);
     assert_eq!(resources.cpu_bytes_in_use(), 0);
+    assert_eq!(resources.active_decodes(), 0);
 }
 
 struct BlockingInput<'a> {
