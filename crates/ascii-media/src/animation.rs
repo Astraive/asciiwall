@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use ascii_core::{BudgetKind, Error, MalformedReason};
+
 use crate::DecodedFrame;
 
 /// Minimum presentation time assigned to an APNG frame, including zero-delay frames.
@@ -58,21 +60,26 @@ impl Animation {
     pub(crate) fn from_composed_frames(
         frames: Vec<(DecodedFrame, Duration)>,
         loops: AnimationLoops,
-    ) -> Option<Self> {
-        if frames.is_empty() || frames.len() > MAX_ANIMATION_FRAMES {
-            return None;
+    ) -> Result<Self, Error> {
+        if frames.is_empty() {
+            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+        }
+        if frames.len() > MAX_ANIMATION_FRAMES {
+            return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
         }
         if matches!(loops, AnimationLoops::Finite(0)) {
-            return None;
+            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
         }
 
         let mut timeline = Vec::with_capacity(frames.len());
         let mut presentation_time = Duration::ZERO;
         for (image, raw_duration) in frames {
             let duration = raw_duration.max(MIN_FRAME_DURATION);
-            let next_time = presentation_time.checked_add(duration)?;
+            let next_time = presentation_time
+                .checked_add(duration)
+                .ok_or(Error::SizeOverflow)?;
             if next_time > MAX_ANIMATION_DURATION {
-                return None;
+                return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
             }
             timeline.push(AnimationFrame {
                 image,
@@ -82,7 +89,7 @@ impl Animation {
             presentation_time = next_time;
         }
 
-        Some(Self {
+        Ok(Self {
             frames: timeline,
             loops,
             loop_duration: presentation_time,

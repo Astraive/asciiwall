@@ -39,6 +39,7 @@ return typed unsupported errors. WebP is also disabled for still decoding until 
 allocation behavior is bounded by the resource ledger. No CLI doctor/import surface exists yet, and
 the library API is not currently wired to application preview/export; those acceptance items remain
 open. Do not infer support from the format's extension or from still-image capabilities.
+
 ## Hardware decoding
 
 Begin with a well-tested CPU decode path and downsample to the needed analysis resolution. Evaluate hardware decode separately on each backend. Hardware-to-CPU readback can erase a speed gain when conversion remains CPU-based. Zero-copy interop across FFmpeg and wgpu is a future platform-specific optimization, not a version-one guarantee.

@@ -91,10 +91,11 @@ Area/box sampling is a practical baseline for shrink-heavy conversion. Compare a
 
 ## Input coverage
 
-This build decodes PNG/JPEG. WebP is recognized only for bounded RIFF structure and animation
-classification; pixel decoding remains disabled until an allocation-safe codec is available.
-Extensions are not codec guarantees. Check dimensions and allocation limits before large buffers;
-codec limits are one layer of defense, not a substitute for process budgets.
+This build decodes PNG/JPEG and composes the documented 8-bit APNG subset. WebP is recognized
+only for bounded RIFF structure and animation classification; pixel decoding remains disabled
+until an allocation-safe codec is available. GIF remains unsupported. Extensions are not codec
+guarantees. Check dimensions and allocation limits before large buffers; codec limits are one
+layer of defense, not a substitute for process budgets.
 
 ### Image decoder implementation status (IMG-001)
 
@@ -145,11 +146,12 @@ These fixture checks do not imply native-codec, performance, or platform-support
 ### Image capability contract (IMG-002)
 
 `ascii-media::image_capabilities()` reports still PNG and baseline/progressive JPEG as enabled.
-APNG and all WebP pixel-decoding variants are disabled. The WebP classifier validates RIFF
-extents, chunk bounds, and zero padding, and returns `Unsupported(AnimatedImage)` for animation
-markers before any pixel-decoding path. WebP remains disabled because the pinned upstream
-`image-webp` 0.2.4 lossless decoder can allocate Huffman groups based on untrusted meta-code IDs
-without bounding them to the canvas group grid; a safe scratch/work bound is not established.
+APNG composition supports 8-bit samples when its default PNG image is the first animation frame;
+16-bit APNG and a separate default image are disabled. WebP pixel-decoding variants remain
+disabled. The WebP classifier validates RIFF extents, chunk bounds, and zero padding, and returns
+`Unsupported(AnimatedImage)` for animation markers before any pixel-decoding path. WebP remains
+disabled because the pinned upstream `image-webp` 0.2.4 lossless decoder can allocate Huffman
+groups based on untrusted meta-code IDs without bounding them to the canvas group grid.
 
 JPEG display orientation is applied once while producing the normalized top-down raster. The
 returned `RasterFrameView` carries `RasterOrientation::TopDown`; consumers must use that pixel
@@ -163,15 +165,18 @@ The repository currently has no CLI doctor or import-error surface to consume th
 report. Those user-facing diagnostics remain blocked until those product surfaces exist; callers
 can query the media-library API in the meantime.
 
-For accepted PNG and JPEG, `ColorDescription::source_profile()` distinguishes observed sRGB
-metadata from untagged data handled under the documented sRGB assumption. PNG sample range is
-full; JPEG source range is unspecified because the decoder has no authoritative range tag.
-Untagged values are not claimed to have undergone profile conversion. Embedded ICC,
-uncalibrated/unknown EXIF color space, non-sRGB PNG `gAMA`/`cHRM`, and unsupported transfer/HDR
-metadata fail with typed color-description errors; no ICC or HDR conversion accuracy is claimed.
+For accepted PNG, JPEG, and APNG, `ColorDescription::source_profile()` distinguishes observed
+sRGB metadata from untagged data handled under the documented sRGB assumption. PNG/APNG sample
+range is full; JPEG source range is unspecified because the decoder has no authoritative range
+tag. APNG output is straight-alpha RGBA; orientation is applied once to the complete canvas after
+frame composition. Embedded ICC, uncalibrated/unknown EXIF color space, non-sRGB PNG
+`gAMA`/`cHRM`, and unsupported transfer/HDR metadata fail with typed color-description errors; no
+ICC or HDR conversion accuracy is claimed.
 
-The bounded WebP classifier recognizes animation markers and returns
-`Unsupported(AnimatedImage)` without publishing pixels. Animated-image routing remains blocked
-because no animation handler exists in the current repository. A future IMG-003 integration must
-handle that typed signal and route frames through timeline/composition, disposal/blend,
-cancellation, and bounded-history semantics.
+`ascii-media::decode_animation` shares a normalized APNG timeline with deterministic
+`Animation::frame_at` selection. It applies a 10 ms minimum delay, bounds each loop to 24 hours and
+256 frames, and accounts canvas, restore history, decoder scratch, and retained output against
+`DecodeLimits`/`DecodeResources`. It supports 8-bit participating-default-image APNG source and
+over blends and none/background/previous disposal. 16-bit and separate-default-image APNG,
+animated WebP, and GIF are typed unsupported. No CLI doctor/import-error surface or application
+preview/export consumer exists yet, so those acceptance criteria remain open.
