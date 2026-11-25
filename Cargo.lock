@@ -87,6 +87,7 @@ name = "ascii-package"
 version = "0.1.0"
 dependencies = [
  "ascii-config",
+ "ascii-core",
  "jsonschema",
  "serde",
  "serde_json",

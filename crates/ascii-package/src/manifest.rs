@@ -210,10 +210,12 @@ pub enum SceneNode {
         id: String,
         params: WindowAvoidParams,
     },
+    #[serde(rename = "trails")]
     Trails {
         id: String,
         params: TrailsParams,
     },
+    #[serde(rename = "composite")]
     Composite {
         id: String,
         params: CompositeParams,
