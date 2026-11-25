@@ -17,6 +17,7 @@ pub enum ErrorKind {
     UnsupportedSceneVersion,
     SchemaDefinition,
     InventoryMismatch,
+    Semantic,
 }
 
 /// Validates scene structure and its bounded, declarative parameter values.
@@ -101,7 +102,8 @@ pub fn validate_manifest(
     validate_schema(manifest_validator()?, &document, "manifest")?;
     let manifest: Manifest = serde_json::from_value(document)
         .map_err(|_| structural("$", "manifest type conversion failed"))?;
-    validate_asset_inventory(&manifest, inventory)?;
+    crate::manifest_semantics::validate_manifest_semantics(&manifest, inventory)?;
+    crate::manifest_semantics::validate_asset_inventory(bytes, &manifest, inventory)?;
     Ok(ValidatedManifest { manifest })
 }
 
@@ -160,41 +162,6 @@ fn structural(location: &str, message: &str) -> Error {
         location: location.into(),
         message: message.into(),
     }
-}
-
-fn validate_asset_inventory(manifest: &Manifest, inventory: &AssetInventory) -> Result<(), Error> {
-    let mut declared = std::collections::BTreeSet::new();
-    for (index, asset) in manifest.assets.iter().enumerate() {
-        if !declared.insert(asset.path.as_str()) {
-            return Err(Error {
-                kind: ErrorKind::InventoryMismatch,
-                location: format!("$.assets[{index}].path"),
-                message: "asset paths must be unique".into(),
-            });
-        }
-        let Some(actual) = inventory.assets.get(&asset.path) else {
-            return Err(Error {
-                kind: ErrorKind::InventoryMismatch,
-                location: format!("$.assets[{index}].path"),
-                message: "declared asset is missing from inventory".into(),
-            });
-        };
-        if actual.size != asset.size || actual.sha256 != asset.sha256 {
-            return Err(Error {
-                kind: ErrorKind::InventoryMismatch,
-                location: format!("$.assets[{index}]"),
-                message: "declared asset size or digest differs from inventory".into(),
-            });
-        }
-    }
-    if declared.len() != inventory.assets.len() {
-        return Err(Error {
-            kind: ErrorKind::InventoryMismatch,
-            location: "$.assets".into(),
-            message: "inventory contains undeclared or duplicate asset records".into(),
-        });
-    }
-    Ok(())
 }
 
 static MANIFEST_VALIDATOR: LazyLock<Result<jsonschema::Validator, String>> =
