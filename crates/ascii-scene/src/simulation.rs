@@ -117,7 +117,7 @@ impl FixedStepSimulation {
         elapsed: Duration,
         parameters: SceneParameters,
     ) -> Result<AdvanceReport, Error> {
-        if !parameters.background_motion() || parameters.time_scale_q16() == 0 {
+        if parameters.is_static() {
             self.accumulator_units = 0;
             return Ok(AdvanceReport {
                 simulation_steps: 0,
@@ -162,6 +162,23 @@ impl FixedStepSimulation {
         })
     }
 
+    pub(crate) fn advance_exact_steps(
+        &mut self,
+        steps: u64,
+        simulation_hz: u16,
+    ) -> Result<impl Iterator<Item = FixedStepContext>, Error> {
+        let final_step_index = self
+            .step_index
+            .checked_add(steps)
+            .ok_or(Error::SizeOverflow)?;
+        let first_step_index = self.step_index;
+        self.accumulator_units = 0;
+        self.step_index = final_step_index;
+        Ok((1..=steps).map(move |offset| FixedStepContext {
+            step_index: first_step_index + offset,
+            simulation_hz,
+        }))
+    }
     pub(crate) fn contexts(
         self,
         report: AdvanceReport,

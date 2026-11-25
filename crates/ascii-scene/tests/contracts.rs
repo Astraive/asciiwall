@@ -494,6 +494,13 @@ fn export_records_normalized_events_or_requires_an_explicit_idle_fallback() {
     assert_eq!(export.font_identity(), [1; 32]);
     assert!(matches!(export.signal_track(), ExportSignalTrack::Recorded(track) if track == events));
 
+    let event_budget = SceneResourceBudget::default();
+    assert!(matches!(
+        export.execute_frame(SceneDimensions::new(16, 8).unwrap(), 3, &event_budget),
+        Err(Error::Malformed(MalformedReason::InvalidConfiguration))
+    ));
+    assert_eq!(event_budget.reserved_bytes(), 0);
+
     let unordered = [events[2], events[0]];
     assert_eq!(
         ExportContext::new(
@@ -518,7 +525,46 @@ fn export_records_normalized_events_or_requires_an_explicit_idle_fallback() {
         idle.signal_track(),
         ExportSignalTrack::IdleFallback
     ));
+    let budget = SceneResourceBudget::default();
+    assert!(matches!(
+        idle.execute_frame(SceneDimensions::new(1, 1).unwrap(), 1_000_001, &budget),
+        Err(Error::BudgetExceeded(BudgetKind::WorkUnits))
+    ));
+    assert_eq!(budget.reserved_bytes(), 0);
 }
+#[test]
+fn identical_export_contexts_execute_exact_cells_for_seed_extremes() {
+    let dimensions = SceneDimensions::new(32, 16).unwrap();
+    let budget = SceneResourceBudget::default();
+
+    for seed in [0, u32::MAX] {
+        let context = || {
+            ExportContext::new(
+                parameters(seed, 1.0, 64, true),
+                1_735_689_600_000,
+                [0xA5; 32],
+                [0x5A; 32],
+                ExportSignalTrack::IdleFallback,
+            )
+            .unwrap()
+        };
+        let first = context().execute_frame(dimensions, 600, &budget).unwrap();
+        let second = context().execute_frame(dimensions, 600, &budget).unwrap();
+
+        assert_eq!(first.cells(), second.cells());
+        assert_eq!(first.step_index(), 600);
+        assert_eq!(first.parameters().seed(), seed);
+        assert_eq!(u32::from_le_bytes(first.seed_le_bytes()), seed);
+        assert_eq!(first.selected_start_timestamp_unix_ms(), 1_735_689_600_000);
+        assert_eq!(first.settings_fingerprint(), [0xA5; 32]);
+        assert_eq!(first.font_identity(), [0x5A; 32]);
+        assert!(matches!(
+            first.signal_track(),
+            ExportSignalTrack::IdleFallback
+        ));
+    }
+}
+
 #[test]
 fn aggregate_budget_rejects_the_next_runtime_without_leaking_a_reservation() {
     let parameters = parameters(1, 1.0, 2_000, true);

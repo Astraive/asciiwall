@@ -23,7 +23,8 @@ pub use determinism::{
     derive_node_seed,
 };
 pub use export::{
-    ExportContext, ExportSignalTrack, MAX_RECORDED_EVENTS, RecordedEvent, RecordedEventKind,
+    ExportContext, ExportSignalTrack, ExportedFrame, MAX_RECORDED_EVENTS, RecordedEvent,
+    RecordedEventKind,
 };
 pub use generator::{ParticleFieldGenerator, STARFIELD_NODE_ID, SceneGenerator, SceneRuntime};
 pub use params::{
