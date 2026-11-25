@@ -24,7 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
-- Added the first-party `ascii-scene` SCN-001 contract: validated typed parameters and descriptor limits, SplitMix64 node/effect streams, bounded Q16.16 fixed-step particle generation, reusable character buffers, capability-filtered snapshots, aggregate resource reservations, and deterministic export context. No CFG/PKG schema, application UI, wallpaper, thumbnail, or native consumer is added.
+- Added the first-party `ascii-scene` SCN-001 contract: validated typed parameters and descriptor limits, SplitMix64 node/effect streams, bounded Q16.16 fixed-step particle generation, reusable character buffers, capability-filtered snapshots, aggregate resource reservations, and exact-step deterministic export execution with explicit idle/empty-track policy. No CFG/PKG schema, application UI, wallpaper, thumbnail, or native consumer is added.
 
 ### Changed
 

@@ -268,6 +268,26 @@ impl<'a> SceneRuntime<'a> {
         Ok(report.with_output_refreshed(output_refreshed))
     }
 
+    pub(crate) fn advance_exact_steps(&mut self, requested_steps: u64) -> Result<(), Error> {
+        let simulation_steps = if self.parameters.is_static() {
+            0
+        } else {
+            requested_steps
+        };
+        let snapshots = ApprovedSnapshots::empty();
+        for context in self
+            .simulation
+            .advance_exact_steps(simulation_steps, self.parameters.simulation_hz())?
+        {
+            self.generator
+                .step(context, self.dimensions, &self.parameters, &snapshots);
+        }
+        if simulation_steps > 0 {
+            self.generator.render(self.dimensions, &mut self.frame);
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub const fn parameters(&self) -> SceneParameters {
         self.parameters

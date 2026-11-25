@@ -136,6 +136,10 @@ impl SceneParameters {
         self.background_motion
     }
 
+    pub(crate) const fn is_static(self) -> bool {
+        !self.background_motion || self.time_scale_q16 == 0
+    }
+
     /// Returns a checked logical allocation and per-advance work estimate for this runtime.
     pub fn estimate_resources(
         self,
@@ -149,7 +153,7 @@ impl SceneParameters {
         let character_bytes = (dimensions.cell_count() as u64)
             .checked_mul(core::mem::size_of::<char>() as u64)
             .ok_or(Error::SizeOverflow)?;
-        let work_units = if !self.background_motion || self.time_scale_q16 == 0 {
+        let work_units = if self.is_static() {
             0
         } else {
             let particle_passes = u64::from(max_catch_up_steps)
