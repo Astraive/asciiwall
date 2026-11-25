@@ -13,7 +13,7 @@ use ascii_core::{Budget, CancellationToken};
 use ascii_scene::{
     ApprovedSnapshots, NormalizedPoint, SceneDimensions, SceneParameters, SceneResourceBudget,
     SceneRuntime, SnapshotCandidates, SnapshotCapabilities, WaveFieldConfig, WaveFieldGenerator,
-    WAVE_FIELD_PRESETS,
+    WAVE_FIELD_DESCRIPTOR, WAVE_FIELD_PRESETS,
 };
 
 fn table() -> ascii_convert::GlyphTable {
@@ -64,6 +64,20 @@ fn advance_for(runtime: &mut SceneRuntime<WaveFieldGenerator<'_>>, frames_per_se
 
 #[test]
 fn preset_bounds_and_exact_values_are_explicit() {
+    let glyphs = table();
+    assert_eq!(
+        glyphs.fingerprint(),
+        &[
+            0x4d, 0xdc, 0x3a, 0x15, 0x85, 0xb2, 0x33, 0x27, 0x8e, 0x70, 0x50, 0xa0, 0x5e, 0xb9,
+            0x5b, 0x77, 0x79, 0x16, 0x37, 0x5d, 0x3e, 0x61, 0x9e, 0xfb, 0x8c, 0x76, 0xcb, 0xd8,
+            0x5d, 0xb6, 0x48, 0xe0,
+        ]
+    );
+    assert_eq!(WAVE_FIELD_DESCRIPTOR.id, "builtin.wave-field");
+    assert!(WAVE_FIELD_DESCRIPTOR.supported_signals.is_empty());
+    assert!(WAVE_FIELD_DESCRIPTOR.presets.is_empty());
+    assert!(!WAVE_FIELD_DESCRIPTOR.deterministic_export);
+    assert_eq!(WAVE_FIELD_DESCRIPTOR.parameters.len(), 4);
     assert_eq!(WAVE_FIELD_PRESETS.len(), 3);
     let calm = WAVE_FIELD_PRESETS[0];
     assert_eq!(calm.name, "calm");
