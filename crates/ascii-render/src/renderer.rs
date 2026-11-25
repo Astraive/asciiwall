@@ -23,8 +23,6 @@ pub const SHADER_REVISION: &str = "ascii-presenter-2";
 const CELL_BYTES: u64 = 16;
 const PARAM_BYTES: u64 = 32;
 const ATLAS_PADDING: u32 = 1;
-const INTEGER_LOAD_SAMPLING_KEY: u8 = 0;
-const R8_UNORM_FORMAT_KEY: u8 = 1;
 const POLL_INTERVAL: usize = 1024;
 
 /// Presenter failures, preserving portable core failures and explicit GPU boundary failures.
@@ -79,7 +77,7 @@ impl DeviceStatus {
     }
 }
 
-/// Counts API-level resource creation and submitted work, not driver allocations or timings.
+/// Counts atlas-cache hits, API resource creation and submitted work, not driver allocations or timings.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PresenterStats {
     pub atlas_textures: u64,
@@ -308,6 +306,16 @@ struct Atlas {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum AtlasSamplingMode {
+    IntegerTextureLoad,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum AtlasFormat {
+    R8Unorm,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct AtlasKey {
     fingerprint: [u8; 32],
     atlas_width: u32,
@@ -318,8 +326,8 @@ struct AtlasKey {
     cell_width: u32,
     cell_height: u32,
     padding: u32,
-    sampling_mode: u8,
-    format: u8,
+    sampling_mode: AtlasSamplingMode,
+    format: AtlasFormat,
 }
 
 struct AtlasCacheEntries {
@@ -376,8 +384,8 @@ impl AtlasCache {
             cell_width: table.cell_width(),
             cell_height: table.cell_height(),
             padding: ATLAS_PADDING,
-            sampling_mode: INTEGER_LOAD_SAMPLING_KEY,
-            format: R8_UNORM_FORMAT_KEY,
+            sampling_mode: AtlasSamplingMode::IntegerTextureLoad,
+            format: AtlasFormat::R8Unorm,
         };
         let mut entries = self
             .entries
@@ -401,6 +409,10 @@ impl AtlasCache {
         if plan.atlas_bytes > self.max_bytes || required_bytes > self.max_bytes {
             return Err(ascii_core::Error::BudgetExceeded(BudgetKind::RasterBytes).into());
         }
+        entries
+            .atlases
+            .try_reserve(1)
+            .map_err(|_| ascii_core::Error::AllocationFailed)?;
         entries
             .atlases
             .retain(|_, atlas| Arc::strong_count(atlas) > 1);
