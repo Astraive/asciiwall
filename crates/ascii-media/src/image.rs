@@ -1,10 +1,10 @@
-//! Content-sniffed PNG/JPEG decoding into owned normalized rasters.
+//! Content-sniffed PNG/JPEG decoding with bounded WebP RIFF classification.
 
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
 use ascii_core::{
-    AlphaMode, Budget, BudgetKind, CancellationToken, Error, MalformedReason, PixelChannels,
-    UnsupportedReason,
+    AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, ColorRange,
+    Error, MalformedReason, PixelChannels, SourceProfile, TransferFunction, UnsupportedReason,
 };
 use image::metadata::Orientation;
 use zune_core::{colorspace::ColorSpace, options::DecoderOptions};
@@ -72,25 +72,25 @@ impl DecodeLimits {
     }
 }
 
-/// Decodes an owned, size-bounded snapshot of a PNG or JPEG stream.
+/// Decodes an owned, size-bounded PNG/JPEG snapshot; WebP is classified but not pixel-decoded.
 ///
 /// PNG input is fully checked through its final IEND chunk and CRCs before publication. JPEG
 /// input is parsed through EOI, then decoded by pure-Rust `zune-jpeg` with strict errors, bounded
-/// dimensions, and a scan ceiling.
-///
-/// During image-data decoding, cancellation is checked at compressed-input refills, with at most
-/// 128 compressed bytes buffered between checks. Work over already-buffered data is not
-/// preempted; cancellation is also checked after each codec call. Both codecs receive preflighted
-/// scratch allowances; codec crate limits are additional defense in depth.
+/// dimensions, and a scan ceiling. WebP is inspected only for RIFF structure and animation; the
+/// pinned `image-webp` decoder's lossless meta-code may allocate an unbounded number of Huffman
+/// groups from a tiny canvas, so all WebP pixel-decoding capabilities are disabled. Odd RIFF chunk
+/// padding is validated as zero before a typed unsupported/animated result is returned.
 ///
 /// Caller-stream snapshot reads request no more than 128 bytes per `Read` and check cancellation
-/// between completed calls. A blocking caller `Read` cannot be interrupted by this API.
+/// between completed calls. A blocking caller `Read` cannot be interrupted by this API. The WebP
+/// container scan checks cancellation between chunks. Codec work over already-buffered data
+/// cannot be preempted; cancellation is also checked after each codec call.
 ///
 /// Normalization checks cancellation at row boundaries and every 128 pixels within each row.
 ///
-/// Output is top-down, tightly packed 8-bit RGB or straight-alpha RGBA. Untagged input is
-/// assumed sRGB. PNGs with `gAMA` or `cHRM` but no `sRGB` declaration, and embedded ICC profiles,
-/// are rejected rather than silently mislabeled. JPEG EXIF display orientation is applied once.
+/// Output is top-down, tightly packed 8-bit RGB or straight-alpha RGBA. Untagged input is assumed
+/// sRGB. PNGs with `gAMA` or `cHRM` but no `sRGB` declaration, and embedded ICC profiles, are
+/// rejected rather than silently mislabeled. JPEG EXIF display orientation is applied once.
 pub fn decode_image(
     input: &mut dyn ReadSeek,
     limits: &DecodeLimits,
@@ -157,6 +157,7 @@ where
             .checked_mul(PNG_CRC_WORK_PER_BYTE)
             .ok_or(Error::SizeOverflow)?,
         Codec::Jpeg => encoded_len,
+        Codec::Webp => encoded_len,
     };
     if header_work > limits.budget.max_work_units() {
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
@@ -173,6 +174,7 @@ where
 
     let result = match codec {
         Codec::Png => decode_png(&snapshot, limits, cancel, &mut normalization_cancel_poller),
+        Codec::Webp => Err(classify_webp(&snapshot, cancel)),
         Codec::Jpeg => decode_jpeg_with_reader_and_pollers(
             &snapshot,
             limits,
@@ -191,6 +193,7 @@ where
 enum Codec {
     Png,
     Jpeg,
+    Webp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -362,6 +365,14 @@ fn reserve_plan(
     Ok((scratch_permit, source_permit, output_permit))
 }
 
+fn classify_webp(encoded: &[u8], cancel: &CancellationToken) -> Error {
+    match inspect_webp_container(encoded, cancel) {
+        Err(error) => error,
+        Ok(container) if container.animated => Error::Unsupported(UnsupportedReason::AnimatedImage),
+        Ok(_) => Error::Unsupported(UnsupportedReason::UnsupportedFormat),
+    }
+}
+
 fn decode_png(
     encoded: &[u8],
     limits: &DecodeLimits,
@@ -487,13 +498,15 @@ where
     } else {
         (PixelChannels::Rgb, AlphaMode::Opaque)
     };
+    let color = ColorDescription::new(ColorPrimaries::Srgb, TransferFunction::Srgb, alpha)
+        .with_source_metadata(header.source_profile, ColorRange::Full);
     DecodedFrame::new(
         DecodedFrameData {
             width: plan.output_width,
             height: plan.output_height,
             row_stride: plan.row_stride,
             channels,
-            alpha,
+            color,
             pixels: output,
             memory_permit: output_permit,
         },
@@ -512,6 +525,7 @@ struct PngHeader {
     palette_entries: usize,
     transparency_len: Option<usize>,
     orientation: Orientation,
+    source_profile: SourceProfile,
     has_srgb: bool,
     gamma: Option<u32>,
     chromaticities: Option<[u32; 8]>,
@@ -555,6 +569,7 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
         palette_entries: 0,
         transparency_len: None,
         orientation: Orientation::NoTransforms,
+        source_profile: SourceProfile::AssumedSrgb,
         has_srgb: false,
         gamma: None,
         chromaticities: None,
@@ -712,12 +727,14 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
                     return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
                 }
                 header.has_srgb = true;
+                header.source_profile = SourceProfile::Srgb;
             }
             b"iCCP" => {
                 if seen_idat {
                     return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
                 }
                 validate_iccp(payload)?;
+                header.source_profile = SourceProfile::EmbeddedIcc;
                 header.unsupported = Some(UnsupportedReason::ColorDescription);
             }
             b"eXIf" => {
@@ -725,8 +742,17 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
                     return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
                 }
                 seen_exif = true;
-                if let Some(orientation) = parse_tiff_orientation(payload) {
+                let metadata = parse_tiff_metadata(payload)?;
+                if let Some(orientation) = metadata.orientation {
                     header.orientation = orientation;
+                }
+                if let Some(profile) = metadata.source_profile {
+                    header.source_profile = profile;
+                    if profile != SourceProfile::Srgb {
+                        header
+                            .unsupported
+                            .get_or_insert(UnsupportedReason::ColorDescription);
+                    }
                 }
             }
             b"acTL" | b"fcTL" | b"fdAT" => {
@@ -927,6 +953,7 @@ struct JpegHeader {
     scan_block_work: u64,
     exif_bytes: u64,
     orientation: Orientation,
+    source_profile: SourceProfile,
     unsupported: Option<UnsupportedReason>,
 }
 
@@ -1085,7 +1112,12 @@ where
             height: plan.output_height,
             row_stride: plan.row_stride,
             channels: PixelChannels::Rgb,
-            alpha: AlphaMode::Opaque,
+            color: ColorDescription::new(
+                ColorPrimaries::Srgb,
+                TransferFunction::Srgb,
+                AlphaMode::Opaque,
+            )
+            .with_source_metadata(header.source_profile, ColorRange::Unspecified),
             pixels: output,
             memory_permit: output_permit,
         },
@@ -1115,6 +1147,7 @@ where
         scan_block_work: 0,
         exif_bytes: 0,
         orientation: Orientation::NoTransforms,
+        source_profile: SourceProfile::AssumedSrgb,
         unsupported: None,
     };
     let mut offset = 2_usize;
@@ -1175,8 +1208,17 @@ where
                     let tiff = &payload[6..];
                     header.exif_bytes =
                         u64::try_from(tiff.len()).map_err(|_| Error::SizeOverflow)?;
-                    if let Some(orientation) = parse_tiff_orientation(tiff) {
+                    let metadata = parse_tiff_metadata(tiff)?;
+                    if let Some(orientation) = metadata.orientation {
                         header.orientation = orientation;
+                    }
+                    if let Some(profile) = metadata.source_profile {
+                        header.source_profile = profile;
+                        if profile != SourceProfile::Srgb {
+                            header
+                                .unsupported
+                                .get_or_insert(UnsupportedReason::ColorDescription);
+                        }
                     }
                 } else {
                     header
@@ -1585,39 +1627,110 @@ where
     }
 }
 
-fn parse_tiff_orientation(tiff: &[u8]) -> Option<Orientation> {
+#[derive(Clone, Copy, Debug, Default)]
+struct ExifMetadata {
+    // None means the TIFF had no Orientation tag; decoder headers default to identity.
+    orientation: Option<Orientation>,
+    source_profile: Option<SourceProfile>,
+}
+
+fn invalid_exif_data() -> Error {
+    Error::Malformed(MalformedReason::InvalidEncodedData)
+}
+
+fn parse_tiff_metadata(tiff: &[u8]) -> Result<ExifMetadata, Error> {
+    let mut metadata = ExifMetadata::default();
     if tiff.len() < 8 {
-        return None;
+        return Err(invalid_exif_data());
     }
     let little_endian = match &tiff[..2] {
         b"II" => true,
         b"MM" => false,
-        _ => return None,
+        _ => return Err(invalid_exif_data()),
     };
     if read_tiff_u16(&tiff[2..4], little_endian) != 42 {
-        return None;
+        return Err(invalid_exif_data());
     }
-    let ifd_offset = usize::try_from(read_tiff_u32(&tiff[4..8], little_endian)).ok()?;
+    let ifd0_offset = usize::try_from(read_tiff_u32(&tiff[4..8], little_endian))
+        .map_err(|_| invalid_exif_data())?;
+    let Some((entries_start, entry_count)) = tiff_ifd_entries(tiff, ifd0_offset, little_endian)
+    else {
+        return Err(invalid_exif_data());
+    };
+    let mut exif_ifd_offset = None;
+    for index in 0..entry_count {
+        let entry_start = index
+            .checked_mul(12)
+            .and_then(|offset| entries_start.checked_add(offset))
+            .ok_or_else(invalid_exif_data)?;
+        let entry_end = entry_start.checked_add(12).ok_or_else(invalid_exif_data)?;
+        let entry = tiff
+            .get(entry_start..entry_end)
+            .ok_or_else(invalid_exif_data)?;
+        let tag = read_tiff_u16(&entry[0..2], little_endian);
+        let value_type = read_tiff_u16(&entry[2..4], little_endian);
+        let value_count = read_tiff_u32(&entry[4..8], little_endian);
+        if tag == 0x0112 {
+            if value_type != 3 || value_count != 1 || metadata.orientation.is_some() {
+                return Err(invalid_exif_data());
+            }
+            let value = u8::try_from(read_tiff_u16(&entry[8..10], little_endian))
+                .map_err(|_| invalid_exif_data())?;
+            metadata.orientation =
+                Some(Orientation::from_exif(value).ok_or_else(invalid_exif_data)?);
+        } else if tag == 0x8769 {
+            if value_type != 4 || value_count != 1 || exif_ifd_offset.is_some() {
+                return Err(invalid_exif_data());
+            }
+            exif_ifd_offset = Some(
+                usize::try_from(read_tiff_u32(&entry[8..12], little_endian))
+                    .map_err(|_| invalid_exif_data())?,
+            );
+        }
+    }
+    let Some(exif_ifd_offset) = exif_ifd_offset else {
+        return Ok(metadata);
+    };
+    let Some((entries_start, entry_count)) = tiff_ifd_entries(tiff, exif_ifd_offset, little_endian)
+    else {
+        return Err(invalid_exif_data());
+    };
+    for index in 0..entry_count {
+        let entry_start = index
+            .checked_mul(12)
+            .and_then(|offset| entries_start.checked_add(offset))
+            .ok_or_else(invalid_exif_data)?;
+        let entry_end = entry_start.checked_add(12).ok_or_else(invalid_exif_data)?;
+        let entry = tiff
+            .get(entry_start..entry_end)
+            .ok_or_else(invalid_exif_data)?;
+        if read_tiff_u16(&entry[0..2], little_endian) != 0xa001 {
+            continue;
+        }
+        let value_type = read_tiff_u16(&entry[2..4], little_endian);
+        let value_count = read_tiff_u32(&entry[4..8], little_endian);
+        if value_type != 3 || value_count != 1 || metadata.source_profile.is_some() {
+            return Err(invalid_exif_data());
+        }
+        metadata.source_profile = Some(match read_tiff_u16(&entry[8..10], little_endian) {
+            1 => SourceProfile::Srgb,
+            0xffff => SourceProfile::Uncalibrated,
+            value => SourceProfile::Other(value),
+        });
+        break;
+    }
+    Ok(metadata)
+}
+
+fn tiff_ifd_entries(tiff: &[u8], ifd_offset: usize, little_endian: bool) -> Option<(usize, usize)> {
     let count_end = ifd_offset.checked_add(2)?;
     let entry_count = usize::from(read_tiff_u16(
         tiff.get(ifd_offset..count_end)?,
         little_endian,
     ));
-    let entries_start = count_end;
-    for index in 0..entry_count {
-        let entry_start = entries_start.checked_add(index.checked_mul(12)?)?;
-        let entry_end = entry_start.checked_add(12)?;
-        let entry = tiff.get(entry_start..entry_end)?;
-        let tag = read_tiff_u16(&entry[0..2], little_endian);
-        let value_type = read_tiff_u16(&entry[2..4], little_endian);
-        let value_count = read_tiff_u32(&entry[4..8], little_endian);
-        if tag == 0x0112 && value_type == 3 && value_count == 1 {
-            return Orientation::from_exif(
-                u8::try_from(read_tiff_u16(&entry[8..10], little_endian)).ok()?,
-            );
-        }
-    }
-    None
+    let entries_end = count_end.checked_add(entry_count.checked_mul(12)?)?;
+    tiff.get(count_end..entries_end)?;
+    Some((count_end, entry_count))
 }
 
 fn read_tiff_u16(bytes: &[u8], little_endian: bool) -> u16 {
@@ -1936,6 +2049,9 @@ fn sniff_format(prefix: &[u8]) -> Result<Codec, Error> {
     if prefix.starts_with(&[0xff, 0xd8]) {
         return Ok(Codec::Jpeg);
     }
+    if prefix.len() >= 12 && prefix[..4] == *b"RIFF" && prefix[8..12] == *b"WEBP" {
+        return Ok(Codec::Webp);
+    }
     if prefix.is_empty()
         || PNG_SIGNATURE.starts_with(prefix)
         || prefix.starts_with(b"\x89PNG")
@@ -1953,7 +2069,146 @@ fn is_known_unsupported(prefix: &[u8]) -> bool {
     (prefix.len() >= 2 && prefix[..2] == *b"BM")
         || (prefix.len() >= 3 && prefix[..3] == *b"GIF")
         || (prefix.len() >= 4 && (prefix[..4] == *b"II*\0" || prefix[..4] == *b"MM\0*"))
-        || (prefix.len() >= 12 && prefix[..4] == *b"RIFF" && prefix[8..12] == *b"WEBP")
+}
+
+struct WebpContainerInfo {
+    animated: bool,
+}
+
+fn inspect_webp_container(
+    encoded: &[u8],
+    cancel: &CancellationToken,
+) -> Result<WebpContainerInfo, Error> {
+    if encoded.len() < 12
+        || encoded[..4] != *b"RIFF"
+        || encoded[8..12] != *b"WEBP"
+        || usize::try_from(u32::from_le_bytes([
+            encoded[4], encoded[5], encoded[6], encoded[7],
+        ]))
+        .ok()
+        .and_then(|size| size.checked_add(8))
+            != Some(encoded.len())
+    {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+    }
+
+    if encoded.len() == 12 {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+    }
+
+    let mut info = WebpContainerInfo { animated: false };
+    let mut saw_vp8x = false;
+    let mut saw_anim = false;
+    let mut saw_frame = false;
+    let mut first_chunk = true;
+    let mut offset = 12_usize;
+    while offset < encoded.len() {
+        check_cancel_periodically(cancel, offset)?;
+        let header_end = offset
+            .checked_add(8)
+            .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
+        let header = encoded
+            .get(offset..header_end)
+            .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
+        let chunk_size = usize::try_from(u32::from_le_bytes([
+            header[4], header[5], header[6], header[7],
+        ]))
+        .map_err(|_| Error::SizeOverflow)?;
+        let data_end = header_end
+            .checked_add(chunk_size)
+            .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
+        let padded_end = data_end
+            .checked_add(chunk_size & 1)
+            .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
+        let data = encoded
+            .get(header_end..data_end)
+            .ok_or(Error::Malformed(MalformedReason::InvalidEncodedData))?;
+        if padded_end > encoded.len() {
+            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+        }
+        if chunk_size & 1 != 0 && encoded[data_end] != 0 {
+            return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+        }
+        match &header[..4] {
+            b"VP8X" => {
+                if !first_chunk || saw_vp8x || data.len() != 10 {
+                    return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+                }
+                saw_vp8x = true;
+                info.animated = data[0] & 0x02 != 0;
+            }
+            b"ANIM" => {
+                if !saw_vp8x || !info.animated || saw_anim || saw_frame || data.len() != 6 {
+                    return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+                }
+                saw_anim = true;
+            }
+            b"ANMF" => {
+                if !saw_anim || !valid_webp_frame_data(data) || data[15] & 0xfc != 0 {
+                    return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+                }
+                saw_frame = true;
+            }
+            _ => {}
+        }
+        first_chunk = false;
+        offset = padded_end;
+    }
+    if info.animated && (!saw_anim || !saw_frame) {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+    }
+    if offset != encoded.len() {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+    }
+    Ok(info)
+}
+
+fn valid_webp_frame_data(data: &[u8]) -> bool {
+    if data.len() < 24 {
+        return false;
+    }
+    let chunks = &data[16..];
+    let mut offset = 0_usize;
+    let mut saw_alpha = false;
+    let mut saw_image = false;
+    while offset < chunks.len() {
+        let Some(header_end) = offset.checked_add(8) else {
+            return false;
+        };
+        let Some(header) = chunks.get(offset..header_end) else {
+            return false;
+        };
+        let chunk_size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        let Some(data_end) = header_end.checked_add(chunk_size) else {
+            return false;
+        };
+        let Some(padded_end) = data_end.checked_add(chunk_size & 1) else {
+            return false;
+        };
+        let Some(chunk_data) = chunks.get(header_end..data_end) else {
+            return false;
+        };
+        if padded_end > chunks.len()
+            || (chunk_size & 1 != 0 && chunks[data_end] != 0)
+            || chunk_size == 0
+            || saw_image
+        {
+            return false;
+        }
+        match &header[..4] {
+            b"ALPH" if !saw_alpha => saw_alpha = true,
+            b"VP8 " => {
+                if saw_alpha && chunk_data.is_empty() {
+                    return false;
+                }
+                saw_image = true;
+            }
+            b"VP8L" if !saw_alpha => saw_image = true,
+            _ => return false,
+        }
+        offset = padded_end;
+    }
+    saw_image && offset == chunks.len()
 }
 
 fn zeroed_bytes(len: usize) -> Result<Vec<u8>, Error> {

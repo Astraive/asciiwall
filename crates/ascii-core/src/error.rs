@@ -36,6 +36,8 @@ pub enum UnsupportedReason {
     AlphaMode,
     /// The input requires a format or feature this API does not support.
     UnsupportedFormat,
+    /// An animated image must be handled by an animation decoder, not the still-image API.
+    AnimatedImage,
     /// The requested glyph is not present in the selected font.
     GlyphUnavailable,
 }
@@ -85,6 +87,9 @@ impl core::fmt::Display for Error {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Malformed(_) => formatter.write_str("malformed input"),
+            Self::Unsupported(UnsupportedReason::AnimatedImage) => {
+                formatter.write_str("animated input requires an animation decoder")
+            }
             Self::Unsupported(UnsupportedReason::ColorDescription) => formatter.write_str(
                 "unsupported color profile: provide SDR sRGB input; HDR tone mapping and wide-gamut conversion are not supported",
             ),

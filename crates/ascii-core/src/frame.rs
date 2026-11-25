@@ -344,7 +344,7 @@ impl PixelFormat {
     }
 }
 
-/// Known color-primary descriptions accepted or rejected by the portable raster contract.
+/// Known color-primary interpretations accepted or rejected by the portable raster contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ColorPrimaries {
     /// Standard sRGB/Rec. 709 primaries.
@@ -357,7 +357,7 @@ pub enum ColorPrimaries {
     Other(u8),
 }
 
-/// Transfer function attached to raster color samples.
+/// Transfer function used to interpret raster color samples.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransferFunction {
     /// The sRGB transfer curve.
@@ -385,16 +385,48 @@ pub enum AlphaMode {
     Other(u8),
 }
 
-/// Explicit color primaries, transfer, and alpha metadata for a raster.
+/// Compact source-profile provenance carried with decoded pixels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceProfile {
+    /// The caller supplied no source-profile information.
+    Unspecified,
+    /// The decoder applies its documented sRGB assumption to untagged source pixels.
+    AssumedSrgb,
+    /// The source explicitly identified the sRGB profile.
+    Srgb,
+    /// The source carries an ICC profile that this pipeline does not interpret.
+    EmbeddedIcc,
+    /// The source declared uncalibrated color.
+    Uncalibrated,
+    /// The source declared a profile code that this pipeline does not interpret.
+    Other(u16),
+}
+
+/// Source sample range metadata; this does not imply a color-range conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ColorRange {
+    /// The source did not declare a range, or the decoder cannot establish one.
+    Unspecified,
+    /// Source channels use the full integer sample range.
+    Full,
+    /// Source channels use a limited/video sample range.
+    Limited,
+    /// The source declared a range code that this pipeline does not interpret.
+    Other(u8),
+}
+
+/// Primaries, transfer, alpha and compact source metadata for a raster.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ColorDescription {
     primaries: ColorPrimaries,
     transfer: TransferFunction,
     alpha_mode: AlphaMode,
+    source_profile: SourceProfile,
+    range: ColorRange,
 }
 
 impl ColorDescription {
-    /// Creates a color description without silently normalizing metadata.
+    /// Creates color semantics with unspecified source profile and range metadata.
     #[must_use]
     pub const fn new(
         primaries: ColorPrimaries,
@@ -405,22 +437,37 @@ impl ColorDescription {
             primaries,
             transfer,
             alpha_mode,
+            source_profile: SourceProfile::Unspecified,
+            range: ColorRange::Unspecified,
         }
     }
 
-    /// Creates the supported sRGB primaries/transfer description with explicit alpha semantics.
+    /// Creates an sRGB interpretation with explicit alpha semantics and unspecified source
+    /// profile/range provenance. Use `with_source_metadata` only when the source is known.
     #[must_use]
     pub const fn srgb(alpha_mode: AlphaMode) -> Self {
         Self::new(ColorPrimaries::Srgb, TransferFunction::Srgb, alpha_mode)
     }
 
-    /// Returns the declared color primaries.
+    /// Adds compact source metadata without copying or allocating.
+    #[must_use]
+    pub const fn with_source_metadata(
+        mut self,
+        source_profile: SourceProfile,
+        range: ColorRange,
+    ) -> Self {
+        self.source_profile = source_profile;
+        self.range = range;
+        self
+    }
+
+    /// Returns the primaries used to interpret samples (declared or policy-assumed).
     #[must_use]
     pub const fn primaries(self) -> ColorPrimaries {
         self.primaries
     }
 
-    /// Returns the declared transfer function.
+    /// Returns the transfer function used to interpret samples.
     #[must_use]
     pub const fn transfer(self) -> TransferFunction {
         self.transfer
@@ -430,6 +477,18 @@ impl ColorDescription {
     #[must_use]
     pub const fn alpha_mode(self) -> AlphaMode {
         self.alpha_mode
+    }
+
+    /// Returns source-profile provenance; this is not an ICC profile payload.
+    #[must_use]
+    pub const fn source_profile(self) -> SourceProfile {
+        self.source_profile
+    }
+
+    /// Returns source range metadata without implying that range conversion was performed.
+    #[must_use]
+    pub const fn range(self) -> ColorRange {
+        self.range
     }
 }
 
@@ -587,8 +646,10 @@ impl<'a> ValidatedRasterFrameView<'a> {
 /// Validates raster metadata, stride, accessible extent, budgets, and cancellation without copying.
 ///
 /// This portable contract currently accepts top-down, 8-bit Gray/RGB/RGBA data with sRGB
-/// primaries and transfer. The exact required extent is `(height - 1) * row_stride + row_bytes`;
-/// unused padding after the last row is not required, and any trailing backing bytes are allowed.
+/// primaries and transfer, and only unspecified/assumed/declared-sRGB source profiles and
+/// unspecified/full ranges. Profile and range fields are provenance, not color conversion. The
+/// exact required extent is `(height - 1) * row_stride + row_bytes`; unused padding after the last
+/// row is not required, and any trailing backing bytes are allowed.
 pub fn validate_raster_frame<'a>(
     view: RasterFrameView<'a>,
     budget: &Budget,
@@ -610,7 +671,13 @@ pub fn validate_raster_frame<'a>(
         | (PixelChannels::Rgba, AlphaMode::Straight | AlphaMode::Premultiplied) => {}
         _ => return Err(Error::Unsupported(UnsupportedReason::AlphaMode)),
     }
-    if view.color.primaries != ColorPrimaries::Srgb || view.color.transfer != TransferFunction::Srgb
+    if view.color.primaries != ColorPrimaries::Srgb
+        || view.color.transfer != TransferFunction::Srgb
+        || !matches!(
+            view.color.source_profile,
+            SourceProfile::Unspecified | SourceProfile::AssumedSrgb | SourceProfile::Srgb
+        )
+        || !matches!(view.color.range, ColorRange::Unspecified | ColorRange::Full)
     {
         return Err(Error::Unsupported(UnsupportedReason::ColorDescription));
     }

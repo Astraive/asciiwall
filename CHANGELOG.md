@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, PNG/JPEG decoding, and the bounded `ascii-scene` runtime. **No application binary or published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, PNG/JPEG decoding with WebP RIFF classification only, and the bounded `ascii-scene` runtime. **No application binary or published release tag exists yet.**
 
 ### Added
 
@@ -23,6 +23,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Bounded `ascii-convert` glyph tables with measured cell-clipped masks, descriptors, deterministic fingerprints, and typed font-validation failures ([FNT-001](docs/engine/glyph-matching-and-fonts.md)).
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
+- Added a build-accurate `ascii-media::image_capabilities()` report for PNG/JPEG; APNG and all WebP pixel-decoding variants are disabled (`[IMG-002]`).
+- Added bounded WebP RIFF chunk/padding validation and animated-input classification without decoding pixels; disabled the pinned WebP codec because lossless meta-codes can request unbounded Huffman-group allocations (`[IMG-002]`).
+- Consolidated APNG support into the single `png.animated` capability flag to prevent contradictory reports (`[IMG-002]`).
+- Added allocation-free source-profile/range provenance to `ColorDescription`/`DecodedFrame`; unsupported profiles and ranges remain typed capability errors without ICC/HDR conversion (`[IMG-002]`).
+- Kept generic `ColorDescription::srgb()` provenance unspecified and made malformed EXIF Orientation/ExifIFD metadata fail with typed encoded-data errors instead of silent fallback (`[IMG-002]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
 - Added the first-party `ascii-scene` SCN-001 contract: validated typed parameters and descriptor limits, a sealed executable generator trait with generic `SceneRuntime`, SplitMix64 node/effect streams, bounded Q16.16 simulation, reusable character buffers, capability-filtered snapshots, deterministic normalized-pointer attraction and recorded-event replay, aggregate resource reservations, and exact-step export with explicit idle fallback. No CFG/PKG schema, application UI, wallpaper, thumbnail, or native consumer is added.
 
@@ -37,6 +42,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Durable publication-ledger replacement uses a same-directory overwrite rename instead of the Windows PowerShell `File.Replace` null-backup binding; a real filesystem regression runs locally and in CI.
 - Project-field schema preflight preserves singleton GraphQL argument collections instead of mistaking a valid input object for multiple arguments.
 - Preserve ISO-looking JSON text and exact protected ledger timestamp strings through repeated reads and atomic writes; the real filesystem regression now exercises lossless reloads.
+- Reject size-consistent empty WebP RIFF containers as malformed encoded data (`[IMG-002]`).
+
 - Hardened FNT-001 cancellation through parser preflight, glyph description, rasterization, and final sorting; prevented implicit deep clones of budgeted tables, validated legacy cmap format 2 beside Unicode maps, fixed one-pixel edge descriptors, expanded fingerprint invalidation coverage, and documented the checked parser-allocation envelope.
 - Bounded in-flight PNG/JPEG cancellation to each 128-byte compressed-input refill, preserving codec errors and releasing reservations without publishing partial frames. Work on the currently buffered compressed input is not preempted (`[IMG-001]`).
 - Bound IMG-001 snapshot source reads to 128-byte requests, polling cancellation between completed calls without claiming to interrupt a blocked caller `Read` (`[IMG-001]`).

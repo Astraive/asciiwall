@@ -91,46 +91,87 @@ Area/box sampling is a practical baseline for shrink-heavy conversion. Compare a
 
 ## Input coverage
 
-Start with PNG/JPEG and add WebP, GIF, APNG, and other formats only when the actual codec feature set and animation semantics are tested. Extensions are not codec guarantees. Check dimensions and allocation limits before large buffers; the image crate's limits are one layer of defense, not a substitute for process budgets. [S27](../research/source-register.md#s27) [S28](../research/source-register.md#s28)
+This build decodes PNG/JPEG. WebP is recognized only for bounded RIFF structure and animation
+classification; pixel decoding remains disabled until an allocation-safe codec is available.
+Extensions are not codec guarantees. Check dimensions and allocation limits before large buffers;
+codec limits are one layer of defense, not a substitute for process budgets.
 
 ### Image decoder implementation status (IMG-001)
 
-`ascii-media::decode_image` sniffs PNG/JPEG bytes from the caller's current stream position; it
-does not open paths or URLs. The stream is copied into a size-bounded, budgeted snapshot before
-codec parsing so all validation and decode passes observe identical bytes. PNG handling uses
-`png` 0.18.0 and validates every chunk CRC through an exact terminal IEND. JPEG handling uses
-the strict, safe-mode pure-Rust `zune-jpeg` 0.5.5 decoder; it does not cross a native decoder
-callback boundary. The `image` 0.25.10 dependency is used for orientation metadata and test
-helpers, not as the PNG/JPEG decode backend.
+`ascii-media::decode_image` sniffs PNG/JPEG/WebP bytes from the caller's current stream position;
+it does not open paths or URLs. The stream is copied into a size-bounded, budgeted snapshot
+before codec parsing so all validation and decode passes observe identical bytes. PNG handling
+uses `png` 0.18.0 and validates every chunk CRC through an exact terminal IEND. JPEG handling
+uses the strict, safe-mode pure-Rust `zune-jpeg` 0.5.5 decoder; it does not cross a native
+decoder callback boundary. WebP has no pixel decoder enabled: the pinned `image-webp` 0.2.4
+lossless parser derives Huffman-group allocations from untrusted meta-code IDs without bounding
+them by the canvas group grid. Current upstream main has the same issue.
 
-Published rasters are top-down and tightly packed as 8-bit RGB or straight-alpha RGBA. Gray
-samples expand to RGB; indexed PNG transparency expands to RGBA; 16-bit PNG samples are rounded
-to 8 bits. PNG Adam7 and JPEG baseline/progressive inputs are supported. JPEG EXIF orientation
-is applied before enforcing output dimensions. Untagged content is assumed sRGB; embedded ICC
-profiles, APNG, unsupported JPEG color models/depths, and non-sRGB PNG `gAMA`/`cHRM` color
-descriptions are rejected as explicit capability errors rather than silently mislabeled.
+Published PNG/JPEG rasters are top-down and tightly packed as 8-bit RGB or straight-alpha RGBA.
+Gray samples expand to RGB; indexed PNG transparency expands to RGBA; 16-bit PNG samples are
+rounded to 8 bits. PNG Adam7 and JPEG baseline/progressive are supported. JPEG EXIF display
+orientation is applied before enforcing output dimensions. Each `DecodedFrame` carries a
+copyable, allocation-free `ColorDescription`: accepted sRGB primaries/transfer interpretation,
+actual alpha semantics, compact source-profile provenance, and source range metadata.
 
 `DecodeLimits` carries the core per-operation `Budget`, decoder-local encoded/scratch limits,
 dimensions, and a shared `DecodeResources` ledger for concurrent decode slots and retained
 memory. The owned input snapshot, codec scratch and temporary rasters are preflighted and
 charged before output allocation. PNG scratch includes row/inflater and reader buffers plus the
 largest non-IDAT chunk buffer; large IDAT payloads are streamed and are not counted again as
-codec scratch. Progressive JPEG scan-block work is budgeted separately from pixel work. Retained
-output remains charged until its `DecodedFrame` is dropped; its `RasterFrameView` borrows from
-that owner. Snapshot acquisition requests at most 128 bytes per caller `Read` and checks the
-token between completed calls; cancellation cannot interrupt an underlying `Read` while it is
-blocked. Codec compressed-input reads use a 128-byte buffer, and JPEG marker/entropy FF-fill
-loops poll at 8 KiB offsets. Pixel normalization polls at each row boundary and after each
-128 pixels within a row. These checks bound work intervals but are not CPU or I/O preemption:
-codec work may continue until its next poll, and a caller's in-progress `Read` cannot be
-interrupted until that call returns. Deterministic tests cover regular/Adam7 PNG, progressive JPEG
-refills, cancellation inside both JPEG FF-fill loops, and cancellation partway through a one-row
-grayscale PNG normalization pass.
-Malformed input, cancellation, and failed budget checks release reservations without publishing
-partial frames. Codec-provided allocation limits remain defense in depth; application
-accounting is not an allocator-enforced process memory limit.
+codec scratch. JPEG scan-block work is budgeted with encoded-input work. WebP is only a linear,
+allocation-free RIFF chunk scan and is charged as header work; no WebP pixel codec or decoder
+scratch is enabled. Retained output remains charged until its `DecodedFrame` is dropped; its
+`RasterFrameView` borrows from that owner. Snapshot acquisition requests at most 128 bytes per
+caller `Read` and checks cancellation between completed calls; a blocked underlying `Read` cannot
+be interrupted. Codec compressed-input reads use a 128-byte buffer; JPEG marker/entropy FF-fill
+loops poll at 8 KiB offsets. WebP container scans poll between chunk headers. Pixel normalization
+polls at each row boundary and after each 128 pixels within a row.
+These checks bound work intervals but
+are not CPU or I/O preemption: codec work may continue until its next poll, and a caller's
+in-progress `Read` cannot be interrupted until that call returns. Malformed input, cancellation,
+and failed budget checks release reservations without publishing partial frames.
+Codec-provided allocation limits remain defense in depth; application accounting is not an
+allocator-enforced process memory limit.
 
-Rights-cleared generated fixtures exercise PNG color/depth/interlace variants, JPEG baseline
-and progressive scans, malformed/truncated inputs, metadata policy, and budget/cancellation
-paths. Their generated configuration and SHA-256 values are printed/asserted by the focused
-tests. These fixture checks do not imply native-codec, performance, or platform-support claims.
+Rights-cleared generated fixtures exercise PNG color/depth/interlace variants and JPEG baseline
+and progressive scans. A valid two-frame WebP fixture generated with Pillow 12.2.0/libwebp 1.6.0
+(`2frames,100ms,loop0`, SHA-256
+`441f56c14aa8f83a84bf7f57c6624834b22de219cc6f18b363c8590e24de5280`) verifies animation
+classification only; WebP pixel decoding is disabled and no still-variant fixture is claimed as
+decoded evidence. A malformed odd-sized RIFF chunk with nonzero padding is rejected.
+
+These fixture checks do not imply native-codec, performance, or platform-support claims.
+### Image capability contract (IMG-002)
+
+`ascii-media::image_capabilities()` reports still PNG and baseline/progressive JPEG as enabled.
+APNG and all WebP pixel-decoding variants are disabled. The WebP classifier validates RIFF
+extents, chunk bounds, and zero padding, and returns `Unsupported(AnimatedImage)` for animation
+markers before any pixel-decoding path. WebP remains disabled because the pinned upstream
+`image-webp` 0.2.4 lossless decoder can allocate Huffman groups based on untrusted meta-code IDs
+without bounding them to the canvas group grid; a safe scratch/work bound is not established.
+
+JPEG display orientation is applied once while producing the normalized top-down raster. The
+returned `RasterFrameView` carries `RasterOrientation::TopDown`; consumers must use that pixel
+orientation and must not apply source EXIF orientation again. When Orientation is absent, identity
+is used; malformed Orientation tags and malformed ExifIFD pointers return
+`Malformed(InvalidEncodedData)` rather than being silently ignored or treated as absent. The eight
+generated asymmetric orientation fixtures and expected output hashes are maintained in
+`image_decode_jpeg_controls.rs`.
+
+The repository currently has no CLI doctor or import-error surface to consume the capability
+report. Those user-facing diagnostics remain blocked until those product surfaces exist; callers
+can query the media-library API in the meantime.
+
+For accepted PNG and JPEG, `ColorDescription::source_profile()` distinguishes observed sRGB
+metadata from untagged data handled under the documented sRGB assumption. PNG sample range is
+full; JPEG source range is unspecified because the decoder has no authoritative range tag.
+Untagged values are not claimed to have undergone profile conversion. Embedded ICC,
+uncalibrated/unknown EXIF color space, non-sRGB PNG `gAMA`/`cHRM`, and unsupported transfer/HDR
+metadata fail with typed color-description errors; no ICC or HDR conversion accuracy is claimed.
+
+The bounded WebP classifier recognizes animation markers and returns
+`Unsupported(AnimatedImage)` without publishing pixels. Animated-image routing remains blocked
+because no animation handler exists in the current repository. A future IMG-003 integration must
+handle that typed signal and route frames through timeline/composition, disposal/blend,
+cancellation, and bounded-history semantics.

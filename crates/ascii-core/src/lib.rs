@@ -13,9 +13,9 @@ mod frame;
 pub use budget::{Budget, CancellationToken, GridBudget, validate_grid_budget};
 pub use error::{BudgetKind, Error, MalformedReason, UnsupportedReason};
 pub use frame::{
-    AlphaMode, AsciiCell, AsciiFrame, ColorDescription, ColorPrimaries, FrameMetadata,
-    GlyphTableId, PixelChannels, PixelFormat, RasterFrameView, RasterOrientation, TransferFunction,
-    ValidatedRasterFrameView, validate_frame, validate_raster_frame,
+    AlphaMode, AsciiCell, AsciiFrame, ColorDescription, ColorPrimaries, ColorRange, FrameMetadata,
+    GlyphTableId, PixelChannels, PixelFormat, RasterFrameView, RasterOrientation, SourceProfile,
+    TransferFunction, ValidatedRasterFrameView, validate_frame, validate_raster_frame,
 };
 #[cfg(test)]
 extern crate std;

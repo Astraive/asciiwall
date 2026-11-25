@@ -2,7 +2,10 @@ use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use ascii_core::{Budget, BudgetKind, CancellationToken};
+use ascii_core::{
+    AlphaMode, Budget, BudgetKind, CancellationToken, ColorPrimaries, ColorRange, SourceProfile,
+    TransferFunction,
+};
 use ascii_media::{DecodeLimits, DecodeResources, decode_image};
 use image::ImageEncoder;
 use sha2::{Digest, Sha256};
@@ -139,15 +142,18 @@ fn decode(bytes: &[u8]) -> Result<ascii_media::DecodedFrame, ascii_core::Error> 
 
 #[test]
 fn codec_matrix_fixture_configuration_and_hashes() {
-    const SETTINGS: &str = "image=0.25.10;png=0.18.0;zune-jpeg=0.5.5;rgb=10,20,30;rgba=11,22,33,44;gray8=77;gray16=0x1234;jpeg_encoder=quality100;jpeg_rgb=255,0,0,0,255,0";
+    const SETTINGS: &str = "image=0.25.10;png=0.18.0;zune-jpeg=0.5.5;rgb=10,20,30;rgba=11,22,33,44;gray8=77;gray16=0x1234;jpeg_encoder=quality100;jpeg_rgb=255,0,0,0,255,0;color_metadata=untagged-and-sRGB;range=PNG-full-JPEG-unspecified";
     println!(
         "environment os={} arch={} settings_sha256={:x} settings={SETTINGS}",
         std::env::consts::OS,
         std::env::consts::ARCH,
         Sha256::digest(SETTINGS.as_bytes())
     );
+    let untagged_png = png(1, 1, image::ColorType::Rgb8, &[10, 20, 30]);
+    let srgb_png = png_with_chunk_after_ihdr(&untagged_png, *b"sRGB", &[0]);
     let fixtures = [
-        ("png_rgb", png(1, 1, image::ColorType::Rgb8, &[10, 20, 30])),
+        ("png_rgb", untagged_png.clone()),
+        ("png_srgb_metadata", srgb_png),
         (
             "png_rgba",
             png(1, 1, image::ColorType::Rgba8, &[11, 22, 33, 44]),
@@ -178,6 +184,33 @@ fn codec_matrix_png_rgb_rgba_grayscale_and_sixteen_bit_normalize() {
     assert_eq!(gray.pixels(), &[77, 77, 77]);
     let gray16 = decode(&png(1, 1, image::ColorType::L16, &0x1234u16.to_ne_bytes())).unwrap();
     assert_eq!(gray16.pixels(), &[0x12, 0x12, 0x12]);
+}
+
+#[test]
+fn decoded_color_description_preserves_source_metadata_and_assumptions() {
+    let untagged = decode(&png(1, 1, image::ColorType::Rgb8, &[10, 20, 30])).unwrap();
+    assert_eq!(untagged.color().primaries(), ColorPrimaries::Srgb);
+    assert_eq!(untagged.color().transfer(), TransferFunction::Srgb);
+    assert_eq!(
+        untagged.color().source_profile(),
+        SourceProfile::AssumedSrgb
+    );
+    assert_eq!(untagged.color().range(), ColorRange::Full);
+    assert_eq!(untagged.color().alpha_mode(), AlphaMode::Opaque);
+
+    let encoded = png(1, 1, image::ColorType::Rgb8, &[10, 20, 30]);
+    let tagged = png_with_chunk_after_ihdr(&encoded, *b"sRGB", &[0]);
+    let tagged = decode(&tagged).unwrap();
+    assert_eq!(tagged.color().source_profile(), SourceProfile::Srgb);
+    assert_eq!(tagged.color().range(), ColorRange::Full);
+
+    let rgba = decode(&png(1, 1, image::ColorType::Rgba8, &[11, 22, 33, 44])).unwrap();
+    assert_eq!(rgba.color().alpha_mode(), AlphaMode::Straight);
+
+    let jpeg = decode(&jpeg(1, 1, &[30, 20, 10])).unwrap();
+    assert_eq!(jpeg.color().source_profile(), SourceProfile::AssumedSrgb);
+    assert_eq!(jpeg.color().range(), ColorRange::Unspecified);
+    assert_eq!(jpeg.color().alpha_mode(), AlphaMode::Opaque);
 }
 
 #[test]
