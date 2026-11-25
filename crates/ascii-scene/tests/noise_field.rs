@@ -132,11 +132,41 @@ fn configuration_and_internal_terrain_bounds_are_checked() {
     }
     assert!(NoiseFieldConfig::new(0.01, 0.0, u32::MAX).is_ok());
     assert!(NoiseFieldConfig::new(100.0, 10.0, 0).is_ok());
-    assert!(TerrainControls::new(0.0, 1, false).is_err());
-    assert!(TerrainControls::new(0.0001, 1, false).is_err());
-    assert!(TerrainControls::new(0.01, 1, false).is_ok());
+    assert!(TerrainControls::new(0.0, 1).is_err());
+    assert!(TerrainControls::new(0.0001, 1).is_err());
+    assert!(TerrainControls::new(0.01, 1).is_ok());
+
     assert!(NoiseFieldConfig::from_hex_rgba(2.0, 0.2, "#ccccffff").is_ok());
     assert!(NoiseFieldConfig::from_hex_rgba(2.0, 0.2, "ccccffff").is_err());
+}
+fn assert_frozen(parameters: SceneParameters) {
+    let table = fixture();
+    let dimensions = SceneDimensions::new(8, 4).unwrap();
+    let generator = NoiseFieldGenerator::new(&table, NoiseFieldConfig::cloud());
+    let mut runtime = SceneRuntime::try_new(
+        parameters,
+        dimensions,
+        generator,
+        &SceneResourceBudget::default(),
+    )
+    .unwrap();
+    let initial = runtime.frame().to_vec();
+    let report = runtime
+        .advance(
+            std::time::Duration::from_secs(1),
+            &ApprovedSnapshots::empty(),
+        )
+        .unwrap();
+    assert_eq!(report.simulation_steps(), 0);
+    assert!(!report.output_refreshed());
+    assert_eq!(runtime.frame(), initial);
+    assert_eq!(runtime.simulation_step_count(), 0);
+}
+
+#[test]
+fn zero_time_scale_and_disabled_background_motion_are_static() {
+    assert_frozen(SceneParameters::new(1, 0.0, 0, 60, true).unwrap());
+    assert_frozen(SceneParameters::new(1, 1.0, 0, 60, false).unwrap());
 }
 #[test]
 fn tiny_large_scale_zero_speed_and_resize_remain_bounded() {

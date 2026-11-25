@@ -201,17 +201,15 @@ impl NoiseFieldConfig {
 pub struct TerrainControls {
     contour_spacing_q16: u32,
     seed: u32,
-    parallax: bool,
 }
 impl TerrainControls {
-    pub fn new(contour_spacing: f32, seed: u32, parallax: bool) -> Result<Self, Error> {
+    pub fn new(contour_spacing: f32, seed: u32) -> Result<Self, Error> {
         if !contour_spacing.is_finite() || !(0.01..=1.0).contains(&contour_spacing) {
             return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
         }
         Ok(Self {
             contour_spacing_q16: (f64::from(contour_spacing) * Q16 as f64).round() as u32,
             seed,
-            parallax,
         })
     }
     #[must_use]
@@ -219,7 +217,6 @@ impl TerrainControls {
         Self {
             contour_spacing_q16: 6_554,
             seed: 1,
-            parallax: false,
         }
     }
     #[must_use]
@@ -229,10 +226,6 @@ impl TerrainControls {
     #[must_use]
     pub const fn seed(self) -> u32 {
         self.seed
-    }
-    #[must_use]
-    pub const fn parallax(self) -> bool {
-        self.parallax
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -251,6 +244,7 @@ pub struct NoiseFieldGenerator<'a> {
     node_id: &'a str,
     phase_q16: u32,
     seed: u64,
+    static_motion: bool,
 }
 impl<'a> NoiseFieldGenerator<'a> {
     #[must_use]
@@ -262,6 +256,7 @@ impl<'a> NoiseFieldGenerator<'a> {
             node_id: NOISE_FIELD_NODE_ID,
             phase_q16: 0,
             seed: 0,
+            static_motion: false,
         }
     }
     #[must_use]
@@ -318,6 +313,7 @@ impl SceneGenerator for NoiseFieldGenerator<'_> {
             seed
         };
         self.phase_q16 = 0;
+        self.static_motion = self.config.speed_q16 == 0 || parameters.is_static();
         Ok(())
     }
     fn step(
@@ -338,7 +334,7 @@ impl SceneGenerator for NoiseFieldGenerator<'_> {
             & 0xffff;
     }
     fn is_static(&self) -> bool {
-        self.config.speed_q16 == 0
+        self.static_motion
     }
     fn render(&self, dims: SceneDimensions, output: &mut [char]) {
         if output.len() != dims.cell_count() {
