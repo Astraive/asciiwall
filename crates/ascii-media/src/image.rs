@@ -3,8 +3,8 @@
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
 use ascii_core::{
-    AlphaMode, Budget, BudgetKind, CancellationToken, Error, MalformedReason, PixelChannels,
-    UnsupportedReason,
+    AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, ColorRange,
+    Error, MalformedReason, PixelChannels, SourceProfile, TransferFunction, UnsupportedReason,
 };
 use image::metadata::Orientation;
 use zune_core::{colorspace::ColorSpace, options::DecoderOptions};
@@ -487,13 +487,15 @@ where
     } else {
         (PixelChannels::Rgb, AlphaMode::Opaque)
     };
+    let color = ColorDescription::new(ColorPrimaries::Srgb, TransferFunction::Srgb, alpha)
+        .with_source_metadata(header.source_profile, ColorRange::Full);
     DecodedFrame::new(
         DecodedFrameData {
             width: plan.output_width,
             height: plan.output_height,
             row_stride: plan.row_stride,
             channels,
-            alpha,
+            color,
             pixels: output,
             memory_permit: output_permit,
         },
@@ -512,6 +514,7 @@ struct PngHeader {
     palette_entries: usize,
     transparency_len: Option<usize>,
     orientation: Orientation,
+    source_profile: SourceProfile,
     has_srgb: bool,
     gamma: Option<u32>,
     chromaticities: Option<[u32; 8]>,
@@ -555,6 +558,7 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
         palette_entries: 0,
         transparency_len: None,
         orientation: Orientation::NoTransforms,
+        source_profile: SourceProfile::AssumedSrgb,
         has_srgb: false,
         gamma: None,
         chromaticities: None,
@@ -712,12 +716,14 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
                     return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
                 }
                 header.has_srgb = true;
+                header.source_profile = SourceProfile::Srgb;
             }
             b"iCCP" => {
                 if seen_idat {
                     return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
                 }
                 validate_iccp(payload)?;
+                header.source_profile = SourceProfile::EmbeddedIcc;
                 header.unsupported = Some(UnsupportedReason::ColorDescription);
             }
             b"eXIf" => {
@@ -725,8 +731,17 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
                     return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
                 }
                 seen_exif = true;
-                if let Some(orientation) = parse_tiff_orientation(payload) {
+                let metadata = parse_tiff_metadata(payload);
+                if let Some(orientation) = metadata.orientation {
                     header.orientation = orientation;
+                }
+                if let Some(profile) = metadata.source_profile {
+                    header.source_profile = profile;
+                    if profile != SourceProfile::Srgb {
+                        header
+                            .unsupported
+                            .get_or_insert(UnsupportedReason::ColorDescription);
+                    }
                 }
             }
             b"acTL" | b"fcTL" | b"fdAT" => {
@@ -927,6 +942,7 @@ struct JpegHeader {
     scan_block_work: u64,
     exif_bytes: u64,
     orientation: Orientation,
+    source_profile: SourceProfile,
     unsupported: Option<UnsupportedReason>,
 }
 
@@ -1085,7 +1101,12 @@ where
             height: plan.output_height,
             row_stride: plan.row_stride,
             channels: PixelChannels::Rgb,
-            alpha: AlphaMode::Opaque,
+            color: ColorDescription::new(
+                ColorPrimaries::Srgb,
+                TransferFunction::Srgb,
+                AlphaMode::Opaque,
+            )
+            .with_source_metadata(header.source_profile, ColorRange::Unspecified),
             pixels: output,
             memory_permit: output_permit,
         },
@@ -1115,6 +1136,7 @@ where
         scan_block_work: 0,
         exif_bytes: 0,
         orientation: Orientation::NoTransforms,
+        source_profile: SourceProfile::AssumedSrgb,
         unsupported: None,
     };
     let mut offset = 2_usize;
@@ -1175,8 +1197,17 @@ where
                     let tiff = &payload[6..];
                     header.exif_bytes =
                         u64::try_from(tiff.len()).map_err(|_| Error::SizeOverflow)?;
-                    if let Some(orientation) = parse_tiff_orientation(tiff) {
+                    let metadata = parse_tiff_metadata(tiff);
+                    if let Some(orientation) = metadata.orientation {
                         header.orientation = orientation;
+                    }
+                    if let Some(profile) = metadata.source_profile {
+                        header.source_profile = profile;
+                        if profile != SourceProfile::Srgb {
+                            header
+                                .unsupported
+                                .get_or_insert(UnsupportedReason::ColorDescription);
+                        }
                     }
                 } else {
                     header
@@ -1585,39 +1616,112 @@ where
     }
 }
 
-fn parse_tiff_orientation(tiff: &[u8]) -> Option<Orientation> {
+#[derive(Clone, Copy, Debug, Default)]
+struct ExifMetadata {
+    orientation: Option<Orientation>,
+    source_profile: Option<SourceProfile>,
+}
+
+fn unsupported_exif_metadata() -> ExifMetadata {
+    ExifMetadata {
+        orientation: None,
+        source_profile: Some(SourceProfile::Malformed),
+    }
+}
+
+fn parse_tiff_metadata(tiff: &[u8]) -> ExifMetadata {
+    let mut metadata = ExifMetadata::default();
     if tiff.len() < 8 {
-        return None;
+        return unsupported_exif_metadata();
     }
     let little_endian = match &tiff[..2] {
         b"II" => true,
         b"MM" => false,
-        _ => return None,
+        _ => return unsupported_exif_metadata(),
     };
     if read_tiff_u16(&tiff[2..4], little_endian) != 42 {
-        return None;
+        return unsupported_exif_metadata();
     }
-    let ifd_offset = usize::try_from(read_tiff_u32(&tiff[4..8], little_endian)).ok()?;
+    let Ok(ifd0_offset) = usize::try_from(read_tiff_u32(&tiff[4..8], little_endian)) else {
+        return unsupported_exif_metadata();
+    };
+    let Some((entries_start, entry_count)) = tiff_ifd_entries(tiff, ifd0_offset, little_endian)
+    else {
+        return unsupported_exif_metadata();
+    };
+    let mut exif_ifd_offset = None;
+    for index in 0..entry_count {
+        let Some(entry_start) = index
+            .checked_mul(12)
+            .and_then(|offset| entries_start.checked_add(offset))
+        else {
+            return unsupported_exif_metadata();
+        };
+        let Some(entry_end) = entry_start.checked_add(12) else {
+            return unsupported_exif_metadata();
+        };
+        let Some(entry) = tiff.get(entry_start..entry_end) else {
+            return unsupported_exif_metadata();
+        };
+        let tag = read_tiff_u16(&entry[0..2], little_endian);
+        let value_type = read_tiff_u16(&entry[2..4], little_endian);
+        let value_count = read_tiff_u32(&entry[4..8], little_endian);
+        if tag == 0x0112 && value_type == 3 && value_count == 1 {
+            metadata.orientation = u8::try_from(read_tiff_u16(&entry[8..10], little_endian))
+                .ok()
+                .and_then(Orientation::from_exif);
+        } else if tag == 0x8769 && value_type == 4 && value_count == 1 {
+            exif_ifd_offset = usize::try_from(read_tiff_u32(&entry[8..12], little_endian)).ok();
+        }
+    }
+    let Some(exif_ifd_offset) = exif_ifd_offset else {
+        return metadata;
+    };
+    let Some((entries_start, entry_count)) = tiff_ifd_entries(tiff, exif_ifd_offset, little_endian)
+    else {
+        return unsupported_exif_metadata();
+    };
+    for index in 0..entry_count {
+        let Some(entry_start) = index
+            .checked_mul(12)
+            .and_then(|offset| entries_start.checked_add(offset))
+        else {
+            return unsupported_exif_metadata();
+        };
+        let Some(entry_end) = entry_start.checked_add(12) else {
+            return unsupported_exif_metadata();
+        };
+        let Some(entry) = tiff.get(entry_start..entry_end) else {
+            return unsupported_exif_metadata();
+        };
+        if read_tiff_u16(&entry[0..2], little_endian) != 0xa001 {
+            continue;
+        }
+        let value_type = read_tiff_u16(&entry[2..4], little_endian);
+        let value_count = read_tiff_u32(&entry[4..8], little_endian);
+        metadata.source_profile = Some(if value_type != 3 || value_count != 1 {
+            SourceProfile::Malformed
+        } else {
+            match read_tiff_u16(&entry[8..10], little_endian) {
+                1 => SourceProfile::Srgb,
+                0xffff => SourceProfile::Uncalibrated,
+                value => SourceProfile::Other(value),
+            }
+        });
+        break;
+    }
+    metadata
+}
+
+fn tiff_ifd_entries(tiff: &[u8], ifd_offset: usize, little_endian: bool) -> Option<(usize, usize)> {
     let count_end = ifd_offset.checked_add(2)?;
     let entry_count = usize::from(read_tiff_u16(
         tiff.get(ifd_offset..count_end)?,
         little_endian,
     ));
-    let entries_start = count_end;
-    for index in 0..entry_count {
-        let entry_start = entries_start.checked_add(index.checked_mul(12)?)?;
-        let entry_end = entry_start.checked_add(12)?;
-        let entry = tiff.get(entry_start..entry_end)?;
-        let tag = read_tiff_u16(&entry[0..2], little_endian);
-        let value_type = read_tiff_u16(&entry[2..4], little_endian);
-        let value_count = read_tiff_u32(&entry[4..8], little_endian);
-        if tag == 0x0112 && value_type == 3 && value_count == 1 {
-            return Orientation::from_exif(
-                u8::try_from(read_tiff_u16(&entry[8..10], little_endian)).ok()?,
-            );
-        }
-    }
-    None
+    let entries_end = count_end.checked_add(entry_count.checked_mul(12)?)?;
+    tiff.get(count_end..entries_end)?;
+    Some((count_end, entry_count))
 }
 
 fn read_tiff_u16(bytes: &[u8], little_endian: bool) -> u16 {

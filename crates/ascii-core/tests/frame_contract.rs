@@ -3,9 +3,9 @@ use std::vec::Vec;
 
 use ascii_core::{
     AlphaMode, AsciiCell, AsciiFrame, Budget, BudgetKind, CancellationToken, ColorDescription,
-    ColorPrimaries, Error, GlyphTableId, GridSize, MalformedReason, PixelChannels, PixelFormat,
-    RasterFrameView, RasterOrientation, TransferFunction, UnsupportedReason, validate_frame,
-    validate_grid_budget, validate_raster_frame,
+    ColorPrimaries, ColorRange, Error, GlyphTableId, GridSize, MalformedReason, PixelChannels,
+    PixelFormat, RasterFrameView, RasterOrientation, SourceProfile, TransferFunction,
+    UnsupportedReason, validate_frame, validate_grid_budget, validate_raster_frame,
 };
 
 fn budget() -> Budget {
@@ -406,6 +406,52 @@ fn raster_rejects_unsupported_sample_depth_orientation_and_color_transfer() {
         ),
         Err(Error::Unsupported(UnsupportedReason::ColorDescription))
     ));
+}
+
+#[test]
+fn color_description_preserves_compact_source_metadata() {
+    let unspecified = ColorDescription::new(
+        ColorPrimaries::Srgb,
+        TransferFunction::Srgb,
+        AlphaMode::Straight,
+    );
+    assert_eq!(unspecified.source_profile(), SourceProfile::Unspecified);
+    assert_eq!(unspecified.range(), ColorRange::Unspecified);
+
+    let described = ColorDescription::srgb(AlphaMode::Straight)
+        .with_source_metadata(SourceProfile::AssumedSrgb, ColorRange::Full);
+    let copied = described;
+    assert_eq!(copied, described);
+    assert_eq!(copied.source_profile(), SourceProfile::AssumedSrgb);
+    assert_eq!(copied.range(), ColorRange::Full);
+}
+
+#[test]
+fn raster_rejects_unsupported_source_profile_and_limited_range() {
+    let pixels = [0; 3];
+    for color in [
+        ColorDescription::srgb(AlphaMode::Opaque)
+            .with_source_metadata(SourceProfile::EmbeddedIcc, ColorRange::Full),
+        ColorDescription::srgb(AlphaMode::Opaque)
+            .with_source_metadata(SourceProfile::Srgb, ColorRange::Limited),
+    ] {
+        assert!(matches!(
+            validate_raster_frame(
+                RasterFrameView::new(
+                    1,
+                    1,
+                    3,
+                    PixelFormat::rgb8(),
+                    color,
+                    RasterOrientation::TopDown,
+                    &pixels,
+                ),
+                &budget(),
+                &CancellationToken::new(),
+            ),
+            Err(Error::Unsupported(UnsupportedReason::ColorDescription))
+        ));
+    }
 }
 
 #[test]

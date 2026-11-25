@@ -75,7 +75,15 @@ A Rust struct is not a wire format. Explicit encoders define byte order, padding
 
 The exact `u32 × u32` cell count fits in `u64`; do not treat that product as overflow-prone. Convert it to platform `usize`, compute cell bytes with checked arithmetic, and reject storage beyond `isize::MAX` before allocation. Every frame has a nonzero grid, exactly one row-major cell per grid position, the expected fixed-width glyph-table identity, and glyph indices below the supplied table count. Colors identify encoded sRGBA8; the renderer converts to linear-light values for blending as required.
 
-The raster validator accepts top-down 8-bit Gray, RGB, or RGBA with sRGB primaries and the sRGB transfer function. It rejects unsupported sample depth, channel layouts, orientation, color/transfer metadata, and alpha semantics instead of silently transforming them. It checks `row_stride >= row_bytes` and the exact readable extent `(height - 1) * row_stride + row_bytes` with checked arithmetic. Padding after the last row is not required; trailing backing bytes are allowed. The validated view borrows the original byte slice, exposes only its required readable extent when requested, and cannot outlive that backing storage. No pixel copy or I/O occurs.
+The raster validator accepts top-down 8-bit Gray/RGB/RGBA with sRGB primaries and transfer,
+unspecified/assumed/declared-sRGB source profiles, and unspecified/full source ranges. `ColorDescription`
+stores those compact provenance values alongside alpha semantics without allocating or converting
+profiles/ranges. Embedded ICC, uncalibrated/unknown profiles, limited/unknown range codes, and
+unsupported transfers fail with typed `Unsupported(ColorDescription)` errors. It checks
+`row_stride >= row_bytes` and the exact readable extent `(height - 1) * row_stride + row_bytes`
+with checked arithmetic. Padding after the last row is not required; trailing backing bytes are
+allowed. The validated view borrows the original byte slice, exposes only its required readable
+extent when requested, and cannot outlive that backing storage. No pixel copy or I/O occurs.
 
 ## Identity and versioning
 

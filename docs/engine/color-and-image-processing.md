@@ -105,10 +105,10 @@ helpers, not as the PNG/JPEG decode backend.
 
 Published rasters are top-down and tightly packed as 8-bit RGB or straight-alpha RGBA. Gray
 samples expand to RGB; indexed PNG transparency expands to RGBA; 16-bit PNG samples are rounded
-to 8 bits. PNG Adam7 and JPEG baseline/progressive inputs are supported. JPEG EXIF orientation
-is applied before enforcing output dimensions. Untagged content is assumed sRGB; embedded ICC
-profiles, APNG, unsupported JPEG color models/depths, and non-sRGB PNG `gAMA`/`cHRM` color
-descriptions are rejected as explicit capability errors rather than silently mislabeled.
+to 8 bits. PNG Adam7 and JPEG baseline/progressive inputs are supported. JPEG EXIF display
+orientation is applied before enforcing output dimensions. Each `DecodedFrame` carries a copyable,
+allocation-free `ColorDescription`: accepted sRGB primaries/transfer interpretation, actual alpha
+semantics, compact source-profile provenance, and source range metadata.
 
 `DecodeLimits` carries the core per-operation `Budget`, decoder-local encoded/scratch limits,
 dimensions, and a shared `DecodeResources` ledger for concurrent decode slots and retained
@@ -138,10 +138,11 @@ tests. These fixture checks do not imply native-codec, performance, or platform-
 
 `ascii-media::image_capabilities()` reports this build's static decoder variants: still PNG,
 baseline/progressive JPEG, and no APNG or WebP variants. APNG support is represented solely by
-`png.animated`, preventing contradictory duplicate capability flags. These values reflect the fixed
-decoder backends and are tested against the crate's actual implementation. The decoder explicitly
-rejects the RIFF/WEBP signature; this does not route animated WebP to an animation decoder, which
-is not wired in. Do not advertise WebP, APNG, ICC profile interpretation, or HDR support.
+`png.animated`. This build pins `image` 0.25.10 with only PNG/JPEG features; its optional `webp`
+feature and `image-webp` backend are absent from the resolved build. No rights-cleared lossy,
+lossless, or alpha WebP fixture generator/evidence is available in this repository/toolchain, so
+all WebP variants remain disabled rather than advertised without exact-build proof. The decoder
+rejects the RIFF/WEBP signature; this does not route animated WebP to an animation decoder.
 
 JPEG display orientation is applied once while producing the normalized top-down raster. The
 returned `RasterFrameView` carries `RasterOrientation::TopDown`; consumers must use that pixel
@@ -151,6 +152,18 @@ orientation fixtures and expected output hashes are maintained in
 
 The repository currently has no CLI doctor or import-error surface to consume the capability
 report. Those user-facing diagnostics remain blocked until those product surfaces exist; callers
-can query the media-library API in the meantime. Color metadata remains intentionally limited:
-untagged images are assumed sRGB, explicit unsupported profiles/transfers are rejected, and no
-ICC/HDR accuracy is claimed.
+can query the media-library API in the meantime.
+
+For accepted PNG, `ColorDescription::source_profile()` distinguishes a declared sRGB chunk from
+untagged data handled under the documented sRGB assumption; PNG sample range is full. JPEG EXIF
+ColorSpace sRGB is retained, otherwise the profile is marked as assumed sRGB; JPEG range is
+unspecified because this decoder has no authoritative source-range tag. Untagged values are not
+claimed to have undergone profile conversion. Embedded ICC, uncalibrated/unknown EXIF color space,
+non-sRGB PNG `gAMA`/`cHRM`, and unsupported transfer/HDR metadata fail with typed color-description
+errors; no ICC or HDR conversion accuracy is claimed.
+
+Animation routing remains blocked: no animation handler exists in the current repository. A future
+IMG-003 integration must classify an animated WebP before static `read_image`, then route frames
+through its timeline/composition, disposal/blend, cancellation, and bounded-history contract. Until
+that adapter exists, static decoding rejects WebP and never publishes a frame as a complete
+animation.

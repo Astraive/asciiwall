@@ -27,7 +27,9 @@
 
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
-use ascii_core::{Budget, BudgetKind, CancellationToken, Error, UnsupportedReason};
+use ascii_core::{
+    Budget, BudgetKind, CancellationToken, ColorRange, Error, SourceProfile, UnsupportedReason,
+};
 use ascii_media::{DecodeLimits, DecodeResources, DecodedFrame, ReadSeek, decode_image};
 use sha2::{Digest, Sha256};
 
@@ -280,6 +282,32 @@ fn with_exif_orientation(jpeg: &[u8], orientation: u16) -> Vec<u8> {
     tagged
 }
 
+fn with_exif_color_space(jpeg: &[u8], color_space: u16) -> Vec<u8> {
+    assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
+
+    let mut payload = b"Exif\0\0".to_vec();
+    payload.extend_from_slice(&[
+        b'I', b'I', 42, 0, 8, 0, 0, 0, // TIFF header; IFD0 starts at offset 8.
+        1, 0, // One IFD0 entry.
+        0x69, 0x87, 4, 0, 1, 0, 0, 0, 26, 0, 0, 0, // Exif IFD pointer.
+        0, 0, 0, 0, // Next IFD offset.
+        1, 0, // One Exif IFD entry.
+        1, 0xa0, 3, 0, 1, 0, 0, 0, // ColorSpace tag, SHORT, one value.
+    ]);
+    payload.extend_from_slice(&color_space.to_le_bytes());
+    payload.extend_from_slice(&[0; 2]); // Inline value padding.
+    payload.extend_from_slice(&[0; 4]); // Next IFD offset.
+
+    let app1_length = u16::try_from(payload.len() + 2).expect("small EXIF segment");
+    let mut tagged = Vec::with_capacity(jpeg.len() + payload.len() + 4);
+    tagged.extend_from_slice(&jpeg[..2]);
+    tagged.extend_from_slice(&[0xff, 0xe1]);
+    tagged.extend_from_slice(&app1_length.to_be_bytes());
+    tagged.extend_from_slice(&payload);
+    tagged.extend_from_slice(&jpeg[2..]);
+    tagged
+}
+
 fn with_comment_padding(jpeg: &[u8], padding_len: usize) -> Vec<u8> {
     assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
 
@@ -435,6 +463,35 @@ fn unsupported_jpeg_depth_and_color_model_have_capability_errors() {
     assert!(matches!(
         decode(&cmyk),
         Err(Error::Unsupported(UnsupportedReason::PixelFormat))
+    ));
+}
+
+#[test]
+fn exif_srgb_color_space_is_preserved_and_uncalibrated_color_is_rejected() {
+    const SETTINGS: &str = "jpeg=rights-cleared-baseline-4x3;exif=II;IFD0.ExifIFD=26;ExifIFD.ColorSpace=SHORT;values=sRGB(1),uncalibrated(65535)";
+    let baseline = fixture_bytes(BASELINE_JPEG_HEX);
+    let srgb = with_exif_color_space(&baseline, 1);
+    let uncalibrated = with_exif_color_space(&baseline, u16::MAX);
+    println!(
+        "exif color-space fixture settings_sha256={:x} settings={SETTINGS}",
+        Sha256::digest(SETTINGS.as_bytes())
+    );
+    println!(
+        "jpeg exif colorspace=sRGB sha256={:x}",
+        Sha256::digest(&srgb)
+    );
+    println!(
+        "jpeg exif colorspace=uncalibrated sha256={:x}",
+        Sha256::digest(&uncalibrated)
+    );
+
+    let tagged = decode(&srgb).unwrap();
+    assert_eq!(tagged.color().source_profile(), SourceProfile::Srgb);
+    assert_eq!(tagged.color().range(), ColorRange::Unspecified);
+    assert_eq!(tagged.color().alpha_mode(), ascii_core::AlphaMode::Opaque);
+    assert!(matches!(
+        decode(&uncalibrated),
+        Err(Error::Unsupported(UnsupportedReason::ColorDescription))
     ));
 }
 

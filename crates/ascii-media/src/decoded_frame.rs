@@ -1,6 +1,6 @@
 use crate::resources::MemoryPermit;
 use ascii_core::{
-    AlphaMode, Budget, CancellationToken, ColorDescription, Error, PixelChannels, PixelFormat,
+    Budget, CancellationToken, ColorDescription, Error, PixelChannels, PixelFormat,
     RasterFrameView, RasterOrientation, validate_raster_frame,
 };
 
@@ -33,7 +33,7 @@ pub(crate) struct DecodedFrameData {
     pub(crate) height: u32,
     pub(crate) row_stride: usize,
     pub(crate) channels: PixelChannels,
-    pub(crate) alpha: AlphaMode,
+    pub(crate) color: ColorDescription,
     pub(crate) pixels: Vec<u8>,
     pub(crate) memory_permit: MemoryPermit,
 }
@@ -49,7 +49,7 @@ impl DecodedFrame {
             height,
             row_stride,
             channels,
-            alpha,
+            color,
             pixels,
             memory_permit,
         } = data;
@@ -64,7 +64,7 @@ impl DecodedFrame {
             height,
             row_stride,
             format: PixelFormat::new(channels, 8),
-            color: ColorDescription::srgb(alpha),
+            color,
             pixels,
             _memory_permit: memory_permit,
         };
@@ -135,6 +135,7 @@ impl DecodedFrame {
 mod tests {
     use super::*;
     use crate::resources::DecodeResources;
+    use ascii_core::AlphaMode;
 
     #[test]
     fn padded_backing_is_charged_including_final_row_padding() {
@@ -148,7 +149,7 @@ mod tests {
                 height: 2,
                 row_stride: 8,
                 channels: PixelChannels::Rgb,
-                alpha: AlphaMode::Opaque,
+                color: ColorDescription::srgb(AlphaMode::Opaque),
                 pixels,
                 memory_permit: permit,
             },
