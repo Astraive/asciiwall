@@ -7,18 +7,19 @@
 //!
 //! Submission, producer writes, raster consumption, and pixel callbacks acquire shared CPU-work
 //! permits. The process-local raster-to-ASCII consumer copies bytes under the pixel callback and
-//! holds a CPU permit across conversion outside the pool lock. A consumed slot retains its output
-//! permit until its acknowledged lease is released or dropped, generation invalidation, or final
-//! pool-owner drop. A decoder outside this crate MUST hold `ResourceBudget::try_acquire_decode` for
-//! its active decode job; this crate supplies no decoder operation to which such a permit could be
-//! applied internally.
+//! transfers the slot's output permit into its lease before conversion, so the returned frame holds
+//! its charge across generation invalidation. An unacknowledged unpinned lease dropped before
+//! completion leaves its permit in the quarantined slot until acknowledgement or invalidation. A
+//! decoder outside this crate MUST hold `ResourceBudget::try_acquire_decode` for its active decode
+//! job; this crate supplies no decoder operation to which such a permit could be applied internally.
 //!
 //! # Locking and callbacks
 //!
 //! The global acquisition order is the [`BoundedHandoff`] operation lock, then an individual
 //! queue, pool, or budget lock. Queue and pool locks are never held simultaneously. Generation
-//! invalidation takes per-slot output permits under the pool lock, then drops them after unlocking;
-//! budget code never acquires a pool lock. Other cross-component operations release each lock
+//! invalidation takes permits stranded in quarantined slots under the pool lock, then drops them
+//! after unlocking; output-pinned lease permits remain charged independently of slot state.
+//! Budget code never acquires a pool lock. Other cross-component operations release each lock
 //! before acquiring the next. Urgent control flags are atomic; completion acknowledgements update
 //! slot ownership under the pool lock. Free-slot publication and no-free-slot replacement takeover
 //! use the cancellation token's short commit gate while holding the pool lock; cancellation never
