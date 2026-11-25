@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 **Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, PNG/JPEG decoding, and the bounded `ascii-scene` runtime. **No application binary or published release tag exists yet.**
 
+### Fixed
+
+- `HostAdapter::reconcile` now rejects truncated snapshots as successful reconciliation while preserving retained feed/lease state in a typed error; behind-revision errors retain precedence.
+
 ### Added
 
 - Added an issue-scoped Windows desktop hierarchy feasibility probe in `ascii-platform`; host enumeration is bounded and read-only, with placement, focus, Explorer-restart, and icon-interaction gates explicitly left not run ([WND-001](tests/platform/host-probe.md)).

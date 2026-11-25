@@ -33,10 +33,12 @@ pub trait HostAdapter {
     /// reported by the snapshot itself; consumers must not treat a truncated snapshot as complete.
     fn reconciliation_snapshot(&self) -> HostStateSnapshot;
 
-    /// Returns authoritative current state only if it covers the dropped-event revision.
+    /// Returns complete authoritative current state only if it covers the dropped-event revision.
     ///
-    /// A successful result may still be truncated; check `HostStateSnapshot::is_complete` before
-    /// marking all feeds and leases reconciled.
+    /// A snapshot behind the requested revision is reported as `SnapshotBehind`, even when it is
+    /// incomplete. Otherwise, a truncated snapshot is returned in `IncompleteSnapshot` so callers
+    /// can inspect its retained values without treating it as fully reconciled.
+    #[allow(clippy::result_large_err)] // Carries the retained snapshot inline without allocating.
     fn reconcile(&self, minimum_revision: u64) -> Result<HostStateSnapshot, ReconciliationError> {
         let snapshot = self.reconciliation_snapshot();
         if snapshot.revision() < minimum_revision {
@@ -45,6 +47,9 @@ pub trait HostAdapter {
                 snapshot_revision: snapshot.revision(),
             });
         }
+        if !snapshot.is_complete() {
+            return Err(ReconciliationError::IncompleteSnapshot { snapshot });
+        }
         Ok(snapshot)
     }
 
@@ -52,8 +57,9 @@ pub trait HostAdapter {
     fn poll(&mut self) -> HostEventBatch;
 }
 
-/// A reconciliation request cannot be satisfied by the returned authoritative revision.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Why a reconciliation request cannot return a complete authoritative snapshot.
+#[allow(clippy::large_enum_variant)] // Keep incomplete snapshots inspectable without allocating.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReconciliationError {
     /// The current snapshot does not cover the requested dropped-event revision.
     SnapshotBehind {
@@ -61,6 +67,11 @@ pub enum ReconciliationError {
         requested_revision: u64,
         /// Revision of the snapshot the adapter returned.
         snapshot_revision: u64,
+    },
+    /// The revision is sufficient, but bounded storage omitted feed or lease values.
+    IncompleteSnapshot {
+        /// The retained partial state and details of which collections were truncated.
+        snapshot: HostStateSnapshot,
     },
 }
 

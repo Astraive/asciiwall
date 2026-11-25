@@ -450,6 +450,31 @@ fn bounded_reconciliation_snapshot_reports_feed_and_lease_truncation() {
     assert!(state.feeds_truncated());
     assert!(state.leases_truncated());
     assert!(!state.is_complete());
+    let snapshot_revision = state.revision();
+    let adapter = FixtureAdapter {
+        capabilities,
+        reconciliation: state,
+    };
+    assert_eq!(
+        adapter.reconcile(snapshot_revision + 1),
+        Err(ascii_platform::ReconciliationError::SnapshotBehind {
+            requested_revision: snapshot_revision + 1,
+            snapshot_revision,
+        })
+    );
+    let ascii_platform::ReconciliationError::IncompleteSnapshot { snapshot } =
+        adapter.reconcile(snapshot_revision).unwrap_err()
+    else {
+        panic!("a truncated snapshot must not report successful reconciliation");
+    };
+    assert_eq!(snapshot.revision(), snapshot_revision);
+    assert_eq!(snapshot.feed_count(), MAX_RECONCILIATION_FEEDS);
+    assert_eq!(snapshot.lease_count(), MAX_RECONCILIATION_LEASES);
+    assert!(snapshot.feeds_truncated());
+    assert!(snapshot.leases_truncated());
+    assert!(!snapshot.is_complete());
+    assert!(snapshot.feeds().next().is_some());
+    assert!(snapshot.leases().next().is_some());
 }
 
 #[test]
