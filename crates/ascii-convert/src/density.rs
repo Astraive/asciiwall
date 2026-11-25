@@ -29,6 +29,7 @@ use crate::sampling::{
 use crate::structural::{
     MAX_STRUCTURAL_CANDIDATES, ReconstructionInput, ReconstructionWeights, ShortlistOptions,
     StructuralDescriptor, StructuralScratch, StructuralWeights, rerank_candidates,
+    shortlist_grid_work_bound,
 };
 
 const CANCELLATION_CELL_INTERVAL: usize = 32;
@@ -513,35 +514,39 @@ pub fn convert_structural(
     let mut structural_settings = settings.with_sampling(sampling);
     structural_settings.color_fit = None;
     let resources = NormalizedRasterResources::new(budget.max_raster_bytes());
-    let conversion = convert_density_detailed_impl(
-        input,
-        glyphs,
-        &structural_settings,
-        budget,
-        &resources,
-        #[cfg(test)]
-        None,
-    )
-    .map_err(DensityConversionError::into_core)?;
-    let DensityConversion {
-        frame,
-        patches,
-        sampling_identity,
-        ..
-    } = conversion;
-    let size = frame.size();
-    drop(frame);
-    let patches = patches.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
-    let glyph_count = u32::try_from(glyphs.glyphs().len()).map_err(|_| Error::SizeOverflow)?;
+    let crop_derived_sizing = matches!(
+        (settings.sizing, sampling.fit()),
+        (GridSizing::Columns(_), FitMode::CustomCrop(_))
+    );
+    let validated_source = if crop_derived_sizing {
+        if input.width() == 0 || input.height() == 0 {
+            return Err(Error::Malformed(MalformedReason::EmptyDimensions));
+        }
+        Some(
+            SamplingSource::new(input)
+                .map_err(|error| DensityConversionError::from(error).into_core())?,
+        )
+    } else {
+        None
+    };
+    let size = settings.sizing.resolve_for_sampling(
+        input.width(),
+        input.height(),
+        glyphs.cell_width(),
+        glyphs.cell_height(),
+        sampling,
+    )?;
+    let grid_budget = validate_grid_budget(size, budget, settings.cancellation)?;
+    let cell_count = grid_budget.cell_count_usize();
+    if previous.is_some_and(|frame| frame.size() != size) {
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+    }
     let candidate_count = glyphs.glyphs().len().min(64).min(MAX_STRUCTURAL_CANDIDATES);
+    let glyph_count = u32::try_from(glyphs.glyphs().len()).map_err(|_| Error::SizeOverflow)?;
     let shortlist_options =
         ShortlistOptions::new(candidate_count, StructuralWeights::new(0.34, 0.33, 0.33)?)?;
     let foreground_luminance = settings.foreground.luminance().value();
     let background_luminance = settings.background.luminance().value();
-    let cell_count = patches.cell_count();
-    if previous.is_some_and(|frame| frame.size() != size) {
-        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
-    }
     let sample_count =
         usize::try_from(patch_dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
     let sample_count_u64 = u64::try_from(sample_count).map_err(|_| Error::SizeOverflow)?;
@@ -557,27 +562,69 @@ pub fn convert_structural(
         .transpose()?
         .unwrap_or(0);
     let rerank_work = sample_count_u64
-        .checked_mul(3)
+        .checked_mul(4)
         .and_then(|work| work.checked_add(fit_work_per_candidate))
         .and_then(|work| work.checked_mul(u64::try_from(candidate_count).ok()?))
-        .and_then(|work| work.checked_mul(u64::try_from(cell_count).ok()?))
+        .and_then(|work| work.checked_mul(grid_budget.cell_count()))
         .ok_or(Error::SizeOverflow)?;
-    let grid_budget = validate_grid_budget(size, budget, settings.cancellation)?;
-    let source = SamplingSource::new(input)
-        .map_err(|error| DensityConversionError::from(error).into_core())?;
+    let shortlist_work = shortlist_grid_work_bound(
+        glyphs.glyphs().len(),
+        candidate_count,
+        patch_dimensions,
+        grid_budget.cell_count(),
+    )?;
+    let structural_matching_work = rerank_work
+        .checked_add(shortlist_work)
+        .ok_or(Error::SizeOverflow)?;
+    let source = match validated_source {
+        Some(source) => source,
+        None => SamplingSource::new(input)
+            .map_err(|error| DensityConversionError::from(error).into_core())?,
+    };
     let structural_sampling = prepare_sampling(
         source,
         size,
         glyphs.cell_width(),
         glyphs.cell_height(),
         sampling,
-        rerank_work,
+        structural_matching_work,
         grid_budget.work_units(),
         sample_count_u64,
         palette_storage_bytes,
         budget,
     )
     .map_err(|error| DensityConversionError::from(error).into_core())?;
+    // Reserve all structural-phase work before giving density matching only the remainder.
+    let density_work_limit = budget
+        .max_work_units()
+        .checked_sub(structural_sampling.work_units())
+        .ok_or(Error::BudgetExceeded(BudgetKind::WorkUnits))?;
+    let density_budget = Budget::new(
+        budget.max_frame_bytes(),
+        budget.max_raster_bytes(),
+        density_work_limit,
+    );
+    let conversion = convert_density_detailed_impl(
+        input,
+        glyphs,
+        &structural_settings,
+        &density_budget,
+        &resources,
+        #[cfg(test)]
+        None,
+    )
+    .map_err(DensityConversionError::into_core)?;
+    let DensityConversion {
+        frame,
+        patches,
+        sampling_identity,
+        ..
+    } = conversion;
+    if frame.size() != size {
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+    }
+    drop(frame);
+    let patches = patches.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
     let normalized = normalize_raster(input, budget, settings.cancellation, &resources)
         .map_err(|error| DensityConversionError::ColorNormalization(error).into_core())?;
     let mut color_samples = Vec::new();

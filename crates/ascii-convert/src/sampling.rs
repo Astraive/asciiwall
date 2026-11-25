@@ -671,6 +671,7 @@ pub(crate) struct SamplingPlan {
     transform: FitTransform,
     options: SamplingOptions,
     identity: SamplingIdentity,
+    work_units: u64,
 }
 
 impl SamplingPlan {
@@ -680,6 +681,11 @@ impl SamplingPlan {
 
     pub(crate) const fn identity(self) -> SamplingIdentity {
         self.identity
+    }
+
+    /// Returns the complete checked work bound accepted by this plan's preflight.
+    pub(crate) const fn work_units(self) -> u64 {
+        self.work_units
     }
 
     pub(crate) fn allocate_patches(
@@ -1588,6 +1594,7 @@ pub(crate) fn prepare_sampling(
         transform,
         options,
         identity,
+        work_units: total_work,
     })
 }
 
