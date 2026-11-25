@@ -3,9 +3,10 @@ mod support;
 
 use ascii_convert::{
     ConversionSettings, FitMode, GlyphConfig, GlyphRepertoire, GlyphTable, GridSizing, LinearRgb,
-    MAX_STRUCTURAL_CANDIDATES, NormalizedRasterResources, PatchDimensions, SamplingFilter,
-    SamplingIdentity, SamplingOptions, ShortlistOptions, StructuralDescriptor, StructuralScratch,
-    StructuralWeights, build_glyph_table, convert_density_detailed,
+    MAX_STRUCTURAL_CANDIDATES, NormalizedRasterResources, PatchDimensions, ReconstructionWeights,
+    SamplingFilter, SamplingIdentity, SamplingOptions, ShortlistOptions, StructuralDescriptor,
+    StructuralScratch, StructuralWeights, build_glyph_table, convert_density_detailed,
+    convert_structural,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, ColorPrimaries, Error,
@@ -651,4 +652,72 @@ fn invalid_candidate_and_work_limits_return_typed_errors() {
         .err(),
         Some(Error::BudgetExceeded(BudgetKind::WorkUnits))
     );
+}
+
+#[test]
+fn structural_conversion_reconstructs_the_shape_of_a_vertical_edge() {
+    let table = build_table(&equal_area_orientation_font(), "BA");
+    let vertical = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'B')
+        .expect("fixture includes vertical mask");
+    let horizontal = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'A')
+        .expect("fixture includes horizontal mask");
+    close(vertical.mean_coverage(), horizontal.mean_coverage());
+
+    let cancellation = CancellationToken::new();
+    let settings = ConversionSettings::new(
+        GridSizing::fixed_pixel_surface(CELL_WIDTH, CELL_HEIGHT),
+        FrameMetadata::new(GlyphTableId::new(*table.fingerprint()), 3, 1, 0, 1),
+        &cancellation,
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .expect("valid fixed-background settings")
+    .with_reconstruction_weights(
+        ReconstructionWeights::new(0.80, 0.15, 0.05, 0.0)
+            .expect("finite normalized objective weights"),
+    );
+    let pixels = vertical.mask();
+    let raster = RasterFrameView::new(
+        CELL_WIDTH,
+        CELL_HEIGHT,
+        CELL_WIDTH as usize,
+        PixelFormat::gray8(),
+        ColorDescription::new(
+            ColorPrimaries::Srgb,
+            TransferFunction::Linear,
+            AlphaMode::Opaque,
+        ),
+        RasterOrientation::TopDown,
+        pixels,
+    );
+    let first = convert_structural(raster, &table, &settings, None, &BUDGET)
+        .expect("structural reconstruction succeeds");
+    let vertical_position = table
+        .glyphs()
+        .iter()
+        .position(|glyph| glyph.character() == 'B')
+        .expect("vertical mask position fits table");
+    assert_eq!(first.cells()[0].glyph(), vertical_position as u32);
+    let repeated = convert_structural(raster, &table, &settings, None, &BUDGET)
+        .expect("repeated structural reconstruction succeeds");
+    assert_eq!(first, repeated);
+
+    let prior = convert_structural(raster, &table, &settings, None, &BUDGET)
+        .expect("prior frame conversion succeeds");
+    let with_zero_temporal_weight =
+        convert_structural(raster, &table, &settings, Some(&prior), &BUDGET)
+            .expect("zero-weight temporal conversion succeeds");
+    assert_eq!(first, with_zero_temporal_weight);
+}
+
+#[test]
+fn reconstruction_weights_reject_nonfinite_and_unnormalized_values() {
+    assert!(ReconstructionWeights::new(f64::NAN, 0.0, 0.0, 0.0).is_err());
+    assert!(ReconstructionWeights::new(0.5, 0.2, 0.2, 0.0).is_err());
 }

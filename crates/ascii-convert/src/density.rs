@@ -22,12 +22,17 @@ use crate::font::GlyphTable;
 #[cfg(test)]
 use crate::sampling::SampleCancellationPoll;
 use crate::palette::{Palette, PaletteError, PaletteKind};
+use crate::structural::{
+    MAX_STRUCTURAL_CANDIDATES, ReconstructionWeights, ShortlistOptions, StructuralDescriptor,
+    StructuralScratch, StructuralWeights, rerank_candidates,
+};
 use crate::sampling::{
-    FitMode, FitTransform, QualityPatches, SamplingError, SamplingIdentity, SamplingOptions,
-    SamplingSource, prepare_sampling,
+    FitMode, FitTransform, PatchDimensions, QualityPatches, SamplingError, SamplingIdentity,
+    SamplingOptions, SamplingSource, prepare_sampling,
 };
 const CANCELLATION_CELL_INTERVAL: usize = 32;
 const CANCELLATION_GLYPH_INTERVAL: usize = 64;
+
 
 /// How an output cell grid is sized before density matching.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,6 +198,7 @@ pub struct ConversionSettings<'a> {
     background: LinearRgb,
     color_fit: Option<(&'a Palette, ColorFitStrategy)>,
     sampling: SamplingOptions,
+    reconstruction_weights: ReconstructionWeights,
 }
 
 impl<'a> ConversionSettings<'a> {
@@ -222,6 +228,7 @@ impl<'a> ConversionSettings<'a> {
             background,
             color_fit: None,
             sampling: SamplingOptions::default(),
+            reconstruction_weights: ReconstructionWeights::new(0.70, 0.20, 0.05, 0.05)?,
         })
     }
 
@@ -244,6 +251,21 @@ impl<'a> ConversionSettings<'a> {
     pub const fn with_sampling(mut self, sampling: SamplingOptions) -> Self {
         self.sampling = sampling;
         self
+    }
+    /// Selects the finite weighted reconstruction objective used by structural matching.
+    #[must_use]
+    pub const fn with_reconstruction_weights(
+        mut self,
+        weights: ReconstructionWeights,
+    ) -> Self {
+        self.reconstruction_weights = weights;
+        self
+    }
+
+    /// Returns the reconstruction weights used by structural matching.
+    #[must_use]
+    pub const fn reconstruction_weights(self) -> ReconstructionWeights {
+        self.reconstruction_weights
     }
 
     /// Returns the fit, filter, and optional retained patch policy.
@@ -456,6 +478,145 @@ pub fn convert_density(
         .map(DensityConversion::into_frame)
         .map_err(DensityConversionError::into_core)
 }
+/// Converts a raster by shortlist screening followed by explicit glyph-mask reconstruction.
+///
+/// Sampling, normalization, patch storage, candidate shortlist, and output allocation share the
+/// same `Budget` and cancellation token. Structural scoring uses the configured fixed foreground
+/// and background baseline.
+pub fn convert_structural(
+    input: RasterFrameView<'_>,
+    glyphs: &GlyphTable,
+    settings: &ConversionSettings<'_>,
+    previous: Option<&AsciiFrame>,
+    budget: &Budget,
+) -> Result<AsciiFrame, Error> {
+    let settings = *settings;
+    if settings.cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    if settings.color_fit.is_some() {
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+    }
+    if settings.metadata.glyph_table_id() != GlyphTableId::new(*glyphs.fingerprint()) {
+        return Err(Error::Malformed(MalformedReason::GlyphTableMismatch));
+    }
+    if glyphs.glyphs().is_empty() {
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+    }
+    if let Some(previous) = previous {
+        if previous.metadata().glyph_table_id() != settings.metadata.glyph_table_id() {
+            return Err(Error::Malformed(MalformedReason::GlyphTableMismatch));
+        }
+    }
+
+    let patch_dimensions = PatchDimensions::new(glyphs.cell_width(), glyphs.cell_height())?;
+    let sampling = SamplingOptions::new(
+        settings.sampling.fit(),
+        settings.sampling.filter(),
+        Some(patch_dimensions),
+    );
+    let structural_settings = settings.with_sampling(sampling);
+    let resources = NormalizedRasterResources::new(budget.max_raster_bytes());
+    let conversion = convert_density_detailed_impl(
+        input,
+        glyphs,
+        &structural_settings,
+        budget,
+        &resources,
+        #[cfg(test)]
+        None,
+    )
+    .map_err(DensityConversionError::into_core)?;
+    let DensityConversion {
+        frame,
+        patches,
+        sampling_identity,
+        ..
+    } = conversion;
+    let size = frame.size();
+    drop(frame);
+    let patches = patches.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+    let glyph_count = u32::try_from(glyphs.glyphs().len()).map_err(|_| Error::SizeOverflow)?;
+    let candidate_count = glyphs.glyphs().len().min(64).min(MAX_STRUCTURAL_CANDIDATES);
+    let shortlist_options = ShortlistOptions::new(
+        candidate_count,
+        StructuralWeights::new(0.34, 0.33, 0.33)?,
+    )?;
+    let foreground_luminance = settings.foreground.luminance().value();
+    let background_luminance = settings.background.luminance().value();
+    let output_foreground = output_color(settings.foreground);
+    let output_background = output_color(settings.background);
+    let cell_count = patches.cell_count();
+    if previous.is_some_and(|frame| frame.size() != size) {
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+    }
+    let rerank_work = patch_dimensions
+        .sample_count()
+        .checked_mul(u64::try_from(candidate_count).map_err(|_| Error::SizeOverflow)?)
+        .and_then(|work| work.checked_mul(u64::try_from(cell_count).ok()?))
+        .ok_or(Error::SizeOverflow)?;
+    if rerank_work > budget.max_work_units() {
+        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
+    }
+    let mut cells = reserve_output_cells(cell_count, settings.cancellation)?;
+    let mut scratch = StructuralScratch::default();
+    for cell_index in 0..cell_count {
+        if cell_index.is_multiple_of(CANCELLATION_CELL_INTERVAL)
+            && settings.cancellation.is_cancelled()
+        {
+            return Err(Error::Cancelled);
+        }
+        let samples = patches
+            .luminance_for_cell(cell_index)
+            .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
+        let descriptor = StructuralDescriptor::from_luminance(
+            samples,
+            patch_dimensions,
+            foreground_luminance,
+            background_luminance,
+            budget,
+            settings.cancellation,
+        )?;
+        let shortlist = scratch.shortlist(
+            &descriptor,
+            glyphs,
+            sampling_identity,
+            shortlist_options,
+            budget,
+            settings.cancellation,
+        )?;
+        let previous_glyph = previous
+            .and_then(|frame| frame.cells().get(cell_index))
+            .map(|cell| cell.glyph());
+        let selected = rerank_candidates(
+            samples,
+            patch_dimensions,
+            &descriptor,
+            glyphs,
+            shortlist.candidates(),
+            foreground_luminance,
+            background_luminance,
+            previous_glyph,
+            settings.reconstruction_weights,
+            budget,
+            settings.cancellation,
+        )?;
+        cells.push(AsciiCell::new(
+            selected.table_position(),
+            output_foreground,
+            output_background,
+        ));
+    }
+    AsciiFrame::try_new(
+        size,
+        settings.metadata,
+        cells,
+        glyph_count,
+        budget,
+        settings.cancellation,
+    )
+}
+
 
 /// Converts a raster into a bounded frame plus the shared geometry and optional quality patches.
 ///

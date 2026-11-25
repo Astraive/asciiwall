@@ -106,6 +106,178 @@ impl ShortlistOptions {
         self.weights
     }
 }
+/// Finite weights for bounded structural candidate reconstruction.
+///
+/// The matcher objective is `pixel_mse * reconstruction + descriptor_distance *
+/// descriptor + tone_error * tone + glyph_change * temporal`. These are practical
+/// default-tunable weights, not universal perceptual constants.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReconstructionWeights {
+    reconstruction: f64,
+    descriptor: f64,
+    tone: f64,
+    temporal: f64,
+}
+
+impl ReconstructionWeights {
+    /// Validates nonnegative finite weights whose sum is one within `1e-9`.
+    pub fn new(
+        reconstruction: f64,
+        descriptor: f64,
+        tone: f64,
+        temporal: f64,
+    ) -> Result<Self, Error> {
+        let sum = reconstruction + descriptor + tone + temporal;
+        if [reconstruction, descriptor, tone, temporal]
+            .into_iter()
+            .any(|weight| !weight.is_finite() || !(0.0..=1.0).contains(&weight))
+            || !sum.is_finite()
+            || (sum - 1.0).abs() > 1.0e-9
+        {
+            return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+        }
+        Ok(Self {
+            reconstruction: reconstruction / sum,
+            descriptor: descriptor / sum,
+            tone: tone / sum,
+            temporal: temporal / sum,
+        })
+    }
+
+    /// Returns the normalized reconstructed-pixel MSE weight.
+    #[must_use]
+    pub const fn reconstruction(self) -> f64 {
+        self.reconstruction
+    }
+
+    /// Returns the normalized structural descriptor-distance weight.
+    #[must_use]
+    pub const fn descriptor(self) -> f64 {
+        self.descriptor
+    }
+
+    /// Returns the normalized mean-coverage error weight.
+    #[must_use]
+    pub const fn tone(self) -> f64 {
+        self.tone
+    }
+
+    /// Returns the normalized temporal glyph-change penalty.
+    #[must_use]
+    pub const fn temporal(self) -> f64 {
+        self.temporal
+    }
+}
+
+/// Selects the best shortlisted glyph under one fixed reconstruction objective.
+///
+/// `samples` is row-major normalized linear-light luminance in `[0, 1]`; reconstruction uses
+/// `R = B + (F - B) M` with the configured luminance polarity. The shortlist's descriptor score
+/// is retained as a separate term, tone error compares mask and sample mean coverage, and a
+/// nonzero temporal weight adds one penalty when the candidate differs from `previous_glyph`.
+/// Exact score ties choose the smaller glyph-table index, then table position.
+pub fn rerank_candidates(
+    samples: &[f32],
+    dimensions: PatchDimensions,
+    descriptor: &StructuralDescriptor<'_>,
+    glyphs: &GlyphTable,
+    candidates: &[StructuralCandidate],
+    foreground_luminance: f64,
+    background_luminance: f64,
+    previous_glyph: Option<u32>,
+    weights: ReconstructionWeights,
+    budget: &Budget,
+    cancellation: &CancellationToken,
+) -> Result<StructuralCandidate, Error> {
+    let sample_count =
+        usize::try_from(dimensions.sample_count()).map_err(|_| Error::SizeOverflow)?;
+    if samples.len() != sample_count
+        || descriptor.dimensions != dimensions
+        || candidates.is_empty()
+        || !foreground_luminance.is_finite()
+        || !background_luminance.is_finite()
+        || !(0.0..=1.0).contains(&foreground_luminance)
+        || !(0.0..=1.0).contains(&background_luminance)
+        || foreground_luminance == background_luminance
+    {
+        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+    }
+    let work_bound = u64::try_from(sample_count)
+        .map_err(|_| Error::SizeOverflow)?
+        .checked_mul(u64::try_from(candidates.len()).map_err(|_| Error::SizeOverflow)?)
+        .ok_or(Error::SizeOverflow)?;
+    if work_bound > budget.max_work_units() {
+        return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
+    }
+    let mut best: Option<(f64, StructuralCandidate)> = None;
+    for candidate in candidates {
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let position =
+            usize::try_from(candidate.table_position()).map_err(|_| Error::SizeOverflow)?;
+        let glyph = glyphs
+            .glyphs()
+            .get(position)
+            .ok_or(Error::Malformed(MalformedReason::GlyphIndexOutOfRange))?;
+        if glyph.glyph_index() != candidate.glyph_index() || glyph.mask().len() != sample_count {
+            return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+        }
+        let mut squared_error = 0.0_f64;
+        let mut target_coverage = 0.0_f64;
+        for (index, (&sample, &mask)) in samples.iter().zip(glyph.mask()).enumerate() {
+            if index.is_multiple_of(CANCELLATION_TILE as usize) && cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            if !sample.is_finite() || !(0.0..=1.0).contains(&sample) {
+                return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+            }
+            let coverage = f64::from(mask) / 255.0;
+            let reconstructed =
+                background_luminance + (foreground_luminance - background_luminance) * coverage;
+            let error = f64::from(sample) - reconstructed;
+            squared_error += error * error;
+            target_coverage += normalized_coverage(
+                f64::from(sample),
+                foreground_luminance,
+                background_luminance,
+            );
+        }
+        let pixel_mse = squared_error / sample_count as f64;
+        let tone_error = (target_coverage / sample_count as f64
+            - f64::from(glyph.mean_coverage()))
+        .abs();
+        let temporal_penalty = if weights.temporal > 0.0
+            && previous_glyph.is_some_and(|previous| previous != candidate.table_position())
+        {
+            1.0
+        } else {
+            0.0
+        };
+        let score = pixel_mse * weights.reconstruction
+            + candidate.score() * weights.descriptor
+            + tone_error * weights.tone
+            + temporal_penalty * weights.temporal;
+        if !score.is_finite() {
+            return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+        }
+        let replace = best.is_none_or(|(best_score, current)| {
+            score < best_score
+                || (score == best_score
+                    && (candidate.glyph_index(), candidate.table_position())
+                        < (current.glyph_index(), current.table_position()))
+        });
+        if replace {
+            best = Some((score, *candidate));
+        }
+    }
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    best.map(|(_, candidate)| candidate)
+        .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))
+}
+
 
 /// Coverage, dimensionless gradient variation, and edge orientation for one sampled patch.
 #[derive(Clone, Copy, Debug, PartialEq)]

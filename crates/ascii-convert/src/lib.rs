@@ -24,7 +24,7 @@ pub use color_fit::{
 };
 pub use density::{
     ConversionSettings, DensityConversion, DensityConversionError, GridSizing, convert_density,
-    convert_density_detailed,
+    convert_density_detailed, convert_structural,
 };
 pub use font::{
     GlyphConfig, GlyphRecord, GlyphRepertoire, GlyphTable, build_glyph_table,
@@ -41,6 +41,7 @@ pub use sampling::{
     SamplingFilter, SamplingIdentity, SamplingOptions, SamplingRect,
 };
 pub use structural::{
-    MAX_STRUCTURAL_CANDIDATES, ShortlistOptions, StructuralCandidate, StructuralDescriptor,
-    StructuralIdentity, StructuralScratch, StructuralShortlist, StructuralWeights,
+    MAX_STRUCTURAL_CANDIDATES, ReconstructionWeights, ShortlistOptions, StructuralCandidate,
+    StructuralDescriptor, StructuralIdentity, StructuralScratch, StructuralShortlist,
+    StructuralWeights, rerank_candidates,
 };
