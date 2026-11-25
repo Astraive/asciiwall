@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed design decision.
+Proposed design decision; no decision-scoped implementation and verification evidence is linked here. This status describes the architecture, not compiled behavior or approval for release.
 
 ## Options
 
@@ -23,3 +23,5 @@ Platform failures degrade to static/preview or a limited capability set. No topm
 ## Revisit when
 
 A compositor introduces an appropriate documented protocol or a platform exposes a supported live-wallpaper API. Add a new adapter/strategy behind the same capability contract, with evidence rather than assumptions.
+
+No new native protocol or host verification is linked as evidence for this decision in the register.
