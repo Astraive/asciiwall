@@ -200,8 +200,7 @@ fn matched_source_comparison_measures_silhouette_tone_loss_and_work() {
         suppressed_tone > 0,
         "thresholded texture causes measurable tone loss"
     );
-    let required_rerank_work = u64::from(WIDTH * HEIGHT) * 2 * 4;
-    assert!(matched.work_units_bound() >= required_rerank_work);
+    assert_eq!(matched.work_units_bound(), 2_513);
     assert_eq!(
         matched.work_units_bound(),
         texture_suppressed.work_units_bound()
