@@ -23,7 +23,17 @@ Normalize orientation, alpha interpretation, color transfer, and range first; ap
 
 Optional quality patches contain validated row-major per-cell linear-luminance samples (each dimension 1–64, at most 4096 values per cell) and mean-luminance/mean-absolute finite-difference descriptors. The stable sampling identity includes resolved source/display geometry, grid and cell dimensions, filter, and patch dimensions. The aggregate operation preflights normalized/input/patch byte bounds and total normalization, matching, sampling, patch-initialization/descriptor, and frame-validation work before allocating patch or output storage.
 
-A fast mode uses calibrated glyph coverage. A quality mode shortlists masks by coverage and edge orientation, then minimizes bounded reconstruction error. A contour mode emphasizes structure and intentionally discards low-contrast texture; it must not be sold as universally more faithful.
+Fast density matching uses calibrated glyph coverage. The structural path first shortlists masks by coverage, normalized gradients, and edge orientation; this ticket does not implement expensive reconstruction scoring or temporal stabilization. A contour mode emphasizes structure and intentionally discards low-contrast texture; it must not be sold as universally more faithful.
+
+### Bounded structural shortlist (CNV-007)
+
+`StructuralDescriptor::from_luminance` derives normalized patch features from retained linear-light samples and the conversion's foreground/background luminances. It uses the same polarity-normalized `[0, 1]` coverage as density matching and shares the immutable glyph-mask orientation-bin implementation. The native descriptor is computed without temporary allocation.
+
+Before ranking, the shortlist deterministically resamples source samples to the glyph table's cell width and height with center-aligned nearest-neighbor mapping: `source_index = floor(((2 * target_index + 1) * source_extent) / (2 * target_extent))` for each axis. Candidate coverage, gradient, and orientation features are therefore measured in the same geometry as glyph masks, making equivalent geometry at different patch resolutions rank identically. The reusable `StructuralScratch` retains only a validated top-K candidate heap (K is 1–4096 and cannot exceed the repertoire); stable score ties use font glyph index, Unicode scalar, then table position.
+
+Tone, shape-gradient, and edge-orientation distances and each configured weight are in `[0, 1]`. The three nonnegative weights are validated to sum to one, so the combined shortlist score stays in `[0, 1]`. `StructuralIdentity` binds the descriptor version, sampling identity, source patch dimensions and native/common feature values, glyph-table mask fingerprint, foreground/background range, candidate limit, and normalized weights. Scratch bytes plus common feature extraction and scoring/heap work are checked against the caller's `Budget`; cancellation is polled in bounded work tiles and an error returns no partial shortlist.
+
+The deterministic matcher fixtures build their small font masks from source-defined synthetic outlines; no downloaded font or runtime network access is involved.
 
 ## Parallelism
 

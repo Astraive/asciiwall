@@ -13,14 +13,16 @@ use ascii_core::{
 use fontdue::{Font, FontSettings};
 use sha2::{Digest, Sha256};
 
-use crate::glyphs::{Centroid, EdgeOrientation, GlyphBounds, GlyphMetrics, describe};
+use crate::glyphs::{
+    Centroid, EdgeOrientation, GlyphBounds, GlyphMetrics, GradientDescriptor, describe,
+};
 
 const MAX_FONT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GLYPHS: usize = 4096;
 const MAX_GLYPH_RASTER_PIXELS: usize = 16 * 1024 * 1024;
 const MAX_GLYPH_RASTER_DIMENSION: usize = 16 * 1024;
 const MAX_CHARSET_BYTES: usize = MAX_GLYPHS * 4;
-const DESCRIPTOR_VERSION: u32 = 1;
+const DESCRIPTOR_VERSION: u32 = 2;
 const RENDERING_MODE: &[u8] = b"fontdue-0.9.3-gray8-no-gsub-v1";
 
 /// A nonempty, unique repertoire restricted to scalars supported in one terminal cell.
@@ -144,6 +146,7 @@ pub struct GlyphRecord {
     bounds: GlyphBounds,
     centroid: Option<Centroid>,
     mean_coverage: f32,
+    gradients: GradientDescriptor,
     edges: EdgeOrientation,
     mask: Vec<u8>,
 }
@@ -177,6 +180,12 @@ impl GlyphRecord {
     #[must_use]
     pub const fn mean_coverage(&self) -> f32 {
         self.mean_coverage
+    }
+
+    /// Returns normalized X/Y total-variation features computed from the glyph mask.
+    #[must_use]
+    pub const fn gradients(&self) -> GradientDescriptor {
+        self.gradients
     }
 
     #[must_use]
@@ -522,7 +531,7 @@ pub fn build_glyph_table(
             }
         }
 
-        let (bounds, centroid, mean_coverage, edges) =
+        let (bounds, centroid, mean_coverage, gradients, edges) =
             describe(&mask, width, height, cancellation)?;
         glyphs.push(GlyphRecord {
             character,
@@ -531,11 +540,11 @@ pub fn build_glyph_table(
             bounds,
             centroid,
             mean_coverage,
+            gradients,
             edges,
             mask,
         });
     }
-
     if cancellation.is_cancelled() {
         return Err(Error::Cancelled);
     }

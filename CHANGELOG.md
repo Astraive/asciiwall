@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
+- [CNV-007] Bounded patch coverage/gradient/orientation descriptors, glyph-cell-resolution candidate comparisons, normalized weighted glyph shortlists, reusable cancellation-safe scratch, and semantic candidate identity, with source-generated deterministic matcher regressions.
 
 ### Changed
 
@@ -57,3 +58,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add CNV-003 regressions for exact-boundary sampling geometry, sampling-configuration identity, padded strides, crop mapping, patch budgets, 64-wide extreme/collapsed crops, and public cancellation conversion ([CNV-003]).
 - Add an in-flight quality-patch cancellation regression confirming normalized-raster reservation release after sampling begins ([CNV-003]).
 - Restrict collapsed Box-sampling scans to each sample's orthogonal source footprint, preserving area coverage without traversing unrelated crop rows ([CNV-003]).
+- Correct CNV-007 feature-extraction work preflight to cover up to nine normalized-coverage evaluations per patch sample before extraction.
