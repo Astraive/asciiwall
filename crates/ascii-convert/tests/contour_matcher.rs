@@ -131,6 +131,118 @@ fn low_contrast_texture_and_uniform_fields_use_background_policy() {
 }
 
 #[test]
+fn horizontal_vertical_and_diagonal_silhouettes_keep_their_orientation() {
+    for (font, expected_character) in [
+        (equal_area_orientation_font(), 'A'),
+        (equal_area_orientation_font(), 'B'),
+        (support::synthetic_font::diagonal_orientation_font(), 'A'),
+        (support::synthetic_font::diagonal_orientation_font(), 'B'),
+    ] {
+        let table = build_glyph_table(
+            &font,
+            &GlyphRepertoire::new(" BA").expect("fixture repertoire is valid"),
+            &GlyphConfig::new(8.0, WIDTH, HEIGHT, 9).expect("fixture geometry is valid"),
+            &BUDGET,
+            &CancellationToken::new(),
+        )
+        .expect("synthetic fixture font builds");
+        let glyph = table
+            .glyphs()
+            .iter()
+            .find(|glyph| glyph.character() == expected_character)
+            .expect("fixture contains the expected oriented mask");
+        let expected = table
+            .glyphs()
+            .iter()
+            .position(|candidate| candidate.character() == expected_character)
+            .expect("expected glyph is present") as u32;
+        let first = run(&table, glyph.mask(), options(0.0, 0.0));
+        let repeated = run(&table, glyph.mask(), options(0.0, 0.0));
+        assert_eq!(first.frame().cells()[0].glyph(), expected);
+        assert_eq!(first, repeated);
+        assert!(first.work_units_bound() > 0);
+    }
+}
+
+#[test]
+fn threshold_endpoints_are_valid_deterministic_and_bounded() {
+    let table = build_glyph_table(
+        &equal_area_orientation_font(),
+        &GlyphRepertoire::new(" BA").expect("fixture repertoire is valid"),
+        &GlyphConfig::new(8.0, WIDTH, HEIGHT, 9).expect("fixture geometry is valid"),
+        &BUDGET,
+        &CancellationToken::new(),
+    )
+    .expect("synthetic fixture font builds");
+    let input = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'B')
+        .expect("fixture has vertical mask")
+        .mask();
+    for threshold in [0.0, 1.0] {
+        let boundary = options(threshold, threshold);
+        let first = run(&table, input, boundary);
+        let repeated = run(&table, input, boundary);
+        assert_eq!(first, repeated, "threshold endpoint {threshold} is stable");
+        assert_eq!(first.frame().cells().len(), 1);
+        assert!(first.work_units_bound() > 0);
+        assert_eq!(boundary.contrast_threshold(), threshold);
+        assert_eq!(boundary.edge_threshold(), threshold);
+    }
+}
+
+#[test]
+fn matched_threshold_comparison_reports_silhouette_tone_loss_and_work() {
+    let table = build_glyph_table(
+        &equal_area_orientation_font(),
+        &GlyphRepertoire::new(" BA").expect("fixture repertoire is valid"),
+        &GlyphConfig::new(8.0, WIDTH, HEIGHT, 9).expect("fixture geometry is valid"),
+        &BUDGET,
+        &CancellationToken::new(),
+    )
+    .expect("synthetic fixture font builds");
+    let silhouette = table
+        .glyphs()
+        .iter()
+        .find(|glyph| glyph.character() == 'B')
+        .expect("fixture has vertical mask")
+        .mask();
+    let textured: Vec<u8> = silhouette
+        .iter()
+        .map(|coverage| if *coverage == 0 { 8 } else { 255 })
+        .collect();
+    let unsuppressed = run(&table, &textured, options(0.0, 0.0));
+    let suppressed = run(&table, &textured, options(0.10, 0.02));
+    assert_eq!(
+        unsuppressed.frame().cells()[0].glyph(),
+        suppressed.frame().cells()[0].glyph(),
+        "matched silhouette remains stable when only faint texture is thresholded"
+    );
+    let error = |glyph_index: u32| {
+        let selected = &table.glyphs()[glyph_index as usize];
+        textured
+            .iter()
+            .zip(selected.mask())
+            .map(|(target, output)| (i16::from(*target) - i16::from(*output)).unsigned_abs())
+            .map(u64::from)
+            .sum::<u64>()
+    };
+    let baseline_tone_error = error(unsuppressed.frame().cells()[0].glyph());
+    let suppressed_tone_error = error(suppressed.frame().cells()[0].glyph());
+    assert!(suppressed_tone_error >= baseline_tone_error);
+    assert!(
+        suppressed_tone_error > 0,
+        "paired evidence exposes tone loss"
+    );
+    assert_eq!(
+        unsuppressed.work_units_bound(),
+        suppressed.work_units_bound(),
+        "same fixture and candidate cap have identical bounded work"
+    );
+}
+
+#[test]
 fn thresholds_and_weights_are_validated_and_part_of_identity() {
     assert!(matches!(
         ContourOptions::new(0, 0.1, 0.1, 0.1, 0.8, 0.1),
