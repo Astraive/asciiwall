@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use ascii_convert::{GlyphConfig, GlyphRepertoire, build_glyph_table};
 use ascii_core::{Budget, CancellationToken, MalformedReason};
 use ascii_scene::{
-    MATRIX_RAIN_DESCRIPTOR, MATRIX_RAIN_PRESETS, MatrixRainConfig, MatrixRainGenerator,
-    SceneDimensions, SceneParameters, SceneResourceBudget, SceneRuntime,
+    ExportContext, ExportSignalTrack, MATRIX_RAIN_DESCRIPTOR, MATRIX_RAIN_PRESETS,
+    MatrixRainConfig, MatrixRainGenerator, SceneDimensions, SceneParameters, SceneResourceBudget,
+    SceneRuntime,
 };
 
 fn table() -> ascii_convert::GlyphTable {
@@ -168,6 +169,47 @@ fn fixed_seed_and_timeline_reproduce_matrix_cells_and_stay_in_grid() {
             .unwrap();
         assert_eq!(bounded.frame().len(), 1);
     }
+}
+
+#[test]
+fn export_replays_matrix_rain_with_pinned_identity_seed_settings_and_inputs() {
+    let glyphs = table();
+    let dimensions = SceneDimensions::new(32, 16).unwrap();
+    let parameters = SceneParameters::new(0x0153, 1.0, 0, 60, true).unwrap();
+    let settings_fingerprint = [0xa5; 32];
+    let font_identity = *glyphs.fingerprint();
+    let make_export = || {
+        ExportContext::new(
+            parameters,
+            1_735_689_600_000,
+            settings_fingerprint,
+            font_identity,
+            ExportSignalTrack::IdleFallback,
+        )
+        .unwrap()
+        .execute_frame_with(
+            dimensions,
+            600,
+            &SceneResourceBudget::default(),
+            MatrixRainGenerator::new("matrix", MatrixRainConfig::ambient(), &glyphs),
+        )
+        .unwrap()
+    };
+
+    let first = make_export();
+    let second = make_export();
+    assert_eq!(first.cells(), second.cells());
+    assert_eq!(frame_hash(first.cells()), 0x5e53_6b47_a9c9_df32);
+    assert_eq!(first.parameters(), parameters);
+    assert_eq!(first.seed_le_bytes(), 0x0153_u32.to_le_bytes());
+    assert_eq!(first.selected_start_timestamp_unix_ms(), 1_735_689_600_000);
+    assert_eq!(first.settings_fingerprint(), settings_fingerprint);
+    assert_eq!(first.font_identity(), font_identity);
+    assert_eq!(first.step_index(), 600);
+    assert!(matches!(
+        first.signal_track(),
+        ExportSignalTrack::IdleFallback
+    ));
 }
 
 #[test]
