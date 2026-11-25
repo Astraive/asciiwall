@@ -111,6 +111,11 @@ fn simulation_hash_matches_at_20_30_and_60_presentations() {
         advance_for(&mut runtime, fps);
         hashes[index] = hash(runtime.frame());
         assert_eq!(runtime.simulation_step_count(), 3_600);
+        eprintln!(
+            "wave-fixture fps={fps} glyph_table={} cell_hash={:016x}",
+            glyphs.fingerprint().iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            hashes[index],
+        );
     }
     assert_eq!(hashes[0], hashes[1]);
     assert_eq!(hashes[1], hashes[2]);
