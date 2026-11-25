@@ -7,6 +7,10 @@ static MANIFEST_SCHEMA: LazyLock<Result<Value, String>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../schemas/manifest-1.0.json"))
         .map_err(|_| "embedded manifest schema is invalid".to_owned())
 });
+static SCENE_SCHEMA: LazyLock<Result<Value, String>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../schemas/scene-1.0.json"))
+        .map_err(|_| "embedded scene schema is invalid".to_owned())
+});
 
 /// A portable metadata mismatch between the package schema and CFG registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,8 +26,9 @@ pub enum RegistryComparisonError {
     Drift(Vec<RegistryDrift>),
 }
 
-/// Compares every portable schema property with CFG-001 descriptors without
-/// synthesizing descriptors/defaults. An empty foundation registry reports drift.
+/// Compares manifest setting properties and scene control keys with CFG-001
+/// descriptors without synthesizing descriptors/defaults. An empty foundation
+/// registry reports drift.
 pub fn compare_portable_settings(registry: &Registry) -> Result<(), RegistryComparisonError> {
     let schema = MANIFEST_SCHEMA
         .as_ref()
@@ -55,6 +60,11 @@ pub fn compare_portable_settings(registry: &Registry) -> Result<(), RegistryComp
             });
         }
     }
+    let scene_schema = SCENE_SCHEMA
+        .as_ref()
+        .map_err(|_| RegistryComparisonError::InvalidSchema)?;
+    compare_control_keys(properties, scene_schema, &mut drift)?;
+
     if drift.is_empty() {
         Ok(())
     } else {
@@ -118,5 +128,97 @@ fn compare_descriptor(
     };
     if !matches_default {
         mismatch("CFG default differs from schema annotation");
+    }
+}
+fn compare_control_keys(
+    manifest_properties: &Map<String, Value>,
+    scene_schema: &Value,
+    drift: &mut Vec<RegistryDrift>,
+) -> Result<(), RegistryComparisonError> {
+    let control_keys = scene_schema
+        .pointer("/properties/controls/items/properties/setting/enum")
+        .and_then(Value::as_array)
+        .ok_or(RegistryComparisonError::InvalidSchema)?;
+    let mut unique_keys = std::collections::BTreeSet::new();
+    for value in control_keys {
+        let key = value
+            .as_str()
+            .ok_or(RegistryComparisonError::InvalidSchema)?;
+        if !unique_keys.insert(key) {
+            return Err(RegistryComparisonError::InvalidSchema);
+        }
+    }
+    for key in manifest_properties.keys() {
+        if !unique_keys.contains(key.as_str()) {
+            drift.push(RegistryDrift {
+                key: key.clone(),
+                reason: "manifest setting is absent from scene control enum",
+            });
+        }
+    }
+    for key in unique_keys {
+        if !manifest_properties.contains_key(key) {
+            drift.push(RegistryDrift {
+                key: key.to_owned(),
+                reason: "scene control setting is absent from manifest schema",
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RegistryDrift, compare_control_keys};
+    use serde_json::{Map, Value, json};
+
+    fn manifest_properties(keys: &[&str]) -> Map<String, Value> {
+        keys.iter()
+            .map(|key| ((*key).to_owned(), json!({})))
+            .collect()
+    }
+
+    fn scene_schema(control_keys: &[&str]) -> Value {
+        json!({
+            "properties": {
+                "controls": {
+                    "items": {
+                        "properties": {
+                            "setting": {
+                                "enum": control_keys
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn reports_manifest_settings_missing_from_control_enum() {
+        let manifest = manifest_properties(&["color.mode"]);
+        let scene = scene_schema(&[]);
+        let mut drift: Vec<RegistryDrift> = Vec::new();
+        compare_control_keys(&manifest, &scene, &mut drift).unwrap();
+        assert_eq!(drift.len(), 1);
+        assert_eq!(drift[0].key, "color.mode");
+        assert_eq!(
+            drift[0].reason,
+            "manifest setting is absent from scene control enum"
+        );
+    }
+
+    #[test]
+    fn reports_control_keys_missing_from_manifest_settings() {
+        let manifest = manifest_properties(&["color.mode"]);
+        let scene = scene_schema(&["color.mode", "grid.columns"]);
+        let mut drift: Vec<RegistryDrift> = Vec::new();
+        compare_control_keys(&manifest, &scene, &mut drift).unwrap();
+        assert_eq!(drift.len(), 1);
+        assert_eq!(drift[0].key, "grid.columns");
+        assert_eq!(
+            drift[0].reason,
+            "scene control setting is absent from manifest schema"
+        );
     }
 }
