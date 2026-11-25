@@ -37,8 +37,9 @@ Proposed commands, scripting, local IPC, output formats, and stable errors.
 
 ## Decisions (4)
 
-Four architecture decisions with alternatives, rationale, and consequences.
+Four proposed architecture decisions with alternatives, rationale, consequences, and revisit criteria. Proposed status describes intended design, not compiled behavior; promotion requires linked implementation and verification evidence.
 
+- [Decision register and lifecycle](decisions/README.md)
 - [ADR 0001 - Own Rust engine and shared frame model](decisions/0001-native-rust-engine.md)
 - [ADR 0002 - Capability-aware native wallpaper hosts](decisions/0002-capability-aware-native-hosts.md)
 - [ADR 0003 - Declarative .asciiwall packages](decisions/0003-declarative-portable-packages.md)

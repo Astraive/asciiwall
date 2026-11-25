@@ -9,6 +9,8 @@ extern crate alloc;
 mod budget;
 mod error;
 mod frame;
+mod generation;
+mod ids;
 
 pub use budget::{Budget, CancellationToken, GridBudget, validate_grid_budget};
 pub use error::{BudgetKind, Error, MalformedReason, UnsupportedReason};
@@ -16,6 +18,13 @@ pub use frame::{
     AlphaMode, AsciiCell, AsciiFrame, ColorDescription, ColorPrimaries, FrameMetadata,
     GlyphTableId, PixelChannels, PixelFormat, RasterFrameView, RasterOrientation, TransferFunction,
     ValidatedRasterFrameView, validate_frame, validate_raster_frame,
+};
+pub use generation::Generation;
+pub use ids::{
+    AssignmentBinding, AssignmentBindingConflict, AssignmentId, CONTENT_DIGEST_BYTES,
+    ContentDigest, DecodeError, ForkLineage, ID_BYTES, IdentityError, MonitorFallbackMatch,
+    MonitorId, MonitorIdentity, PACKAGE_RELEASE_WIRE_BYTES, PackageId, PackageRelease,
+    PackageVersion, ReleaseConflict,
 };
 #[cfg(test)]
 extern crate std;

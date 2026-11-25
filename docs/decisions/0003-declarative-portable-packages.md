@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed draft format 1.0.
+Proposed format draft 1.0; no decision-scoped implementation and verification evidence is linked here. This status describes the design contract, not compiled behavior, a frozen format, or approval for release.
 
 ## Options
 
@@ -23,3 +23,5 @@ The format can represent procedural, image, video, character clip, and baked vid
 ## Revisit when
 
 Real creator needs cannot be expressed by reviewed built-in nodes. Extend the declarative registry first; only then assess a metered isolated extension ABI. Do not weaken import boundaries to make one special wallpaper work.
+
+No reviewed-node implementation or package conformance verification is linked as evidence for this decision in the register.
