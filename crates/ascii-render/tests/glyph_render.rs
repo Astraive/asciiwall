@@ -460,8 +460,9 @@ fn narrow_atlas_budget_boundary_and_gpu_copy() {
     let frame = frame(&table, size, &budget, &token);
     let output = texture(&device, size);
     let target = RenderTarget::texture(&output, 1, 1);
-    let width = table.glyphs().len() as u64 * u64::from(table.cell_width());
-    let height = u64::from(table.cell_height());
+    let padding = 2u64;
+    let width = table.glyphs().len() as u64 * (u64::from(table.cell_width()) + padding);
+    let height = u64::from(table.cell_height()) + padding;
     let alignment = u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let staging_bytes = width.div_ceil(alignment) * alignment * height;
     let raster_bytes = width * height + staging_bytes;

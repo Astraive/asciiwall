@@ -17,9 +17,10 @@ use crate::surface::{
 };
 
 /// Revision of the engine-owned shader, for evidence records.
-pub const SHADER_REVISION: &str = "ascii-presenter-1";
+pub const SHADER_REVISION: &str = "ascii-presenter-2";
 const CELL_BYTES: u64 = 16;
 const PARAM_BYTES: u64 = 32;
+const ATLAS_PADDING: u32 = 1;
 const POLL_INTERVAL: usize = 1024;
 
 /// Presenter failures, preserving portable core failures and explicit GPU boundary failures.
@@ -122,6 +123,8 @@ struct Plan {
     atlas_width: u32,
     atlas_height: u32,
     atlas_columns: u32,
+    atlas_tile_width: u32,
+    atlas_tile_height: u32,
     atlas_bytes: u64,
     atlas_row_pitch: u32,
     atlas_staging_bytes: u64,
@@ -170,23 +173,28 @@ fn plan(input: PlanInput, limits: &wgpu::Limits, budget: &Budget) -> Result<Plan
         return Err(ascii_core::Error::Malformed(MalformedReason::InvalidConfiguration).into());
     }
     let max_dim = limits.max_texture_dimension_2d;
-    if target_size.0 > max_dim
-        || target_size.1 > max_dim
-        || glyph_width > max_dim
-        || glyph_height > max_dim
-    {
+    let atlas_tile_width = glyph_width
+        .checked_add(ATLAS_PADDING * 2)
+        .ok_or(ascii_core::Error::SizeOverflow)?;
+    let atlas_tile_height = glyph_height
+        .checked_add(ATLAS_PADDING * 2)
+        .ok_or(ascii_core::Error::SizeOverflow)?;
+    if target_size.0 > max_dim || target_size.1 > max_dim {
         return Err(Error::DeviceLimit("2D texture dimensions"));
     }
-    let atlas_columns = (max_dim / glyph_width).min(glyph_count);
+    if atlas_tile_width > max_dim || atlas_tile_height > max_dim {
+        return Err(Error::DeviceLimit("padded glyph dimensions"));
+    }
+    let atlas_columns = (max_dim / atlas_tile_width).min(glyph_count);
     if atlas_columns == 0 {
         return Err(Error::DeviceLimit("atlas width"));
     }
     let atlas_rows = glyph_count.div_ceil(atlas_columns);
     let atlas_width = atlas_columns
-        .checked_mul(glyph_width)
+        .checked_mul(atlas_tile_width)
         .ok_or(ascii_core::Error::SizeOverflow)?;
     let atlas_height = atlas_rows
-        .checked_mul(glyph_height)
+        .checked_mul(atlas_tile_height)
         .ok_or(ascii_core::Error::SizeOverflow)?;
     if atlas_height > max_dim {
         return Err(Error::DeviceLimit("atlas height"));
@@ -249,6 +257,8 @@ fn plan(input: PlanInput, limits: &wgpu::Limits, budget: &Budget) -> Result<Plan
         atlas_width,
         atlas_height,
         atlas_columns,
+        atlas_tile_width,
+        atlas_tile_height,
         atlas_bytes: atlas_len,
         atlas_row_pitch,
         atlas_staging_bytes,
@@ -590,6 +600,9 @@ impl Renderer {
                 plan.atlas_columns,
                 self.table.cell_width(),
                 self.table.cell_height(),
+                plan.atlas_tile_width,
+                plan.atlas_tile_height,
+                ATLAS_PADDING,
             ]
             .into_iter()
             .enumerate()
@@ -681,6 +694,9 @@ impl Renderer {
         let width = table.cell_width() as usize;
         let height = table.cell_height() as usize;
         let stride = plan.atlas_row_pitch as usize;
+        let tile_width = plan.atlas_tile_width as usize;
+        let tile_height = plan.atlas_tile_height as usize;
+        let padding = ATLAS_PADDING as usize;
         for (index, glyph) in table.glyphs().iter().enumerate() {
             if cancellation.is_cancelled() {
                 return Err(ascii_core::Error::Cancelled.into());
@@ -694,8 +710,8 @@ impl Renderer {
                     ascii_core::Error::Malformed(MalformedReason::InvalidConfiguration).into(),
                 );
             }
-            let x = index % plan.atlas_columns as usize * width;
-            let y = index / plan.atlas_columns as usize * height;
+            let x = index % plan.atlas_columns as usize * tile_width + padding;
+            let y = index / plan.atlas_columns as usize * tile_height + padding;
             for row in 0..height {
                 if row.is_multiple_of(POLL_INTERVAL) && cancellation.is_cancelled() {
                     return Err(ascii_core::Error::Cancelled.into());
@@ -1151,11 +1167,11 @@ mod tests {
             plan(input, &limits, &too_small).unwrap_err(),
             Error::Core(ascii_core::Error::BudgetExceeded(BudgetKind::RasterBytes))
         );
-        let exact = Budget::new(10_000, 514, 10_000);
+        let exact = Budget::new(10_000, 1036, 10_000);
         let narrow = plan(input, &limits, &exact).unwrap();
-        assert_eq!(narrow.atlas_bytes, 2);
+        assert_eq!(narrow.atlas_bytes, 12);
         assert_eq!(narrow.atlas_row_pitch, 256);
-        assert_eq!(narrow.atlas_staging_bytes, 512);
+        assert_eq!(narrow.atlas_staging_bytes, 1024);
 
         limits.max_buffer_size = 511;
         assert!(matches!(
@@ -1174,18 +1190,18 @@ mod tests {
             target_size: (1, 1),
         };
         let mut limits = wgpu::Limits::downlevel_defaults();
-        // Two target passes + two atlas copies + 512 padded bytes + three cell traversals.
-        let too_little_work = Budget::new(10_000, 10_000, 520);
+        // Two target passes + two padded-atlas copies + 1024 staging bytes + three cell traversals.
+        let too_little_work = Budget::new(10_000, 10_000, 1052);
         assert_eq!(
             plan(input, &limits, &too_little_work).unwrap_err(),
             Error::Core(ascii_core::Error::BudgetExceeded(BudgetKind::WorkUnits))
         );
-        let exact_work = Budget::new(10_000, 10_000, 521);
+        let exact_work = Budget::new(10_000, 10_000, 1053);
         assert_eq!(
             plan(input, &limits, &exact_work)
                 .unwrap()
                 .atlas_staging_bytes,
-            512
+            1024
         );
 
         input.target_size = (u32::MAX, u32::MAX);
@@ -1211,13 +1227,13 @@ mod tests {
         let aligned = plan(input, &limits, &generous).unwrap();
         assert_eq!(
             (aligned.atlas_row_pitch, aligned.atlas_staging_bytes),
-            (256, 512)
+            (512, 2048)
         );
         input.glyph_width = 257;
         let padded = plan(input, &limits, &generous).unwrap();
         assert_eq!(
             (padded.atlas_row_pitch, padded.atlas_staging_bytes),
-            (512, 1024)
+            (512, 2048)
         );
 
         input.glyph_width = u32::MAX;
@@ -1258,7 +1274,7 @@ mod tests {
         );
         let fingerprint = *table.fingerprint();
         let mut limits = wgpu::Limits::downlevel_defaults();
-        limits.max_texture_dimension_2d = 16;
+        limits.max_texture_dimension_2d = 24;
         let planned = plan(
             PlanInput {
                 size: GridSize::new(1, 1),
@@ -1271,25 +1287,35 @@ mod tests {
             &budget,
         )
         .unwrap();
-        assert_eq!((planned.atlas_columns, planned.atlas_height), (2, 8));
+        assert_eq!((planned.atlas_columns, planned.atlas_height), (2, 12));
         assert_eq!(planned.atlas_row_pitch, 256);
         let mut data = vec![0; planned.atlas_staging_bytes as usize];
         Renderer::fill_atlas_data(&table, &cancellation, planned, &mut data).unwrap();
         for (index, glyph) in table.glyphs().iter().enumerate() {
-            for row in 0..4 {
-                let start = (index / 2 * 4 + row) * 256 + index % 2 * 8;
-                assert_eq!(&data[start..start + 8], &glyph.mask()[row * 8..row * 8 + 8]);
+            let tile_x = index % 2 * planned.atlas_tile_width as usize;
+            let tile_y = index / 2 * planned.atlas_tile_height as usize;
+            for row in 0..table.cell_height() as usize {
+                let start =
+                    (tile_y + row + ATLAS_PADDING as usize) * 256 + tile_x + ATLAS_PADDING as usize;
+                assert_eq!(
+                    &data[start..start + table.cell_width() as usize],
+                    &glyph.mask()[row * table.cell_width() as usize
+                        ..(row + 1) * table.cell_width() as usize]
+                );
             }
-        }
-        for row in data.as_chunks::<256>().0 {
-            assert!(row[16..].iter().all(|&byte| byte == 0));
-        }
-        for row in 4..8 {
-            assert!(
-                data[row * 256 + 8..row * 256 + 16]
-                    .iter()
-                    .all(|&byte| byte == 0)
-            );
+            for row in 0..planned.atlas_tile_height as usize {
+                for col in 0..planned.atlas_tile_width as usize {
+                    let is_glyph = (ATLAS_PADDING as usize
+                        ..ATLAS_PADDING as usize + table.cell_width() as usize)
+                        .contains(&col)
+                        && (ATLAS_PADDING as usize
+                            ..ATLAS_PADDING as usize + table.cell_height() as usize)
+                            .contains(&row);
+                    if !is_glyph {
+                        assert_eq!(data[(tile_y + row) * 256 + tile_x + col], 0);
+                    }
+                }
+            }
         }
         assert_eq!(*table.fingerprint(), fingerprint);
         cancellation.cancel();

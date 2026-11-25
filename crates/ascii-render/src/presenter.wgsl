@@ -11,9 +11,9 @@ struct Parameters {
     atlas_columns: u32,
     cell_width: u32,
     cell_height: u32,
-    reserved0: u32,
-    reserved1: u32,
-    reserved2: u32,
+    atlas_tile_width: u32,
+    atlas_tile_height: u32,
+    atlas_padding: u32,
 }
 @group(0) @binding(0) var<uniform> params: Parameters;
 @group(0) @binding(1) var<storage, read> cells: array<Cell>;
@@ -65,8 +65,9 @@ fn background_main(input: VertexOut) -> @location(0) vec4<f32> {
 @fragment
 fn glyph_main(input: VertexOut) -> @location(0) vec4<f32> {
     let glyph = cells[input.cell_index].glyph;
-    let glyph_origin = vec2<u32>((glyph % params.atlas_columns) * params.cell_width,
-                                 (glyph / params.atlas_columns) * params.cell_height);
+    let glyph_origin = vec2<u32>((glyph % params.atlas_columns) * params.atlas_tile_width,
+                                 (glyph / params.atlas_columns) * params.atlas_tile_height)
+        + vec2<u32>(params.atlas_padding);
     let extent = vec2<u32>(params.cell_width, params.cell_height);
     let offset = min(vec2<u32>(max(input.local, vec2<f32>(0.0)) * vec2<f32>(extent)), extent - vec2<u32>(1u));
     let coverage = textureLoad(masks, vec2<i32>(glyph_origin + offset), 0).r;
