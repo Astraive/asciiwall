@@ -44,5 +44,6 @@
 ## Naming conventions
 
 Documentation paths use lowercase kebab-case. Rust module files use the language's conventional underscore style. Configuration keys are dotted sections with kebab-case leaf names. JSON manifest fields use the exact snake_case names in the draft schemas. Do not translate machine identifiers when localizing the UI.
+When terminology or a machine identifier changes in a contract, update the affected glossary entry and user-facing help, UI, and error wording in the same change. Preserve stable identifiers exactly; do not localize them.
 
 The word 'supported' always refers to tested behavior in a named environment; 'proposed' and 'experimental' are deliberate status labels. 'No backend' means no owned hosted application service is required, not that optional public downloads occur without external hosting.

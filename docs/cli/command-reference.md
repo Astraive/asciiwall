@@ -12,10 +12,10 @@ Global flags: `--json`, `--quiet`, `--verbose`, `--config <path>`, `--no-color`,
 |---|---|---|
 | `asciiwall convert <image> --output <file>` | Image to text/ANSI/PNG | `--columns`, `--matcher density|structural`, `--charset`, `--color`, `--format txt|ansi|png`, `--overwrite` |
 | `asciiwall preview <source>` | Normal interactive preview window | `--preset`, `--columns`, `--safe-mode` |
-| `asciiwall bake <source> --output <file>` | Precompute character clip or rendered video | `--format ascii-clip|video`, `--fps`, `--duration`, `--seed`, `--width`, `--height`, `--encoder`, `--overwrite` |
+| `asciiwall bake <source> --output <file>` | Precompute an ASCII clip or rendered video | `--format ascii-clip|video`, `--fps`, `--duration`, `--seed`, `--width`, `--height`, `--encoder`, `--overwrite` |
 | `asciiwall benchmark <source>` | Explicit local benchmark | `--preset`, `--warmup`, `--frames`, `--output`, `--json` |
 
-File extension can suggest a format but explicit conflicting flags are rejected. `bake --format video` requires an encoder actually included in the build; print supported encoders rather than inventing availability. Audio is absent/muted unless a future explicit supported option is selected.
+File extension can suggest a format but explicit conflicting flags are rejected. `bake --format ascii-clip` produces precomputed character frames with glyph data retained. `bake --format video` produces a rendered-video raster; its pixels show the ASCII artwork, but grid structure and glyph choices are not editable data after baking. The `video` flag value selects the rendered-video representation named in the [glossary](../reference/glossary.md); it does not imply grid/glyph editing support. Video output requires an encoder actually included in the build; print supported encoders rather than inventing availability. Audio is absent/muted unless a future explicit supported option is selected.
 
 ```bash
 asciiwall convert mountain.png --columns 180 --matcher structural --format txt --output mountain.txt
