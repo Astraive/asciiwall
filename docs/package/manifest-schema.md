@@ -4,7 +4,13 @@
 
 This embedded JSON Schema uses draft 2020-12. [S36](../research/source-register.md#s36) It is a closed-world v1 structure: unknown fields and unknown portable setting names are rejected. Defaults annotate the schema; a validator does not necessarily insert them. The engine's settings resolver fills absent values.
 
-The schema is not an archive validator. Path normalization, duplicate JSON keys, asset existence, actual hashes, resource totals, version comparison, licensing review, and capability checks are additional mandatory phases.
+The schema is not an archive validator. Archive path normalization, duplicate JSON keys, resource totals, version comparison, licensing review, and capability checks are additional mandatory phases. The package API separately compares declared asset paths, sizes, and digests with a caller-supplied inventory; it does not build that inventory or extract archive entries.
+
+The implementation artifacts are checked in at [`manifest-1.0.json`](../../crates/ascii-package/schemas/manifest-1.0.json) and [`scene-1.0.json`](../../crates/ascii-package/schemas/scene-1.0.json). Their stable identifiers are `urn:asciiwall:schema:manifest:1.0` and `urn:asciiwall:schema:scene:1.0`. `ascii-package::validate_manifest` and `validate_scene` compile these local artifacts and validate in-process; the schema files contain no `$ref`, and the validator is built without remote resolver features.
+
+Consumers should call `validate_manifest(bytes, &inventory)` for bounded manifest structure and declared-asset size/digest reconciliation, then run archive, compatibility, licensing, and capability phases. The caller must build the inventory from actual content; schema validation alone never establishes its bytes. `validate_scene(bytes)` checks scene structure and bounded built-in parameters; graph topology/arity semantics remain PKG-003's responsibility. Parsed settings preserve omission: schema `default` annotations do not populate values.
+
+Schema evolution is versioned: a breaking or constraint-changing format contract gets a new schema artifact and URN version. Never silently revise the meaning of a published `:1.0` identifier; update shared types, consumer fixtures, and this policy alongside a new artifact.
 
 ```json
 {
