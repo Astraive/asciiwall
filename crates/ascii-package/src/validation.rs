@@ -106,6 +106,7 @@ pub fn validate_manifest(
 }
 
 fn check_json_depth(bytes: &[u8]) -> Result<(), Error> {
+    let mut expected_closers = [0u8; MAX_JSON_DEPTH];
     let mut depth = 0usize;
     let mut in_string = false;
     let mut escaped = false;
@@ -123,14 +124,26 @@ fn check_json_depth(bytes: &[u8]) -> Result<(), Error> {
         match *byte {
             b'"' => in_string = true,
             b'{' | b'[' => {
-                depth += 1;
-                if depth > MAX_JSON_DEPTH {
-                    return Err(structural("$", "JSON nesting exceeds 32 levels"));
+                if depth == MAX_JSON_DEPTH {
+                    return Err(structural(
+                        "$",
+                        &format!("JSON nesting exceeds {MAX_JSON_DEPTH} levels"),
+                    ));
                 }
+                expected_closers[depth] = if *byte == b'{' { b'}' } else { b']' };
+                depth += 1;
             }
-            b'}' | b']' => depth = depth.saturating_sub(1),
+            b'}' | b']' => {
+                if depth == 0 || expected_closers[depth - 1] != *byte {
+                    return Err(structural("$", "JSON delimiters are not properly nested"));
+                }
+                depth -= 1;
+            }
             _ => {}
         }
+    }
+    if depth != 0 {
+        return Err(structural("$", "JSON delimiters are not properly nested"));
     }
     Ok(())
 }
@@ -231,4 +244,43 @@ fn validate_schema(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ErrorKind, MAX_JSON_DEPTH, check_json_depth};
+
+    #[test]
+    fn rejects_mismatched_closing_delimiters() {
+        for input in [b"{]".as_slice(), b"[}", b"}"] {
+            let error = check_json_depth(input).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Structural);
+        }
+    }
+
+    #[test]
+    fn ignores_delimiters_and_escapes_inside_strings() {
+        let input = br#"{"text":"delimiters {}[] and escaped quote: \" and backslash \\"}"#;
+        assert!(serde_json::from_slice::<serde_json::Value>(input).is_ok());
+        assert!(check_json_depth(input).is_ok());
+    }
+
+    #[test]
+    fn accepts_limit_and_rejects_one_level_over() {
+        let at_limit = format!(
+            "{}0{}",
+            "[".repeat(MAX_JSON_DEPTH),
+            "]".repeat(MAX_JSON_DEPTH)
+        );
+        assert!(check_json_depth(at_limit.as_bytes()).is_ok());
+
+        let over_limit = format!(
+            "{}0{}",
+            "[".repeat(MAX_JSON_DEPTH + 1),
+            "]".repeat(MAX_JSON_DEPTH + 1)
+        );
+        let error = check_json_depth(over_limit.as_bytes()).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Structural);
+        assert_eq!(error.location, "$");
+    }
 }
