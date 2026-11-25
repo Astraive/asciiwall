@@ -30,6 +30,4 @@ pub use sampling::{
     SamplingFilter, SamplingIdentity, SamplingOptions, SamplingRect,
 };
 pub use adjustments::{
-    AdjustmentError, AdjustmentSettings, ArtisticAdjustments, EdgeSettings, apply_adjustments,
-    adjustment_invalidation,
 };
