@@ -55,6 +55,16 @@ fn malformed_webp_container_is_rejected() {
     ));
 }
 
+
+#[test]
+fn empty_size_consistent_webp_container_is_malformed() {
+    let fixture = b"RIFF\x04\0\0\0WEBP";
+    assert!(matches!(
+        decode(fixture),
+        Err(Error::Malformed(MalformedReason::InvalidEncodedData))
+    ));
+}
+
 #[test]
 fn nonzero_odd_riff_chunk_padding_is_rejected() {
     let fixture = b"RIFF\x0e\0\0\0WEBPJUNK\x01\0\0\0\0\x01";

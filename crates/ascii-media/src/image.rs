@@ -2092,6 +2092,10 @@ fn inspect_webp_container(
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
 
+    if encoded.len() == 12 {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+    }
+
     let mut info = WebpContainerInfo { animated: false };
     let mut saw_vp8x = false;
     let mut offset = 12_usize;
