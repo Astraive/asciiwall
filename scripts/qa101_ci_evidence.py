@@ -137,6 +137,22 @@ def tool_version(args: list[str], *, cwd: Path) -> str:
     return completed.stdout.decode("utf-8", errors="replace").splitlines()[0]
 
 
+
+def runner_failure_result(
+    manifest: dict[str, Any],
+    *,
+    stage: str,
+    error_type: str,
+    observed_status: str | None,
+    observed_summary: str | None,
+) -> None:
+    manifest["result"] = (
+        {"status": observed_status, "summary": observed_summary}
+        if observed_status is not None
+        else {"status": "not-run"}
+    )
+    manifest["evidence_processing_failure"] = {"stage": stage, "error_type": error_type}
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qa004-root", type=Path, required=True, help="checkout of QA-004 tooling at its pinned commit")
@@ -174,6 +190,9 @@ def main() -> int:
             "native_product_acceptance": "not-performed",
         },
     }
+    observed_status: str | None = None
+    observed_summary: str | None = None
+    observed_test: dict[str, Any] | None = None
     stage = "source-identity"
     try:
         commit, tree_oid, source_hash = source_identity(repo_root)
@@ -262,6 +281,17 @@ def main() -> int:
             f"{sum(value.endswith(': ok') for value in cases.values())} of 5 passed. "
             "automated only; no independent human review or native or product acceptance."
         )
+        observed_status = status
+        observed_summary = summary
+        observed_test = {
+            "target": TEST_TARGET,
+            "observed_cases": cases,
+            "harness_summary": result_line,
+            "exit_code": test_run.returncode,
+            "status": status,
+        }
+        manifest["test"] = observed_test
+        manifest["result"] = {"status": status, "summary": summary}
         record = {
             "schema_version": 1,
             "level": "integration",
@@ -337,7 +367,13 @@ def main() -> int:
         return 0 if test_passed else 1
     except Exception as exc:  # Keep partial build/test evidence uploadable on tool failures.
         (output_dir / "runner-error.log").write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
-        manifest["result"] = {"status": "not-run", "stage": stage, "error_type": type(exc).__name__}
+        runner_failure_result(
+            manifest,
+            stage=stage,
+            error_type=type(exc).__name__,
+            observed_status=observed_status,
+            observed_summary=observed_summary,
+        )
         write_json(manifest_path, manifest)
         return 1
 
