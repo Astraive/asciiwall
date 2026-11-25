@@ -244,9 +244,8 @@ pub fn rerank_candidates(
             );
         }
         let pixel_mse = squared_error / sample_count as f64;
-        let tone_error = (target_coverage / sample_count as f64
-            - f64::from(glyph.mean_coverage()))
-        .abs();
+        let tone_error =
+            (target_coverage / sample_count as f64 - f64::from(glyph.mean_coverage())).abs();
         let temporal_penalty = if weights.temporal > 0.0
             && previous_glyph.is_some_and(|previous| previous != candidate.table_position())
         {
@@ -277,7 +276,6 @@ pub fn rerank_candidates(
     best.map(|(_, candidate)| candidate)
         .ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))
 }
-
 
 /// Coverage, dimensionless gradient variation, and edge orientation for one sampled patch.
 #[derive(Clone, Copy, Debug, PartialEq)]

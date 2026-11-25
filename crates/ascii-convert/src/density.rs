@@ -19,20 +19,20 @@ use crate::color::{
 };
 use crate::color_fit::{ColorFitError, ColorFitStrategy, estimate_color_fit_work, fit_color_patch};
 use crate::font::GlyphTable;
+use crate::palette::{Palette, PaletteError, PaletteKind};
 #[cfg(test)]
 use crate::sampling::SampleCancellationPoll;
-use crate::palette::{Palette, PaletteError, PaletteKind};
-use crate::structural::{
-    MAX_STRUCTURAL_CANDIDATES, ReconstructionWeights, ShortlistOptions, StructuralDescriptor,
-    StructuralScratch, StructuralWeights, rerank_candidates,
-};
 use crate::sampling::{
     FitMode, FitTransform, PatchDimensions, QualityPatches, SamplingError, SamplingIdentity,
     SamplingOptions, SamplingSource, prepare_sampling,
 };
+use crate::structural::{
+    MAX_STRUCTURAL_CANDIDATES, ReconstructionWeights, ShortlistOptions, StructuralDescriptor,
+    StructuralScratch, StructuralWeights, rerank_candidates,
+};
+
 const CANCELLATION_CELL_INTERVAL: usize = 32;
 const CANCELLATION_GLYPH_INTERVAL: usize = 64;
-
 
 /// How an output cell grid is sized before density matching.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,12 +252,10 @@ impl<'a> ConversionSettings<'a> {
         self.sampling = sampling;
         self
     }
+
     /// Selects the finite weighted reconstruction objective used by structural matching.
     #[must_use]
-    pub const fn with_reconstruction_weights(
-        mut self,
-        weights: ReconstructionWeights,
-    ) -> Self {
+    pub const fn with_reconstruction_weights(mut self, weights: ReconstructionWeights) -> Self {
         self.reconstruction_weights = weights;
         self
     }
@@ -538,10 +536,8 @@ pub fn convert_structural(
     let patches = patches.ok_or(Error::Malformed(MalformedReason::InvalidConfiguration))?;
     let glyph_count = u32::try_from(glyphs.glyphs().len()).map_err(|_| Error::SizeOverflow)?;
     let candidate_count = glyphs.glyphs().len().min(64).min(MAX_STRUCTURAL_CANDIDATES);
-    let shortlist_options = ShortlistOptions::new(
-        candidate_count,
-        StructuralWeights::new(0.34, 0.33, 0.33)?,
-    )?;
+    let shortlist_options =
+        ShortlistOptions::new(candidate_count, StructuralWeights::new(0.34, 0.33, 0.33)?)?;
     let foreground_luminance = settings.foreground.luminance().value();
     let background_luminance = settings.background.luminance().value();
     let output_foreground = output_color(settings.foreground);
@@ -616,7 +612,6 @@ pub fn convert_structural(
         settings.cancellation,
     )
 }
-
 
 /// Converts a raster into a bounded frame plus the shared geometry and optional quality patches.
 ///
