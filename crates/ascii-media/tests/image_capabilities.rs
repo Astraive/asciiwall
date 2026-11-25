@@ -82,8 +82,13 @@ fn reports_only_variants_implemented_by_this_build() {
     let capabilities = image_capabilities();
 
     assert!(capabilities.png.still);
-    assert!(!capabilities.png.animated);
+    assert!(capabilities.png.animated);
+    assert!(capabilities.png.apng_8bit);
+    assert!(!capabilities.png.apng_16bit);
+    assert!(!capabilities.png.apng_separate_default_image);
     assert!(capabilities.jpeg.baseline);
+    assert!(!capabilities.gif.still);
+    assert!(capabilities.gif.animated);
     assert!(capabilities.jpeg.progressive);
     assert!(!capabilities.webp.lossy);
     assert!(!capabilities.webp.lossless);

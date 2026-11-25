@@ -20,7 +20,42 @@ Looping drains correctly and returns to the chosen loop start. A seamless-loop o
 
 ## Animated images
 
-GIF/WebP/APNG support must honor frame durations, disposal, blend behavior, loop counts, and the composed canvas rather than treating each frame as a standalone image. Extremely short/zero durations require a documented floor to prevent a runaway loop. Local preview and export should use the same normalized animation timeline.
+`ascii-media::decode_animation` supports 8-bit APNG whose default PNG image is also the first
+animation frame, plus GIF89a/GIF87a animations. APNG partial rectangles are checked against the
+canvas; source/source-over blending and none/background/previous disposal are composed before
+publication, with PNG orientation applied once to the full canvas. GIF uses the pinned `gif` 0.14.0
+low-level decoder, checks every frame rectangle, preserves palette transparency, and composes
+keep/any, background-color, and previous disposal onto the logical-screen canvas. Both formats
+publish straight-alpha sRGB `DecodedFrame`s, never subframes.
+GIF ICC-profile and user-input-dependent variants return typed unsupported errors.
+
+The shared `Animation` timeline floors every frame at 10 ms and rejects a normalized loop longer
+than 24 hours or over 256 frames. APNG denominator zero is 100 and positive `num_plays` is total
+plays. GIF delays use 10 ms units; a finite GIF repeat count is repetitions after the initial play,
+while no repeat extension means one play and repeat zero means infinite. `Animation::frame_at` is
+the common preview/export selection primitive and holds the last frame after finite playback.
+Encoded input, GIF per-frame decoder scratch, canvas, previous-rectangle restore, and retained
+full-canvas history are bounded by `DecodeLimits`, `Budget`, and `DecodeResources`; cancellation is
+checked between frames, compressed-input refills, and composition/normalization rows.
+
+GIF still-image decoding remains disabled. 16-bit and separate-default APNG, animated WebP, and all
+WebP pixel decoding remain disabled; WebP's pinned lossless meta-code can allocate unbounded Huffman
+groups outside the memory ledger. No CLI doctor/import surface exists yet, and the library API is
+not wired to application preview/export; those acceptance items remain open. Do not infer support
+from a file extension or still-image capability.
+
+### Reproducible animation fixtures
+
+The generated fixture inputs and generator settings are pinned by SHA-256 assertions in
+`ascii-media/tests/animation_decode.rs`:
+
+- GIF settings `dc797df0c1e556719cea89374be0017617b45ac9abb97cd7acb4ca71f65b1092`;
+  fixture `d5a5dc5f85f99530aab8862e84a9c5b4c8536dec155cda61bc1bb013edf8be29`.
+- APNG settings `4960c500b02bfa20654df299568b29dea2554e0ace6299284b8e9e175e82f28f`;
+  fixture `9a2efd0e082adadd8e166d92a8dd2724bf27484378375c9fac7fa91d5bd5e079`.
+- First-frame `Previous` disposal mutation settings
+  `a17c43ba4d9d5d33e02c1eb270db702f96a3a2ac4a3c8dedee9ae4ddef9644aa`;
+  fixture `90446459a823e11715c4e128960ece9b97cb820e7876aa92e31e7b7dfa85f5ca`.
 
 ## Hardware decoding
 

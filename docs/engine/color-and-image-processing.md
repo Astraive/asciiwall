@@ -91,15 +91,17 @@ Area/box sampling is a practical baseline for shrink-heavy conversion. Compare a
 
 ## Input coverage
 
-This build decodes PNG/JPEG. WebP is recognized only for bounded RIFF structure and animation
-classification; pixel decoding remains disabled until an allocation-safe codec is available.
-Extensions are not codec guarantees. Check dimensions and allocation limits before large buffers;
-codec limits are one layer of defense, not a substitute for process budgets.
+This build decodes PNG/JPEG, composes the documented 8-bit APNG subset, and supports animated GIF
+through a bounded low-level decoder path. WebP is recognized only for bounded RIFF structure and
+animation classification; pixel decoding remains disabled until an allocation-safe codec is
+available. Extensions are not codec guarantees. Check dimensions and allocation limits before large
+buffers; codec limits are one layer of defense, not a substitute for process budgets.
 
 ### Image decoder implementation status (IMG-001)
 
-`ascii-media::decode_image` sniffs PNG/JPEG/WebP bytes from the caller's current stream position;
-it does not open paths or URLs. The stream is copied into a size-bounded, budgeted snapshot
+`ascii-media::decode_image` sniffs PNG/JPEG/WebP bytes for still decoding, while
+`decode_animation` additionally handles APNG/GIF from the caller's current stream position; neither
+opens paths or URLs. The stream is copied into a size-bounded, budgeted snapshot
 before codec parsing so all validation and decode passes observe identical bytes. PNG handling
 uses `png` 0.18.0 and validates every chunk CRC through an exact terminal IEND. JPEG handling
 uses the strict, safe-mode pure-Rust `zune-jpeg` 0.5.5 decoder; it does not cross a native
@@ -118,15 +120,17 @@ actual alpha semantics, compact source-profile provenance, and source range meta
 dimensions, and a shared `DecodeResources` ledger for concurrent decode slots and retained
 memory. The owned input snapshot, codec scratch and temporary rasters are preflighted and
 charged before output allocation. PNG scratch includes row/inflater and reader buffers plus the
-largest non-IDAT chunk buffer; large IDAT payloads are streamed and are not counted again as
-codec scratch. JPEG scan-block work is budgeted with encoded-input work. WebP is only a linear,
-allocation-free RIFF chunk scan and is charged as header work; no WebP pixel codec or decoder
-scratch is enabled. Retained output remains charged until its `DecodedFrame` is dropped; its
+largest non-IDAT chunk buffer; large IDAT payloads are streamed and are not counted again as codec
+scratch. GIF's per-frame palette-index buffer, RGBA compositor canvas, one restore rectangle,
+reader buffer, and retained full-canvas frames are preflighted against `max_decoder_bytes`, `Budget`,
+and the shared ledger. GIF's `MemoryLimit` is additional per-allocation defense; its application
+permit is reserved before parsing. JPEG scan-block work is budgeted with encoded-input work. WebP is
+only a linear, allocation-free RIFF chunk scan and is charged as header work; no WebP pixel codec or
+decoder scratch is enabled. Retained output remains charged until its `DecodedFrame` is dropped; its
 `RasterFrameView` borrows from that owner. Snapshot acquisition requests at most 128 bytes per
 caller `Read` and checks cancellation between completed calls; a blocked underlying `Read` cannot
-be interrupted. Codec compressed-input reads use a 128-byte buffer; JPEG marker/entropy FF-fill
-loops poll at 8 KiB offsets. WebP container scans poll between chunk headers. Pixel normalization
-polls at each row boundary and after each 128 pixels within a row.
+be interrupted. WebP container scans poll between chunks. GIF input reads poll between refill calls.
+Pixel normalization polls at row boundaries and after each 128 pixels within a row.
 These checks bound work intervals but
 are not CPU or I/O preemption: codec work may continue until its next poll, and a caller's
 in-progress `Read` cannot be interrupted until that call returns. Malformed input, cancellation,
@@ -144,12 +148,14 @@ decoded evidence. A malformed odd-sized RIFF chunk with nonzero padding is rejec
 These fixture checks do not imply native-codec, performance, or platform-support claims.
 ### Image capability contract (IMG-002)
 
-`ascii-media::image_capabilities()` reports still PNG and baseline/progressive JPEG as enabled.
-APNG and all WebP pixel-decoding variants are disabled. The WebP classifier validates RIFF
-extents, chunk bounds, and zero padding, and returns `Unsupported(AnimatedImage)` for animation
-markers before any pixel-decoding path. WebP remains disabled because the pinned upstream
-`image-webp` 0.2.4 lossless decoder can allocate Huffman groups based on untrusted meta-code IDs
-without bounding them to the canvas group grid; a safe scratch/work bound is not established.
+`ascii-media::image_capabilities()` reports still PNG and baseline/progressive JPEG plus animated
+GIF composition. APNG composition supports 8-bit samples when its default PNG image is the first
+animation frame; 16-bit APNG and a separate default image are disabled. GIF remains animation-only.
+WebP pixel-decoding variants remain disabled. The WebP classifier validates RIFF extents, chunk
+bounds, and zero padding, and returns `Unsupported(AnimatedImage)` for animation markers before any
+pixel-decoding path. WebP remains disabled because the pinned upstream `image-webp` 0.2.4 lossless
+decoder can allocate Huffman groups based on untrusted meta-code IDs without bounding them to the
+canvas group grid.
 
 JPEG display orientation is applied once while producing the normalized top-down raster. The
 returned `RasterFrameView` carries `RasterOrientation::TopDown`; consumers must use that pixel
@@ -163,15 +169,20 @@ The repository currently has no CLI doctor or import-error surface to consume th
 report. Those user-facing diagnostics remain blocked until those product surfaces exist; callers
 can query the media-library API in the meantime.
 
-For accepted PNG and JPEG, `ColorDescription::source_profile()` distinguishes observed sRGB
-metadata from untagged data handled under the documented sRGB assumption. PNG sample range is
-full; JPEG source range is unspecified because the decoder has no authoritative range tag.
-Untagged values are not claimed to have undergone profile conversion. Embedded ICC,
-uncalibrated/unknown EXIF color space, non-sRGB PNG `gAMA`/`cHRM`, and unsupported transfer/HDR
-metadata fail with typed color-description errors; no ICC or HDR conversion accuracy is claimed.
+For accepted PNG, JPEG, APNG, and GIF, `ColorDescription::source_profile()` distinguishes observed
+sRGB metadata from untagged data handled under the documented sRGB assumption. PNG/APNG and GIF
+samples use the full range; JPEG source range is unspecified because the decoder has no authoritative
+range tag. APNG and GIF output is straight-alpha RGBA; PNG orientation is applied once to the
+complete APNG canvas after frame composition. Embedded ICC, uncalibrated/unknown EXIF color space,
+non-sRGB PNG `gAMA`/`cHRM`, and unsupported transfer/HDR metadata fail with typed color-description
+errors; no ICC or HDR conversion accuracy is claimed.
 
-The bounded WebP classifier recognizes animation markers and returns
-`Unsupported(AnimatedImage)` without publishing pixels. Animated-image routing remains blocked
-because no animation handler exists in the current repository. A future IMG-003 integration must
-handle that typed signal and route frames through timeline/composition, disposal/blend,
-cancellation, and bounded-history semantics.
+`ascii-media::decode_animation` shares a normalized APNG/GIF timeline with deterministic
+`Animation::frame_at` selection. It applies a 10 ms minimum delay, bounds each loop to 24 hours and
+256 frames, and accounts canvas, restore history, decoder scratch, and retained output against
+`DecodeLimits`/`DecodeResources`. APNG supports 8-bit participating-default-image source/over blends
+and none/background/previous disposal. GIF supports palette transparency and keep/any,
+background-color, and previous disposal with finite/infinite play semantics. 16-bit/separate-default
+APNG, GIF still images, animated WebP, and all WebP pixel decoding remain unsupported; GIF ICC and
+user-input-dependent variants return typed errors. No CLI doctor/import-error surface or application
+preview/export consumer exists yet, so those acceptance criteria remain open.
