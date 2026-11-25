@@ -9,10 +9,91 @@ fn feed_status(
     ascii_package::SceneFeedStatus {
         state,
         usable,
-        reason: ascii_package::SceneFeedReason {
-            code: reason.to_owned(),
-        },
+        reason: ascii_package::SceneFeedReason::new(reason).unwrap(),
     }
+}
+
+#[test]
+fn feed_reason_codes_enforce_bounded_ascii_tokens() {
+    use ascii_package::{MAX_SCENE_FEED_REASON_CODE_BYTES, SceneFeedReason, SceneFeedReasonError};
+
+    assert_eq!(SceneFeedReason::new(""), Err(SceneFeedReasonError::Empty));
+    let maximum = "a".repeat(MAX_SCENE_FEED_REASON_CODE_BYTES);
+    assert_eq!(
+        SceneFeedReason::new(&maximum).unwrap().as_str(),
+        maximum.as_str()
+    );
+    let oversized = "a".repeat(MAX_SCENE_FEED_REASON_CODE_BYTES + 1);
+    assert_eq!(
+        SceneFeedReason::new(&oversized),
+        Err(SceneFeedReasonError::TooLong)
+    );
+    for invalid in [
+        "Uppercase",
+        "not a token",
+        "not/reported",
+        "double--separator",
+        "leading-",
+        "trailing_",
+        "control\ncode",
+        "delete\u{7f}",
+        "not-ascii-ø",
+    ] {
+        assert_eq!(
+            SceneFeedReason::new(invalid),
+            Err(SceneFeedReasonError::InvalidToken),
+            "{invalid:?}"
+        );
+    }
+}
+
+#[test]
+fn required_feed_error_display_is_bounded_by_reason_code_limit() {
+    use ascii_package::{MAX_SCENE_FEED_REASON_CODE_BYTES, SceneFeeds};
+
+    let primary_reason = "a".repeat(MAX_SCENE_FEED_REASON_CODE_BYTES);
+    let position_reason = "b".repeat(MAX_SCENE_FEED_REASON_CODE_BYTES);
+    let mut manifest: ascii_package::Manifest =
+        serde_json::from_str(include_str!("fixtures/manifest.json")).unwrap();
+    manifest.capabilities.required = vec![ascii_package::Capability::PointerButtons];
+    manifest.capabilities.optional.clear();
+    let click = validate_scene(
+        br##"{"scene_version":"1.0","seed":1,"nodes":[{"id":"click","kind":"click-ripple","params":{"radius_cells":1,"duration_ms":50,"strength":0}}],"edges":[],"output":"click","controls":[]}"##,
+    )
+    .unwrap();
+    let feeds = SceneFeeds {
+        capabilities: [
+            (
+                ascii_package::Capability::PointerButtons,
+                feed_status(
+                    ascii_package::SceneFeedState::Denied,
+                    false,
+                    &primary_reason,
+                ),
+            ),
+            (
+                ascii_package::Capability::PointerPosition,
+                feed_status(
+                    ascii_package::SceneFeedState::Unknown,
+                    false,
+                    &position_reason,
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let error = ascii_package::validate_scene_capabilities(
+        &click,
+        &manifest,
+        &feeds,
+        &ascii_package::ScenePolicy::default(),
+    )
+    .unwrap_err();
+    let display = error.to_string();
+    assert!(display.len() <= 512);
+    assert!(display.contains(&primary_reason));
+    assert!(display.contains(&position_reason));
 }
 
 fn click_feeds(buttons: ascii_package::SceneFeedStatus) -> ascii_package::SceneFeeds {
@@ -234,7 +315,7 @@ fn window_feed_and_media_asset_refs_are_checked_without_host_queries() {
     let window_status = &plan.feed_decisions[&ascii_package::Capability::WindowRectangles].status;
     assert_eq!(window_status.state, ascii_package::SceneFeedState::Unknown);
     assert!(!window_status.usable);
-    assert_eq!(window_status.reason.code.as_str(), "not-reported");
+    assert_eq!(window_status.reason.as_str(), "not-reported");
 
     let source = validate_scene(
         br##"{"scene_version":"1.0","seed":1,"nodes":[{"id":"image","kind":"image-source","params":{"path":"not-declared.png"}}],"edges":[],"output":"image","controls":[]}"##,
