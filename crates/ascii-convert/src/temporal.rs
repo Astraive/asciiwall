@@ -135,10 +135,11 @@ pub struct TemporalScratch {
 }
 
 impl TemporalScratch {
-    /// Invalidates history and establishes the only generation allowed to publish subsequently.
+    /// Invalidates history and establishes the only generation accepted by subsequent calls.
     ///
-    /// This is the settings/seek invalidation barrier for asynchronous callers: old work carrying a
-    /// prior generation is rejected and cannot replace the newly established state.
+    /// This synchronous check rejects mismatched generations; it does not provide an asynchronous
+    /// publication barrier. Callers must prevent stale completed work from publishing at the
+    /// application layer.
     pub fn invalidate(&mut self, generation: u64) {
         self.history.clear();
         self.output.clear();
