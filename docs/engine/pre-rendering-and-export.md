@@ -34,7 +34,31 @@ Write a temporary file in the destination filesystem, validate the completed res
 
 ## Terminal safety
 
-Plain-text export removes control bytes and terminal escape sequences. ANSI export emits only engine-generated approved color sequences and printable glyph data; package metadata is never printed as raw escape codes. Do not embed OSC hyperlinks, clipboard sequences, terminal title changes, or arbitrary control strings from user content.
+Plain-text output contains only supported printable glyphs and structural LFs; unsafe glyph-table entries are rejected rather than copied into output. ANSI output emits only engine-generated approved color sequences and printable glyph data. Package metadata is never printed as raw escape codes. Do not embed OSC hyperlinks, clipboard sequences, terminal title changes, or arbitrary control strings from user content.
+
+`ascii-render` implements headless `.txt` and `.ans` serialization from an `ascii-core` frame and its bound `ascii-convert` glyph table. It returns a complete owned byte buffer, logical `GridSize`, and static target-loss notice; it does not choose or write a destination. Frame/table identity, glyph indices, and glyph safety are rechecked at the export boundary. Metadata, identifiers, and source names are not serialized.
+
+Both targets preserve one glyph per grid column, use LF between rows, and include exactly one final LF. Glyph records carry individual Unicode scalars, not strings. The strict repertoire is printable ASCII (`U+0020`–`U+007E`), block elements (`U+2580`–`U+259F`), and Braille patterns (`U+2800`–`U+28FF`); C0/C1 controls, bidi formatting controls, combining marks, and multi-cell characters are rejected. Multi-scalar strings cannot be represented by the shared glyph-record type. Export rechecks each glyph through `ascii_convert::is_supported_single_cell_scalar`, the public FNT-002 predicate, in addition to the table's validated repertoire.
+
+ANSI emits only engine-generated SGR color sequences (`ESC [` … `m`), begins with `ESC[0m` to clear inherited styles, and resets with `ESC[0m` before each row's LF. Supported resolved modes are ANSI16, xterm-256, and truecolor; other palette modes are not represented by the API. ANSI16 uses its conventional 16-color palette. ANSI256 selects from those 16 colors, the xterm 6×6×6 cube, and the 24-step grayscale ramp. Palette modes choose the nearest entry in encoded-sRGB RGB distance, breaking ties by lower palette index; truecolor emits direct encoded-sRGB channel values after alpha compositing. The background is composited over opaque black, then the foreground over that flattened background, using deterministic encoded-sRGB rounding; no output mode retains alpha. ANSI16 and ANSI256 quantize both resulting colors, and ANSI256's first 16 entries may reflect terminal-configured colors. Target notices disclose source-font and motion/live-effect loss and viewer/terminal cell-aspect dependence; ANSI notices also report alpha flattening, palette quantization where applicable, and terminal-palette dependence for indexed modes.
+
+Each export checks the complete output length against `Budget::max_frame_bytes`, checks work against `Budget::max_work_units`, polls the shared cancellation token, and returns typed errors without exposing partial bytes. For `n` cells and `g` glyph entries, estimated work is `3n + g` for text and truecolor, `67n + g` for ANSI16, and `75n + g` for ANSI256. These bounds include a frame-validation cell scan, a size-pass scan, a serialization scan, glyph validation, and palette candidate-distance evaluations in both ANSI encoding passes (16 candidates per ANSI16 color and 18 per ANSI256 color). Destination transactions and CLI request wiring are not included: VID-014 owns the former, while this workspace has no `apps/cli` consumer for CLI-001. This serializer therefore provides no end-to-end CLI export path.
+
+### Focused export-boundary guard verification
+
+Command:
+
+```sh
+CARGO_HOME='D:/.worktrees/asciiwall/cargo-home-vid010' CARGO_TARGET_DIR='D:/.worktrees/asciiwall/target-vid010-export-guard-tests' cargo +1.100.0 test --locked -p ascii-render --lib export::tests::invalid_export_glyphs_return_indexed_errors -- --exact
+```
+
+Result: 1 passed (1 suite, 2 filtered, 0.01s).
+
+Environment: Windows 11 build 10.0.26300.9974, x86_64; `rustc 1.100.0 (0ef1bc386 2026-11-09)`, host `x86_64-pc-windows-msvc`; Cargo `1.100.0 (3acc79c0c 2026-11-05)`.
+
+SHA-256:
+- `crates/ascii-render/src/export.rs` (validator and focused test): `f70ad4cafdc3234c550ddc1583a63e822721cac1e6ec20ee148d16aaa8f03bfb`
+- `crates/ascii-render/tests/support/synthetic_font.rs` (included unit-test fixture source): `4a1baa8158dee1addcae7a7edafeee1c5bdecc3e1ad51e07cee0b597717fd34f`
 
 ## Package export
 
