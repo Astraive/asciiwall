@@ -1,6 +1,7 @@
 #[allow(dead_code)]
 mod support;
 
+use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
 
 use ascii_convert::{
@@ -1581,7 +1582,20 @@ fn dither_cancellation_fails_without_publishing_a_frame() {
 }
 
 #[test]
-fn synthetic_motion_and_scene_change_metrics_compare_with_undithered_output() {
+fn synthetic_motion_and_scene_change_metrics_match_retained_evidence() {
+    #[derive(Debug, PartialEq)]
+    struct Metrics {
+        mode: DitherMode,
+        gradient_tone_mae: f64,
+        moving_changed_glyphs: u32,
+        moving_flicker_fraction: f64,
+        gradient_changed_glyphs_vs_off: u32,
+        scene_cut_tone_mae: f64,
+        scene_changed_glyphs_vs_off: u32,
+        scene_transition_changed_glyphs: u32,
+        scene_cut_carryover_frames: u32,
+    }
+
     let table = build_table();
     let cancellation = CancellationToken::new();
     let make_image = |shift: usize, scene_change: bool| {
@@ -1589,9 +1603,14 @@ fn synthetic_motion_and_scene_change_metrics_compare_with_undithered_output() {
         for y in 0..36 {
             for x in 0..32 {
                 image[y * 32 + x] = if scene_change {
-                    u8::MAX
+                    if (x / 8 + y / 12).is_multiple_of(2) {
+                        96_u8
+                    } else {
+                        160_u8
+                    }
                 } else {
-                    u8::try_from((x + shift).min(31) * 255 / 31).expect("gradient value fits")
+                    u8::try_from((x + shift).min(31) * 255 / 31)
+                        .expect("linear gradient sample fits u8")
                 };
             }
         }
@@ -1628,59 +1647,131 @@ fn synthetic_motion_and_scene_change_metrics_compare_with_undithered_output() {
             kernel: ErrorDiffusionKernel::FloydSteinberg,
         },
     ];
+    let cell_width = usize::try_from(CELL_WIDTH).expect("cell width fits");
+    let cell_height = usize::try_from(CELL_HEIGHT).expect("cell height fits");
+    let tone_mae = |converted: &ascii_convert::DensityConversion, pixels: &[u8]| {
+        converted
+            .frame()
+            .cells()
+            .iter()
+            .enumerate()
+            .map(|(index, cell)| {
+                let row = index / 4;
+                let column = index % 4;
+                let mut target = 0.0;
+                for y in row * cell_height..(row + 1) * cell_height {
+                    for x in column * cell_width..(column + 1) * cell_width {
+                        target += f64::from(pixels[y * 32 + x]) / 255.0;
+                    }
+                }
+                target /= f64::from(CELL_WIDTH * CELL_HEIGHT);
+                let glyph_index = usize::try_from(cell.glyph()).expect("fixture glyph index fits");
+                let selected = f64::from(table.glyphs()[glyph_index].mean_coverage());
+                (target - selected).abs()
+            })
+            .sum::<f64>()
+            / 12.0
+    };
+    let changed_glyphs = |left: &ascii_convert::DensityConversion,
+                          right: &ascii_convert::DensityConversion| {
+        u32::try_from(
+            left.frame()
+                .cells()
+                .iter()
+                .zip(right.frame().cells())
+                .filter(|(left, right)| left.glyph() != right.glyph())
+                .count(),
+        )
+        .expect("synthetic grid changed-cell count fits u32")
+    };
+    let mut fixture_hash = Sha256::new();
+    fixture_hash.update(b"CNV-006-fixture-v1\0");
+    fixture_hash.update(32_u32.to_le_bytes());
+    fixture_hash.update(36_u32.to_le_bytes());
+    for image in [&first_gradient, &moving_gradient, &changed_scene] {
+        fixture_hash.update(image);
+    }
+    let fixture_hash = format!("{:x}", fixture_hash.finalize());
+    let config_hash = format!(
+        "{:x}",
+        Sha256::digest(
+            b"CNV-006-config-v1;grid=4x3;cell=8x12;filter=box;transfer=linear;alpha=opaque;foreground=white;background=black;ordered=bayer8:seed=23;diffusion=floyd-steinberg:ltr;scene-cut=linear-checker96-160"
+        )
+    );
 
+    let off_gradient = frame(&first_gradient, DitherMode::Off);
+    let off_scene = frame(&changed_scene, DitherMode::Off);
     let mut metrics = Vec::new();
     for mode in modes {
         let first = frame(&first_gradient, mode);
         let moving = frame(&moving_gradient, mode);
         let changed = frame(&changed_scene, mode);
-        let tone_error = |converted: &ascii_convert::DensityConversion, pixels: &[u8]| {
-            converted
-                .frame()
-                .cells()
-                .iter()
-                .enumerate()
-                .map(|(index, cell)| {
-                    let row = index / 4;
-                    let column = index % 4;
-                    let mut target = 0.0;
-                    let cell_width = usize::try_from(CELL_WIDTH).expect("cell width fits");
-                    let cell_height = usize::try_from(CELL_HEIGHT).expect("cell height fits");
-                    for y in row * cell_height..(row + 1) * cell_height {
-                        for x in column * cell_width..(column + 1) * cell_width {
-                            target += f64::from(pixels[y * 32 + x]) / 255.0;
-                        }
-                    }
-                    target /= f64::from(CELL_WIDTH * CELL_HEIGHT);
-                    let glyph_index =
-                        usize::try_from(cell.glyph()).expect("fixture glyph index fits");
-                    let selected = f64::from(table.glyphs()[glyph_index].mean_coverage());
-                    (target - selected).abs()
-                })
-                .sum::<f64>()
-                / 12.0
-        };
-        let changed_cells = first
-            .frame()
-            .cells()
-            .iter()
-            .zip(moving.frame().cells())
-            .filter(|(left, right)| left.glyph() != right.glyph())
-            .count();
-        let changed_fraction =
-            f64::from(u32::try_from(changed_cells).expect("synthetic grid has a small cell count"))
-                / 12.0;
-        let lag_error = tone_error(&changed, &changed_scene);
-        metrics.push((
-            tone_error(&first, &first_gradient),
-            changed_fraction,
-            lag_error,
-        ));
+        let settled = frame(&changed_scene, mode);
+        assert_eq!(changed.frame(), settled.frame());
+        let changed_glyph_count = changed_glyphs(&first, &moving);
+        metrics.push(Metrics {
+            mode,
+            gradient_tone_mae: tone_mae(&first, &first_gradient),
+            moving_changed_glyphs: changed_glyph_count,
+            moving_flicker_fraction: f64::from(changed_glyph_count) / 12.0,
+            gradient_changed_glyphs_vs_off: changed_glyphs(&first, &off_gradient),
+            scene_cut_tone_mae: tone_mae(&changed, &changed_scene),
+            scene_changed_glyphs_vs_off: changed_glyphs(&changed, &off_scene),
+            scene_transition_changed_glyphs: changed_glyphs(&first, &changed),
+            scene_cut_carryover_frames: u32::from(changed.frame() != settled.frame()),
+        });
     }
-    assert_eq!(metrics.len(), 3);
-    for (tone, flicker, lag) in metrics {
-        assert!(tone.is_finite() && (0.0..=1.0).contains(&tone));
-        assert!(flicker.is_finite() && (0.0..=1.0).contains(&flicker));
-        assert!(lag.is_finite() && (0.0..=1.0).contains(&lag));
+    assert_eq!(
+        fixture_hash,
+        "73c009fc5946e391fcca501e89a4cfe96aba7bb385eef19422302eb9609aca33"
+    );
+    assert_eq!(
+        config_hash,
+        "9192795ae357a250499087e804163084cc222b03e0f17ab8c99369c8159a57c0"
+    );
+    let expected = [
+        Metrics {
+            mode: DitherMode::Off,
+            gradient_tone_mae: 0.32316176396082397,
+            moving_changed_glyphs: 3,
+            moving_flicker_fraction: 0.25,
+            gradient_changed_glyphs_vs_off: 0,
+            scene_cut_tone_mae: 0.26862744998698074,
+            scene_changed_glyphs_vs_off: 0,
+            scene_transition_changed_glyphs: 3,
+            scene_cut_carryover_frames: 0,
+        },
+        Metrics {
+            mode: DitherMode::Ordered {
+                pattern: OrderedPattern::Bayer8,
+                seed: 23,
+            },
+            gradient_tone_mae: 0.32406045685406576,
+            moving_changed_glyphs: 0,
+            moving_flicker_fraction: 0.0,
+            gradient_changed_glyphs_vs_off: 1,
+            scene_cut_tone_mae: 0.26862744998698074,
+            scene_changed_glyphs_vs_off: 0,
+            scene_transition_changed_glyphs: 2,
+            scene_cut_carryover_frames: 0,
+        },
+        Metrics {
+            mode: DitherMode::ErrorDiffusion {
+                kernel: ErrorDiffusionKernel::FloydSteinberg,
+            },
+            gradient_tone_mae: 0.3249591497473075,
+            moving_changed_glyphs: 1,
+            moving_flicker_fraction: 0.08333333333333333,
+            gradient_changed_glyphs_vs_off: 2,
+            scene_cut_tone_mae: 0.26862744998698074,
+            scene_changed_glyphs_vs_off: 0,
+            scene_transition_changed_glyphs: 1,
+            scene_cut_carryover_frames: 0,
+        },
+    ];
+    assert_eq!(metrics.as_slice(), expected.as_slice());
+    println!("CNV-006 evidence fixture_sha256={fixture_hash} config_sha256={config_hash}");
+    for metric in &metrics {
+        println!("CNV-006 evidence metrics={metric:?}");
     }
 }

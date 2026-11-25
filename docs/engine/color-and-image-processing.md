@@ -121,14 +121,34 @@ The detailed result exposes a SHA-256 dither cache identity that includes mode, 
 pattern, and the ordered seed. Applications must combine it with source, glyph-table, sampling,
 color, and conversion settings in their overall cache key.
 
-Evaluation compares synthetic moving linear-light gradients and abrupt scene changes against
-undithered conversion using mean tone error, changed-cell fraction between adjacent frames
-(flicker), and response to the scene-change frame (lag). Ordered phase and diffusion scan restart
-at each independent frame, so neither mode promises temporal coherence; fixed ordered phase avoids
-per-frame random phase changes, while diffusion has serial dependencies. Both add conversion work;
-diffusion also adds two row buffers and cannot use parallel cell matching. Dithering is not a
-claim that still-image quality gains improve video, and any tone/flicker/lag trade-off is scene- and
-grid-dependent.
+### Retained synthetic comparison evidence
+
+The regression test `synthetic_motion_and_scene_change_metrics_match_retained_evidence` compares
+each mode against `Off` and asserts these deterministic values. The fixture is a 32×36 linear-gray
+moving horizontal gradient (one source-pixel shift) followed by a 4×3 per-cell checker scene cut
+using linear values 96/160; the output grid has 8×12-pixel cells. Tone MAE is the mean absolute
+difference between each input cell's linear-gray mean and the selected glyph's measured mean
+coverage. Flicker is changed output glyphs between the two gradient frames divided by 12. Glyph
+deltas count cell positions different from `Off`; scene-cut carryover is the number of additional
+same-scene conversions before the cut frame equals a fresh deterministic conversion (zero here).
+
+| Mode | Gradient tone MAE | Gradient shift changes / flicker | Gradient glyph delta vs Off | Scene-cut tone MAE | Gradient→cut glyph changes | Cut glyph delta vs Off | Carryover frames |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Off | 0.32316176396082397 | 3 / 12 (0.25) | 0 | 0.26862744998698074 | 3 | 0 | 0 |
+| Ordered Bayer-8, seed 23 | 0.32406045685406576 | 0 / 12 (0.0) | 1 | 0.26862744998698074 | 2 | 0 | 0 |
+| Floyd–Steinberg | 0.3249591497473075 | 1 / 12 (0.08333333333333333) | 2 | 0.26862744998698074 | 1 | 0 | 0 |
+
+Fixture SHA-256: `73c009fc5946e391fcca501e89a4cfe96aba7bb385eef19422302eb9609aca33`.
+Configuration SHA-256: `9192795ae357a250499087e804163084cc222b03e0f17ab8c99369c8159a57c0`.
+The exact hashes and metrics are also asserted and printed by the regression test. Verification
+environment: Windows 10.0.26300.9974 x64, rustc 1.100.0, cargo 1.100.0. Exact evidence command:
+`CARGO_HOME=D:/target/cargo-home CARGO_TARGET_DIR=D:/worktrees/.targets/cnv-006-dither cargo test --locked --package ascii-convert --test density_matcher -- --nocapture`.
+
+This single synthetic fixture shows a slight gradient-tone error increase for both dither modes
+alongside fewer changed glyphs; the scene-cut tone and mode-vs-Off glyph deltas happen to be equal
+here. Zero carryover reflects frame-independent conversion, not perceptual lag or a temporal
+quality guarantee. The small, synthetic comparison is evidence for the tested inputs only; it does
+not claim still-image gains improve video or that dithering improves arbitrary scenes.
 
 ## Filtering and edges
 
