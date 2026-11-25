@@ -43,7 +43,7 @@ Change classes describe invalidation: uniform, scene/runtime, conversion, atlas,
 
 | Key | Default | Type / constraints | Scope / change / phase | Meaning / capability |
 |---|---|---|---|---|
-| `conversion.matcher` | `"density"` | string; density, structural | P / conversion / v1 | Structure-aware mode has a larger compute budget. Capability: none. |
+| `conversion.matcher` | `"density"` | string; density, structural, contour | P / conversion / v1 | Density is the fast tone baseline; structural and contour spend more work on shape/oriented edges. Contour suppresses configured low-contrast texture and may lose tone fidelity. Capability: none. |
 | `conversion.sample` | `"area"` | string; area, bilinear | P / conversion / v1 | Downsampling strategy. Capability: none. |
 | `conversion.brightness` | `0` | number; -1 to 1 | P / conversion / v1 | Luminance offset before matching. Capability: none. |
 | `conversion.contrast` | `1` | number; 0 to 4 | P / conversion / v1 | Contrast gain in normalized working space. Capability: none. |

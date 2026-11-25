@@ -126,7 +126,7 @@ impl GridSizing {
         }
         Ok(size)
     }
-    fn resolve_for_sampling(
+    pub(crate) fn resolve_for_sampling(
         self,
         source_width: u32,
         source_height: u32,
@@ -254,6 +254,10 @@ impl<'a> ConversionSettings<'a> {
         self
     }
 
+    pub(crate) const fn color_fit_enabled(self) -> bool {
+        self.color_fit.is_some()
+    }
+
     /// Selects the finite weighted reconstruction objective used by structural matching.
     #[must_use]
     pub const fn with_reconstruction_weights(mut self, weights: ReconstructionWeights) -> Self {
@@ -362,7 +366,7 @@ impl From<SamplingError> for DensityConversionError {
 }
 
 impl DensityConversionError {
-    fn into_core(self) -> Error {
+    pub(crate) fn into_core(self) -> Error {
         match self {
             Self::Core(error)
             | Self::ColorNormalization(ColorNormalizationError::Raster(error)) => error,
@@ -453,10 +457,16 @@ impl DensityConversion {
         self.terminal_appearance_notice
     }
 
-    /// Consumes the result and returns its ASCII frame.
+    /// Consumes the result and returns its converted frame.
     #[must_use]
     pub fn into_frame(self) -> AsciiFrame {
         self.frame
+    }
+
+    pub(crate) fn into_contour_parts(
+        self,
+    ) -> (AsciiFrame, Option<QualityPatches>, SamplingIdentity) {
+        (self.frame, self.patches, self.sampling_identity)
     }
 }
 
