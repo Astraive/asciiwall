@@ -26,13 +26,16 @@ the exact profile-specific normalization failure.
 Decode within limits and apply display orientation once in the decoder; then interpret source color metadata, decide alpha compositing background, select crop/contain/cover, resample, and apply artistic adjustments such as exposure, contrast, gamma, saturation, and edge emphasis. Distinguish physical color conversion from user-selected artistic distortion.
 
 The portable `ascii-convert::apply_adjustments` operation consumes fitted row-major linear-light
-RGB samples, validates all settings and geometry before allocation, then applies exposure,
-contrast around 0.5, artistic power gamma, saturation about linear luminance, and optional radius-one
-3x3 unsharp emphasis, in that order. Channels clamp to `[0,1]` after each stage. Exposure is
-bounded to `[-8,8]` stops; contrast and saturation to `[0,4]`; artistic gamma to `[0.1,4]`;
-unsharp gain to `[0,1]`. Identity settings return exact original sample values. Artistic gamma is
-not physical sRGB transfer decoding. Edge halo remains possible; the deterministic edge fixture
-compares enabled output with the no-edge baseline on a synthetic sharp transition.
+RGB samples plus the caller's per-operation `Budget` and `CancellationToken`. It validates all
+settings and geometry before allocation, accounts for the borrowed input extent and owned output
+bytes, and charges work before processing. It applies exposure, contrast around 0.5, artistic power
+gamma, saturation about linear luminance, and optional radius-one 3x3 unsharp emphasis, in that
+order. Channels clamp to `[0,1]` after each stage. Exposure is bounded to `[-8,8]` stops; contrast
+and saturation to `[0,4]`; artistic gamma to `[0.1,4]`; unsharp gain to `[0,1]`. Identity settings
+return exact original sample values. Edge emphasis computes neighbors from the borrowed input and
+allocates only the output frame; cancellation is polled at bounded sample intervals. Artistic gamma
+is not physical sRGB transfer decoding. Edge halo remains possible; the deterministic edge fixture
+quantifies the response against a no-enhancement baseline on a synthetic sharp transition.
 
 There is no application cache/decode owner or tint/render boundary in this workspace API.
 Consequently this module can specify that adjustment changes occur after reusable normalized
