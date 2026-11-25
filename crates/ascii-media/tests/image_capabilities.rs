@@ -15,7 +15,7 @@ fn limits() -> DecodeLimits {
 }
 
 #[test]
-fn animated_webp_signature_is_rejected_by_the_static_decoder() {
+fn webp_signature_is_rejected_by_the_static_decoder() {
     let mut bytes = Cursor::new(b"RIFF\0\0\0\0WEBP");
     let error = decode_image(&mut bytes, &limits(), &CancellationToken::new())
         .expect_err("WebP must not be exposed as a decoded still frame");
