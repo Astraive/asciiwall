@@ -2144,7 +2144,7 @@ fn inspect_webp_container(
                 saw_anim = true;
             }
             b"ANMF" => {
-                if !saw_anim || !valid_webp_frame_data(data) {
+                if !saw_anim || !valid_webp_frame_data(data) || data[15] & 0xfc != 0 {
                     return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
                 }
                 saw_frame = true;
@@ -2167,22 +2167,48 @@ fn valid_webp_frame_data(data: &[u8]) -> bool {
     if data.len() < 24 {
         return false;
     }
-    let chunk = &data[16..];
-    if chunk.len() < 8 || (&chunk[..4] != b"VP8 " && &chunk[..4] != b"VP8L") {
-        return false;
+    let chunks = &data[16..];
+    let mut offset = 0_usize;
+    let mut saw_alpha = false;
+    let mut saw_image = false;
+    while offset < chunks.len() {
+        let Some(header_end) = offset.checked_add(8) else {
+            return false;
+        };
+        let Some(header) = chunks.get(offset..header_end) else {
+            return false;
+        };
+        let chunk_size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        let Some(data_end) = header_end.checked_add(chunk_size) else {
+            return false;
+        };
+        let Some(padded_end) = data_end.checked_add(chunk_size & 1) else {
+            return false;
+        };
+        let Some(chunk_data) = chunks.get(header_end..data_end) else {
+            return false;
+        };
+        if padded_end > chunks.len()
+            || (chunk_size & 1 != 0 && chunks[data_end] != 0)
+            || chunk_size == 0
+            || saw_image
+        {
+            return false;
+        }
+        match &header[..4] {
+            b"ALPH" if !saw_alpha => saw_alpha = true,
+            b"VP8 " => {
+                if saw_alpha && chunk_data.is_empty() {
+                    return false;
+                }
+                saw_image = true;
+            }
+            b"VP8L" if !saw_alpha => saw_image = true,
+            _ => return false,
+        }
+        offset = padded_end;
     }
-    let Some(chunk_size) =
-        usize::try_from(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]])).ok()
-    else {
-        return false;
-    };
-    let Some(data_end) = 8_usize.checked_add(chunk_size) else {
-        return false;
-    };
-    let Some(padded_end) = data_end.checked_add(chunk_size & 1) else {
-        return false;
-    };
-    padded_end == chunk.len() && chunk_size != 0 && (chunk_size & 1 == 0 || chunk[data_end] == 0)
+    saw_image && offset == chunks.len()
 }
 
 fn zeroed_bytes(len: usize) -> Result<Vec<u8>, Error> {

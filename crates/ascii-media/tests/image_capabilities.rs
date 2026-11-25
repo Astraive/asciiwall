@@ -47,6 +47,27 @@ fn decode(bytes: &[u8]) -> Result<ascii_media::DecodedFrame, Error> {
     )
 }
 
+fn append_chunk(bytes: &mut Vec<u8>, fourcc: &[u8; 4], data: &[u8]) {
+    bytes.extend_from_slice(fourcc);
+    bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(data);
+    if data.len() & 1 != 0 {
+        bytes.push(0);
+    }
+}
+
+fn animated_lossy_alpha_fixture(flags: u8) -> Vec<u8> {
+    let mut frame = [0_u8; 16].to_vec();
+    frame[15] = flags;
+    append_chunk(&mut frame, b"ALPH", &[0]);
+    append_chunk(&mut frame, b"VP8 ", &[0]);
+    webp_with_chunks(&[
+        (b"VP8X", b"\x02\0\0\0\0\0\0\0\0\0"),
+        (b"ANIM", &[0; 6]),
+        (b"ANMF", &frame),
+    ])
+}
+
 fn webp_with_chunks(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
     let mut bytes = b"RIFF\0\0\0\0WEBP".to_vec();
     for (fourcc, data) in chunks {
@@ -129,6 +150,22 @@ fn animated_webp_is_identified_without_publishing_a_static_frame() {
     assert!(matches!(
         decode(&bytes),
         Err(Error::Unsupported(UnsupportedReason::AnimatedImage))
+    ));
+}
+
+#[test]
+fn animated_lossy_alpha_frame_is_classified_as_animated() {
+    assert!(matches!(
+        decode(&animated_lossy_alpha_fixture(0)),
+        Err(Error::Unsupported(UnsupportedReason::AnimatedImage))
+    ));
+}
+
+#[test]
+fn reserved_animation_frame_flags_are_malformed() {
+    assert!(matches!(
+        decode(&animated_lossy_alpha_fixture(0x04)),
+        Err(Error::Malformed(MalformedReason::InvalidEncodedData))
     ));
 }
 
