@@ -10,7 +10,7 @@ use ascii_core::{
     MalformedReason,
 };
 use ascii_render::{
-    DeviceStatus, Error, PresentOutcome, RecoverableReason, RenderTarget, Renderer,
+    AtlasCache, DeviceStatus, Error, PresentOutcome, RecoverableReason, RenderTarget, Renderer,
     SHADER_REVISION, SkippedReason,
 };
 use sha2::{Digest, Sha256};
@@ -525,6 +525,96 @@ fn narrow_atlas_budget_boundary_and_gpu_copy() {
     );
     let (pixels, stride) = read_pixels(&device, &queue, &output);
     compare_golden(&frame, &table, &pixels, stride);
+}
+
+#[test]
+#[ignore = "requires a real wgpu adapter for shared-atlas resource lifetime"]
+fn same_device_cache_reuses_fingerprints_and_rejects_generation_without_replacement() {
+    let (device, queue) = native_device();
+    let (table, budget, token) = fixtures();
+    let cache_bytes = table.glyphs().len() as u64
+        * u64::from(table.cell_width() + 2)
+        * u64::from(table.cell_height() + 2);
+    let cache = Arc::new(AtlasCache::new(device.clone(), queue.clone(), cache_bytes));
+    let size = GridSize::new(4, 4);
+    let original_frame = frame(&table, size, &budget, &token);
+    let first_texture = texture(&device, size);
+    let second_texture = texture(&device, size);
+    let first_target = RenderTarget::texture(&first_texture, 1, 1);
+    let second_target = RenderTarget::texture(&second_texture, 2, 1);
+
+    let mut first = Renderer::new_with_cache(
+        cache.clone(),
+        table.clone(),
+        budget,
+        token.clone(),
+        DeviceStatus::new(),
+    );
+    assert_eq!(
+        first.present(&original_frame, &first_target),
+        Ok(PresentOutcome::Presented { suboptimal: false })
+    );
+    assert_eq!(first.stats().atlas_textures, 1);
+    assert_eq!(cache.resident_bytes(), cache_bytes);
+
+    let mut second = Renderer::new_with_cache(
+        cache.clone(),
+        table.clone(),
+        budget,
+        token.clone(),
+        DeviceStatus::new(),
+    );
+    assert_eq!(
+        second.present(&original_frame, &second_target),
+        Ok(PresentOutcome::Presented { suboptimal: false })
+    );
+    assert_eq!(second.stats().atlas_cache_hits, 1);
+    assert_eq!(second.stats().atlas_textures, 0);
+    assert_eq!(cache.resident_bytes(), cache_bytes);
+
+    let alternate = Arc::new(
+        build_glyph_table(
+            &synthetic_font::synthetic_font(false),
+            &GlyphRepertoire::new(" AB").unwrap(),
+            &GlyphConfig::new(9.0, 8, 12, 9).unwrap(),
+            &budget,
+            &token,
+        )
+        .unwrap(),
+    );
+    assert_ne!(table.fingerprint(), alternate.fingerprint());
+    let alternate_frame = frame(&alternate, size, &budget, &token);
+    let third_texture = texture(&device, size);
+    let third_target = RenderTarget::texture(&third_texture, 3, 1);
+    let mut third = Renderer::new_with_cache(
+        cache.clone(),
+        alternate,
+        budget,
+        token.clone(),
+        DeviceStatus::new(),
+    );
+    assert_eq!(
+        third.present(&alternate_frame, &third_target),
+        Err(Error::Core(ascii_core::Error::BudgetExceeded(
+            ascii_core::BudgetKind::RasterBytes
+        )))
+    );
+    assert_eq!(cache.resident_bytes(), cache_bytes);
+    first.invalidate();
+    assert_eq!(
+        first.present(&original_frame, &first_target),
+        Ok(PresentOutcome::Presented { suboptimal: false })
+    );
+
+    drop(second);
+    drop(first);
+    let _ = device.poll(wgpu::Maintain::Wait);
+    assert_eq!(
+        third.present(&alternate_frame, &third_target),
+        Ok(PresentOutcome::Presented { suboptimal: false })
+    );
+    assert_eq!(third.stats().atlas_textures, 1);
+    assert_eq!(cache.resident_bytes(), cache_bytes);
 }
 
 #[test]

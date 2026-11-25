@@ -1,14 +1,16 @@
 //! Validated, bounded wgpu glyph-atlas presentation.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-
 use ascii_convert::GlyphTable;
 use ascii_core::{
     AsciiCell, AsciiFrame, Budget, BudgetKind, CancellationToken, GlyphTableId, GridSize,
     MalformedReason, validate_frame,
+};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::surface::{
@@ -21,6 +23,8 @@ pub const SHADER_REVISION: &str = "ascii-presenter-2";
 const CELL_BYTES: u64 = 16;
 const PARAM_BYTES: u64 = 32;
 const ATLAS_PADDING: u32 = 1;
+const INTEGER_LOAD_SAMPLING_KEY: u8 = 0;
+const R8_UNORM_FORMAT_KEY: u8 = 1;
 const POLL_INTERVAL: usize = 1024;
 
 /// Presenter failures, preserving portable core failures and explicit GPU boundary failures.
@@ -79,6 +83,7 @@ impl DeviceStatus {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PresenterStats {
     pub atlas_textures: u64,
+    pub atlas_cache_hits: u64,
     pub cell_buffers: u64,
     pub pipelines: u64,
     pub uploads: u64,
@@ -299,6 +304,183 @@ fn ensure_frame_budget(
 struct Atlas {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct AtlasKey {
+    fingerprint: [u8; 32],
+    atlas_width: u32,
+    atlas_height: u32,
+    atlas_columns: u32,
+    atlas_tile_width: u32,
+    atlas_tile_height: u32,
+    cell_width: u32,
+    cell_height: u32,
+    padding: u32,
+    sampling_mode: u8,
+    format: u8,
+}
+
+struct AtlasCacheEntries {
+    atlases: HashMap<AtlasKey, Arc<Atlas>>,
+    bytes: u64,
+}
+
+/// Same-device owner of immutable glyph atlases. Construct one per host device and share its
+/// `Arc` between renderers for preview and wallpaper targets.
+pub struct AtlasCache {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    max_bytes: u64,
+    entries: Mutex<AtlasCacheEntries>,
+}
+
+impl AtlasCache {
+    /// Creates an empty cache bounded by the host's atlas byte budget.
+    #[must_use]
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, max_bytes: u64) -> Self {
+        Self {
+            device,
+            queue,
+            max_bytes,
+            entries: Mutex::new(AtlasCacheEntries {
+                atlases: HashMap::new(),
+                bytes: 0,
+            }),
+        }
+    }
+
+    /// Returns retained immutable texture bytes, excluding staging and backend allocations.
+    #[must_use]
+    pub fn resident_bytes(&self) -> u64 {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bytes
+    }
+
+    fn acquire(
+        &self,
+        table: &GlyphTable,
+        plan: Plan,
+        cancellation: &CancellationToken,
+    ) -> Result<(Arc<Atlas>, bool), Error> {
+        let key = AtlasKey {
+            fingerprint: *table.fingerprint(),
+            atlas_width: plan.atlas_width,
+            atlas_height: plan.atlas_height,
+            atlas_columns: plan.atlas_columns,
+            atlas_tile_width: plan.atlas_tile_width,
+            atlas_tile_height: plan.atlas_tile_height,
+            cell_width: table.cell_width(),
+            cell_height: table.cell_height(),
+            padding: ATLAS_PADDING,
+            sampling_mode: INTEGER_LOAD_SAMPLING_KEY,
+            format: R8_UNORM_FORMAT_KEY,
+        };
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(atlas) = entries.atlases.get(&key) {
+            return Ok((atlas.clone(), false));
+        }
+
+        // Decide whether unreferenced generations suffice before evicting any of them. A
+        // failed budget request therefore leaves both the cache and all active renderer refs intact.
+        let retained_bytes = entries
+            .atlases
+            .values()
+            .filter(|atlas| Arc::strong_count(atlas) > 1)
+            .try_fold(0u64, |bytes, atlas| bytes.checked_add(atlas.bytes))
+            .ok_or(ascii_core::Error::SizeOverflow)?;
+        let required_bytes = retained_bytes
+            .checked_add(plan.atlas_bytes)
+            .ok_or(ascii_core::Error::SizeOverflow)?;
+        if plan.atlas_bytes > self.max_bytes || required_bytes > self.max_bytes {
+            return Err(ascii_core::Error::BudgetExceeded(BudgetKind::RasterBytes).into());
+        }
+        entries
+            .atlases
+            .retain(|_, atlas| Arc::strong_count(atlas) > 1);
+        entries.bytes = entries
+            .atlases
+            .values()
+            .try_fold(0u64, |bytes, atlas| bytes.checked_add(atlas.bytes))
+            .ok_or(ascii_core::Error::SizeOverflow)?;
+
+        if cancellation.is_cancelled() {
+            return Err(ascii_core::Error::Cancelled.into());
+        }
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ascii glyph atlas staging"),
+            size: plan.atlas_staging_bytes,
+            usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: true,
+        });
+        {
+            let mut data = staging.slice(..).get_mapped_range_mut();
+            Renderer::fill_atlas_data(table, cancellation, plan, &mut data)?;
+        }
+        staging.unmap();
+        if cancellation.is_cancelled() {
+            return Err(ascii_core::Error::Cancelled.into());
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ascii glyph masks"),
+            size: wgpu::Extent3d {
+                width: plan.atlas_width,
+                height: plan.atlas_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let atlas = Arc::new(Atlas {
+            texture,
+            view,
+            bytes: plan.atlas_bytes,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ascii glyph atlas upload"),
+            });
+        encoder.copy_buffer_to_texture(
+            wgpu::ImageCopyBuffer {
+                buffer: &staging,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(plan.atlas_row_pitch),
+                    rows_per_image: Some(plan.atlas_height),
+                },
+            },
+            atlas.texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: plan.atlas_width,
+                height: plan.atlas_height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        let queued_atlas = atlas.clone();
+        self.queue.on_submitted_work_done(move || {
+            drop(staging);
+            drop(queued_atlas);
+        });
+        entries.bytes = entries
+            .bytes
+            .checked_add(plan.atlas_bytes)
+            .ok_or(ascii_core::Error::SizeOverflow)?;
+        entries.atlases.insert(key, atlas.clone());
+        Ok((atlas, true))
+    }
 }
 struct GpuResources {
     layout: wgpu::BindGroupLayout,
@@ -313,23 +495,21 @@ struct GpuResources {
 
 struct InFlight {
     submission: wgpu::SubmissionIndex,
-    // The atlas copy buffer must remain owned until the submission has finished.
-    _atlas_staging: Option<wgpu::Buffer>,
 }
 
-/// A renderer bound to one host-provided device, queue, immutable font table and budget.
+/// A renderer bound to one host device, immutable font table, atlas cache and budget.
 ///
-/// No device, surface, full-resolution intermediate target or readback is created here. At most
-/// one submission from this renderer is in flight: a subsequent changed scene waits for it before
-/// replacing resources or enqueueing more writes. The host must use the matching device/queue.
+/// No device, queue, surface, full-resolution intermediate target or readback is created here.
+/// Share one `AtlasCache` between compatible targets and create one for each device.
 pub struct Renderer {
+    atlas_cache: Arc<AtlasCache>,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     table: Arc<GlyphTable>,
     budget: Budget,
     cancellation: Arc<CancellationToken>,
     status: DeviceStatus,
-    atlas: Option<Atlas>,
+    atlas: Option<Arc<Atlas>>,
     resources: Option<GpuResources>,
     packed: Vec<u8>,
     packed_valid: bool,
@@ -340,7 +520,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Creates a lazy renderer. Glyph tables and the device remain owned/shared by the host.
+    /// Creates a lazy renderer with a renderer-local atlas cache.
     #[must_use]
     pub fn new(
         device: Arc<wgpu::Device>,
@@ -350,9 +530,23 @@ impl Renderer {
         cancellation: Arc<CancellationToken>,
         status: DeviceStatus,
     ) -> Self {
+        let cache = Arc::new(AtlasCache::new(device, queue, budget.max_raster_bytes()));
+        Self::new_with_cache(cache, table, budget, cancellation, status)
+    }
+
+    /// Creates a lazy renderer using a host-shared same-device atlas cache.
+    #[must_use]
+    pub fn new_with_cache(
+        atlas_cache: Arc<AtlasCache>,
+        table: Arc<GlyphTable>,
+        budget: Budget,
+        cancellation: Arc<CancellationToken>,
+        status: DeviceStatus,
+    ) -> Self {
         Self {
-            device,
-            queue,
+            device: atlas_cache.device.clone(),
+            queue: atlas_cache.queue.clone(),
+            atlas_cache,
             table,
             budget,
             cancellation,
@@ -491,11 +685,7 @@ impl Renderer {
                     .extend_from_slice(&GpuCell::from_cell(*cell).bytes());
             }
         }
-        if let Some(InFlight {
-            submission,
-            _atlas_staging,
-        }) = self.in_flight.take()
-        {
+        if let Some(InFlight { submission }) = self.in_flight.take() {
             let _ = self
                 .device
                 .poll(wgpu::Maintain::WaitForSubmissionIndex(submission));
@@ -507,28 +697,19 @@ impl Renderer {
             self.last = None;
             return Ok(PresentOutcome::Recoverable(RecoverableReason::DeviceLost));
         }
-        let atlas_staging = if self.atlas.is_none() {
-            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("ascii glyph atlas staging"),
-                size: plan.atlas_staging_bytes,
-                usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: true,
-            });
-            {
-                let mut data = staging.slice(..).get_mapped_range_mut();
-                Self::fill_atlas_data(&self.table, &self.cancellation, plan, &mut data)?;
+        if self.atlas.is_none() {
+            let (atlas, created) =
+                self.atlas_cache
+                    .acquire(&self.table, plan, &self.cancellation)?;
+            self.atlas = Some(atlas);
+            if created {
+                self.stats.atlas_textures += 1;
+                self.stats.uploads += 1;
+                self.stats.uploaded_bytes += plan.atlas_bytes;
+                self.stats.submissions += 1;
+            } else {
+                self.stats.atlas_cache_hits += 1;
             }
-            staging.unmap();
-            Some(staging)
-        } else {
-            None
-        };
-        if self.cancellation.is_cancelled() {
-            return Err(ascii_core::Error::Cancelled.into());
-        }
-        if self.status.is_lost() {
-            self.last = None;
-            return Ok(PresentOutcome::Recoverable(RecoverableReason::DeviceLost));
         }
         let surface_frame = match &target.kind {
             TargetKind::Surface(surface) => match surface.get_current_texture() {
@@ -552,34 +733,9 @@ impl Renderer {
             TargetKind::Texture(_) => None,
         };
 
-        if self.atlas.is_none() {
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("ascii glyph masks"),
-                size: wgpu::Extent3d {
-                    width: plan.atlas_width,
-                    height: plan.atlas_height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.atlas = Some(Atlas { texture, view });
-            self.stats.atlas_textures += 1;
-        }
         self.ensure_resources(plan.cell_bytes, target.format);
-        // Resource creation can take time; do not enqueue any writes after a cancellation or
-        // known device loss. An unuploaded new atlas is discarded so a later retry rebuilds it.
+        // Resource creation can take time; do not enqueue writes after cancellation or known loss.
         if self.cancellation.is_cancelled() || self.status.is_lost() {
-            if atlas_staging.is_some() {
-                self.resources = None;
-                self.atlas = None;
-                self.uniform_size = None;
-            }
             self.last = None;
             if self.cancellation.is_cancelled() {
                 return Err(ascii_core::Error::Cancelled.into());
@@ -625,30 +781,6 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ascii presentation"),
             });
-        if let Some(staging) = &atlas_staging {
-            encoder.copy_buffer_to_texture(
-                wgpu::ImageCopyBuffer {
-                    buffer: staging,
-                    layout: wgpu::ImageDataLayout {
-                        offset: 0,
-                        bytes_per_row: Some(plan.atlas_row_pitch),
-                        rows_per_image: Some(plan.atlas_height),
-                    },
-                },
-                self.atlas
-                    .as_ref()
-                    .expect("atlas just created")
-                    .texture
-                    .as_image_copy(),
-                wgpu::Extent3d {
-                    width: plan.atlas_width,
-                    height: plan.atlas_height,
-                    depth_or_array_layers: 1,
-                },
-            );
-            self.stats.uploads += 1;
-            self.stats.uploaded_bytes += plan.atlas_bytes;
-        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ascii background and glyphs"),
@@ -670,10 +802,11 @@ impl Renderer {
             pass.set_pipeline(&resources.glyph);
             pass.draw(0..6, 0..plan.count);
         }
-        self.in_flight = Some(InFlight {
-            submission: self.queue.submit(Some(encoder.finish())),
-            _atlas_staging: atlas_staging,
-        });
+        let submission = self.queue.submit(Some(encoder.finish()));
+        let queued_atlas = self.atlas.as_ref().expect("atlas exists").clone();
+        self.queue
+            .on_submitted_work_done(move || drop(queued_atlas));
+        self.in_flight = Some(InFlight { submission });
         self.stats.submissions += 1;
         self.stats.draw_calls += 2;
         let suboptimal = surface_frame.as_ref().is_some_and(|frame| frame.suboptimal);
