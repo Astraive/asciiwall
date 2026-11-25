@@ -501,7 +501,10 @@ fn over_limit_button_tracks_are_rejected_without_retaining_a_prefix() {
     assert_eq!(rejected.pointer_buttons(), None);
     assert!(rejected.pointer_buttons_rejected());
 
-    let denied = ApprovedSnapshots::filter(SnapshotCapabilities::default(), SnapshotCandidates::new(None, Some(&events), None, None));
+    let denied = ApprovedSnapshots::filter(
+        SnapshotCapabilities::default(),
+        SnapshotCandidates::new(None, Some(&events), None, None),
+    );
     assert!(!denied.pointer_buttons_rejected());
 }
 #[test]

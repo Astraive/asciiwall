@@ -13,7 +13,7 @@ use crate::params::{
 };
 use crate::resource::GeneratorPreparationPermit;
 use crate::simulation::FixedStepContext;
-use crate::snapshots::{ApprovedSnapshots, SignalKind, MAX_APPROVED_BUTTON_EVENTS};
+use crate::snapshots::{ApprovedSnapshots, MAX_APPROVED_BUTTON_EVENTS, SignalKind};
 
 const Q16: i64 = 1 << 16;
 const MIN_DEPTH_Q16: i32 = 6_554; // rounded representation of 0.1
