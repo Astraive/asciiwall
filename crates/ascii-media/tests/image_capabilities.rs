@@ -47,6 +47,52 @@ fn decode(bytes: &[u8]) -> Result<ascii_media::DecodedFrame, Error> {
     )
 }
 
+fn webp_with_chunks(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    let mut bytes = b"RIFF\0\0\0\0WEBP".to_vec();
+    for (fourcc, data) in chunks {
+        bytes.extend_from_slice(*fourcc);
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(data);
+        if data.len() & 1 != 0 {
+            bytes.push(0);
+        }
+    }
+    let riff_size = (bytes.len() - 8) as u32;
+    bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    bytes
+}
+
+fn assert_malformed_webp_chunks(chunks: &[(&[u8; 4], &[u8])]) {
+    assert!(matches!(
+        decode(&webp_with_chunks(chunks)),
+        Err(Error::Malformed(MalformedReason::InvalidEncodedData))
+    ));
+}
+
+#[test]
+fn empty_animation_chunk_is_malformed() {
+    let vp8x = *b"\x02\0\0\0\0\0\0\0\0\0";
+    assert_malformed_webp_chunks(&[(b"VP8X", &vp8x), (b"ANIM", &[])]);
+}
+
+#[test]
+fn short_animation_chunk_is_malformed() {
+    let vp8x = *b"\x02\0\0\0\0\0\0\0\0\0";
+    assert_malformed_webp_chunks(&[(b"VP8X", &vp8x), (b"ANIM", &[0; 5])]);
+}
+
+#[test]
+fn animation_frame_before_animation_control_is_malformed() {
+    let vp8x = *b"\x02\0\0\0\0\0\0\0\0\0";
+    assert_malformed_webp_chunks(&[(b"VP8X", &vp8x), (b"ANMF", &[0; 24]), (b"ANIM", &[0; 6])]);
+}
+
+#[test]
+fn short_animation_frame_chunk_is_malformed() {
+    let vp8x = *b"\x02\0\0\0\0\0\0\0\0\0";
+    assert_malformed_webp_chunks(&[(b"VP8X", &vp8x), (b"ANIM", &[0; 6]), (b"ANMF", &[0; 16])]);
+}
+
 #[test]
 fn malformed_webp_container_is_rejected() {
     assert!(matches!(

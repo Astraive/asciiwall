@@ -2098,6 +2098,9 @@ fn inspect_webp_container(
 
     let mut info = WebpContainerInfo { animated: false };
     let mut saw_vp8x = false;
+    let mut saw_anim = false;
+    let mut saw_frame = false;
+    let mut first_chunk = true;
     let mut offset = 12_usize;
     while offset < encoded.len() {
         check_cancel_periodically(cancel, offset)?;
@@ -2128,21 +2131,58 @@ fn inspect_webp_container(
         }
         match &header[..4] {
             b"VP8X" => {
-                if saw_vp8x || data.len() != 10 {
+                if !first_chunk || saw_vp8x || data.len() != 10 {
                     return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
                 }
                 saw_vp8x = true;
-                info.animated |= data[0] & 0x02 != 0;
+                info.animated = data[0] & 0x02 != 0;
             }
-            b"ANIM" | b"ANMF" => info.animated = true,
+            b"ANIM" => {
+                if !saw_vp8x || !info.animated || saw_anim || saw_frame || data.len() != 6 {
+                    return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+                }
+                saw_anim = true;
+            }
+            b"ANMF" => {
+                if !saw_anim || !valid_webp_frame_data(data) {
+                    return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
+                }
+                saw_frame = true;
+            }
             _ => {}
         }
+        first_chunk = false;
         offset = padded_end;
+    }
+    if info.animated && (!saw_anim || !saw_frame) {
+        return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
     if offset != encoded.len() {
         return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
     }
     Ok(info)
+}
+
+fn valid_webp_frame_data(data: &[u8]) -> bool {
+    if data.len() < 24 {
+        return false;
+    }
+    let chunk = &data[16..];
+    if chunk.len() < 8 || (&chunk[..4] != b"VP8 " && &chunk[..4] != b"VP8L") {
+        return false;
+    }
+    let Some(chunk_size) =
+        usize::try_from(u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]])).ok()
+    else {
+        return false;
+    };
+    let Some(data_end) = 8_usize.checked_add(chunk_size) else {
+        return false;
+    };
+    let Some(padded_end) = data_end.checked_add(chunk_size & 1) else {
+        return false;
+    };
+    padded_end == chunk.len() && chunk_size != 0 && (chunk_size & 1 == 0 || chunk[data_end] == 0)
 }
 
 fn zeroed_bytes(len: usize) -> Result<Vec<u8>, Error> {
