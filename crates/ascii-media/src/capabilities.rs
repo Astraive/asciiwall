@@ -44,9 +44,9 @@ pub struct WebpCapabilities {
 
 /// Returns the capabilities of this exact `ascii-media` build.
 ///
-/// `webp` enables the direct `image-webp` still decoder; this build's fixtures cover lossy,
-/// lossless, and alpha inputs. Animated WebP is classified as `Unsupported(AnimatedImage)` before
-/// static pixel decoding, but no animation/timeline handler is available here.
+/// WebP is recognized for safe format/animation classification, but all pixel-decoding variants
+/// are disabled because the pinned decoder has unbounded lossless Huffman-group allocations. No
+/// animation timeline handler is available here.
 #[must_use]
 pub const fn image_capabilities() -> ImageCapabilities {
     ImageCapabilities {
@@ -59,9 +59,9 @@ pub const fn image_capabilities() -> ImageCapabilities {
             progressive: true,
         },
         webp: WebpCapabilities {
-            lossy: cfg!(feature = "webp"),
-            lossless: cfg!(feature = "webp"),
-            alpha: cfg!(feature = "webp"),
+            lossy: false,
+            lossless: false,
+            alpha: false,
             animated: false,
         },
     }
