@@ -61,9 +61,9 @@ pub struct WebpCapabilities {
 
 /// Returns the capabilities of this exact `ascii-media` build.
 ///
-/// APNG composition supports 8-bit samples when the default PNG image is the first animation
-/// frame. It composes all APNG blend and disposal operations. 16-bit APNG, GIF, and animated WebP
-/// remain unavailable. WebP is recognized only for safe format/animation classification; all pixel
+/// APNG supports the documented 8-bit participating-default subset, and GIF frames are decoded
+/// with bounded full-canvas composition. 16-bit/separate-default APNG and animated WebP remain
+/// unavailable. WebP is recognized only for safe format/animation classification; all pixel
 /// decoding remains disabled because pinned `image-webp` lossless Huffman groups exceed the memory
 /// ledger.
 #[must_use]
@@ -82,7 +82,7 @@ pub const fn image_capabilities() -> ImageCapabilities {
         },
         gif: GifCapabilities {
             still: false,
-            animated: false,
+            animated: true,
         },
         webp: WebpCapabilities {
             lossy: false,

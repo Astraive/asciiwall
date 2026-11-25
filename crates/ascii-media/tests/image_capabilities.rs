@@ -55,7 +55,6 @@ fn malformed_webp_container_is_rejected() {
     ));
 }
 
-
 #[test]
 fn nonzero_odd_riff_chunk_padding_is_rejected() {
     let fixture = b"RIFF\x0e\0\0\0WEBPJUNK\x01\0\0\0\0\x01";
@@ -89,7 +88,7 @@ fn reports_only_variants_implemented_by_this_build() {
     assert!(!capabilities.png.apng_separate_default_image);
     assert!(capabilities.jpeg.baseline);
     assert!(!capabilities.gif.still);
-    assert!(!capabilities.gif.animated);
+    assert!(capabilities.gif.animated);
     assert!(capabilities.jpeg.progressive);
     assert!(!capabilities.webp.lossy);
     assert!(!capabilities.webp.lossless);

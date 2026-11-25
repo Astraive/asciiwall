@@ -20,25 +20,42 @@ Looping drains correctly and returns to the chosen loop start. A seamless-loop o
 
 ## Animated images
 
-`ascii-media::decode_animation` currently supports APNG only: 8-bit samples whose default PNG
-image is also the first animation frame. Partial frame rectangles are checked against the declared
-canvas; source and source-over blending plus none/background/previous disposal are composed before
-publishing a frame. The decoder applies PNG orientation once to the full canvas and retains each
-frame as a budgeted `DecodedFrame` with straight-alpha sRGB metadata.
+`ascii-media::decode_animation` supports 8-bit APNG whose default PNG image is also the first
+animation frame, plus GIF89a/GIF87a animations. APNG partial rectangles are checked against the
+canvas; source/source-over blending and none/background/previous disposal are composed before
+publication, with PNG orientation applied once to the full canvas. GIF uses the pinned `gif` 0.14.0
+low-level decoder, checks every frame rectangle, preserves palette transparency, and composes
+keep/any, background-color, and previous disposal onto the logical-screen canvas. Both formats
+publish straight-alpha sRGB `DecodedFrame`s, never subframes.
+GIF ICC-profile and user-input-dependent variants return typed unsupported errors.
 
-The shared `Animation` timeline assigns every frame at least 10 ms, treats APNG denominator zero
-as 100, and rejects a normalized loop longer than 24 hours or over 256 frames. APNG `num_plays=0`
-means infinite; positive values are total finite plays. `Animation::frame_at` is the shared
-preview/export selection primitive and holds the last frame after a finite animation ends.
-Encoded input, codec scratch, canvas, one previous-canvas restore buffer, and retained full-canvas
-history are bounded by `DecodeLimits`, `Budget`, and `DecodeResources`; cancellation is checked
-between frames and composition rows.
+The shared `Animation` timeline floors every frame at 10 ms and rejects a normalized loop longer
+than 24 hours or over 256 frames. APNG denominator zero is 100 and positive `num_plays` is total
+plays. GIF delays use 10 ms units; a finite GIF repeat count is repetitions after the initial play,
+while no repeat extension means one play and repeat zero means infinite. `Animation::frame_at` is
+the common preview/export selection primitive and holds the last frame after finite playback.
+Encoded input, GIF per-frame decoder scratch, canvas, previous-rectangle restore, and retained
+full-canvas history are bounded by `DecodeLimits`, `Budget`, and `DecodeResources`; cancellation is
+checked between frames, compressed-input refills, and composition/normalization rows.
 
-16-bit APNG and APNG with a separate default image, GIF, and animated WebP remain disabled and
-return typed unsupported errors. WebP is also disabled for still decoding until the pinned decoder's
-allocation behavior is bounded by the resource ledger. No CLI doctor/import surface exists yet, and
-the library API is not currently wired to application preview/export; those acceptance items remain
-open. Do not infer support from the format's extension or from still-image capabilities.
+GIF still-image decoding remains disabled. 16-bit and separate-default APNG, animated WebP, and all
+WebP pixel decoding remain disabled; WebP's pinned lossless meta-code can allocate unbounded Huffman
+groups outside the memory ledger. No CLI doctor/import surface exists yet, and the library API is
+not wired to application preview/export; those acceptance items remain open. Do not infer support
+from a file extension or still-image capability.
+
+### Reproducible animation fixtures
+
+The generated fixture inputs and generator settings are pinned by SHA-256 in
+`ascii-media/tests/animation_decode.rs`:
+
+- GIF settings `dc797df0c1e556719cea89374be0017617b45ac9abb97cd7acb4ca71f65b1092`;
+  fixture `d5a5dc5f85f99530aab8862e84a9c5b4c8536dec155cda61bc1bb013edf8be29`.
+- APNG settings `c4cd033e2aa48663db855d031731297fa3e857cc0efe5dabec9452d03bcff237`;
+  fixture `77d6a525c74475921c8e47569d5fbb60ed90da6253ad71773e119d744492b453`.
+- First-frame `Previous` disposal mutation settings
+  `51679d6525c606c817699ca1203051994a9f12515add008f7f68ce2d9e1eb143`;
+  fixture `7d21b8a38929c127e58a73c3d9da9d37ffd33acc4c8f7b84bbdd29ffe12a0719`.
 
 ## Hardware decoding
 

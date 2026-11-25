@@ -4,7 +4,7 @@ use ascii_core::{BudgetKind, Error, MalformedReason};
 
 use crate::DecodedFrame;
 
-/// Minimum presentation time assigned to an APNG frame, including zero-delay frames.
+/// Minimum presentation time assigned to an APNG or GIF frame, including zero-delay frames.
 pub const MIN_FRAME_DURATION: Duration = Duration::from_millis(10);
 /// Maximum number of composed frames retained by one animation.
 pub const MAX_ANIMATION_FRAMES: usize = 256;
