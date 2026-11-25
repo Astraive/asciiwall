@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added `crates/ascii-config` as the sole typed settings authority, with P/A/O/S layer enforcement, requested/effective snapshots, bounded canonical TOML parsing, revision-conflict batch writes, same-directory atomic persistence, explicit backup/repair, read-only future-schema handling, and reversible synthetic v1→v2 migration fixtures. Domain settings, CLI wiring, and host startup restore integration remain out of scope; checks are pending parent gates.
 - [CFG-001] New-file publication uses Linux `renameat2(RENAME_NOREPLACE)` or macOS `renamex_np(RENAME_EXCL)` where supported, then a no-replace hard-link fallback; if neither is available, it returns `io::ErrorKind::Unsupported` instead of using overwriting `rename`.
 - Added fixed-seed, bounded `proptest` coverage for range endpoints, overflow, nesting, duplicate keys, invalid UTF-8, unsupported schemas, disk loss, interrupted writes, stale revisions, and rollback; migration golden cases cover absent defaults and explicit overrides ([CFG-001]).
+- Added `ascii-package` draft v1 manifest/scene models, checked-in local Draft 2020-12 schemas, bounded schema-backed validation and asset-inventory reconciliation, plus a CFG-registry drift comparison; CFG domain descriptors/defaults remain absent from the prerequisite foundation.
 
 ### Changed
 

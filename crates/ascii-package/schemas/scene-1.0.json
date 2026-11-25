@@ -1,0 +1,748 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:asciiwall:schema:scene:1.0",
+  "title": "AsciiWall draft scene 1.0",
+  "type": "object",
+  "properties": {
+    "scene_version": {
+      "const": "1.0"
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "solid"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "color": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{8}$"
+                  }
+                },
+                "required": [
+                  "color"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "matrix-rain"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "density": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "speed": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10
+                  },
+                  "trail_cells": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200
+                  },
+                  "color": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{8}$"
+                  }
+                },
+                "required": [
+                  "density",
+                  "speed",
+                  "trail_cells",
+                  "color"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "starfield"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20000
+                  },
+                  "speed": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10
+                  },
+                  "depth": {
+                    "type": "number",
+                    "minimum": 0.1,
+                    "maximum": 100
+                  },
+                  "color": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{8}$"
+                  }
+                },
+                "required": [
+                  "count",
+                  "speed",
+                  "depth",
+                  "color"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "waves"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "amplitude": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10
+                  },
+                  "frequency": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 20
+                  },
+                  "speed": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10
+                  },
+                  "color": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{8}$"
+                  }
+                },
+                "required": [
+                  "amplitude",
+                  "frequency",
+                  "speed",
+                  "color"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "noise-field"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "scale": {
+                    "type": "number",
+                    "minimum": 0.01,
+                    "maximum": 100
+                  },
+                  "speed": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10
+                  },
+                  "color": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{8}$"
+                  }
+                },
+                "required": [
+                  "scale",
+                  "speed",
+                  "color"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "cube-wireframe"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "speed": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 10
+                  },
+                  "scale": {
+                    "type": "number",
+                    "minimum": 0.05,
+                    "maximum": 1
+                  },
+                  "color": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{8}$"
+                  }
+                },
+                "required": [
+                  "speed",
+                  "scale",
+                  "color"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "image-source"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 240,
+                    "pattern": "^[a-z0-9][a-z0-9./-]*$"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "video-source"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 240,
+                    "pattern": "^[a-z0-9][a-z0-9./-]*$"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "glyph-color"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "color": {
+                    "type": "string",
+                    "pattern": "^#[0-9a-fA-F]{8}$"
+                  },
+                  "strength": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": [
+                  "color",
+                  "strength"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "pointer-force"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "attract",
+                      "repel"
+                    ]
+                  },
+                  "radius_cells": {
+                    "type": "number",
+                    "minimum": 0.5,
+                    "maximum": 100
+                  },
+                  "strength": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 5
+                  }
+                },
+                "required": [
+                  "mode",
+                  "radius_cells",
+                  "strength"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "click-ripple"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "radius_cells": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 100
+                  },
+                  "duration_ms": {
+                    "type": "integer",
+                    "minimum": 50,
+                    "maximum": 5000
+                  },
+                  "strength": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 3
+                  }
+                },
+                "required": [
+                  "radius_cells",
+                  "duration_ms",
+                  "strength"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "window-avoid"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "margin_cells": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 32
+                  },
+                  "strength": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 5
+                  }
+                },
+                "required": [
+                  "margin_cells",
+                  "strength"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "trails"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "decay": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 0.99
+                  }
+                },
+                "required": [
+                  "decay"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
+              },
+              "kind": {
+                "const": "composite"
+              },
+              "params": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "over",
+                      "add",
+                      "multiply"
+                    ]
+                  },
+                  "opacity": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": [
+                  "mode",
+                  "opacity"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "params"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "maxItems": 128,
+      "minItems": 1
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "to": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "slot": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "slot"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 256,
+      "minItems": 0
+    },
+    "output": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "controls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,63}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "setting": {
+            "type": "string",
+            "enum": [
+              "grid.columns",
+              "grid.rows",
+              "grid.cell-aspect",
+              "grid.fit",
+              "grid.anchor-x",
+              "grid.anchor-y",
+              "grid.padding-cells",
+              "font.face",
+              "font.pixel-size",
+              "font.line-spacing",
+              "font.letter-spacing",
+              "font.antialias",
+              "charset.mode",
+              "charset.custom",
+              "charset.invert",
+              "conversion.matcher",
+              "conversion.sample",
+              "conversion.brightness",
+              "conversion.contrast",
+              "conversion.gamma",
+              "conversion.saturation",
+              "conversion.edge-strength",
+              "conversion.tone-weight",
+              "conversion.shape-weight",
+              "conversion.candidate-count",
+              "conversion.dither",
+              "conversion.dither-strength",
+              "conversion.temporal-stability",
+              "conversion.cut-threshold",
+              "conversion.alpha",
+              "color.mode",
+              "color.foreground",
+              "color.background",
+              "color.secondary",
+              "color.opacity",
+              "color.palette-dither",
+              "playback.fps",
+              "playback.speed",
+              "playback.loop",
+              "playback.loop-start-ms",
+              "playback.loop-end-ms",
+              "playback.resume",
+              "playback.loop-transition-ms",
+              "scene.seed",
+              "scene.time-scale",
+              "scene.max-particles",
+              "scene.simulation-hz",
+              "scene.background-motion",
+              "effects.glitch.enabled",
+              "effects.glitch.strength",
+              "effects.glitch.interval-ms",
+              "effects.scanlines.enabled",
+              "effects.scanlines.strength",
+              "effects.bloom.enabled",
+              "effects.bloom.strength",
+              "effects.trails.enabled",
+              "effects.trails.decay",
+              "effects.vignette",
+              "effects.noise",
+              "interaction.pointer.mode",
+              "interaction.pointer.radius-cells",
+              "interaction.pointer.strength",
+              "interaction.pointer.smoothing-ms",
+              "interaction.pointer.max-offset-cells",
+              "interaction.click.mode",
+              "interaction.click.radius-cells",
+              "interaction.click.duration-ms",
+              "interaction.click.strength",
+              "interaction.click.max-active",
+              "interaction.click.cooldown-ms",
+              "interaction.window.mode",
+              "interaction.window.margin-cells",
+              "interaction.window.strength",
+              "interaction.window.decay-ms",
+              "transition.in",
+              "transition.out",
+              "transition.duration-ms",
+              "transition.easing",
+              "transition.direction",
+              "transition.on-resume"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "setting"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 64,
+      "minItems": 0
+    }
+  },
+  "required": [
+    "scene_version",
+    "seed",
+    "nodes",
+    "edges",
+    "output",
+    "controls"
+  ],
+  "additionalProperties": false
+}
