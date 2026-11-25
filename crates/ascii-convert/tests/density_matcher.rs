@@ -1137,31 +1137,33 @@ fn patch_memory_budget_includes_readable_input_extent_but_not_trailing_padding()
         SamplingFilter::Nearest,
         Some(PatchDimensions::new(1, 1).expect("one-sample patch is valid")),
     ));
-    // Two readable rows: 64 bytes per row including inter-row padding, plus 32 trailing bytes.
-    let mut pixels = vec![128; 160];
+    // The two readable rows occupy 65 bytes including the inter-row gap; all later bytes are
+    // trailing padding and must not be charged to the conversion's aggregate raster ceiling.
+    let mut pixels = vec![128; 2_000_000];
     pixels[64] = 129;
     let padded = raster(&pixels, 1, 2, 64);
-    let normalized_and_patch_only = Budget::new(8_000_000, 136, 16_000_000);
+    let bounded = Budget::new(8_000_000, 1_000_000, 16_000_000);
+    let oversized_extent_pixels = vec![128; 1_500_001];
+    let oversized_extent = raster(&oversized_extent_pixels, 1, 2, 1_500_000);
 
     assert_eq!(
         convert_density_detailed(
-            padded,
+            oversized_extent,
             &table,
             &conversion_settings,
-            &normalized_and_patch_only,
+            &bounded,
             unlimited_raster_resources(),
         ),
         Err(DensityConversionError::Core(Error::BudgetExceeded(
             BudgetKind::RasterBytes
         )))
     );
-    let exact_extent = Budget::new(8_000_000, 201, 16_000_000);
     assert!(
         convert_density_detailed(
             padded,
             &table,
             &conversion_settings,
-            &exact_extent,
+            &bounded,
             unlimited_raster_resources(),
         )
         .is_ok()

@@ -241,10 +241,11 @@ impl GlyphTable {
             )
             .ok_or(Error::SizeOverflow)?;
         for glyph in &self.glyphs {
-            let mask_bytes = u64::try_from(glyph.mask.capacity()).map_err(|_| Error::SizeOverflow)?;
+            let mask_bytes =
+                u64::try_from(glyph.mask.capacity()).map_err(|_| Error::SizeOverflow)?;
             bytes = bytes.checked_add(mask_bytes).ok_or(Error::SizeOverflow)?;
         }
-        bytes
+        Ok(bytes)
     }
 }
 

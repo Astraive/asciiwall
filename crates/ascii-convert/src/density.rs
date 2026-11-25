@@ -411,7 +411,6 @@ impl<'a> ConversionSettings<'a> {
         self.worker_limit = NonZeroUsize::new(1).expect("one is nonzero");
         self
     }
-
 }
 
 /// A density conversion failure, retaining the original core or color-normalization error.
@@ -430,12 +429,10 @@ impl fmt::Display for DensityConversionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Core(error) => write!(formatter, "density conversion failed: {error}"),
-            Self::ColorNormalization(error) => {
-                write!(
-                    formatter,
-                    "density conversion color normalization failed: {error}"
-                )
-            }
+            Self::ColorNormalization(error) => write!(
+                formatter,
+                "density conversion color normalization failed: {error}"
+            ),
             Self::ColorFit(error) => {
                 write!(formatter, "density conversion color fit failed: {error}")
             }
@@ -759,9 +756,8 @@ pub fn convert_structural(
     let normalized = normalize_raster(input, budget, settings.cancellation, &resources)
         .map_err(|error| DensityConversionError::ColorNormalization(error).into_core())?;
     execution.check(settings.cancellation)?;
-    let mut cells = reserve_output_cells(cell_count, settings.cancellation, || {
-        execution.is_current()
-    })?;
+    let mut cells =
+        reserve_output_cells(cell_count, settings.cancellation, || execution.is_current())?;
     execution.check(settings.cancellation)?;
     run_structural_workers(
         settings,
@@ -973,7 +969,6 @@ fn convert_density_detailed_impl(
         &normalized,
         glyphs,
         sampling,
-        foreground_luminance,
         background_luminance,
         luminance_span,
         foreground,
@@ -983,9 +978,8 @@ fn convert_density_detailed_impl(
         sample_cancel_poll,
     )?;
     execution.check(settings.cancellation)?;
-    let patches = patch_dimensions.map(|dimensions| {
-        QualityPatches::from_parts(dimensions, patch_values, patch_descriptors)
-    });
+    let patches = patch_dimensions
+        .map(|dimensions| QualityPatches::from_parts(dimensions, patch_values, patch_descriptors));
     let frame = AsciiFrame::try_new(
         size,
         settings.metadata,
@@ -1217,6 +1211,7 @@ fn process_structural_range(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_density_workers(
     settings: ConversionSettings<'_>,
     execution: &JobExecution<'_>,
@@ -1229,7 +1224,6 @@ fn run_density_workers(
     normalized: &NormalizedRaster,
     glyphs: &GlyphTable,
     sampling: SamplingPlan,
-    foreground_luminance: f64,
     background_luminance: f64,
     luminance_span: f64,
     foreground: [u8; 4],
@@ -1255,7 +1249,6 @@ fn run_density_workers(
             normalized,
             glyphs,
             sampling,
-            foreground_luminance,
             background_luminance,
             luminance_span,
             foreground,
@@ -1283,7 +1276,6 @@ fn run_density_workers(
             normalized,
             glyphs,
             sampling,
-            foreground_luminance,
             background_luminance,
             luminance_span,
             foreground,
@@ -1316,19 +1308,16 @@ fn run_density_workers(
                 .ok_or(Error::SizeOverflow)?;
             let (worker_cells, rest) = remaining_cells.split_at_mut(cell_len);
             remaining_cells = rest;
-            let patch_value_len = cell_len
-                .checked_mul(patch_len)
-                .ok_or(Error::SizeOverflow)?;
+            let patch_value_len = cell_len.checked_mul(patch_len).ok_or(Error::SizeOverflow)?;
             let (worker_values, rest) = remaining_values.split_at_mut(patch_value_len);
             remaining_values = rest;
             let (worker_descriptors, rest) = if patch_dimensions.is_some() {
                 remaining_descriptors.split_at_mut(cell_len)
             } else {
-                (&mut [], remaining_descriptors)
+                remaining_descriptors.split_at_mut(0)
             };
             remaining_descriptors = rest;
-            let builder =
-                thread::Builder::new().stack_size(WORKER_STACK_SIZE_BYTES as usize);
+            let builder = thread::Builder::new().stack_size(WORKER_STACK_SIZE_BYTES as usize);
             let handle = builder
                 .spawn_scoped(scope, move || {
                     process_density_range(
@@ -1343,7 +1332,6 @@ fn run_density_workers(
                         normalized,
                         glyphs,
                         sampling,
-                        foreground_luminance,
                         background_luminance,
                         luminance_span,
                         foreground,
@@ -1379,7 +1367,6 @@ fn process_density_range(
     normalized: &NormalizedRaster,
     glyphs: &GlyphTable,
     sampling: SamplingPlan,
-    foreground_luminance: f64,
     background_luminance: f64,
     luminance_span: f64,
     foreground: [u8; 4],
@@ -1434,11 +1421,9 @@ fn process_density_range(
                                 .ok_or(Error::SizeOverflow)?;
                             let end = start.checked_add(patch_len).ok_or(Error::SizeOverflow)?;
                             Some(
-                                patch_values
-                                    .get_mut(start..end)
-                                    .ok_or(Error::Malformed(
-                                        MalformedReason::InvalidConfiguration,
-                                    ))?,
+                                patch_values.get_mut(start..end).ok_or(Error::Malformed(
+                                    MalformedReason::InvalidConfiguration,
+                                ))?,
                             )
                         } else {
                             None
@@ -1516,9 +1501,9 @@ fn process_density_range(
                         output_color(fit.background().color()),
                     );
                 } else {
-                    let target_coverage =
-                        ((target_luminance - background_luminance) / luminance_span)
-                            .clamp(0.0, 1.0);
+                    let target_coverage = ((target_luminance - background_luminance)
+                        / luminance_span)
+                        .clamp(0.0, 1.0);
                     let glyph = best_glyph(glyphs.glyphs().iter(), target_coverage, || {
                         settings.cancellation.is_cancelled() || !execution.is_current()
                     })?;
@@ -1611,17 +1596,17 @@ mod tests {
         convert_density_detailed_impl, reserve_output_cells,
     };
     use crate::color::LinearRgb;
-    use crate::worker::{ConversionResources, GenerationController};
-    use core::num::NonZeroUsize;
     use crate::font::{GlyphConfig, GlyphRepertoire, build_glyph_table};
     use crate::sampling::{FitMode, PatchDimensions, SamplingFilter, SamplingOptions};
+    use crate::worker::{ConversionResources, GenerationController};
     use ascii_core::{
         AlphaMode, Budget, CancellationToken, ColorDescription, ColorPrimaries, Error,
         FrameMetadata, GlyphTableId, PixelFormat, RasterFrameView, RasterOrientation,
         TransferFunction,
     };
-    use std::sync::mpsc;
+    use core::num::NonZeroUsize;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
     use std::time::Duration;
 
     #[allow(dead_code)]
@@ -1764,12 +1749,11 @@ mod tests {
         )
         .unwrap();
         let generations = GenerationController::new(11);
-        let resources =
-            ConversionResources::new(128_000_000, NonZeroUsize::new(2).unwrap());
+        let resources = ConversionResources::new(128_000_000, NonZeroUsize::new(2).unwrap());
         let make_settings = |generation: u64| {
             super::ConversionSettings::new(
                 super::GridSizing::fixed_pixel_surface(8, 12),
-                FrameMetadata::new(GlyphTableId::new(*table.fingerprint()), generation, 0, 0, 1),
+                FrameMetadata::new(GlyphTableId::new(*table.fingerprint()), 1, generation, 0, 1),
                 &cancellation,
                 LinearRgb::WHITE,
                 LinearRgb::BLACK,
@@ -1840,12 +1824,11 @@ mod tests {
         assert!(!generations.publish_if_current(11, || {
             published_generation.store(11, Ordering::Release);
         }));
-        assert!(generations.publish_if_current(
-            result_b.frame().metadata().generation(),
-            || {
+        assert!(
+            generations.publish_if_current(result_b.frame().metadata().generation(), || {
                 published_generation.store(12, Ordering::Release);
-            },
-        ));
+            },)
+        );
         assert_eq!(published_generation.load(Ordering::Acquire), 12);
         assert_eq!(resources.active_bytes(), 0);
         assert_eq!(resources.active_workers(), 0);
@@ -1859,6 +1842,7 @@ mod tests {
 
         assert_eq!(
             reserve_output_cells(usize::MAX, &cancellation, || true).err(),
+            Some(Error::Cancelled)
         );
     }
 }

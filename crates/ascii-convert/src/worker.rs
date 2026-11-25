@@ -47,13 +47,13 @@ impl ConversionResources {
 
     /// Returns the aggregate live-job byte ceiling.
     #[must_use]
-    pub const fn max_active_bytes(&self) -> u64 {
+    pub fn max_active_bytes(&self) -> u64 {
         self.shared.max_active_bytes
     }
 
     /// Returns the aggregate worker-slot ceiling.
     #[must_use]
-    pub const fn max_workers(&self) -> usize {
+    pub fn max_workers(&self) -> usize {
         self.shared.max_workers
     }
 
@@ -70,8 +70,15 @@ impl ConversionResources {
             .unwrap_or(self.shared.max_workers)
     }
 
-    fn reserve_workers(&self, requested: usize, tile_count: usize) -> Result<WorkerReservation, Error> {
-        let requested = requested.min(tile_count).min(self.shared.max_workers).max(1);
+    fn reserve_workers(
+        &self,
+        requested: usize,
+        tile_count: usize,
+    ) -> Result<WorkerReservation, Error> {
+        let requested = requested
+            .min(tile_count)
+            .min(self.shared.max_workers)
+            .max(1);
         let mut active = self.shared.active_workers.load(Ordering::Acquire);
         loop {
             let available = self
@@ -157,8 +164,14 @@ struct ByteReservation {
 
 impl Drop for ByteReservation {
     fn drop(&mut self) {
-        let previous = self.shared.active_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
-        debug_assert!(previous >= self.bytes, "conversion byte reservation underflow");
+        let previous = self
+            .shared
+            .active_bytes
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+        debug_assert!(
+            previous >= self.bytes,
+            "conversion byte reservation underflow"
+        );
     }
 }
 
@@ -184,12 +197,18 @@ impl GenerationController {
     /// Returns the currently active generation.
     #[must_use]
     pub fn current(&self) -> u64 {
-        *self.current.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Advances the active generation and returns its identity.
     pub fn advance(&self) -> Result<u64, Error> {
-        let mut current = self.current.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *current = current.checked_add(1).ok_or(Error::SizeOverflow)?;
         Ok(*current)
     }
@@ -205,7 +224,10 @@ impl GenerationController {
     /// The callback runs while generation advancement is excluded. A stale value is dropped and
     /// `false` is returned without invoking the callback.
     pub fn publish_if_current(&self, generation: u64, value: impl FnOnce()) -> bool {
-        let current = self.current.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if *current != generation {
             return false;
         }
@@ -230,7 +252,6 @@ impl WorkerRange {
         }
     }
 }
-
 
 pub(crate) struct WorkerRanges {
     rows: usize,
@@ -356,7 +377,9 @@ impl<'a> JobExecution<'a> {
     /// Checks explicit cancellation and generation freshness at a tile boundary.
     pub(crate) fn check(&self, cancellation: &CancellationToken) -> Result<(), Error> {
         if cancellation.is_cancelled()
-            || self.generation.is_some_and(|gate| !gate.is_current(self.generation_id))
+            || self
+                .generation
+                .is_some_and(|gate| !gate.is_current(self.generation_id))
         {
             return Err(Error::Cancelled);
         }
@@ -368,6 +391,7 @@ impl<'a> JobExecution<'a> {
             .is_none_or(|gate| gate.is_current(self.generation_id))
     }
 
+    #[cfg(test)]
     pub(crate) fn generation_id(&self) -> u64 {
         self.generation_id
     }
@@ -383,14 +407,8 @@ mod tests {
     #[test]
     fn row_ranges_are_stable_contiguous_and_tile_bounded() {
         let resources = ConversionResources::new(10_000, NonZeroUsize::new(3).unwrap());
-        let job = JobExecution::begin(
-            Some(&resources),
-            None,
-            9,
-            NonZeroUsize::new(3).unwrap(),
-            19,
-        )
-        .unwrap();
+        let job = JobExecution::begin(Some(&resources), None, 9, NonZeroUsize::new(3).unwrap(), 19)
+            .unwrap();
         let ranges = job.ranges(19).collect::<Vec<_>>();
         assert!(ranges.iter().all(|range| range.generation_id == 9));
 
@@ -407,26 +425,14 @@ mod tests {
     #[test]
     fn aggregate_admission_is_bounded_and_releases_on_failure_and_drop() {
         let resources = ConversionResources::new(32, NonZeroUsize::new(2).unwrap());
-        let mut first = JobExecution::begin(
-            Some(&resources),
-            None,
-            1,
-            NonZeroUsize::new(2).unwrap(),
-            8,
-        )
-        .unwrap();
+        let mut first =
+            JobExecution::begin(Some(&resources), None, 1, NonZeroUsize::new(2).unwrap(), 8)
+                .unwrap();
         first.reserve_memory(32).unwrap();
         assert_eq!(resources.active_bytes(), 32);
         assert_eq!(resources.active_workers(), 2);
         assert_eq!(
-            JobExecution::begin(
-                Some(&resources),
-                None,
-                2,
-                NonZeroUsize::new(1).unwrap(),
-                4,
-            )
-            .err(),
+            JobExecution::begin(Some(&resources), None, 2, NonZeroUsize::new(1).unwrap(), 4,).err(),
             Some(Error::BudgetExceeded(BudgetKind::WorkUnits))
         );
         drop(first);
@@ -465,16 +471,18 @@ mod tests {
             .err(),
             Some(Error::Cancelled)
         );
-        assert!(JobExecution::begin(
-            None,
-            Some(&generation),
-            13,
-            NonZeroUsize::new(1).unwrap(),
-            1,
-        )
-        .unwrap()
-        .check(&CancellationToken::new())
-        .is_ok());
+        assert!(
+            JobExecution::begin(
+                None,
+                Some(&generation),
+                13,
+                NonZeroUsize::new(1).unwrap(),
+                1,
+            )
+            .unwrap()
+            .check(&CancellationToken::new())
+            .is_ok()
+        );
     }
 
     #[test]
@@ -497,6 +505,32 @@ mod tests {
             Err(Error::Cancelled)
         );
         drop(job);
+        assert_eq!(resources.active_workers(), 0);
+    }
+
+    #[test]
+    fn simultaneous_jobs_share_the_aggregate_byte_ceiling() {
+        let resources = ConversionResources::new(32, NonZeroUsize::new(2).unwrap());
+        let mut first =
+            JobExecution::begin(Some(&resources), None, 1, NonZeroUsize::new(1).unwrap(), 8)
+                .unwrap();
+        let mut second =
+            JobExecution::begin(Some(&resources), None, 2, NonZeroUsize::new(1).unwrap(), 8)
+                .unwrap();
+
+        first.reserve_memory(24).unwrap();
+        assert_eq!(
+            second.reserve_memory(9),
+            Err(Error::BudgetExceeded(BudgetKind::RasterBytes))
+        );
+        assert_eq!(resources.active_bytes(), 24);
+        assert_eq!(resources.active_workers(), 2);
+
+        drop(second);
+        assert_eq!(resources.active_bytes(), 24);
+        assert_eq!(resources.active_workers(), 1);
+        drop(first);
+        assert_eq!(resources.active_bytes(), 0);
         assert_eq!(resources.active_workers(), 0);
     }
 }

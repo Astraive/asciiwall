@@ -621,7 +621,6 @@ impl QualityPatches {
             descriptors,
         }
     }
-
 }
 
 fn normalized_pixel_overlap(
@@ -692,7 +691,6 @@ impl SamplingPlan {
         self.memory_bytes
     }
 }
-
 
 impl SamplingPlan {
     pub(crate) const fn transform(self) -> FitTransform {
@@ -1527,7 +1525,9 @@ pub(crate) fn prepare_sampling(
         None => 0,
     };
     let initialization_work = if patch_dimensions.is_some() {
-        sample_count.checked_add(cell_count).ok_or(Error::SizeOverflow)?
+        sample_count
+            .checked_add(cell_count)
+            .ok_or(Error::SizeOverflow)?
     } else {
         0
     };
