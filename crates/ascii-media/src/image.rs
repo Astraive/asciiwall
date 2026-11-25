@@ -731,7 +731,7 @@ fn inspect_png(encoded: &[u8], cancel: &CancellationToken) -> Result<PngHeader, 
                     return Err(Error::Malformed(MalformedReason::InvalidEncodedData));
                 }
                 seen_exif = true;
-                let metadata = parse_tiff_metadata(payload);
+                let metadata = parse_tiff_metadata(payload)?;
                 if let Some(orientation) = metadata.orientation {
                     header.orientation = orientation;
                 }
@@ -1197,7 +1197,7 @@ where
                     let tiff = &payload[6..];
                     header.exif_bytes =
                         u64::try_from(tiff.len()).map_err(|_| Error::SizeOverflow)?;
-                    let metadata = parse_tiff_metadata(tiff);
+                    let metadata = parse_tiff_metadata(tiff)?;
                     if let Some(orientation) = metadata.orientation {
                         header.orientation = orientation;
                     }
@@ -1618,99 +1618,96 @@ where
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ExifMetadata {
+    // None means the TIFF had no Orientation tag; decoder headers default to identity.
     orientation: Option<Orientation>,
     source_profile: Option<SourceProfile>,
 }
 
-fn unsupported_exif_metadata() -> ExifMetadata {
-    ExifMetadata {
-        orientation: None,
-        source_profile: Some(SourceProfile::Malformed),
-    }
+fn invalid_exif_data() -> Error {
+    Error::Malformed(MalformedReason::InvalidEncodedData)
 }
 
-fn parse_tiff_metadata(tiff: &[u8]) -> ExifMetadata {
+fn parse_tiff_metadata(tiff: &[u8]) -> Result<ExifMetadata, Error> {
     let mut metadata = ExifMetadata::default();
     if tiff.len() < 8 {
-        return unsupported_exif_metadata();
+        return Err(invalid_exif_data());
     }
     let little_endian = match &tiff[..2] {
         b"II" => true,
         b"MM" => false,
-        _ => return unsupported_exif_metadata(),
+        _ => return Err(invalid_exif_data()),
     };
     if read_tiff_u16(&tiff[2..4], little_endian) != 42 {
-        return unsupported_exif_metadata();
+        return Err(invalid_exif_data());
     }
-    let Ok(ifd0_offset) = usize::try_from(read_tiff_u32(&tiff[4..8], little_endian)) else {
-        return unsupported_exif_metadata();
-    };
+    let ifd0_offset = usize::try_from(read_tiff_u32(&tiff[4..8], little_endian))
+        .map_err(|_| invalid_exif_data())?;
     let Some((entries_start, entry_count)) = tiff_ifd_entries(tiff, ifd0_offset, little_endian)
     else {
-        return unsupported_exif_metadata();
+        return Err(invalid_exif_data());
     };
     let mut exif_ifd_offset = None;
     for index in 0..entry_count {
-        let Some(entry_start) = index
+        let entry_start = index
             .checked_mul(12)
             .and_then(|offset| entries_start.checked_add(offset))
-        else {
-            return unsupported_exif_metadata();
-        };
-        let Some(entry_end) = entry_start.checked_add(12) else {
-            return unsupported_exif_metadata();
-        };
-        let Some(entry) = tiff.get(entry_start..entry_end) else {
-            return unsupported_exif_metadata();
-        };
+            .ok_or_else(invalid_exif_data)?;
+        let entry_end = entry_start.checked_add(12).ok_or_else(invalid_exif_data)?;
+        let entry = tiff
+            .get(entry_start..entry_end)
+            .ok_or_else(invalid_exif_data)?;
         let tag = read_tiff_u16(&entry[0..2], little_endian);
         let value_type = read_tiff_u16(&entry[2..4], little_endian);
         let value_count = read_tiff_u32(&entry[4..8], little_endian);
-        if tag == 0x0112 && value_type == 3 && value_count == 1 {
-            metadata.orientation = u8::try_from(read_tiff_u16(&entry[8..10], little_endian))
-                .ok()
-                .and_then(Orientation::from_exif);
-        } else if tag == 0x8769 && value_type == 4 && value_count == 1 {
-            exif_ifd_offset = usize::try_from(read_tiff_u32(&entry[8..12], little_endian)).ok();
+        if tag == 0x0112 {
+            if value_type != 3 || value_count != 1 || metadata.orientation.is_some() {
+                return Err(invalid_exif_data());
+            }
+            let value = u8::try_from(read_tiff_u16(&entry[8..10], little_endian))
+                .map_err(|_| invalid_exif_data())?;
+            metadata.orientation = Some(Orientation::from_exif(value).ok_or_else(invalid_exif_data)?);
+        } else if tag == 0x8769 {
+            if value_type != 4 || value_count != 1 || exif_ifd_offset.is_some() {
+                return Err(invalid_exif_data());
+            }
+            exif_ifd_offset = Some(
+                usize::try_from(read_tiff_u32(&entry[8..12], little_endian))
+                    .map_err(|_| invalid_exif_data())?,
+            );
         }
     }
     let Some(exif_ifd_offset) = exif_ifd_offset else {
-        return metadata;
+        return Ok(metadata);
     };
     let Some((entries_start, entry_count)) = tiff_ifd_entries(tiff, exif_ifd_offset, little_endian)
     else {
-        return unsupported_exif_metadata();
+        return Err(invalid_exif_data());
     };
     for index in 0..entry_count {
-        let Some(entry_start) = index
+        let entry_start = index
             .checked_mul(12)
             .and_then(|offset| entries_start.checked_add(offset))
-        else {
-            return unsupported_exif_metadata();
-        };
-        let Some(entry_end) = entry_start.checked_add(12) else {
-            return unsupported_exif_metadata();
-        };
-        let Some(entry) = tiff.get(entry_start..entry_end) else {
-            return unsupported_exif_metadata();
-        };
+            .ok_or_else(invalid_exif_data)?;
+        let entry_end = entry_start.checked_add(12).ok_or_else(invalid_exif_data)?;
+        let entry = tiff
+            .get(entry_start..entry_end)
+            .ok_or_else(invalid_exif_data)?;
         if read_tiff_u16(&entry[0..2], little_endian) != 0xa001 {
             continue;
         }
         let value_type = read_tiff_u16(&entry[2..4], little_endian);
         let value_count = read_tiff_u32(&entry[4..8], little_endian);
-        metadata.source_profile = Some(if value_type != 3 || value_count != 1 {
-            SourceProfile::Malformed
-        } else {
-            match read_tiff_u16(&entry[8..10], little_endian) {
-                1 => SourceProfile::Srgb,
-                0xffff => SourceProfile::Uncalibrated,
-                value => SourceProfile::Other(value),
-            }
+        if value_type != 3 || value_count != 1 || metadata.source_profile.is_some() {
+            return Err(invalid_exif_data());
+        }
+        metadata.source_profile = Some(match read_tiff_u16(&entry[8..10], little_endian) {
+            1 => SourceProfile::Srgb,
+            0xffff => SourceProfile::Uncalibrated,
+            value => SourceProfile::Other(value),
         });
         break;
     }
-    metadata
+    Ok(metadata)
 }
 
 fn tiff_ifd_entries(tiff: &[u8], ifd_offset: usize, little_endian: bool) -> Option<(usize, usize)> {

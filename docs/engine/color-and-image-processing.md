@@ -146,8 +146,10 @@ rejects the RIFF/WEBP signature; this does not route animated WebP to an animati
 
 JPEG display orientation is applied once while producing the normalized top-down raster. The
 returned `RasterFrameView` carries `RasterOrientation::TopDown`; consumers must use that pixel
-orientation and must not apply source EXIF orientation again. The eight generated asymmetric
-orientation fixtures and expected output hashes are maintained in
+orientation and must not apply source EXIF orientation again. When Orientation is absent, identity
+is used; malformed Orientation tags and malformed ExifIFD pointers return
+`Malformed(InvalidEncodedData)` rather than being silently ignored or treated as absent. The eight
+generated asymmetric orientation fixtures and expected output hashes are maintained in
 `image_decode_jpeg_controls.rs`.
 
 The repository currently has no CLI doctor or import-error surface to consume the capability

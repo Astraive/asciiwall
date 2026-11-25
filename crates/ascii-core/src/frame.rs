@@ -398,8 +398,6 @@ pub enum SourceProfile {
     EmbeddedIcc,
     /// The source declared uncalibrated color.
     Uncalibrated,
-    /// Source metadata is structurally malformed or unusable.
-    Malformed,
     /// The source declared a profile code that this pipeline does not interpret.
     Other(u16),
 }
@@ -444,12 +442,11 @@ impl ColorDescription {
         }
     }
 
-    /// Creates a full-range sRGB interpretation with explicit alpha semantics.
+    /// Creates an sRGB interpretation with explicit alpha semantics and unspecified source
+    /// profile/range provenance. Use `with_source_metadata` only when the source is known.
     #[must_use]
     pub const fn srgb(alpha_mode: AlphaMode) -> Self {
         Self::new(ColorPrimaries::Srgb, TransferFunction::Srgb, alpha_mode)
-            .with_source_metadata(SourceProfile::Srgb, ColorRange::Full)
-    }
 
     /// Adds compact source metadata without copying or allocating.
     #[must_use]

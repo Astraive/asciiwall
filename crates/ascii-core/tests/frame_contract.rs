@@ -417,6 +417,9 @@ fn color_description_preserves_compact_source_metadata() {
     );
     assert_eq!(unspecified.source_profile(), SourceProfile::Unspecified);
     assert_eq!(unspecified.range(), ColorRange::Unspecified);
+    let interpreted = ColorDescription::srgb(AlphaMode::Straight);
+    assert_eq!(interpreted.source_profile(), SourceProfile::Unspecified);
+    assert_eq!(interpreted.range(), ColorRange::Unspecified);
 
     let described = ColorDescription::srgb(AlphaMode::Straight)
         .with_source_metadata(SourceProfile::AssumedSrgb, ColorRange::Full);
