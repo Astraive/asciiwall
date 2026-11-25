@@ -24,12 +24,26 @@ fn runtime(
     parameters: SceneParameters,
     dimensions: SceneDimensions,
     budget: &SceneResourceBudget,
-) -> SceneRuntime<'static> {
+) -> SceneRuntime<ParticleFieldGenerator<'static>> {
     SceneRuntime::try_new(
         parameters,
         dimensions,
         ParticleFieldGenerator::default(),
         budget,
+    )
+    .unwrap()
+}
+
+fn recorded_context<'a>(
+    parameters: SceneParameters,
+    events: &'a [RecordedEvent],
+) -> ExportContext<'a> {
+    ExportContext::new(
+        parameters,
+        1_735_689_600_000,
+        [0; 32],
+        [1; 32],
+        ExportSignalTrack::Recorded(events),
     )
     .unwrap()
 }
@@ -171,7 +185,10 @@ fn descriptor_advertises_versioned_parameters_limits_and_estimated_presets() {
     const {
         assert!(GENERATOR_DESCRIPTOR.deterministic_export);
     };
-    assert!(GENERATOR_DESCRIPTOR.supported_signals.is_empty());
+    assert_eq!(
+        GENERATOR_DESCRIPTOR.supported_signals,
+        &[ascii_scene::SignalKind::PointerPosition]
+    );
     assert_eq!(GENERATOR_DESCRIPTOR.presets.len(), 2);
     assert!(
         GENERATOR_DESCRIPTOR
@@ -454,6 +471,34 @@ fn snapshots_are_filtered_by_explicit_host_capabilities() {
     );
     assert_eq!(battery_only.battery_state(), Some(battery));
 }
+#[test]
+fn synthetic_pointer_snapshots_drive_deterministic_local_interaction() {
+    let dimensions = SceneDimensions::new(32, 16).unwrap();
+    let parameters = parameters(0, 1.0, 64, true);
+    let budget = SceneResourceBudget::default();
+    let mut idle = runtime(parameters, dimensions, &budget);
+    let mut first = runtime(parameters, dimensions, &budget);
+    let mut second = runtime(parameters, dimensions, &budget);
+    let snapshots = ApprovedSnapshots::filter(
+        SnapshotCapabilities::new(true, false, false, false),
+        SnapshotCandidates::new(Some(NormalizedPoint::new(0, 0)), None, None, None),
+    );
+    let no_input = ApprovedSnapshots::empty();
+
+    for _ in 0..600 {
+        idle.advance(Duration::from_nanos(16_666_667), &no_input)
+            .unwrap();
+        first
+            .advance(Duration::from_nanos(16_666_667), &snapshots)
+            .unwrap();
+        second
+            .advance(Duration::from_nanos(16_666_667), &snapshots)
+            .unwrap();
+    }
+
+    assert_eq!(first.frame(), second.frame());
+    assert_ne!(idle.frame(), first.frame());
+}
 
 #[test]
 fn export_records_normalized_events_or_requires_an_explicit_idle_fallback() {
@@ -563,6 +608,100 @@ fn identical_export_contexts_execute_exact_cells_for_seed_extremes() {
             ExportSignalTrack::IdleFallback
         ));
     }
+}
+#[test]
+fn recorded_pointer_tracks_replay_exactly_and_future_events_are_ignored() {
+    let dimensions = SceneDimensions::new(32, 16).unwrap();
+    let parameters = parameters(0, 1.0, 64, true);
+    let track = [
+        RecordedEvent::new(
+            0,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(0, 0)),
+        ),
+        RecordedEvent::new(
+            20,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(u16::MAX, u16::MAX)),
+        ),
+        RecordedEvent::new(
+            20,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(0, u16::MAX)),
+        ),
+        RecordedEvent::new(
+            90,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(0, 0)),
+        ),
+    ];
+    let changed_track = [
+        RecordedEvent::new(
+            0,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(32_768, 32_768)),
+        ),
+        RecordedEvent::new(
+            20,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(32_768, 32_768)),
+        ),
+        RecordedEvent::new(
+            20,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(32_768, 32_768)),
+        ),
+        RecordedEvent::new(
+            90,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(32_768, 32_768)),
+        ),
+    ];
+    let budget = SceneResourceBudget::default();
+    let first = recorded_context(parameters, &track)
+        .execute_frame(dimensions, 600, &budget)
+        .unwrap();
+    let repeated = recorded_context(parameters, &track)
+        .execute_frame(dimensions, 600, &budget)
+        .unwrap();
+    let changed = recorded_context(parameters, &changed_track)
+        .execute_frame(dimensions, 600, &budget)
+        .unwrap();
+    assert_eq!(first.cells(), repeated.cells());
+    assert_ne!(first.cells(), changed.cells());
+
+    let duplicate_step = [
+        RecordedEvent::new(
+            1,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(0, 0)),
+        ),
+        RecordedEvent::new(
+            1,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(32_768, 32_768)),
+        ),
+    ];
+    let only_last = [duplicate_step[1]];
+    assert_eq!(
+        recorded_context(parameters, &duplicate_step)
+            .execute_frame(dimensions, 600, &budget)
+            .unwrap()
+            .cells(),
+        recorded_context(parameters, &only_last)
+            .execute_frame(dimensions, 600, &budget)
+            .unwrap()
+            .cells()
+    );
+
+    let initial = [track[0]];
+    let with_future = [
+        track[0],
+        RecordedEvent::new(
+            601,
+            RecordedEventKind::PointerPosition(NormalizedPoint::new(32_768, 32_768)),
+        ),
+    ];
+    assert_eq!(
+        recorded_context(parameters, &initial)
+            .execute_frame(dimensions, 600, &budget)
+            .unwrap()
+            .cells(),
+        recorded_context(parameters, &with_future)
+            .execute_frame(dimensions, 600, &budget)
+            .unwrap()
+            .cells()
+    );
 }
 
 #[test]

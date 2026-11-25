@@ -77,3 +77,17 @@ impl Drop for ResourceReservation {
             .fetch_sub(self.bytes, Ordering::AcqRel);
     }
 }
+
+/// Proof that the runtime owns a live logical-resource reservation for generator preparation.
+#[derive(Debug)]
+pub struct GeneratorPreparationPermit<'a> {
+    _reservation: &'a ResourceReservation,
+}
+
+impl<'a> GeneratorPreparationPermit<'a> {
+    pub(crate) const fn new(reservation: &'a ResourceReservation) -> Self {
+        Self {
+            _reservation: reservation,
+        }
+    }
+}

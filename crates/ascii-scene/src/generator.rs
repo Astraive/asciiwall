@@ -5,10 +5,10 @@ use ascii_core::{Error, MalformedReason};
 use crate::descriptor::{GENERATOR_DESCRIPTOR, GeneratorDescriptor, ResourceEstimate};
 use crate::determinism::{MAX_NODE_ID_BYTES, RandomStream};
 use crate::params::{
-    MAX_PARTICLE_LIFETIME_TICKS as MAX_LIFETIME_TICKS, MAX_PARTICLES, MAX_VELOCITY_Q16,
-    SceneDimensions, SceneParameters,
+    MAX_ACCELERATION_Q16, MAX_PARTICLE_LIFETIME_TICKS as MAX_LIFETIME_TICKS, MAX_PARTICLES,
+    MAX_VELOCITY_Q16, SceneDimensions, SceneParameters,
 };
-use crate::resource::{ResourceReservation, SceneResourceBudget};
+use crate::resource::{GeneratorPreparationPermit, ResourceReservation, SceneResourceBudget};
 use crate::simulation::{AdvanceReport, FixedStepContext, FixedStepSimulation, SimulationLimits};
 use crate::snapshots::ApprovedSnapshots;
 
@@ -22,11 +22,30 @@ pub const STARFIELD_NODE_ID: &str = "builtin.particle-field.default";
 mod sealed {
     pub trait Sealed {}
 }
-/// Reviewed first-party generator metadata; mutable execution stays inside `SceneRuntime`.
+/// Sealed first-party execution contract driven by the bounded `SceneRuntime`.
 #[allow(private_bounds)]
 pub trait SceneGenerator: sealed::Sealed {
     fn descriptor(&self) -> &'static GeneratorDescriptor;
     fn node_id(&self) -> &str;
+    /// Returns checked logical scratch storage without allocating.
+    fn scratch_bytes(&self, parameters: &SceneParameters) -> Result<u64, Error>;
+    /// Prepares bounded buffers; the runtime-only permit proves resources were reserved first.
+    fn prepare(
+        &mut self,
+        permit: &GeneratorPreparationPermit<'_>,
+        parameters: &SceneParameters,
+        dimensions: SceneDimensions,
+    ) -> Result<(), Error>;
+    /// Performs one bounded fixed-step update without allocating.
+    fn step(
+        &mut self,
+        context: FixedStepContext,
+        dimensions: SceneDimensions,
+        parameters: &SceneParameters,
+        snapshots: &ApprovedSnapshots<'_>,
+    );
+    /// Writes into caller-owned output storage without allocating.
+    fn render(&self, dimensions: SceneDimensions, output: &mut [char]);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,9 +94,7 @@ impl SceneGenerator for ParticleFieldGenerator<'_> {
     fn node_id(&self) -> &str {
         self.node_id
     }
-}
 
-impl ParticleFieldGenerator<'_> {
     fn scratch_bytes(&self, parameters: &SceneParameters) -> Result<u64, Error> {
         let required_particles =
             usize::try_from(parameters.max_particles()).map_err(|_| Error::SizeOverflow)?;
@@ -89,6 +106,7 @@ impl ParticleFieldGenerator<'_> {
 
     fn prepare(
         &mut self,
+        _permit: &GeneratorPreparationPermit<'_>,
         parameters: &SceneParameters,
         dimensions: SceneDimensions,
     ) -> Result<(), Error> {
@@ -117,15 +135,36 @@ impl ParticleFieldGenerator<'_> {
         context: FixedStepContext,
         dimensions: SceneDimensions,
         _parameters: &SceneParameters,
-        _snapshots: &ApprovedSnapshots<'_>,
+        snapshots: &ApprovedSnapshots<'_>,
     ) {
         let hz = i32::from(context.simulation_hz());
         let width_q16 = dimensions.columns() as i32 * Q16_ONE;
         let height_q16 = dimensions.rows() as i32 * Q16_ONE;
+        let pointer_target = snapshots.pointer_position().map(|pointer| {
+            (
+                i32::from(pointer.x_q16()) * dimensions.columns() as i32,
+                i32::from(pointer.y_q16()) * dimensions.rows() as i32,
+            )
+        });
         for particle in &mut self.particles {
-            particle.velocity_x_q16 = (particle.velocity_x_q16 + particle.acceleration_x_q16 / hz)
+            let (acceleration_x_q16, acceleration_y_q16) = pointer_target.map_or(
+                (particle.acceleration_x_q16, particle.acceleration_y_q16),
+                |(target_x_q16, target_y_q16)| {
+                    let attraction_x =
+                        shortest_toroidal_delta(particle.x_q16, target_x_q16, width_q16) / 8;
+                    let attraction_y =
+                        shortest_toroidal_delta(particle.y_q16, target_y_q16, height_q16) / 8;
+                    (
+                        (particle.acceleration_x_q16 + attraction_x)
+                            .clamp(-MAX_ACCELERATION_Q16, MAX_ACCELERATION_Q16),
+                        (particle.acceleration_y_q16 + attraction_y)
+                            .clamp(-MAX_ACCELERATION_Q16, MAX_ACCELERATION_Q16),
+                    )
+                },
+            );
+            particle.velocity_x_q16 = (particle.velocity_x_q16 + acceleration_x_q16 / hz)
                 .clamp(-MAX_VELOCITY_Q16, MAX_VELOCITY_Q16);
-            particle.velocity_y_q16 = (particle.velocity_y_q16 + particle.acceleration_y_q16 / hz)
+            particle.velocity_y_q16 = (particle.velocity_y_q16 + acceleration_y_q16 / hz)
                 .clamp(-MAX_VELOCITY_Q16, MAX_VELOCITY_Q16);
             particle.x_q16 = (particle.x_q16 + particle.velocity_x_q16 / hz).rem_euclid(width_q16);
             particle.y_q16 = (particle.y_q16 + particle.velocity_y_q16 / hz).rem_euclid(height_q16);
@@ -152,6 +191,15 @@ impl ParticleFieldGenerator<'_> {
                 _ => '*',
             };
         }
+    }
+}
+
+fn shortest_toroidal_delta(from_q16: i32, to_q16: i32, extent_q16: i32) -> i32 {
+    let forward = (to_q16 - from_q16).rem_euclid(extent_q16);
+    if forward > extent_q16 / 2 {
+        forward - extent_q16
+    } else {
+        forward
     }
 }
 
@@ -182,22 +230,22 @@ fn random_signed(random: &mut RandomStream, magnitude: i32) -> i32 {
 }
 
 /// Owns fixed-step state and reusable output storage for one generator node.
-pub struct SceneRuntime<'a> {
+pub struct SceneRuntime<G: SceneGenerator> {
     parameters: SceneParameters,
     dimensions: SceneDimensions,
-    generator: ParticleFieldGenerator<'a>,
+    generator: G,
     simulation: FixedStepSimulation,
     frame: Vec<char>,
     resource_estimate: ResourceEstimate,
     _reservation: ResourceReservation,
 }
 
-impl<'a> SceneRuntime<'a> {
+impl<G: SceneGenerator> SceneRuntime<G> {
     /// Constructs a runtime with the four-step default catch-up limit.
     pub fn try_new(
         parameters: SceneParameters,
         dimensions: SceneDimensions,
-        generator: ParticleFieldGenerator<'a>,
+        generator: G,
         budget: &SceneResourceBudget,
     ) -> Result<Self, Error> {
         Self::try_new_with_limits(
@@ -213,7 +261,7 @@ impl<'a> SceneRuntime<'a> {
     pub fn try_new_with_limits(
         parameters: SceneParameters,
         dimensions: SceneDimensions,
-        mut generator: ParticleFieldGenerator<'a>,
+        mut generator: G,
         budget: &SceneResourceBudget,
         limits: SimulationLimits,
     ) -> Result<Self, Error> {
@@ -233,7 +281,10 @@ impl<'a> SceneRuntime<'a> {
             .try_reserve_exact(dimensions.cell_count())
             .map_err(|_| Error::AllocationFailed)?;
         frame.resize(dimensions.cell_count(), ' ');
-        generator.prepare(&parameters, dimensions)?;
+        {
+            let permit = GeneratorPreparationPermit::new(&reservation);
+            generator.prepare(&permit, &parameters, dimensions)?;
+        }
         generator.render(dimensions, &mut frame);
 
         Ok(Self {
@@ -268,17 +319,24 @@ impl<'a> SceneRuntime<'a> {
         Ok(report.with_output_refreshed(output_refreshed))
     }
 
-    pub(crate) fn advance_exact_steps(&mut self, requested_steps: u64) -> Result<(), Error> {
+    pub(crate) fn advance_exact_steps_with<'snapshot, F>(
+        &mut self,
+        requested_steps: u64,
+        mut snapshots_for_step: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut(u64) -> ApprovedSnapshots<'snapshot>,
+    {
         let simulation_steps = if self.parameters.is_static() {
             0
         } else {
             requested_steps
         };
-        let snapshots = ApprovedSnapshots::empty();
         for context in self
             .simulation
             .advance_exact_steps(simulation_steps, self.parameters.simulation_hz())?
         {
+            let snapshots = snapshots_for_step(context.step_index());
             self.generator
                 .step(context, self.dimensions, &self.parameters, &snapshots);
         }
@@ -286,6 +344,16 @@ impl<'a> SceneRuntime<'a> {
             self.generator.render(self.dimensions, &mut self.frame);
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn descriptor(&self) -> &'static GeneratorDescriptor {
+        self.generator.descriptor()
+    }
+
+    #[must_use]
+    pub fn node_id(&self) -> &str {
+        self.generator.node_id()
     }
 
     #[must_use]
@@ -316,5 +384,117 @@ impl<'a> SceneRuntime<'a> {
     #[must_use]
     pub fn frame_storage_capacity(&self) -> usize {
         self.frame.capacity()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    struct TestGenerator<'a> {
+        inner: ParticleFieldGenerator<'static>,
+        step_count: &'a Cell<u64>,
+        fail_prepare: bool,
+    }
+
+    impl sealed::Sealed for TestGenerator<'_> {}
+
+    impl SceneGenerator for TestGenerator<'_> {
+        fn descriptor(&self) -> &'static GeneratorDescriptor {
+            self.inner.descriptor()
+        }
+
+        fn node_id(&self) -> &str {
+            self.inner.node_id()
+        }
+
+        fn scratch_bytes(&self, parameters: &SceneParameters) -> Result<u64, Error> {
+            self.inner.scratch_bytes(parameters)
+        }
+
+        fn prepare(
+            &mut self,
+            permit: &GeneratorPreparationPermit<'_>,
+            parameters: &SceneParameters,
+            dimensions: SceneDimensions,
+        ) -> Result<(), Error> {
+            if self.fail_prepare {
+                return Err(Error::AllocationFailed);
+            }
+            self.inner.prepare(permit, parameters, dimensions)
+        }
+
+        fn step(
+            &mut self,
+            context: FixedStepContext,
+            dimensions: SceneDimensions,
+            parameters: &SceneParameters,
+            snapshots: &ApprovedSnapshots<'_>,
+        ) {
+            self.step_count.set(self.step_count.get().saturating_add(1));
+            self.inner.step(context, dimensions, parameters, snapshots);
+        }
+
+        fn render(&self, dimensions: SceneDimensions, output: &mut [char]) {
+            self.inner.render(dimensions, output);
+        }
+    }
+
+    #[test]
+    fn runtime_dispatches_execution_through_generator_contract() {
+        let parameters = SceneParameters::default();
+        let dimensions = SceneDimensions::new(16, 8).unwrap();
+        let budget = SceneResourceBudget::default();
+        let step_count = Cell::new(0);
+        let mut scene = SceneRuntime::try_new(
+            parameters,
+            dimensions,
+            TestGenerator {
+                inner: ParticleFieldGenerator::default(),
+                step_count: &step_count,
+                fail_prepare: false,
+            },
+            &budget,
+        )
+        .unwrap();
+        assert_eq!(scene.descriptor().id, GENERATOR_DESCRIPTOR.id);
+        assert_eq!(scene.node_id(), STARFIELD_NODE_ID);
+        let report = scene
+            .advance(Duration::from_secs(1), &ApprovedSnapshots::empty())
+            .unwrap();
+        assert_eq!(report.simulation_steps(), 4);
+        assert_eq!(step_count.get(), 4);
+
+        let mut direct = SceneRuntime::try_new(
+            parameters,
+            dimensions,
+            ParticleFieldGenerator::default(),
+            &SceneResourceBudget::default(),
+        )
+        .unwrap();
+        direct
+            .advance(Duration::from_secs(1), &ApprovedSnapshots::empty())
+            .unwrap();
+        assert_eq!(scene.frame(), direct.frame());
+    }
+
+    #[test]
+    fn failed_generator_preparation_releases_its_resource_reservation() {
+        let budget = SceneResourceBudget::default();
+        let step_count = Cell::new(0);
+        let result = SceneRuntime::try_new(
+            SceneParameters::default(),
+            SceneDimensions::new(16, 8).unwrap(),
+            TestGenerator {
+                inner: ParticleFieldGenerator::default(),
+                step_count: &step_count,
+                fail_prepare: true,
+            },
+            &budget,
+        );
+        assert!(matches!(result, Err(Error::AllocationFailed)));
+        assert_eq!(budget.reserved_bytes(), 0);
     }
 }

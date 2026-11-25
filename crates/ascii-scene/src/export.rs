@@ -4,7 +4,9 @@ use crate::descriptor::{GENERATOR_DESCRIPTOR, ResourceEstimate};
 use crate::generator::{ParticleFieldGenerator, SceneRuntime};
 use crate::params::{MAX_SIMULATION_WORK_UNITS, SceneDimensions, SceneParameters};
 use crate::resource::SceneResourceBudget;
-use crate::snapshots::{NormalizedPoint, SignalKind};
+use crate::snapshots::{
+    ApprovedSnapshots, NormalizedPoint, SignalKind, SnapshotCandidates, SnapshotCapabilities,
+};
 
 pub const MAX_RECORDED_EVENTS: usize = 65_536;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,7 +73,7 @@ pub struct ExportedFrame<'a> {
     font_identity: [u8; 32],
     step_index: u64,
     signal_track: ExportSignalTrack<'a>,
-    runtime: SceneRuntime<'static>,
+    runtime: SceneRuntime<ParticleFieldGenerator<'static>>,
 }
 
 impl<'a> ExportedFrame<'a> {
@@ -186,8 +188,10 @@ impl<'a> ExportContext<'a> {
     }
     /// Executes the exact requested fixed-step frame without clocks or live snapshots.
     ///
-    /// The built-in descriptor has no supported signals and no event replay. An explicit idle
-    /// fallback or an empty recorded track is accepted; nonempty tracks are rejected.
+    /// The built-in executor replays normalized pointer positions supplied in the recorded track.
+    /// Events are applied before their indexed step; same-step events retain input order (last wins),
+    /// step-zero events apply before the first update, and later events are ignored for this frame.
+    /// An explicit idle fallback or an empty recorded track performs no synthetic interaction.
     pub fn execute_frame(
         self,
         dimensions: SceneDimensions,
@@ -195,6 +199,10 @@ impl<'a> ExportContext<'a> {
         budget: &SceneResourceBudget,
     ) -> Result<ExportedFrame<'a>, Error> {
         validate_signal_track(self.signal_track)?;
+        let event_count = match self.signal_track {
+            ExportSignalTrack::Recorded(events) => events.len(),
+            ExportSignalTrack::IdleFallback => 0,
+        };
 
         let simulation_steps = if self.parameters.is_static() {
             0
@@ -214,9 +222,11 @@ impl<'a> ExportContext<'a> {
         let step_work = simulation_steps
             .checked_mul(particle_count.max(1))
             .ok_or(Error::SizeOverflow)?;
+        let event_work = u64::try_from(event_count).map_err(|_| Error::SizeOverflow)?;
         let work_units = render_work
             .checked_add(particle_work)
             .and_then(|work| work.checked_add(step_work))
+            .and_then(|work| work.checked_add(event_work))
             .ok_or(Error::SizeOverflow)?;
         if work_units > MAX_SIMULATION_WORK_UNITS {
             return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
@@ -228,7 +238,28 @@ impl<'a> ExportContext<'a> {
             ParticleFieldGenerator::default(),
             budget,
         )?;
-        runtime.advance_exact_steps(step_index)?;
+        let events: &[RecordedEvent] = match self.signal_track {
+            ExportSignalTrack::Recorded(events) => events,
+            ExportSignalTrack::IdleFallback => &[],
+        };
+        let mut next_event = 0;
+        let mut pointer_position: Option<NormalizedPoint> = None;
+        let capabilities = SnapshotCapabilities::new(true, false, false, false);
+        runtime.advance_exact_steps_with(step_index, |current_step| {
+            while let Some(event) = events.get(next_event) {
+                if event.step_index() > current_step {
+                    break;
+                }
+                if let RecordedEventKind::PointerPosition(position) = event.kind() {
+                    pointer_position = Some(position);
+                }
+                next_event += 1;
+            }
+            ApprovedSnapshots::filter(
+                capabilities,
+                SnapshotCandidates::new(pointer_position, None, None, None),
+            )
+        })?;
         Ok(ExportedFrame {
             selected_start_timestamp_unix_ms: self.selected_start_timestamp_unix_ms,
             settings_fingerprint: self.settings_fingerprint,
@@ -251,10 +282,6 @@ fn validate_signal_track(track: ExportSignalTrack<'_>) -> Result<(), Error> {
         {
             return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
         }
-    }
-    // A descriptor declaration alone does not imply this executor can replay that signal yet.
-    if !events.is_empty() {
-        return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
     }
     Ok(())
 }
