@@ -124,10 +124,11 @@ color, and conversion settings in their overall cache key.
 ### Retained synthetic comparison evidence
 
 The regression test `synthetic_motion_and_scene_change_metrics_match_retained_evidence` compares
-each mode against `Off` and asserts these deterministic values. The fixture is a 32×36 linear-gray
-moving horizontal gradient (one source-pixel shift) followed by a 4×3 per-cell checker scene cut
-using linear values 96/160; the output grid has 8×12-pixel cells. Tone MAE is the mean absolute
-difference between each input cell's linear-gray mean and the selected glyph's measured mean
+each mode against `Off` and asserts these deterministic values. The fixture is a 32×36 image of
+8-bit gray byte samples passed through `linear_gray_raster` (linear transfer): a moving horizontal
+gradient shifted one source pixel, followed by a 4×3 per-cell checker cut. The cut uses byte samples
+96 and 160, interpreted as linear gray and normalized to `96/255` and `160/255` on `[0,1]`; output
+cells are 8×12 pixels. Tone MAE is the mean absolute difference between each input cell's linear-gray mean and the selected glyph's measured mean
 coverage. Flicker is changed output glyphs between the two gradient frames divided by 12. Glyph
 deltas count cell positions different from `Off`; scene-cut carryover is the number of additional
 same-scene conversions before the cut frame equals a fresh deterministic conversion (zero here).
