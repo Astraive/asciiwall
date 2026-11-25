@@ -353,7 +353,8 @@ fn classify_snapshot(snapshot: &HierarchySnapshot) -> HierarchyObservation {
     } else if summary.shell_owned_desktop_view_count > 0 {
         let recognized_parent = summary.desktop_views_parented_by_progman > 0
             || summary.desktop_views_parented_by_workerw > 0;
-        if recognized_parent {
+        let unexpected_parent = summary.desktop_views_with_other_parent > 0;
+        if recognized_parent && !unexpected_parent {
             Observation {
                 status: ProbeStatus::Experimental,
                 reason: ObservationReason::ShellHierarchyObserved,
@@ -476,6 +477,21 @@ mod tests {
             result.observation.reason,
             ObservationReason::UnexpectedHierarchy
         );
+    }
+
+    #[test]
+    fn unexpected_parent_takes_precedence_over_recognized_desktop_view() {
+        let records = [
+            view(WindowClass::Progman, WindowClass::Progman, false),
+            view(WindowClass::Other, WindowClass::Progman, false),
+        ];
+        let result = classify_snapshot(&snapshot(true, &records));
+        assert_eq!(result.observation.status, ProbeStatus::Experimental);
+        assert_eq!(
+            result.observation.reason,
+            ObservationReason::UnexpectedHierarchy
+        );
+        assert_eq!(result.summary.desktop_views_with_other_parent, 1);
     }
 
     #[test]
