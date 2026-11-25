@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "fixture_id": "synthetic-cpu-grid-v1",
+  "provenance": "Authored synthetic integer-grid fixture; no external media, fonts, or personal data.",
+  "grid": [
+    "+--+",
+    "|##|",
+    "|..|",
+    "+--+"
+  ]
+}
