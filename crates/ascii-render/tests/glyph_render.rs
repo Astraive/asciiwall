@@ -611,13 +611,14 @@ fn same_device_cache_reuses_fingerprints_and_rejects_generation_without_replacem
         )))
     );
     assert_eq!(cache.resident_bytes(), cache_bytes);
+    drop(second);
+    assert_eq!(cache.resident_bytes(), cache_bytes);
     first.invalidate();
     assert_eq!(
         first.present(&original_frame, &first_target),
         Ok(PresentOutcome::Presented { suboptimal: false })
     );
 
-    drop(second);
     drop(first);
     let _ = device.poll(wgpu::Maintain::Wait);
     assert_eq!(
