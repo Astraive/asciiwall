@@ -3,7 +3,7 @@ use ascii_core::{Error, MalformedReason};
 
 use crate::descriptor::{
     GeneratorDescriptor, GeneratorLimits, MotionPolicy, ParameterDefault, ParameterDescriptor,
-    ParameterKind, PresetMotion, PresetDescriptor, ResourceEstimatePolicy,
+    ParameterKind, PresetMotion, ResourceEstimatePolicy,
 };
 use crate::determinism::MAX_NODE_ID_BYTES;
 use crate::generator::SceneGenerator;
@@ -13,7 +13,7 @@ use crate::params::{
 };
 use crate::resource::GeneratorPreparationPermit;
 use crate::simulation::FixedStepContext;
-use crate::snapshots::{ApprovedSnapshots, SignalKind};
+use crate::snapshots::ApprovedSnapshots;
 
 const Q16: u64 = 1 << 16;
 const MAX_PARAMETER_Q16: u32 = 20 << 16;
@@ -181,19 +181,33 @@ impl WaveFieldConfig {
     }
 
     #[must_use]
-    pub const fn amplitude_q16(self) -> u32 { self.amplitude_q16 }
+    pub const fn amplitude_q16(self) -> u32 {
+        self.amplitude_q16
+    }
     #[must_use]
-    pub const fn frequency_q16(self) -> u32 { self.frequency_q16 }
+    pub const fn frequency_q16(self) -> u32 {
+        self.frequency_q16
+    }
     #[must_use]
-    pub const fn speed_q16(self) -> u32 { self.speed_q16 }
+    pub const fn speed_q16(self) -> u32 {
+        self.speed_q16
+    }
     #[must_use]
-    pub const fn color_rgba(self) -> u32 { self.color_rgba }
+    pub const fn color_rgba(self) -> u32 {
+        self.color_rgba
+    }
     #[must_use]
-    pub fn amplitude(self) -> f32 { self.amplitude_q16 as f32 / Q16 as f32 }
+    pub fn amplitude(self) -> f32 {
+        self.amplitude_q16 as f32 / Q16 as f32
+    }
     #[must_use]
-    pub fn frequency(self) -> f32 { self.frequency_q16 as f32 / Q16 as f32 }
+    pub fn frequency(self) -> f32 {
+        self.frequency_q16 as f32 / Q16 as f32
+    }
     #[must_use]
-    pub fn speed(self) -> f32 { self.speed_q16 as f32 / Q16 as f32 }
+    pub fn speed(self) -> f32 {
+        self.speed_q16 as f32 / Q16 as f32
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -217,7 +231,12 @@ pub struct WaveFieldGenerator<'a> {
 impl<'a> WaveFieldGenerator<'a> {
     #[must_use]
     pub const fn new(glyph_table: &'a GlyphTable, config: WaveFieldConfig) -> Self {
-        Self { glyph_table, config, node_id: WAVE_FIELD_NODE_ID, phase_q16: 0 }
+        Self {
+            glyph_table,
+            config,
+            node_id: WAVE_FIELD_NODE_ID,
+            phase_q16: 0,
+        }
     }
 
     #[must_use]
@@ -230,8 +249,12 @@ impl<'a> WaveFieldGenerator<'a> {
 impl crate::generator::sealed::Sealed for WaveFieldGenerator<'_> {}
 
 impl SceneGenerator for WaveFieldGenerator<'_> {
-    fn descriptor(&self) -> &'static GeneratorDescriptor { &WAVE_FIELD_DESCRIPTOR }
-    fn node_id(&self) -> &str { self.node_id }
+    fn descriptor(&self) -> &'static GeneratorDescriptor {
+        &WAVE_FIELD_DESCRIPTOR
+    }
+    fn node_id(&self) -> &str {
+        self.node_id
+    }
 
     fn scratch_bytes(&self, _parameters: &SceneParameters) -> Result<u64, Error> {
         Ok(WAVE_FIXED_BYTES)
@@ -271,21 +294,30 @@ impl SceneGenerator for WaveFieldGenerator<'_> {
         parameters: &SceneParameters,
         _snapshots: &ApprovedSnapshots<'_>,
     ) {
-        if self.config.speed_q16 == 0 || parameters.time_scale_q16() == 0 || !parameters.background_motion() {
+        if self.config.speed_q16 == 0
+            || parameters.time_scale_q16() == 0
+            || !parameters.background_motion()
+        {
             return;
         }
-        let phase = u128::from(context.step_index())
-            * u128::from(self.config.speed_q16)
+        let phase = u128::from(context.step_index()) * u128::from(self.config.speed_q16)
             / u128::from(context.simulation_hz());
         self.phase_q16 = phase as u16;
     }
 
-    fn is_static(&self) -> bool { self.config.speed_q16 == 0 }
+    fn is_static(&self) -> bool {
+        self.config.speed_q16 == 0
+    }
 
     fn render(&self, dimensions: SceneDimensions, output: &mut [char]) {
-        if output.len() != dimensions.cell_count() { return; }
+        if output.len() != dimensions.cell_count() {
+            return;
+        }
         let glyphs = self.glyph_table.glyphs();
-        if glyphs.is_empty() { output.fill(' '); return; }
+        if glyphs.is_empty() {
+            output.fill(' ');
+            return;
+        }
         let columns = u64::from(dimensions.columns());
         let rows = u64::from(dimensions.rows());
         let frequency = u64::from(self.config.frequency_q16);
@@ -302,7 +334,8 @@ impl SceneGenerator for WaveFieldGenerator<'_> {
                 let displacement = wave * amplitude as i64 * max_index / (32_767 * denom as i64);
                 let center = max_index / 2;
                 let cell_index = row as usize * columns as usize + column as usize;
-                output[cell_index] = glyphs[((center + displacement).clamp(0, max_index)) as usize].character();
+                output[cell_index] =
+                    glyphs[((center + displacement).clamp(0, max_index)) as usize].character();
             }
         }
     }

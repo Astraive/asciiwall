@@ -75,7 +75,41 @@ The SCN-003 synthetic fixture uses `synthetic_font(false)`, repertoire `BA `, `G
 
 The generator stores only a bounded phase word in addition to the SCN-001 frame; checked grid/resource limits and the shared runtime reservation govern construction. The configuration and generator descriptor are local Rust introspection only, not draft-v1 schema validation. Color rendering, generic deterministic export, native/application integration, and accepted FNT-002/FNT-003 glyph mapping are not supported. Ripple impulses are intentionally not synthesized from pointer/button observations: the current reviewed wave interface has no approved ripple-effect snapshot contract, so the generator advertises no supported signals and consumes no snapshots. SCN-001 acceptance remains blocked; this implementation is not an acceptance claim for its downstream consumers.
 
-`crates/ascii-scene/tests/waves.rs` checks preset/configuration bounds, zero extrema, equal output at the same simulated time under 20/30/60 FPS presentation, static/reduced-motion behavior, deterministic no-input behavior, and a 27-case, 60-second benchmark harness (calm/contour/still × 160/240/320 columns × 20/30/60 FPS). The synthetic glyph-table fingerprint is pinned in the test; the wave cell hash and benchmark percentiles await the reserved shared-target verification run. No cell hashes or measurements are claimed yet.
+The focused fixture uses the source-generated `synthetic_font(false)`, repertoire `BA `, `GlyphConfig(8.0, 8, 12, 9)`, default wave node ID, seed `0x0155`, calm config, an `80 × 40` grid, 60-Hz simulation, empty snapshots, and 3,600 steps. Its immutable glyph-table fingerprint is `4ddc3a1585b233278e7050a05eb95b777916375d3e619efb8c76cbd85db648e0`. The config FNV-1a-64 hashes little-endian `u32` values `[amplitude_q16, frequency_q16, speed_q16, color_rgba]` to `4edd48d9b0f96007`; the scalar-wise row-major cell FNV-1a-64 is `16804a1f09ca39a5`. All three fixture values are pinned in `crates/ascii-scene/tests/waves.rs`; they identify this synthetic fixture, not an accepted portable font mapping.
+
+The benchmark ran in the focused suite with `CARGO_HOME=C:/Users/gskne/.cargo/asciiwall-img001 CARGO_TARGET_DIR=D:/target cargo test -p ascii-scene --lib --test contracts --test matrix_rain --test starfield --test waves -- --nocapture`. Environment: Windows 11 Home Single Language build 26300 on an Intel Core i7-13650HX (20 logical processors, 16,873,545,728 bytes RAM), `x86_64-pc-windows-msvc`, Rust/cargo `1.100.0` (`rustc 0ef1bc386`, LLVM `23.1.5`), debug test profile. `Cargo.lock` SHA-256 is `9a6e77e2100867550053f0e79ae8b6ead95e2ea6b67edfa6058fe164be210ae8`; locked non-workspace dependencies include `fontdue 0.9.3`, `hashbrown 0.15.5`, `ttf-parser 0.21.1`, `sha2 0.10.9`, `allocator-api2 0.2.21`, `equivalent 1.0.3`, `foldhash 0.1.5`, `cfg-if 1.0.5`, `cpufeatures 0.2.17`, `digest 0.10.7`, `block-buffer 0.10.4`, `generic-array 0.14.7`, `typenum 1.20.1`, `crypto-common 0.1.7`, and `version_check 0.9.5`. Each case advances exactly 60 seconds at its requested presentation rate. p50/p95/p99 are `Instant` duration per `SceneRuntime::advance` in nanoseconds; logical state is the checked frame storage plus the generator's two-byte phase word, excluding allocator overhead and RSS.
+
+Focused validation passed 41 tests across the five selected scene suites; the config/glyph fingerprint test passed in its targeted run. `cargo fmt --all` completed and `cargo clippy -p ascii-scene --all-targets -- -D warnings` passed.
+
+| Preset | Columns | FPS | p50 ns | p95 ns | p99 ns | Peak logical state bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| calm | 160 | 20 | 268,700 | 284,700 | 463,600 | 57,602 |
+| calm | 160 | 30 | 270,000 | 286,900 | 417,300 | 57,602 |
+| calm | 160 | 60 | 269,200 | 283,000 | 366,700 | 57,602 |
+| calm | 240 | 20 | 597,600 | 622,300 | 1,095,300 | 129,602 |
+| calm | 240 | 30 | 1,571,400 | 3,078,300 | 4,679,800 | 129,602 |
+| calm | 240 | 60 | 2,102,000 | 3,495,900 | 4,903,300 | 129,602 |
+| calm | 320 | 20 | 3,733,900 | 5,856,700 | 8,240,800 | 230,402 |
+| calm | 320 | 30 | 3,671,800 | 5,990,800 | 10,318,400 | 230,402 |
+| calm | 320 | 60 | 3,694,800 | 5,895,600 | 9,446,800 | 230,402 |
+| contour | 160 | 20 | 943,200 | 1,695,400 | 3,512,000 | 57,602 |
+| contour | 160 | 30 | 941,500 | 1,422,200 | 2,701,200 | 57,602 |
+| contour | 160 | 60 | 922,800 | 1,482,700 | 3,241,000 | 57,602 |
+| contour | 240 | 20 | 2,101,400 | 3,474,300 | 6,021,400 | 129,602 |
+| contour | 240 | 30 | 2,227,300 | 4,338,300 | 5,911,400 | 129,602 |
+| contour | 240 | 60 | 2,127,100 | 3,758,100 | 5,703,900 | 129,602 |
+| contour | 320 | 20 | 3,833,300 | 6,260,800 | 8,566,400 | 230,402 |
+| contour | 320 | 30 | 3,761,600 | 5,746,800 | 8,127,000 | 230,402 |
+| contour | 320 | 60 | 3,784,000 | 6,037,100 | 10,662,900 | 230,402 |
+| still | 160 | 20 | 100 | 200 | 200 | 57,602 |
+| still | 160 | 30 | 100 | 200 | 200 | 57,602 |
+| still | 160 | 60 | 100 | 200 | 200 | 57,602 |
+| still | 240 | 20 | 100 | 200 | 200 | 129,602 |
+| still | 240 | 30 | 100 | 100 | 100 | 129,602 |
+| still | 240 | 60 | 100 | 200 | 200 | 129,602 |
+| still | 320 | 20 | 100 | 100 | 100 | 230,402 |
+| still | 320 | 30 | 100 | 200 | 200 | 230,402 |
+| still | 320 | 60 | 100 | 100 | 100 | 230,402 |
 
 #### Deterministic fixture
 

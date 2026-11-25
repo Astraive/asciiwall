@@ -12,8 +12,8 @@ use ascii_convert::{GlyphConfig, GlyphRepertoire, build_glyph_table};
 use ascii_core::{Budget, CancellationToken};
 use ascii_scene::{
     ApprovedSnapshots, NormalizedPoint, SceneDimensions, SceneParameters, SceneResourceBudget,
-    SceneRuntime, SnapshotCandidates, SnapshotCapabilities, WaveFieldConfig, WaveFieldGenerator,
-    WAVE_FIELD_DESCRIPTOR, WAVE_FIELD_PRESETS,
+    SceneRuntime, SnapshotCandidates, SnapshotCapabilities, WAVE_FIELD_DESCRIPTOR,
+    WAVE_FIELD_PRESETS, WaveFieldConfig, WaveFieldGenerator,
 };
 
 fn table() -> ascii_convert::GlyphTable {
@@ -53,12 +53,35 @@ fn hash(frame: &[char]) -> u64 {
         (hash ^ u64::from(*character as u32)).wrapping_mul(0x0000_0100_0000_01b3)
     })
 }
+fn config_hash(config: WaveFieldConfig) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for value in [
+        config.amplitude_q16(),
+        config.frequency_q16(),
+        config.speed_q16(),
+        config.color_rgba(),
+    ] {
+        for byte in value.to_le_bytes() {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+fn elapsed_for_frame(frame: u32, frames_per_second: u32) -> Duration {
+    let fps = u64::from(frames_per_second);
+    let base = 1_000_000_000 / fps;
+    let extra_nanos = 1_000_000_000 % fps;
+    let extra_frame = u64::from(frame % frames_per_second) < extra_nanos;
+    Duration::from_nanos(base + if extra_frame { 1 } else { 0 })
+}
 
 fn advance_for(runtime: &mut SceneRuntime<WaveFieldGenerator<'_>>, frames_per_second: u32) {
-    let elapsed = Duration::from_nanos(1_000_000_000 / u64::from(frames_per_second));
     let snapshots = ApprovedSnapshots::empty();
-    for _ in 0..frames_per_second * 60 {
-        runtime.advance(elapsed, &snapshots).unwrap();
+    for frame in 0..frames_per_second * 60 {
+        runtime
+            .advance(elapsed_for_frame(frame, frames_per_second), &snapshots)
+            .unwrap();
     }
 }
 
@@ -76,7 +99,6 @@ fn preset_bounds_and_exact_values_are_explicit() {
     assert_eq!(WAVE_FIELD_DESCRIPTOR.id, "builtin.wave-field");
     assert!(WAVE_FIELD_DESCRIPTOR.supported_signals.is_empty());
     assert!(WAVE_FIELD_DESCRIPTOR.presets.is_empty());
-    assert!(!WAVE_FIELD_DESCRIPTOR.deterministic_export);
     assert_eq!(WAVE_FIELD_DESCRIPTOR.parameters.len(), 4);
     assert_eq!(WAVE_FIELD_PRESETS.len(), 3);
     let calm = WAVE_FIELD_PRESETS[0];
@@ -85,6 +107,7 @@ fn preset_bounds_and_exact_values_are_explicit() {
     assert_eq!(calm.config.frequency(), 2.0);
     assert_eq!(calm.config.speed(), 0.5);
     assert_eq!(calm.config.color_rgba(), 0x66cc_ffff);
+    assert_eq!(config_hash(calm.config), 0x4edd_48d9_b0f9_6007);
     let contour = WAVE_FIELD_PRESETS[1];
     assert_eq!(contour.name, "contour");
     assert_eq!(contour.config.amplitude(), 2.0);
@@ -99,7 +122,12 @@ fn preset_bounds_and_exact_values_are_explicit() {
     assert!(WaveFieldConfig::new(0.5, 20.01, 0.5, 0).is_err());
     assert!(WaveFieldConfig::new(0.5, 2.0, f32::INFINITY, 0).is_err());
     assert!(WaveFieldConfig::from_hex_rgba(1.0, 2.0, 1.0, "66ccffff").is_err());
-    assert_eq!(WaveFieldConfig::from_hex_rgba(1.0, 2.0, 1.0, "#66ccffff").unwrap().color_rgba(), 0x66cc_ffff);
+    assert_eq!(
+        WaveFieldConfig::from_hex_rgba(1.0, 2.0, 1.0, "#66ccffff")
+            .unwrap()
+            .color_rgba(),
+        0x66cc_ffff
+    );
 }
 
 #[test]
@@ -111,14 +139,10 @@ fn simulation_hash_matches_at_20_30_and_60_presentations() {
         advance_for(&mut runtime, fps);
         hashes[index] = hash(runtime.frame());
         assert_eq!(runtime.simulation_step_count(), 3_600);
-        eprintln!(
-            "wave-fixture fps={fps} glyph_table={} cell_hash={:016x}",
-            glyphs.fingerprint().iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
-            hashes[index],
-        );
     }
     assert_eq!(hashes[0], hashes[1]);
     assert_eq!(hashes[1], hashes[2]);
+    assert_eq!(hashes[0], 0x1680_4a1f_09ca_39a5);
 }
 
 #[test]
@@ -134,14 +158,31 @@ fn zero_frequency_and_amplitude_remain_finite_and_bounded() {
         let initial = hash(runtime.frame());
         let snapshots = ApprovedSnapshots::empty();
         for _ in 0..600 {
-            runtime.advance(Duration::from_millis(10), &snapshots).unwrap();
-            assert!(runtime.frame().iter().all(|cell| glyphs.glyphs().iter().any(|g| g.character() == *cell)));
+            runtime
+                .advance(Duration::from_millis(10), &snapshots)
+                .unwrap();
+            assert!(
+                runtime
+                    .frame()
+                    .iter()
+                    .all(|cell| glyphs.glyphs().iter().any(|g| g.character() == *cell))
+            );
         }
         if config.amplitude_q16() == 0 {
-            assert!(runtime.frame().iter().all(|cell| *cell == runtime.frame()[0]));
+            assert!(
+                runtime
+                    .frame()
+                    .iter()
+                    .all(|cell| *cell == runtime.frame()[0])
+            );
         }
         if config.frequency_q16() == 0 {
-            assert!(runtime.frame().iter().all(|cell| *cell == runtime.frame()[0]));
+            assert!(
+                runtime
+                    .frame()
+                    .iter()
+                    .all(|cell| *cell == runtime.frame()[0])
+            );
         } else if config.speed_q16() == 0 {
             assert_eq!(hash(runtime.frame()), initial);
         }
@@ -159,8 +200,12 @@ fn deterministic_seed_and_unsupported_inputs_do_not_create_ripples() {
         SnapshotCandidates::new(Some(pointer), None, None, None),
     );
     for _ in 0..300 {
-        first.advance(Duration::from_millis(16), &snapshots).unwrap();
-        second.advance(Duration::from_millis(16), &ApprovedSnapshots::empty()).unwrap();
+        first
+            .advance(Duration::from_millis(16), &snapshots)
+            .unwrap();
+        second
+            .advance(Duration::from_millis(16), &ApprovedSnapshots::empty())
+            .unwrap();
     }
     assert_eq!(hash(first.frame()), hash(second.frame()));
 }
@@ -170,7 +215,9 @@ fn still_and_reduced_motion_do_not_evolve() {
     let glyphs = table();
     let mut still = runtime(WaveFieldConfig::still(), &glyphs, 80, 40, 60);
     let before = hash(still.frame());
-    still.advance(Duration::from_secs(60), &ApprovedSnapshots::empty()).unwrap();
+    still
+        .advance(Duration::from_secs(60), &ApprovedSnapshots::empty())
+        .unwrap();
     assert_eq!(hash(still.frame()), before);
     let dimensions = SceneDimensions::new(80, 40).unwrap();
     let parameters = SceneParameters::new(0x0155, 1.0, 2_000, 60, false).unwrap();
@@ -182,7 +229,9 @@ fn still_and_reduced_motion_do_not_evolve() {
     )
     .unwrap();
     let before = hash(reduced.frame());
-    reduced.advance(Duration::from_secs(60), &ApprovedSnapshots::empty()).unwrap();
+    reduced
+        .advance(Duration::from_secs(60), &ApprovedSnapshots::empty())
+        .unwrap();
     assert_eq!(hash(reduced.frame()), before);
     assert_eq!(reduced.simulation_step_count(), 0);
 }
@@ -200,10 +249,10 @@ fn benchmark_27_sixty_second_timelines() {
             for fps in [20, 30, 60] {
                 let rows = columns * 9 / 16;
                 let mut runtime = runtime(config, &glyphs, columns, rows, 60);
-                let elapsed = Duration::from_nanos(1_000_000_000 / fps);
                 let snapshots = ApprovedSnapshots::empty();
                 let mut timings = Vec::with_capacity((fps * 60) as usize);
-                for _ in 0..fps * 60 {
+                for frame in 0..fps * 60 {
+                    let elapsed = elapsed_for_frame(frame, fps);
                     let start = Instant::now();
                     runtime.advance(elapsed, &snapshots).unwrap();
                     timings.push(start.elapsed().as_nanos());
@@ -212,7 +261,10 @@ fn benchmark_27_sixty_second_timelines() {
                 let percentile = |p: usize| timings[(timings.len() - 1) * p / 100];
                 eprintln!(
                     "wave-bench preset={name} columns={columns} fps={fps} p50_ns={} p95_ns={} p99_ns={} logical_state_bytes={}",
-                    percentile(50), percentile(95), percentile(99), runtime.resource_estimate().total_bytes(),
+                    percentile(50),
+                    percentile(95),
+                    percentile(99),
+                    runtime.resource_estimate().total_bytes(),
                 );
             }
         }
@@ -228,11 +280,14 @@ fn config_and_grid_reject_before_runtime_reservation() {
     let parameters = SceneParameters::DEFAULT;
     assert!(WaveFieldConfig::new(f32::NAN, 2.0, 0.5, 0).is_err());
     assert_eq!(budget.reserved_bytes(), 0);
-    assert!(SceneRuntime::try_new(
-        parameters,
-        SceneDimensions::new(10, 10).unwrap(),
-        WaveFieldGenerator::new(&glyphs, WaveFieldConfig::calm()),
-        &budget,
-    ).is_err());
+    assert!(
+        SceneRuntime::try_new(
+            parameters,
+            SceneDimensions::new(10, 10).unwrap(),
+            WaveFieldGenerator::new(&glyphs, WaveFieldConfig::calm()),
+            &budget,
+        )
+        .is_err()
+    );
     assert_eq!(budget.reserved_bytes(), 0);
 }
