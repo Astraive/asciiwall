@@ -432,6 +432,7 @@ impl BufferPool {
             inner: Some(Arc::clone(&self.inner)),
             descriptor: *descriptor,
             resource_budget: self.resource_budget.clone(),
+            output_permit: None,
             completion_token_issued: false,
             released: false,
         })
@@ -735,8 +736,8 @@ impl core::fmt::Debug for CompletionToken {
 impl CompletionToken {
     /// Explicitly acknowledges completion and reclaims a lease already dropped by its consumer.
     ///
-    /// If the consumer lease is still attached, its output permit stays charged until the lease is
-    /// released or dropped.
+    /// If the consumer lease is still attached, its output permit stays charged by the lease until
+    /// that lease is released or dropped.
     pub fn acknowledge(self) {
         let output_permit = {
             let mut inner = lock_unpoisoned(&self.inner);
@@ -772,12 +773,15 @@ impl CompletionToken {
     }
 }
 
-/// Consumer ownership of a validated slot. Dropping this value does not acknowledge completion.
+/// Consumer ownership of a validated slot. The runtime may pin the slot's output permit to this
+/// lease so a converted frame remains charged across generation invalidation. Dropping this value
+/// does not acknowledge completion.
 #[must_use = "release or invalidate the leased slot after external work completes"]
 pub struct FrameLease {
     inner: Option<Arc<Mutex<PoolInner>>>,
     descriptor: FrameDescriptor,
     resource_budget: ResourceBudget,
+    output_permit: Option<ConcurrencyPermit>,
     completion_token_issued: bool,
     released: bool,
 }
@@ -798,6 +802,41 @@ impl FrameLease {
     #[must_use]
     pub const fn descriptor(&self) -> &FrameDescriptor {
         &self.descriptor
+    }
+
+    /// Transfers the slot charge to the lease before conversion can expose a durable output.
+    ///
+    /// Pool invalidation can discard a slot-owned charge, but cannot release this lease-owned
+    /// charge until its converted wrapper is dropped.
+    pub(crate) fn pin_output(&mut self) -> Result<(), RuntimeError> {
+        if self.released || self.output_permit.is_some() {
+            return Err(RuntimeError::InvalidState);
+        }
+        let pool = self.inner.as_ref().ok_or(RuntimeError::StaleLease)?;
+        let output_permit = {
+            let mut inner = lock_unpoisoned(pool);
+            if inner.generation != self.descriptor.generation {
+                return Err(RuntimeError::StaleLease);
+            }
+            let slot = inner
+                .slots
+                .get_mut(self.descriptor.slot_id as usize)
+                .ok_or(RuntimeError::StaleLease)?;
+            if slot.state != SlotState::Consumed
+                || slot.generation != self.descriptor.generation
+                || !slot.lease_attached
+                || slot.descriptor.is_none_or(|published| {
+                    published.publication_id != self.descriptor.publication_id
+                })
+            {
+                return Err(RuntimeError::InvalidState);
+            }
+            slot.output_permit
+                .take()
+                .ok_or(RuntimeError::InvalidState)?
+        };
+        self.output_permit = Some(output_permit);
+        Ok(())
     }
 
     /// Creates the one explicit completion token for the caller's external work.
@@ -873,13 +912,14 @@ impl FrameLease {
     ///
     /// Calling this before the matching [`CompletionToken`] is acknowledged returns
     /// `CompletionPending` and leaves the lease usable for a later retry. After acknowledgement,
-    /// releasing the lease drops its shared output permit; the pool later reclaims the slot.
+    /// releasing the lease drops its output permit; the pool later reclaims the slot.
     pub fn release(&mut self) -> Result<(), RuntimeError> {
         if self.released {
             return Ok(());
         }
         let Some(pool) = self.inner.take() else {
             self.released = true;
+            drop(self.output_permit.take());
             return Ok(());
         };
         let (result, output_permit) = {
@@ -912,6 +952,7 @@ impl FrameLease {
         drop(output_permit);
         if result.is_ok() {
             self.released = true;
+            drop(self.output_permit.take());
         } else {
             self.inner = Some(pool);
         }
@@ -946,6 +987,10 @@ impl Drop for FrameLease {
                             slot.completion_token_issued = false;
                             slot.output_permit.take()
                         } else {
+                            if self.output_permit.is_some() {
+                                debug_assert!(slot.output_permit.is_none());
+                                slot.output_permit = self.output_permit.take();
+                            }
                             None
                         }
                     }
