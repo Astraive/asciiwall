@@ -6,7 +6,13 @@ Build an immutable glyph table from a font fingerprint, raster size, cell dimens
 
 ### Executable font-table contract
 
-`ascii-convert::build_glyph_table(font_bytes, &repertoire, config, budget, cancellation)` builds one row-major, 8-bit coverage mask per requested Unicode scalar. `GlyphRepertoire::new(&str)` validates a nonempty, duplicate-free repertoire and stores it privately; its only accepted scalars are printable ASCII (including space), Unicode block elements U+2580–U+259F, and Braille patterns U+2800–U+28FF. The public `is_supported_single_cell_scalar` predicate is the shared contract for future consumers. The builder accepts only `&GlyphRepertoire`, so raw strings cannot bypass validation. Missing font glyphs remain a separate typed error. `GlyphConfig` requires finite positive raster size, nonzero cell dimensions, and a baseline no lower than the cell's bottom edge.
+`GlyphRepertoire::from_preset(GlyphRepertoirePreset::{PrintableAscii, BlockElements, BraillePatterns, AllSupported})` creates the named printable ASCII (U+0020–U+007E, including space), Unicode blocks (U+2580–U+259F), Braille (U+2800–U+28FF), or combined set. `GlyphRepertoire::new(&str)` accepts validated subsets, sorts them canonically, and reports deterministic duplicate/unsupported failures as `Error::Glyph { character, reason }`. The public `is_supported_single_cell_scalar` predicate is the same scalar contract intended for future consumers; `build_glyph_table` accepts only `&GlyphRepertoire`, so raw strings cannot bypass validation.
+
+Font lookup is direct and substitution is disabled. A missing cmap entry returns a scalar-specific `GlyphUnavailable` error; a glyph whose measured horizontal advance exceeds the configured fixed `cell_width` returns `MultiCellMetrics`. `GlyphMetrics::cell_classification(cell_width)` exposes the measured single-cell/multi-cell classification for retained records.
+
+`build_glyph_preview` rasterizes one supported scalar through the exact glyph-table mask path and returns row-major 8-bit coverage plus its mean coverage. Its status is `Available`, `Unavailable`, `Invisible`, or `MultiCell`; space remains `Available` with its actual blank mask, and missing/multi-cell glyphs have no mask. No tofu/fallback mask is synthesized.
+
+The executable workspace contains `crates/ascii-core/`, `crates/ascii-convert/`, and `crates/ascii-media/`; the latter exposes `parse_clip_glyph_table` for the draft clip glyph-table section. It validates entries with the shared `is_supported_single_cell_scalar` predicate, but is not a full clip reader: header, frame-index, and frame decoding are not implemented. There is no application/editor tree (`apps/`), and `docs/ui/` is design documentation, not an editor implementation; editor preview/coverage integration remains missing. Text export is in separate draft PR #333 and is not part of PR #334 until those changes are stacked/merged. Thus, clip glyph-table predicate reuse is implemented, while editor and full-clip integration remain unmet FNT-002 acceptance; this change must stay open/draft.
 
 Each glyph is rasterized with pinned `fontdue 0.9.3` (default features disabled; `hashbrown` enabled, SIMD disabled), centered by advance width and positioned at the configured baseline, then clipped to the cell. Space remains a real measured blank mask. Bounds, coverage-weighted centroid, normalized mean coverage, and four gradient-orientation energy bins come from the resulting mask. The immutable table sorts by measured coverage, then font glyph index, then Unicode scalar.
 
@@ -20,11 +26,20 @@ The raster-byte budget is a checked logical-allocation envelope, not a process-R
 
 Version one enforces that repertoire at construction: C0/C1 controls, bidi formatting, combining marks and variation selectors, emoji, CJK, and all other unlisted scalars are rejected before font lookup. Full shaped text, grapheme clusters, CJK width rules, and color emoji require a separate design rather than silently breaking the grid.
 
+### FNT-002 verification evidence
+
+- Focused command: `cargo test --locked -p ascii-convert --test repertoire` — 10 tests passed, including all 256 Braille dot patterns at 8×12 and 10×15, complete preset font availability, block alignment/coverage, strict rejections, preview-mask identity, and missing/invisible states.
+- Workspace command: `cargo test --locked --workspace --all-targets` — 165 tests passed across 13 suites in `ascii-core`, `ascii-convert`, and `ascii-media`.
+- Quality commands: `cargo fmt --all -- --check` and `cargo clippy --locked --workspace --all-targets -- -D warnings` — passed.
+- Executable smoke: temporary offline path-dependent binary ran `cargo run --locked --offline` and asserted actual `A` preview-mask equality, blank space preservation, and `C` unavailable status. Output: `preview smoke passed: A=Available coverage=Some(0.21764706), space=Available, C=Unavailable`.
+- Fixture/config evidence (source-generated, rights-cleared, no downloaded assets): `crates/ascii-convert/tests/support/repertoire_font.rs` SHA-256 `5a9e260b31c2f43eacb758d1bedf2fcb1e5c16289ebabf9faeb3bfe637731868`; `crates/ascii-convert/tests/repertoire.rs` (raster sizes, cells, baseline, budgets, assertions) SHA-256 `ff80d09fa511f84a84fa662843382424f530facee9257788662488c1414b2228`.
+- Environment: Windows 10 x64, `x86_64-pc-windows-msvc`, Cargo/rustc 1.100.0; `CARGO_HOME=D:/.worktrees/.cargo-cache`, `CARGO_TARGET_DIR=D:/.worktrees/.targets/fnt-002`.
+
 ## Density matching
 
 For mask `m_g(p)` in [0,1], coverage is its mean over the cell. Compare the target's normalized luminance against the reconstructed cell luminance, taking foreground and background polarity into account. A hard-coded string such as ` .:-=+*#%@` is only a starter UI preset; actual glyph darkness depends on font and size.
 
-Coverage ties are resolved deterministically. Space is a valid glyph. Sparse masks can become visually invisible at small sizes, so the repertoire editor should show actual rasterized previews rather than only Unicode labels.
+Coverage ties are resolved deterministically. Space is a valid glyph. Sparse masks can become visually invisible at small sizes; `build_glyph_preview` exposes the measured mask and `Invisible` status, but no editor currently consumes that API.
 
 ## Structure-aware matching
 

@@ -11,12 +11,20 @@ mod error;
 mod frame;
 
 pub use budget::{Budget, CancellationToken, GridBudget, validate_grid_budget};
-pub use error::{BudgetKind, Error, MalformedReason, UnsupportedReason};
+pub use error::{BudgetKind, Error, GlyphFailureReason, MalformedReason, UnsupportedReason};
 pub use frame::{
     AlphaMode, AsciiCell, AsciiFrame, ColorDescription, ColorPrimaries, FrameMetadata,
     GlyphTableId, PixelChannels, PixelFormat, RasterFrameView, RasterOrientation, TransferFunction,
     ValidatedRasterFrameView, validate_frame, validate_raster_frame,
 };
+/// Returns whether a scalar belongs to the strict, supported single-cell v1 repertoire.
+///
+/// This shared predicate lets media readers and conversion code enforce the same glyph set.
+#[must_use]
+pub const fn is_supported_single_cell_scalar(character: char) -> bool {
+    matches!(character as u32, 0x20..=0x7e | 0x2580..=0x259f | 0x2800..=0x28ff)
+}
+
 #[cfg(test)]
 extern crate std;
 /// The dimensions of an ASCII cell grid.
