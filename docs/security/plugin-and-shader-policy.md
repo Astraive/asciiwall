@@ -10,7 +10,7 @@ This still allows extensive customization: colors, fonts, character sets, densit
 
 A syntactically valid shader can consume excessive GPU time, allocate expensive resources through its host, trigger driver bugs, or hang a display path. Validation alone is not a dependable execution-time budget. Do not permit unreviewed shaders in the same process/device path that keeps the user's desktop responsive.
 
-Built-in WGSL remains part of the reviewed engine release. It is versioned, tested, bounded by host resource limits, and not replaceable by a package. Custom color ramps or effect parameters are data, not source-code substitution.
+Any future built-in WGSL is engine-owned, reviewed and versioned with the engine release, bounded by host resource limits, and not replaceable by a package. Custom color ramps or effect parameters are data, not source-code substitution. No package-provided shader executor is implemented.
 
 ## Future extension research
 
@@ -20,10 +20,20 @@ Do not claim WebAssembly makes arbitrary plugins safe by itself. Native GPU acce
 
 ## Developer mode
 
-An advanced developer build may load local experimental code only through a clearly separate explicit mode, with prominent warnings and no association with `.asciiwall` auto-import. It should not be enabled by a package, catalog, config migration, or hidden URL.
+No developer mode is implemented. Any future developer-only code loading must require a clearly separate explicit mode, prominent warnings, and no association with `.asciiwall` auto-import. A package must never enable it; neither should a catalog, config migration, or hidden URL.
 
 Community-library publication remains data-only until the extension security model has an independent release decision. Keeping this boundary small is the recommended way to launch a dependable open-source wallpaper engine.
+
+## Portable validation evidence and limits
+
+`ascii-package` validates bounded manifest and scene documents. Its v1 scene schema accepts only the closed built-in node registry and bounded declarative parameters; integration tests exercise accepted built-in scene controls and reject Rust, JavaScript, shell, native-library, and process-command node payloads. Existing scene tests also reject arbitrary WGSL, WebAssembly, and script node kinds. Manifest settings reject a package-supplied `developer-mode` value.
+
+These tests establish only the portable document-validation boundary. The current repository has no application package loader or developer-mode implementation; catalog activation and hidden-URL paths are not package-validator inputs. Archive extraction, runtime execution, and native bridge behavior have not been audited or accepted by these tests.
+
+Stable manifest validation additionally admits only the declared v1 media-type/path pairs supported by the current local formats: JSON and plain-text data, PNG/JPEG images, WebM video, and TTF fonts. Unknown MIME declarations and mismatched or executable-looking extensions (including native libraries, WebAssembly, and scripts) fail public `validate_manifest`, even when inventory size and digest match. This is metadata admission only: inventory contains no byte-type evidence, so it does not establish that file contents match their declared type or make media/font parsing safe.
 
 ## Native shell integrations
 
 Plasma/GNOME companion components are trusted application adapters, not wallpaper plugins in the package sense. Users install/update them through a reviewed distribution path. Their code must be minimal because a fault can affect the desktop shell. They never execute user-provided conversion or media parser code in the shell process.
+
+The trusted-adapter distinction is policy, not a completed native audit: Plasma/GNOME companion code and its distribution/update path require separate review. No claim is made here that shell integrations or native media/conversion boundaries have passed security acceptance.

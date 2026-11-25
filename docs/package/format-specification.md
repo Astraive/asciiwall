@@ -33,6 +33,21 @@ Unused files are not automatically allowed. All regular files except `manifest.j
 `scene` references a validated scene graph; `image` a decoded raster; `video` a locally decoded source converted live; `ascii-clip` a bounded precomputed character stream; `rendered-video` baked pixels already showing ASCII artwork. Baked video does not retain editable character structure. See [mode comparison](../product/mode-comparison.md).
 
 The optional preview is a static raster, not active HTML/video. A fallback is a safe static image. A font is an explicitly declared font asset. Source, preview, fallback, font, and license paths must resolve to declared files of appropriate types.
+## Supported v1 asset media types
+
+Every declared asset's `media_type` must match its path extension exactly as listed below. No other media types or extensions are permitted by this v1 asset policy.
+
+| Media type | Permitted path extension |
+|---|---|
+| `application/json` | `.json` |
+| `text/plain` | `.txt` |
+| `image/png` | `.png` |
+| `image/jpeg` | `.jpg`, `.jpeg` |
+| `video/webm` | `.webm` |
+| `font/ttf` | `.ttf` |
+| `application/vnd.asciiwall.ascii-clip` | `.ascii-clip` |
+
+The extension is the suffix after the final dot in the asset path. These pairs describe metadata admission only; they do not assert that asset bytes are valid or safe to decode.
 
 ## Paths and transport
 

@@ -134,6 +134,8 @@ The source objects below are valid discriminators, not complete standalone manif
 ]
 ```
 
+The v1 asset inventory declares `assets/waves.ascii-clip` with media type `application/vnd.asciiwall.ascii-clip`. The validator permits that media type only with the `.ascii-clip` extension; it does not expand the executable or native-asset allowlist.
+
 ## Negative conformance cases
 
 | Case | Example / mutation | Required result |
