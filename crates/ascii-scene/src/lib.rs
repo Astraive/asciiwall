@@ -9,6 +9,7 @@ mod determinism;
 mod export;
 mod generator;
 mod matrix_rain;
+mod noise_field;
 mod params;
 mod resource;
 mod simulation;
@@ -33,6 +34,10 @@ pub use generator::{ParticleFieldGenerator, STARFIELD_NODE_ID, SceneGenerator, S
 pub use matrix_rain::{
     MATRIX_RAIN_DESCRIPTOR, MATRIX_RAIN_PRESETS, MatrixRainConfig, MatrixRainGenerator,
     MatrixRainPresetDescriptor,
+};
+pub use noise_field::{
+    NOISE_ALGORITHM, NOISE_FIELD_DESCRIPTOR, NOISE_FIELD_NODE_ID, NOISE_FIELD_PRESETS,
+    NoiseFieldConfig, NoiseFieldGenerator, NoiseFieldPresetDescriptor, TerrainControls,
 };
 pub use params::{
     MAX_CATCH_UP_STEPS, MAX_GRID_CELLS, MAX_GRID_DIMENSION, MAX_PARTICLES,
