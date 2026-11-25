@@ -1,6 +1,6 @@
 # Precomputed ASCII clip format - draft version 1
 
-This is a proposed internal portable character-animation format, separate from the outer `.asciiwall` ZIP package. Its suggested asset extension is `.ascii-clip`. It is not implemented by this documentation delivery.
+This proposed internal portable character-animation format is separate from the outer `.asciiwall` ZIP package. Its suggested asset extension is `.ascii-clip`. The bounded portable reader accepts the uncompressed complete-frame v1 baseline; this document remains a draft and does not promise stable external compatibility.
 
 ## Purpose
 
@@ -36,9 +36,9 @@ Each raw cell is 12 bytes: `glyph_index:u32`, four foreground RGBA bytes, four b
 
 ## Validation
 
-Require positive dimensions, positive duration, increasing presentation timestamps, valid glyph references, bounded frame/glyph counts, nonoverlapping protected header/index regions, and every offset/length inside the file. Reject integer overflow, unknown required flags, truncated data, decompression overruns, unsupported codec ids, and index/payload overlap. Bound total decoded memory independently of compressed bytes.
+Require positive dimensions and durations, increasing presentation timestamps, valid glyph references, bounded frame/glyph counts, nonoverlapping header, glyph-table, index, and payload regions, and every offset/length inside the file. Reject integer overflow, unsupported flags/codecs/frame kinds, truncated data, invalid CRC-32, and index/payload overlap. Bound total decoded memory independently of input size.
 
-The baseline reader caps one frame at 1,048,576 cells and glyph tables at 4096 entries, while user-facing quality profiles are much lower. Admission also checks a whole-job memory budget; a syntactically valid clip can still be too expensive to play.
+The portable reader currently accepts only `codec=0` complete frames with zero flags. The optional zstd codec is rejected until a clip feature declares and implements it. The reader caps one frame at 1,048,576 cells, the glyph table at 4096 entries, total frames at 65,536, and decoded frame payloads at 64 MiB. These parser bounds do not replace a caller's whole-job playback memory admission.
 
 ## Seeking and export
 
