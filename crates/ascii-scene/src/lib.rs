@@ -14,6 +14,7 @@ mod resource;
 mod simulation;
 mod snapshots;
 mod starfield;
+mod waves;
 
 pub use descriptor::{
     GENERATOR_DESCRIPTOR, GeneratorDescriptor, GeneratorLimits, MotionPolicy, ParameterDefault,
@@ -46,6 +47,10 @@ pub use snapshots::{
 pub use starfield::{
     STARFIELD_DESCRIPTOR, STARFIELD_PRESETS, StarfieldConfig, StarfieldGenerator,
     StarfieldPresetDescriptor,
+};
+pub use waves::{
+    WAVE_FIELD_DESCRIPTOR, WAVE_FIELD_NODE_ID, WAVE_FIELD_PRESETS, WaveFieldConfig,
+    WaveFieldGenerator, WaveFieldPresetDescriptor,
 };
 
 pub use ascii_core::Error;
