@@ -51,6 +51,7 @@ dependencies = [
 name = "ascii-runtime"
 version = "0.1.0"
 dependencies = [
+ "ascii-convert",
  "ascii-core",
  "icu_casemap",
  "icu_normalizer",
