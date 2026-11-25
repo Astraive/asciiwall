@@ -106,6 +106,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascii-scene"
+version = "0.1.0"
+dependencies = [
+ "ascii-core",
+]
+
+[[package]]
 name = "asciiwall-cli"
 version = "0.1.0"
 dependencies = [
