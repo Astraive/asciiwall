@@ -2,6 +2,7 @@
 
 mod color;
 mod color_fit;
+mod contour;
 mod density;
 mod font;
 mod font_preflight;
@@ -22,6 +23,7 @@ pub use color_fit::{
     COLOR_FIT_ALGORITHM_VERSION, ColorFit, ColorFitError, ColorFitStrategy, MAX_COLOR_FIT_SAMPLES,
     MAX_COLOR_FIT_WORK_UNITS, estimate_color_fit_work, fit_color_patch,
 };
+pub use contour::{ContourConversion, ContourIdentity, ContourOptions, convert_contour};
 pub use density::{
     ConversionSettings, DensityConversion, DensityConversionError, GridSizing, convert_density,
     convert_density_detailed, convert_structural,
