@@ -150,6 +150,7 @@ pub fn decode_animation(
         let mut snapshot =
             zeroed_bytes(usize::try_from(encoded_len).map_err(|_| Error::SizeOverflow)?)?;
         snapshot[..prefix_len].copy_from_slice(&prefix[..prefix_len]);
+        read_snapshot_remainder(input, &mut snapshot[prefix_len..], cancel)?;
         let result = decode_gif_snapshot(&snapshot, limits, cancel, || cancel.is_cancelled());
         drop(snapshot);
         drop(snapshot_permit);

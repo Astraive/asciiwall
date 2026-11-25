@@ -312,6 +312,32 @@ fn excessive_declared_frame_count_is_rejected_before_canvas_allocation() {
 }
 
 #[test]
+fn gif_decode_uses_bytes_after_the_sniff_prefix() {
+    let resources = DecodeResources::new(1, 1 << 20);
+    let encoded = partial_disposal_gif(None);
+    assert!(
+        encoded.len() > 12,
+        "fixture must extend beyond the sniff prefix"
+    );
+
+    let animation = decode_animation(
+        &mut Cursor::new(&encoded),
+        &limits(resources.clone()),
+        &CancellationToken::new(),
+    )
+    .unwrap();
+
+    assert_eq!(animation.frames().len(), 4);
+    assert_eq!(
+        animation.frames()[0].image().pixels(),
+        &[255, 0, 0, 255, 255, 0, 0, 255]
+    );
+    drop(animation);
+    assert_eq!(resources.cpu_bytes_in_use(), 0);
+    assert_eq!(resources.active_decodes(), 0);
+}
+
+#[test]
 fn gif_subframes_compose_disposal_transparency_and_repeat_timeline() {
     let resources = DecodeResources::new(1, 1 << 20);
     let encoded = partial_disposal_gif(Some(gif::Repeat::Finite(1)));
