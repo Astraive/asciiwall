@@ -248,12 +248,14 @@ fn validate_schema(
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorKind, MAX_JSON_DEPTH, check_json_depth};
+    use super::{AssetInventory, ErrorKind, MAX_JSON_DEPTH, check_json_depth, validate_manifest};
 
     #[test]
     fn rejects_mismatched_closing_delimiters() {
         for input in [b"{]".as_slice(), b"[}", b"}"] {
             let error = check_json_depth(input).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Structural);
+            let error = validate_manifest(input, &AssetInventory::default()).unwrap_err();
             assert_eq!(error.kind, ErrorKind::Structural);
         }
     }
