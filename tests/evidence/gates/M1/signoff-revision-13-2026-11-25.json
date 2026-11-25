@@ -1,0 +1,125 @@
+{
+  "schema": "asciiwall.m1-gate-receipt/v1",
+  "receipt_version": "draft-13",
+  "recorded_on": "2026-11-25",
+  "decision": "no-go",
+  "record_status": "draft_pending_independent_signoff",
+  "amends": {
+    "revision": "draft-12",
+    "file": "signoff-revision-12-2026-11-24.json",
+    "sha256": "cf0ce9afb3379922c478429da9ddf720d987c0917aac19cbd5dd73a92037cfd6",
+    "prior_revision_preserved_byte_for_byte": true
+  },
+  "gate": {
+    "issue": 211,
+    "state_observed": "OPEN",
+    "status": "In Review / Blocked",
+    "acceptance_status": "NO-GO",
+    "m1_completion_claimed": false,
+    "accepted_scope": []
+  },
+  "evidence_added": {
+    "qa101": {
+      "pull_request": 335,
+      "state": "OPEN_DRAFT",
+      "head_sha": "68ecb191b9d336291021a23e67c78bd7829c837f",
+      "base": "feat/qa-004-evidence-recorder-linear",
+      "hosted_run": {
+        "run_id": 45612484177,
+        "conclusion": "success",
+        "head_sha": "68ecb191b9d336291021a23e67c78bd7829c837f",
+        "checks": [
+          "EC-001–EC-005 passed on Ubuntu",
+          "EC-001–EC-005 passed on macOS",
+          "EC-001–EC-005 passed on Windows"
+        ],
+        "artifacts": {
+          "ubuntu": {
+            "artifact": "qa-101-ubuntu-latest",
+            "manifest_path": "linux/run-manifest.json",
+            "evidence_path": "linux/test-output.log",
+            "record_path": "linux/qa004-record.json",
+            "source_sha256": "6097265db2baeefd96548810ef754fd9ed0a1aef2273f357534694d24b69bfe8",
+            "test_binary_sha256": "cc0c8b58024137c17378d3a22686b1d3eae43b67ce8661f8322dce24e11102fc",
+            "output_sha256": "4940eb7f90090eb535e158ef3d13ef479acb0da30aedb3c5142b3100a16e3c6c",
+            "qa004_record_id": "97c14567d0ad8346b8528ac95689698043fda88b51911940e491a24c80416ef5"
+          },
+          "macos": {
+            "artifact": "qa-101-macos-latest",
+            "manifest_path": "macos/run-manifest.json",
+            "evidence_path": "macos/test-output.log",
+            "record_path": "macos/qa004-record.json",
+            "source_sha256": "6097265db2baeefd96548810ef754fd9ed0a1aef2273f357534694d24b69bfe8",
+            "test_binary_sha256": "6c50791f1f67ad14a62dadfb04addd13dcbfe5e12eb7888f281903b89b8303fe",
+            "output_sha256": "4940eb7f90090eb535e158ef3d13ef479acb0da30aedb3c5142b3100a16e3c6c",
+            "qa004_record_id": "3aa00558ebff0d691c0c413e7f8753106792daa19b419a4b138c0181f669275e"
+          },
+          "windows": {
+            "artifact": "qa-101-windows-latest",
+            "manifest_path": "windows/run-manifest.json",
+            "evidence_path": "windows/test-output.log",
+            "record_path": "windows/qa004-record.json",
+            "source_sha256": "6097265db2baeefd96548810ef754fd9ed0a1aef2273f357534694d24b69bfe8",
+            "test_binary_sha256": "e10e178b59642a92778088b6cc4af80e1473000acff2a07cb1de5b10c9a2b0eb",
+            "output_sha256": "4940eb7f90090eb535e158ef3d13ef479acb0da30aedb3c5142b3100a16e3c6c",
+            "qa004_record_id": "8b263408d4095983cb48ed1af4c3044652c642301665789a5411c8913110ad1e"
+          }
+        },
+        "validation": "Downloaded each hosted artifact and checked manifest paths, source and test hashes, result, QA-004 record IDs, and SHA-256 of test-output.log; manifests report QA-004 record validation status valid."
+      },
+      "offline_evidence_run": {
+        "run_id": 45612493349,
+        "head_sha": "68ecb191b9d336291021a23e67c78bd7829c837f",
+        "conclusion": "success",
+        "checks": [
+          "Offline evidence (ubuntu-latest)",
+          "Offline evidence (macos-latest)",
+          "Offline evidence (windows-latest)"
+        ],
+        "artifact_status": "No downloadable artifacts are attached to this run; artifact API returned an empty list."
+      },
+      "qa004_pin": "fb20e84ec196c421b954b90985dc2217a35767c6",
+      "portable_repository_and_security_checks": "Passed; Portable core passed Ubuntu/macOS/Windows and Repository quality and Python security analysis passed at the exact QA-101 head in hosted runs 45612493349 and 45612484177.",
+      "focused_local_regression_tests": "Passed (reported for exact QA-101 head in source-verified review evidence).",
+      "independent_exact_head_review": {
+        "reviewer": "Luna",
+        "head_sha": "68ecb191b9d336291021a23e67c78bd7829c837f",
+        "status": "No P0–P2 findings",
+        "scope": "Code review only; not authenticated scenario acceptance or M1 sign-off."
+      },
+      "scope_limit": "Automated component evidence only; no authenticated scenario acceptance, native/product acceptance, or integrated M1 gate pass."
+    },
+    "qa102": {
+      "pull_request": 341,
+      "state": "OPEN_DRAFT",
+      "head_sha": "1f14681b9db9480c4eb0db9775820691d0970520",
+      "base": "main",
+      "portable_core_security_repository_checks": "Passing; do not interpret as EC-009 or full-gate pass.",
+      "ec009": "NOT RUN",
+      "scope_limits": [
+        "Documented narrow scope only",
+        "GitHub reports a real merge conflict",
+        "No authenticated human or native acceptance"
+      ]
+    }
+  },
+  "remaining_blockers": [
+    "QA-004 issue #35 remains OPEN and is a hard prerequisite.",
+    "No integrated M1 candidate or binary exists.",
+    "Exact-candidate and firewall-denied scenarios remain untested.",
+    "Native/product acceptance and authenticated independent human signoffs remain absent; required reviewer identities, decisions, dates, and evidence links are null.",
+    "No captured settings digest is available.",
+    "Rights and provenance remain unresolved."
+  ],
+  "independent_human_signoffs": {
+    "engine_maintainer": null,
+    "cli_reviewer": null
+  },
+  "disposition": {
+    "decision": "NO-GO",
+    "m1_completion_claimed": false,
+    "accepted_scope": [],
+    "issue_211_remains_open": true,
+    "reason": "QA-101 adds exact-head automated component evidence but does not satisfy authenticated acceptance, and QA-102 has limited evidence, EC-009 NOT RUN, and a real merge conflict. No integrated candidate, native/product acceptance, settings digest, rights/provenance evidence, or required independent signoffs exist; QA-004 #35 remains a hard prerequisite. The gate remains blocked and NO-GO."
+  }
+}
