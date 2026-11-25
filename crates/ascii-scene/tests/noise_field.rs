@@ -9,8 +9,8 @@ use ascii_convert::{GlyphConfig, GlyphRepertoire, build_glyph_table};
 use ascii_core::{Budget, CancellationToken};
 use ascii_scene::{
     ApprovedSnapshots, NOISE_ALGORITHM, NOISE_FIELD_DESCRIPTOR, NOISE_FIELD_PRESETS,
-    NoiseFieldConfig, NoiseFieldGenerator, SceneDimensions, SceneParameters, SceneResourceBudget,
-    SceneRuntime, TerrainControls,
+    NoiseFieldConfig, NoiseFieldGenerator, NormalizedPoint, SceneDimensions, SceneParameters,
+    SceneResourceBudget, SceneRuntime, SnapshotCandidates, SnapshotCapabilities, TerrainControls,
 };
 fn fixture() -> ascii_convert::GlyphTable {
     let font = synthetic_font::synthetic_font(false);
@@ -132,9 +132,9 @@ fn configuration_and_internal_terrain_bounds_are_checked() {
     }
     assert!(NoiseFieldConfig::new(0.01, 0.0, u32::MAX).is_ok());
     assert!(NoiseFieldConfig::new(100.0, 10.0, 0).is_ok());
-    assert!(TerrainControls::new(0.0, 1).is_err());
-    assert!(TerrainControls::new(0.0001, 1).is_err());
-    assert!(TerrainControls::new(0.01, 1).is_ok());
+    assert!(TerrainControls::new(0.0, 1, false).is_err());
+    assert!(TerrainControls::new(0.0001, 1, false).is_err());
+    assert!(TerrainControls::new(0.01, 1, false).is_ok());
 
     assert!(NoiseFieldConfig::from_hex_rgba(2.0, 0.2, "#ccccffff").is_ok());
     assert!(NoiseFieldConfig::from_hex_rgba(2.0, 0.2, "ccccffff").is_err());
@@ -167,6 +167,53 @@ fn assert_frozen(parameters: SceneParameters) {
 fn zero_time_scale_and_disabled_background_motion_are_static() {
     assert_frozen(SceneParameters::new(1, 0.0, 0, 60, true).unwrap());
     assert_frozen(SceneParameters::new(1, 1.0, 0, 60, false).unwrap());
+}
+
+#[test]
+fn terrain_parallax_uses_only_approved_normalized_pointer() {
+    use ascii_scene::SignalKind;
+
+    assert_eq!(
+        NOISE_FIELD_DESCRIPTOR.supported_signals,
+        &[SignalKind::PointerPosition]
+    );
+    let table = fixture();
+    let parameters = SceneParameters::new(1, 1.0, 0, 60, true).unwrap();
+    let dimensions = SceneDimensions::new(80, 40).unwrap();
+    let controls = TerrainControls::new(0.1, 1, true).unwrap();
+    let mut runtime = SceneRuntime::try_new(
+        parameters,
+        dimensions,
+        NoiseFieldGenerator::new(&table, NoiseFieldConfig::terrain())
+            .with_terrain_controls(controls),
+        &SceneResourceBudget::default(),
+    )
+    .unwrap();
+    let initial = runtime.frame().to_vec();
+    let candidates = SnapshotCandidates::new(
+        Some(NormalizedPoint::new(u16::MAX, u16::MAX)),
+        None,
+        None,
+        None,
+    );
+    let denied = ApprovedSnapshots::filter(
+        SnapshotCapabilities::new(false, false, false, false),
+        candidates,
+    );
+    let denied_report = runtime
+        .advance(std::time::Duration::from_millis(17), &denied)
+        .unwrap();
+    assert!(denied_report.output_refreshed());
+    assert_eq!(runtime.frame(), initial);
+
+    let approved = ApprovedSnapshots::filter(
+        SnapshotCapabilities::new(true, false, false, false),
+        candidates,
+    );
+    let approved_report = runtime
+        .advance(std::time::Duration::from_millis(17), &approved)
+        .unwrap();
+    assert!(approved_report.output_refreshed());
 }
 #[test]
 fn tiny_large_scale_zero_speed_and_resize_remain_bounded() {

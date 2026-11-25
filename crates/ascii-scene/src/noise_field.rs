@@ -13,7 +13,7 @@ use crate::params::{
 };
 use crate::resource::GeneratorPreparationPermit;
 use crate::simulation::FixedStepContext;
-use crate::snapshots::ApprovedSnapshots;
+use crate::snapshots::{ApprovedSnapshots, SignalKind};
 
 const Q16: u64 = 65_536;
 const PARAMETERS: &[ParameterDescriptor] = &[
@@ -119,7 +119,7 @@ pub const NOISE_FIELD_DESCRIPTOR: GeneratorDescriptor = GeneratorDescriptor {
         max_acceleration_q16: 0,
         max_lifetime_ticks: 0,
     },
-    supported_signals: &[],
+    supported_signals: &[SignalKind::PointerPosition],
     reduced_motion: MotionPolicy::FreezeWhenBackgroundMotionDisabled,
     deterministic_export: true,
     presets: DESCRIPTOR_PRESETS,
@@ -201,15 +201,17 @@ impl NoiseFieldConfig {
 pub struct TerrainControls {
     contour_spacing_q16: u32,
     seed: u32,
+    parallax: bool,
 }
 impl TerrainControls {
-    pub fn new(contour_spacing: f32, seed: u32) -> Result<Self, Error> {
+    pub fn new(contour_spacing: f32, seed: u32, parallax: bool) -> Result<Self, Error> {
         if !contour_spacing.is_finite() || !(0.01..=1.0).contains(&contour_spacing) {
             return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
         }
         Ok(Self {
             contour_spacing_q16: (f64::from(contour_spacing) * Q16 as f64).round() as u32,
             seed,
+            parallax,
         })
     }
     #[must_use]
@@ -217,6 +219,7 @@ impl TerrainControls {
         Self {
             contour_spacing_q16: 6_554,
             seed: 1,
+            parallax: false,
         }
     }
     #[must_use]
@@ -226,6 +229,10 @@ impl TerrainControls {
     #[must_use]
     pub const fn seed(self) -> u32 {
         self.seed
+    }
+    #[must_use]
+    pub const fn parallax(self) -> bool {
+        self.parallax
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -244,6 +251,8 @@ pub struct NoiseFieldGenerator<'a> {
     node_id: &'a str,
     phase_q16: u32,
     seed: u64,
+    parallax_x_q16: i32,
+    parallax_y_q16: i32,
     static_motion: bool,
 }
 impl<'a> NoiseFieldGenerator<'a> {
@@ -256,6 +265,8 @@ impl<'a> NoiseFieldGenerator<'a> {
             node_id: NOISE_FIELD_NODE_ID,
             phase_q16: 0,
             seed: 0,
+            parallax_x_q16: 0,
+            parallax_y_q16: 0,
             static_motion: false,
         }
     }
@@ -313,7 +324,8 @@ impl SceneGenerator for NoiseFieldGenerator<'_> {
             seed
         };
         self.phase_q16 = 0;
-        self.static_motion = self.config.speed_q16 == 0 || parameters.is_static();
+        self.static_motion = parameters.is_static()
+            || (self.config.speed_q16 == 0 && !self.terrain.is_some_and(TerrainControls::parallax));
         Ok(())
     }
     fn step(
@@ -321,17 +333,21 @@ impl SceneGenerator for NoiseFieldGenerator<'_> {
         context: FixedStepContext,
         _: SceneDimensions,
         parameters: &SceneParameters,
-        _: &ApprovedSnapshots<'_>,
+        snapshots: &ApprovedSnapshots<'_>,
     ) {
-        if self.config.speed_q16 == 0
-            || parameters.time_scale_q16() == 0
-            || !parameters.background_motion()
-        {
+        if parameters.is_static() {
             return;
         }
-        self.phase_q16 = ((u128::from(context.step_index()) * u128::from(self.config.speed_q16)
-            / u128::from(context.simulation_hz())) as u32)
-            & 0xffff;
+        if self.config.speed_q16 > 0 {
+            self.phase_q16 = ((u128::from(context.step_index()) * u128::from(self.config.speed_q16)
+                / u128::from(context.simulation_hz())) as u32)
+                & 0xffff;
+        }
+        if self.terrain.is_some_and(TerrainControls::parallax) {
+            let point = snapshots.pointer_position();
+            self.parallax_x_q16 = point.map_or(0, |p| (i32::from(p.x_q16()) - 32_768) * 2);
+            self.parallax_y_q16 = point.map_or(0, |p| (i32::from(p.y_q16()) - 32_768) * 2);
+        }
     }
     fn is_static(&self) -> bool {
         self.static_motion
@@ -350,8 +366,14 @@ impl SceneGenerator for NoiseFieldGenerator<'_> {
         let spacing = self.terrain.map_or(0, |t| u64::from(t.contour_spacing_q16));
         for y in 0..dims.rows() {
             for x in 0..dims.columns() {
-                let px = (u64::from(x) * Q16 / scale).min(u64::from(u32::MAX)) as u32;
-                let py = (u64::from(y) * Q16 / scale).min(u64::from(u32::MAX)) as u32;
+                let px = offset_coordinate(
+                    (u64::from(x) * Q16 / scale).min(u64::from(u32::MAX)) as u32,
+                    self.parallax_x_q16,
+                );
+                let py = offset_coordinate(
+                    (u64::from(y) * Q16 / scale).min(u64::from(u32::MAX)) as u32,
+                    self.parallax_y_q16,
+                );
                 let value = sample(self.seed, px, py.wrapping_add(phase));
                 let index = if spacing > 0 {
                     let band = u64::from(value) % spacing;
@@ -368,6 +390,9 @@ impl SceneGenerator for NoiseFieldGenerator<'_> {
             }
         }
     }
+}
+fn offset_coordinate(coordinate: u32, offset_q16: i32) -> u32 {
+    (i64::from(coordinate) + i64::from(offset_q16)).clamp(0, i64::from(u32::MAX)) as u32
 }
 fn sample(seed: u64, x: u32, y: u32) -> u16 {
     let ix = x >> 16;
@@ -399,4 +424,16 @@ fn fade(t: u16) -> u32 {
 fn lerp(a: u16, b: u16, t: u32) -> u16 {
     let delta = i64::from(b) - i64::from(a);
     (i64::from(a) + delta * i64::from(t) / 65_535).clamp(0, 65_535) as u16
+}
+#[cfg(test)]
+mod tests {
+    use super::{offset_coordinate, sample};
+
+    #[test]
+    fn bounded_parallax_offset_changes_the_sampled_field() {
+        let start = 4 * 65_536;
+        let shifted = offset_coordinate(start, 65_534);
+        assert!(shifted - start <= 65_536);
+        assert_ne!(sample(7, start, start), sample(7, shifted, shifted));
+    }
 }
