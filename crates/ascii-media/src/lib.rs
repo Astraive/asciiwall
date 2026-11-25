@@ -6,10 +6,14 @@
 //! Codec crate limits are defense in depth; decoder scratch, input, work, and retained output
 //! are also preflighted and charged to local and shared resource ledgers.
 
+mod capabilities;
 mod decoded_frame;
 mod image;
 mod resources;
 
+pub use capabilities::{
+    ImageCapabilities, JpegCapabilities, PngCapabilities, WebpCapabilities, image_capabilities,
+};
 pub use decoded_frame::DecodedFrame;
 pub use image::{DecodeLimits, ReadSeek, decode_image};
 pub use resources::DecodeResources;

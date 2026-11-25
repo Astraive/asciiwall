@@ -134,3 +134,22 @@ Rights-cleared generated fixtures exercise PNG color/depth/interlace variants, J
 and progressive scans, malformed/truncated inputs, metadata policy, and budget/cancellation
 paths. Their generated configuration and SHA-256 values are printed/asserted by the focused
 tests. These fixture checks do not imply native-codec, performance, or platform-support claims.
+### Image capability contract (IMG-002)
+
+`ascii-media::image_capabilities()` reports this build's static decoder variants: still PNG,
+baseline/progressive JPEG, and no APNG or WebP variants. These values reflect the fixed decoder
+backends and are tested against the crate's actual implementation. The decoder explicitly rejects
+the RIFF/WEBP signature; animated WebP is not treated as a still image, and no animation decoder
+is currently wired in. Do not advertise WebP, APNG, ICC profile interpretation, or HDR support.
+
+JPEG display orientation is applied once while producing the normalized top-down raster. The
+returned `RasterFrameView` carries `RasterOrientation::TopDown`; consumers must use that pixel
+orientation and must not apply source EXIF orientation again. The eight generated asymmetric
+orientation fixtures and expected output hashes are maintained in
+`image_decode_jpeg_controls.rs`.
+
+The repository currently has no CLI doctor or import-error surface to consume the capability
+report. Those user-facing diagnostics remain blocked until those product surfaces exist; callers
+can query the media-library API in the meantime. Color metadata remains intentionally limited:
+untagged images are assumed sRGB, explicit unsupported profiles/transfers are rejected, and no
+ICC/HDR accuracy is claimed.
