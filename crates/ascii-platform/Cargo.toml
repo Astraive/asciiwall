@@ -1,0 +1,10 @@
+[package]
+name = "ascii-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+ascii-core = { path = "../ascii-core" }
