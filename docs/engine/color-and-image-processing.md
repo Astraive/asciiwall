@@ -91,9 +91,51 @@ Palette storage, source sampling, candidate fitting, and frame construction are 
 
 The frame stores explicit resolved sRGBA8 foreground and background colors, so downstream image encoders can consume those colors directly. This conversion contract does not implement a PNG exporter, GUI, terminal renderer, or promise of terminal appearance; the ANSI notice is metadata, not a display guarantee.
 
+## Dithering
+
+Density dithering is optional and defaults to `DitherMode::Off`, which preserves the existing
+nearest-mean-coverage choice. Ordered and diffusion modes operate only on normalized linear-light
+cell luminance after sampling and background compositing: the scalar target is
+`clamp((Y - Y_background) / (Y_foreground - Y_background), 0, 1)`. It is not applied to encoded
+bytes, individual RGB channels, retained quality-patch samples, or candidate-specific color-fit
+scores; combining a non-off mode with color fitting is rejected.
+
+`Ordered { pattern: Bayer8, seed }` adds a signed Bayer-8 threshold in coverage units with amplitude
+`1 / max(glyph_count - 1, 1)`. The seed is mixed with a fixed SplitMix64 finalizer to select one
+stable 8x8 phase; the phase depends on the seed and absolute output-cell coordinates, never frame
+number, wall clock, randomness, or thread scheduling. Quantization chooses the nearest measured
+glyph mean coverage, ties by glyph index then Unicode scalar. Thresholds are clamped to `[0,1]`.
+
+`ErrorDiffusion { kernel: FloydSteinberg }` processes cells serially in row-major, left-to-right
+order. It distributes the residual between adjusted target and chosen measured glyph coverage as
+7/16 to the next cell, 3/16 to next-row left, 5/16 to next-row same-column, and 1/16 to next-row
+right. Out-of-grid neighbors are discarded; adjusted values clamp to `[0,1]`; ties use the same
+glyph rule. This dependency chain is deliberately not parallelized. Two `f64` row buffers are the
+only diffusion scratch; their checked bytes join the conversion raster budget. The additional
+dither operations, including row-buffer initialization and clearing, are charged to the operation
+work budget and capped at 16,000,000 units. Cancellation is polled during scratch initialization,
+row clearing, and conversion. Nonfinite residuals, checked-size overflow, allocation failure,
+cancellation, or budget exhaustion fail without returning a partial frame.
+
+The detailed result exposes a SHA-256 dither cache identity that includes mode, selected kernel or
+pattern, and the ordered seed. Applications must combine it with source, glyph-table, sampling,
+color, and conversion settings in their overall cache key.
+
+Evaluation compares synthetic moving linear-light gradients and abrupt scene changes against
+undithered conversion using mean tone error, changed-cell fraction between adjacent frames
+(flicker), and response to the scene-change frame (lag). Ordered phase and diffusion scan restart
+at each independent frame, so neither mode promises temporal coherence; fixed ordered phase avoids
+per-frame random phase changes, while diffusion has serial dependencies. Both add conversion work;
+diffusion also adds two row buffers and cannot use parallel cell matching. Dithering is not a
+claim that still-image quality gains improve video, and any tone/flicker/lag trade-off is scene- and
+grid-dependent.
+
 ## Filtering and edges
 
-Area/box sampling is a practical baseline for shrink-heavy conversion. Compare alternatives with thin lines, checkerboards, text, and photographs. Edge enhancement should be bounded and operate before quantization; strong enhancement can introduce halos. Dithering is optional and can increase flicker in video unless its pattern is temporally stable.
+Area/box sampling is a practical baseline for shrink-heavy conversion. Compare alternatives with thin
+lines, checkerboards, text, and photographs. Edge enhancement should be bounded and operate before
+quantization; strong enhancement can introduce halos. Dithering is optional and can increase
+flicker in video unless its pattern is temporally stable.
 
 ## Input coverage
 

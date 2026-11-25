@@ -5,9 +5,10 @@ use std::sync::LazyLock;
 
 use ascii_convert::{
     ColorNormalizationError, ColorNormalizationWarning, ConversionSettings, CropRect,
-    DensityConversionError, FitMode, FitTransform, GlyphConfig, GlyphRepertoire, GlyphTable,
-    GridSizing, LinearRgb, PatchDimensions, SamplingFilter, SamplingOptions,
-    UnsupportedColorReason, build_glyph_table, convert_density, convert_density_detailed,
+    DensityConversionError, DitherMode, ErrorDiffusionKernel, FitMode, FitTransform, GlyphConfig,
+    GlyphRepertoire, GlyphTable, GridSizing, LinearRgb, OrderedPattern, PatchDimensions,
+    SamplingFilter, SamplingOptions, UnsupportedColorReason, build_glyph_table, convert_density,
+    convert_density_detailed,
 };
 use ascii_core::{
     AlphaMode, Budget, BudgetKind, CancellationToken, ColorDescription, Error, FrameMetadata,
@@ -1496,4 +1497,190 @@ fn settings_reject_empty_geometry_and_indistinguishable_luminance() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn dither_modes_have_stable_cache_identity_and_deterministic_frames() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let pixels = vec![128; 32 * 36];
+    let make = |mode| {
+        let configured = settings(
+            &table,
+            &cancellation,
+            GridSizing::fixed_pixel_surface(32, 36),
+            LinearRgb::WHITE,
+            LinearRgb::BLACK,
+        )
+        .with_dither(mode);
+        convert_density_detailed(
+            linear_gray_raster(&pixels, 32, 36, 32),
+            &table,
+            &configured,
+            &budget(),
+            unlimited_raster_resources(),
+        )
+        .expect("synthetic dither conversion succeeds")
+    };
+    let ordered = DitherMode::Ordered {
+        pattern: OrderedPattern::Bayer8,
+        seed: 17,
+    };
+    let first = make(ordered);
+    let repeated = make(ordered);
+    let other_seed = make(DitherMode::Ordered {
+        pattern: OrderedPattern::Bayer8,
+        seed: 18,
+    });
+    let diffusion = make(DitherMode::ErrorDiffusion {
+        kernel: ErrorDiffusionKernel::FloydSteinberg,
+    });
+
+    assert_eq!(first.frame(), repeated.frame());
+    assert_ne!(
+        first.dither_cache_identity(),
+        other_seed.dither_cache_identity()
+    );
+    assert_ne!(
+        first.dither_cache_identity(),
+        diffusion.dither_cache_identity()
+    );
+    assert_eq!(
+        first.dither_cache_identity(),
+        repeated.dither_cache_identity()
+    );
+    assert_eq!(first.frame().size(), GridSize::new(4, 3));
+}
+
+#[test]
+fn dither_cancellation_fails_without_publishing_a_frame() {
+    let table = build_table();
+    let pixels = [128; CELL_WIDTH as usize * CELL_HEIGHT as usize];
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let configured = settings(
+        &table,
+        &cancellation,
+        GridSizing::fixed_pixel_surface(CELL_WIDTH, CELL_HEIGHT),
+        LinearRgb::WHITE,
+        LinearRgb::BLACK,
+    )
+    .with_dither(DitherMode::ErrorDiffusion {
+        kernel: ErrorDiffusionKernel::FloydSteinberg,
+    });
+    assert!(matches!(
+        convert_density_detailed(
+            linear_gray_raster(&pixels, CELL_WIDTH, CELL_HEIGHT, CELL_WIDTH as usize),
+            &table,
+            &configured,
+            &budget(),
+            unlimited_raster_resources(),
+        ),
+        Err(DensityConversionError::Core(Error::Cancelled))
+    ));
+}
+
+#[test]
+fn synthetic_motion_and_scene_change_metrics_compare_with_undithered_output() {
+    let table = build_table();
+    let cancellation = CancellationToken::new();
+    let make_image = |shift: usize, scene_change: bool| {
+        let mut image = vec![0; 32 * 36];
+        for y in 0..36 {
+            for x in 0..32 {
+                image[y * 32 + x] = if scene_change {
+                    u8::MAX
+                } else {
+                    u8::try_from((x + shift).min(31) * 255 / 31).expect("gradient value fits")
+                };
+            }
+        }
+        image
+    };
+    let frame = |pixels: &[u8], mode| {
+        let configured = settings(
+            &table,
+            &cancellation,
+            GridSizing::fixed_pixel_surface(32, 36),
+            LinearRgb::WHITE,
+            LinearRgb::BLACK,
+        )
+        .with_dither(mode);
+        convert_density_detailed(
+            linear_gray_raster(pixels, 32, 36, 32),
+            &table,
+            &configured,
+            &budget(),
+            unlimited_raster_resources(),
+        )
+        .expect("synthetic frame converts")
+    };
+    let first_gradient = make_image(0, false);
+    let moving_gradient = make_image(1, false);
+    let changed_scene = make_image(0, true);
+    let modes = [
+        DitherMode::Off,
+        DitherMode::Ordered {
+            pattern: OrderedPattern::Bayer8,
+            seed: 23,
+        },
+        DitherMode::ErrorDiffusion {
+            kernel: ErrorDiffusionKernel::FloydSteinberg,
+        },
+    ];
+
+    let mut metrics = Vec::new();
+    for mode in modes {
+        let first = frame(&first_gradient, mode);
+        let moving = frame(&moving_gradient, mode);
+        let changed = frame(&changed_scene, mode);
+        let tone_error = |converted: &ascii_convert::DensityConversion, pixels: &[u8]| {
+            converted
+                .frame()
+                .cells()
+                .iter()
+                .enumerate()
+                .map(|(index, cell)| {
+                    let row = index / 4;
+                    let column = index % 4;
+                    let mut target = 0.0;
+                    let cell_width = usize::try_from(CELL_WIDTH).expect("cell width fits");
+                    let cell_height = usize::try_from(CELL_HEIGHT).expect("cell height fits");
+                    for y in row * cell_height..(row + 1) * cell_height {
+                        for x in column * cell_width..(column + 1) * cell_width {
+                            target += f64::from(pixels[y * 32 + x]) / 255.0;
+                        }
+                    }
+                    target /= f64::from(CELL_WIDTH * CELL_HEIGHT);
+                    let glyph_index =
+                        usize::try_from(cell.glyph()).expect("fixture glyph index fits");
+                    let selected = f64::from(table.glyphs()[glyph_index].mean_coverage());
+                    (target - selected).abs()
+                })
+                .sum::<f64>()
+                / 12.0
+        };
+        let changed_cells = first
+            .frame()
+            .cells()
+            .iter()
+            .zip(moving.frame().cells())
+            .filter(|(left, right)| left.glyph() != right.glyph())
+            .count();
+        let changed_fraction =
+            f64::from(u32::try_from(changed_cells).expect("synthetic grid has a small cell count"))
+                / 12.0;
+        let lag_error = tone_error(&changed, &changed_scene);
+        metrics.push((
+            tone_error(&first, &first_gradient),
+            changed_fraction,
+            lag_error,
+        ));
+    }
+    assert_eq!(metrics.len(), 3);
+    for (tone, flicker, lag) in metrics {
+        assert!(tone.is_finite() && (0.0..=1.0).contains(&tone));
+        assert!(flicker.is_finite() && (0.0..=1.0).contains(&flicker));
+        assert!(lag.is_finite() && (0.0..=1.0).contains(&lag));
+    }
 }

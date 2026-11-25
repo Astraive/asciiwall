@@ -1145,6 +1145,7 @@ pub(crate) fn prepare_sampling(
     frame_validation_work: u64,
     color_samples_per_cell: u64,
     palette_storage_bytes: u64,
+    dither_scratch_bytes: u64,
     budget: &Budget,
 ) -> Result<SamplingPlan, SamplingError> {
     let source_width = source.width();
@@ -1318,6 +1319,7 @@ pub(crate) fn prepare_sampling(
         .and_then(|bytes| bytes.checked_add(retained_patch_bytes))
         .and_then(|bytes| bytes.checked_add(color_buffer_bytes))
         .and_then(|bytes| bytes.checked_add(palette_storage_bytes))
+        .and_then(|bytes| bytes.checked_add(dither_scratch_bytes))
         .ok_or(Error::SizeOverflow)?;
     if whole_raster_bytes > budget.max_raster_bytes() {
         return Err(Error::BudgetExceeded(BudgetKind::RasterBytes).into());
