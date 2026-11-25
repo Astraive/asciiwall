@@ -200,10 +200,8 @@ pub fn convert_contour(
         dimensions,
         size.cell_count(),
     )?;
-    let reserved_work = rerank_work
-        .checked_add(shortlist_work)
-        .and_then(|work| work.checked_add(grid_budget.work_units()))
-        .ok_or(Error::SizeOverflow)?;
+    let reserved_work =
+        reserved_contour_work(rerank_work, shortlist_work, grid_budget.work_units())?;
     if reserved_work >= budget.max_work_units() {
         return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
     }
@@ -405,6 +403,17 @@ pub fn convert_contour(
         identity: ContourIdentity(digest.finalize().into()),
         work_units_bound: reserved_work,
     })
+}
+
+fn reserved_contour_work(
+    rerank_work: u64,
+    shortlist_work: u64,
+    grid_work: u64,
+) -> Result<u64, Error> {
+    rerank_work
+        .checked_add(shortlist_work)
+        .and_then(|work| work.checked_add(grid_work))
+        .ok_or(Error::SizeOverflow)
 }
 
 fn patch_has_contour(
@@ -623,4 +632,25 @@ fn encode_color(color: crate::LinearRgb) -> [u8; 4] {
 
 fn canonical_zero(value: f64) -> f64 {
     if value == 0.0 { 0.0 } else { value }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reserved_contour_work;
+
+    #[test]
+    fn reservation_includes_rerank_shortlist_and_grid_work() {
+        let cells = 1_u64;
+        let candidates = 2_u64;
+        let samples = 8_u64 * 12;
+        let shortlist_work = 12_345;
+        let grid_work = 678;
+        let rerank_work = cells * candidates * samples * 4;
+
+        assert_eq!(
+            reserved_contour_work(rerank_work, shortlist_work, grid_work)
+                .expect("fixture work reservation fits u64"),
+            768 + shortlist_work + grid_work
+        );
+    }
 }

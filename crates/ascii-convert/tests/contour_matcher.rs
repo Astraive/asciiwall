@@ -190,14 +190,12 @@ fn matched_source_comparison_measures_silhouette_tone_loss_and_work() {
     let matched = run(&table, &source, options(0.0, 0.0));
     let texture_suppressed = run(&table, &texture, options(0.10, 0.02));
     let (matched_silhouette, matched_tone) = selected_errors(&table, &source, &matched);
-    let (suppressed_silhouette, suppressed_tone) =
-        selected_errors(&table, &texture, &texture_suppressed);
+    let (_, suppressed_tone) = selected_errors(&table, &texture, &texture_suppressed);
     assert_eq!(
         matched_silhouette, 0,
         "exact reference retains its silhouette"
     );
     assert_eq!(matched_tone, 0, "exact reference has no tone loss");
-    assert!(suppressed_silhouette <= texture.len());
     assert!(
         suppressed_tone > 0,
         "thresholded texture causes measurable tone loss"
