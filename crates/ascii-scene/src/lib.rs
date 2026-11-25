@@ -42,7 +42,7 @@ pub use resource::{GeneratorPreparationPermit, SceneResourceBudget};
 pub use simulation::{AdvanceReport, FixedStepContext, SimulationLimits};
 pub use snapshots::{
     ApprovedSnapshots, BatterySnapshot, NormalizedButtonEvent, NormalizedPoint, NormalizedRect,
-    SignalKind, SnapshotCandidates, SnapshotCapabilities,
+    SignalKind, SnapshotCandidates, SnapshotCapabilities, MAX_APPROVED_BUTTON_EVENTS,
 };
 pub use starfield::{
     STARFIELD_DESCRIPTOR, STARFIELD_PRESETS, StarfieldConfig, StarfieldGenerator,

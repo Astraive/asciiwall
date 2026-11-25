@@ -11,8 +11,8 @@ use std::time::Duration;
 use ascii_convert::{GlyphConfig, GlyphRepertoire, build_glyph_table};
 use ascii_core::{Budget, CancellationToken};
 use ascii_scene::{
-    STARFIELD_DESCRIPTOR, STARFIELD_PRESETS, SceneDimensions, SceneParameters, SceneResourceBudget,
-    SceneRuntime, StarfieldConfig, StarfieldGenerator,
+    MAX_APPROVED_BUTTON_EVENTS, STARFIELD_DESCRIPTOR, STARFIELD_PRESETS, SceneDimensions,
+    SceneParameters, SceneResourceBudget, SceneRuntime, StarfieldConfig, StarfieldGenerator,
 };
 
 fn table() -> ascii_convert::GlyphTable {
@@ -86,6 +86,18 @@ fn bounds_presets_and_requested_effective_counts_are_explicit() {
         2_000
     );
     assert!(scene.resource_estimate().generator_scratch_bytes() >= 2_000);
+}
+
+#[test]
+fn button_event_scan_work_is_admitted_for_each_catch_up_step() {
+    let glyphs = table();
+    let scene = runtime(0x154, 2_000, StarfieldConfig::ambient(), &glyphs);
+    let particle_and_grid_work = 80_u64 * 40 + 2_000 * 5;
+    let button_scan_work = (MAX_APPROVED_BUTTON_EVENTS as u64) * 4;
+    assert_eq!(
+        scene.resource_estimate().work_units(),
+        particle_and_grid_work + button_scan_work
+    );
 }
 
 #[test]

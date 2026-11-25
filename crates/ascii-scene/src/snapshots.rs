@@ -7,6 +7,9 @@ pub enum SignalKind {
     BatteryState,
 }
 
+/// Maximum pointer-button events retained in one approved snapshot.
+pub const MAX_APPROVED_BUTTON_EVENTS: usize = 256;
+
 /// Normalized point in unsigned Q0.16 coordinates, independent of desktop pixels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NormalizedPoint {
@@ -182,6 +185,7 @@ pub struct ApprovedSnapshots<'a> {
     pointer_buttons: Option<&'a [NormalizedButtonEvent]>,
     window_rectangles: Option<&'a [NormalizedRect]>,
     battery_state: Option<BatterySnapshot>,
+    pointer_buttons_rejected: bool,
 }
 
 impl<'a> ApprovedSnapshots<'a> {
@@ -192,25 +196,40 @@ impl<'a> ApprovedSnapshots<'a> {
             pointer_buttons: None,
             window_rectangles: None,
             battery_state: None,
+            pointer_buttons_rejected: false,
         }
     }
 
+    /// Applies host capabilities and rejects an over-limit button track in its entirety.
+    ///
+    /// Oversized input is not truncated or retained. Callers can inspect
+    /// `pointer_buttons_rejected()` to distinguish rejection from absent or denied input.
     #[must_use]
     pub const fn filter(
         capabilities: SnapshotCapabilities,
         candidates: SnapshotCandidates<'a>,
     ) -> Self {
+        let pointer_buttons_rejected = if capabilities.pointer_buttons {
+            match candidates.pointer_buttons {
+                Some(events) => events.len() > MAX_APPROVED_BUTTON_EVENTS,
+                _ => false,
+            }
+        } else {
+            false
+        };
+        let pointer_buttons = if capabilities.pointer_buttons && !pointer_buttons_rejected {
+            candidates.pointer_buttons
+        } else {
+            None
+        };
         Self {
             pointer_position: if capabilities.pointer_position {
                 candidates.pointer_position
             } else {
                 None
             },
-            pointer_buttons: if capabilities.pointer_buttons {
-                candidates.pointer_buttons
-            } else {
-                None
-            },
+            pointer_buttons,
+            pointer_buttons_rejected,
             window_rectangles: if capabilities.window_rectangles {
                 candidates.window_rectangles
             } else {
@@ -232,6 +251,11 @@ impl<'a> ApprovedSnapshots<'a> {
     #[must_use]
     pub const fn pointer_buttons(self) -> Option<&'a [NormalizedButtonEvent]> {
         self.pointer_buttons
+    }
+
+    #[must_use]
+    pub const fn pointer_buttons_rejected(self) -> bool {
+        self.pointer_buttons_rejected
     }
 
     #[must_use]
