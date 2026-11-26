@@ -206,6 +206,23 @@ pub(super) struct WindowClass {
     name: Arc<[u16]>,
     registered: bool,
 }
+#[derive(Clone, Copy)]
+struct WindowCreateBounds {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone, Copy)]
+struct WindowCreateOptions {
+    extended_style: u32,
+    style: u32,
+    bounds: WindowCreateBounds,
+    parent: HWND,
+    dpi_context: Option<DPI_AWARENESS_CONTEXT>,
+}
+
 fn next_window_id() -> Option<usize> {
     NEXT_WINDOW_ID
         .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -252,16 +269,18 @@ impl WindowClass {
     }
 
     pub fn create_controller(&self) -> Result<Window, NativeError> {
-        self.create(
-            OWNED_WINDOW_EX_STYLE,
-            WS_POPUP | WS_DISABLED,
-            0,
-            0,
-            1,
-            1,
-            null_mut(),
-            None,
-        )
+        self.create(WindowCreateOptions {
+            extended_style: OWNED_WINDOW_EX_STYLE,
+            style: WS_POPUP | WS_DISABLED,
+            bounds: WindowCreateBounds {
+                left: 0,
+                top: 0,
+                width: 1,
+                height: 1,
+            },
+            parent: null_mut(),
+            dpi_context: None,
+        })
     }
 
     pub fn create_surface_window(
@@ -274,31 +293,23 @@ impl WindowClass {
     ) -> Result<Window, NativeError> {
         let width = i32::try_from(width).map_err(|_| NativeError::InvalidDisplayBounds)?;
         let height = i32::try_from(height).map_err(|_| NativeError::InvalidDisplayBounds)?;
-        self.create(
-            OWNED_WINDOW_EX_STYLE,
-            WS_POPUP | WS_DISABLED | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-            screen_left,
-            screen_top,
-            width,
-            height,
-            null_mut(),
-            Some(dpi_context),
-        )
+        self.create(WindowCreateOptions {
+            extended_style: OWNED_WINDOW_EX_STYLE,
+            style: WS_POPUP | WS_DISABLED | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+            bounds: WindowCreateBounds {
+                left: screen_left,
+                top: screen_top,
+                width,
+                height,
+            },
+            parent: null_mut(),
+            dpi_context: Some(dpi_context),
+        })
     }
 
-    fn create(
-        &self,
-        extended_style: u32,
-        style: u32,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-        parent: HWND,
-        context: Option<DPI_AWARENESS_CONTEXT>,
-    ) -> Result<Window, NativeError> {
+    fn create(&self, options: WindowCreateOptions) -> Result<Window, NativeError> {
         let identity = next_window_id().ok_or(NativeError::IdentityExhausted)?;
-        let previous_context = if let Some(context) = context {
+        let previous_context = if let Some(context) = options.dpi_context {
             // SAFETY: `context` is a system DPI-awareness pseudo-handle obtained from a live shell
             // parent. It is used only for this window creation and restored before returning.
             let previous = unsafe { SetThreadDpiAwarenessContext(context) };
@@ -314,15 +325,15 @@ impl WindowClass {
         // registered class, and this call creates only this process's hidden, disabled HWND.
         let hwnd = unsafe {
             CreateWindowExW(
-                extended_style,
+                options.extended_style,
                 self.name.as_ptr(),
                 null(),
-                style,
-                x,
-                y,
-                width,
-                height,
-                parent,
+                options.style,
+                options.bounds.left,
+                options.bounds.top,
+                options.bounds.width,
+                options.bounds.height,
+                options.parent,
                 null_mut(),
                 self.instance,
                 null(),
@@ -361,7 +372,7 @@ impl WindowClass {
         }
         let process_id = unsafe { GetCurrentProcessId() };
         let thread_id = unsafe { GetCurrentThreadId() };
-        if let Some(context) = context {
+        if let Some(context) = options.dpi_context {
             // SAFETY: hwnd is the hidden window just created above.
             let actual = unsafe { GetWindowDpiAwarenessContext(hwnd) };
             // SAFETY: both values are system DPI-awareness pseudo-handles.
