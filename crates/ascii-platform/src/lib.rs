@@ -22,16 +22,16 @@ pub use events::{
     PointerButtons, PointerButtonsUpdate, PointerPosition, SessionLockState, StaticWallpaperUpdate,
     WindowIdentity, WindowRectangle, WindowState,
 };
-#[cfg(windows)]
-pub use observer::{
-    DesktopClickBatch, DesktopClickObservation, DesktopHitClassification, FullscreenCandidate,
-    ObservedWindowBounds, WindowsObserver, WindowsObserverConsent, WindowsObserverError,
-    WindowsObserverSnapshot, WindowBoundsSource, MAX_DESKTOP_CLICK_OBSERVATIONS,
-    MAX_FULLSCREEN_OBSERVATIONS, MAX_WINDOWS_OBSERVED,
-};
 pub use host::{
     HostAdapter, ReconciliationError, SurfaceLease, SurfaceLeaseError, SurfaceLeaseRegistry,
     SurfaceRetirementReason,
+};
+#[cfg(windows)]
+pub use observer::{
+    DesktopClickBatch, DesktopClickObservation, DesktopHitClassification, FullscreenCandidate,
+    MAX_DESKTOP_CLICK_OBSERVATIONS, MAX_FULLSCREEN_OBSERVATIONS, MAX_WINDOWS_OBSERVED,
+    ObservedWindowBounds, WindowBoundsSource, WindowsObserver, WindowsObserverConsent,
+    WindowsObserverError, WindowsObserverSnapshot,
 };
 #[cfg(windows)]
 pub use probe::{

@@ -1,7 +1,7 @@
 use super::{
     DesktopClickBatch, DesktopClickObservation, DesktopHitClassification, FullscreenCandidate,
-    ObservedWindowBounds, WindowsObserverConsent, WindowsObserverSnapshot, WindowBoundsSource,
     MAX_DESKTOP_CLICK_OBSERVATIONS, MAX_FULLSCREEN_OBSERVATIONS, MAX_WINDOWS_OBSERVED,
+    ObservedWindowBounds, WindowBoundsSource, WindowsObserverConsent, WindowsObserverSnapshot,
 };
 use crate::{
     AdapterVersion, CapabilityAvailability, CapabilityFeature, CapabilityReason, CapabilityRecord,
@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::{MaybeUninit, size_of};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -81,8 +81,8 @@ const RI_MOUSE_BUTTON_4_UP: u16 = 0x0080;
 const RI_MOUSE_BUTTON_5_DOWN: u16 = 0x0100;
 const RI_MOUSE_BUTTON_5_UP: u16 = 0x0200;
 const CLASS_NAME: [u16; 25] = [
-    65, 115, 99, 105, 105, 87, 97, 108, 108, 79, 98, 115, 101, 114, 118, 101, 114, 87, 110,
-    100, 67, 108, 115, 0, 0,
+    65, 115, 99, 105, 105, 87, 97, 108, 108, 79, 98, 115, 101, 114, 118, 101, 114, 87, 110, 100,
+    67, 108, 115, 0, 0,
 ];
 const WINDOW_TITLE: [u16; 1] = [0];
 static NEXT_HOST_INSTANCE: AtomicU64 = AtomicU64::new(1);
@@ -317,7 +317,9 @@ impl WindowsObserver {
             worker_panicked = worker.join().is_err();
         }
         self.worker_thread_id = 0;
-        self.shared.session_state.store(SESSION_REVOKED, Ordering::Release);
+        self.shared
+            .session_state
+            .store(SESSION_REVOKED, Ordering::Release);
         let mut data = lock_data(&self.shared);
         clear_observations(&mut data);
         set_consent_capability_status(
@@ -497,8 +499,7 @@ impl NativeQueue {
     }
 
     fn push(&mut self, event: NativeEvent) {
-        let last_index = (self.head + self.len + NATIVE_QUEUE_CAPACITY - 1)
-            % NATIVE_QUEUE_CAPACITY;
+        let last_index = (self.head + self.len + NATIVE_QUEUE_CAPACITY - 1) % NATIVE_QUEUE_CAPACITY;
         if self.len != 0 {
             match (self.entries[last_index], event) {
                 (
@@ -506,13 +507,18 @@ impl NativeQueue {
                         handle: queued_handle,
                         event: queued_kind,
                     }),
-                    NativeEvent::Window { handle, event: kind },
+                    NativeEvent::Window {
+                        handle,
+                        event: kind,
+                    },
                 ) if queued_handle == handle && queued_kind == kind => {
                     self.entries[last_index] = Some(event);
                     return;
                 }
                 (
-                    Some(NativeEvent::RawInput { button_flags: 0, .. }),
+                    Some(NativeEvent::RawInput {
+                        button_flags: 0, ..
+                    }),
                     NativeEvent::RawInput {
                         button_flags: 0, ..
                     },
@@ -567,7 +573,10 @@ thread_local! {
 }
 
 fn lock_data(shared: &SharedInner) -> MutexGuard<'_, ObserverData> {
-    shared.data.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    shared
+        .data
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -741,10 +750,9 @@ fn set_capability_and_publish(
     };
     if let Ok(changes) = data.capabilities.replace(record) {
         for change in changes.iter() {
-            let _ = data.events.push(
-                HostEvent::CapabilityChanged(*change),
-                changes.revision(),
-            );
+            let _ = data
+                .events
+                .push(HostEvent::CapabilityChanged(*change), changes.revision());
         }
     }
 }
@@ -821,7 +829,10 @@ fn clear_observations(data: &mut ObserverData) {
     data.outputs_truncated = false;
 }
 
-fn worker_main(shared: Arc<SharedInner>, ready: mpsc::SyncSender<Result<u32, WindowsObserverError>>) {
+fn worker_main(
+    shared: Arc<SharedInner>,
+    ready: mpsc::SyncSender<Result<u32, WindowsObserverError>>,
+) {
     let mut context = CallbackContext {
         shared: Arc::clone(&shared),
         native_events: RefCell::new(NativeQueue::new()),
@@ -1040,7 +1051,9 @@ unsafe fn worker_setup_and_loop(
                 let mut processed = 0;
                 while processed < 64 {
                     let mut message = MaybeUninit::<Message>::uninit();
-                    if unsafe { PeekMessageW(message.as_mut_ptr(), null_mut(), 0, 0, PM_REMOVE) } == 0 {
+                    if unsafe { PeekMessageW(message.as_mut_ptr(), null_mut(), 0, 0, PM_REMOVE) }
+                        == 0
+                    {
                         break;
                     }
                     let message = unsafe { message.assume_init() };
@@ -1125,13 +1138,17 @@ fn mark_health(data: &mut ObserverData, health: HostHealth) {
     if let Ok(changes) = data.capabilities.set_health(health) {
         let revision = changes.revision();
         for change in changes.iter() {
-            let _ = data.events.push(HostEvent::CapabilityChanged(*change), revision);
+            let _ = data
+                .events
+                .push(HostEvent::CapabilityChanged(*change), revision);
         }
     }
 }
 
 fn mark_session_suspended(shared: &SharedInner) {
-    shared.session_state.store(SESSION_SUSPENDED, Ordering::Release);
+    shared
+        .session_state
+        .store(SESSION_SUSPENDED, Ordering::Release);
     let mut data = lock_data(shared);
     let now_ms = elapsed_ms(shared.started);
     clear_observations(&mut data);
@@ -1266,22 +1283,38 @@ fn mark_click_history_uncertain(shared: &SharedInner) {
 }
 
 fn button_flags_for_processing(buttons_uncertain: bool, flags: u16) -> u16 {
-    if buttons_uncertain {
-        0
-    } else {
-        flags
-    }
+    if buttons_uncertain { 0 } else { flags }
 }
 
 fn apply_button_flags(previous: u8, button_flags: u16) -> (u8, [Option<u8>; 5]) {
     let mut next = previous;
     let mut down = [None; 5];
     let transitions = [
-        (RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP, PointerButtons::LEFT),
-        (RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP, PointerButtons::RIGHT),
-        (RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, PointerButtons::MIDDLE),
-        (RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, PointerButtons::AUXILIARY_1),
-        (RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP, PointerButtons::AUXILIARY_2),
+        (
+            RI_MOUSE_LEFT_BUTTON_DOWN,
+            RI_MOUSE_LEFT_BUTTON_UP,
+            PointerButtons::LEFT,
+        ),
+        (
+            RI_MOUSE_RIGHT_BUTTON_DOWN,
+            RI_MOUSE_RIGHT_BUTTON_UP,
+            PointerButtons::RIGHT,
+        ),
+        (
+            RI_MOUSE_MIDDLE_BUTTON_DOWN,
+            RI_MOUSE_MIDDLE_BUTTON_UP,
+            PointerButtons::MIDDLE,
+        ),
+        (
+            RI_MOUSE_BUTTON_4_DOWN,
+            RI_MOUSE_BUTTON_4_UP,
+            PointerButtons::AUXILIARY_1,
+        ),
+        (
+            RI_MOUSE_BUTTON_5_DOWN,
+            RI_MOUSE_BUTTON_5_UP,
+            PointerButtons::AUXILIARY_2,
+        ),
     ];
     for (index, (down_flag, up_flag, bit)) in transitions.into_iter().enumerate() {
         if button_flags & down_flag != 0 {
@@ -1425,8 +1458,8 @@ fn classify_desktop_hit(position: PointerPosition) -> DesktopHitClassification {
 
     let root_name = &root_class[..root_length];
     let target_name = &target_class[..target_length];
-    let root_is_desktop = class_matches(root_name, "Progman")
-        || class_matches(root_name, "WorkerW");
+    let root_is_desktop =
+        class_matches(root_name, "Progman") || class_matches(root_name, "WorkerW");
     if target == root {
         return classify_shell_surface(root_is_desktop, true, false, false, None);
     }
@@ -1528,20 +1561,23 @@ fn classify_shell_surface(
 
 fn class_matches(actual: &[u16], expected: &str) -> bool {
     actual.len() == expected.len()
-        && actual.iter().zip(expected.bytes()).all(|(actual, expected)| {
-            let actual = if (65..=90).contains(actual) {
-                *actual + 32
-            } else {
-                *actual
-            };
-            let expected = u16::from(expected);
-            let expected = if (65..=90).contains(&expected) {
-                expected + 32
-            } else {
-                expected
-            };
-            actual == expected
-        })
+        && actual
+            .iter()
+            .zip(expected.bytes())
+            .all(|(actual, expected)| {
+                let actual = if (65..=90).contains(actual) {
+                    *actual + 32
+                } else {
+                    *actual
+                };
+                let expected = u16::from(expected);
+                let expected = if (65..=90).contains(&expected) {
+                    expected + 32
+                } else {
+                    expected
+                };
+                actual == expected
+            })
 }
 
 fn refresh_window(shared: &SharedInner, handle: usize, now_ms: u64) {
@@ -1773,10 +1809,7 @@ fn update_window(
     data.windows[slot] = Some(next);
 }
 
-fn same_bounds(
-    left: Option<ObservedWindowBounds>,
-    right: Option<ObservedWindowBounds>,
-) -> bool {
+fn same_bounds(left: Option<ObservedWindowBounds>, right: Option<ObservedWindowBounds>) -> bool {
     match (left, right) {
         (None, None) => true,
         (Some(left), Some(right)) => {
@@ -1844,10 +1877,9 @@ fn update_outputs(shared: &SharedInner) -> bool {
     let mut changed = collected.truncated || data.outputs_truncated;
     let mut dropped_output = false;
     for (index, monitor) in collected.records[..collected.len].iter().enumerate() {
-        let existing = previous
-            .iter()
-            .flatten()
-            .find(|output| output.handle == monitor.handle && same_output_rect(output.rect, monitor.rect));
+        let existing = previous.iter().flatten().find(|output| {
+            output.handle == monitor.handle && same_output_rect(output.rect, monitor.rect)
+        });
         let identity = if let Some(output) = existing {
             output.identity
         } else {
@@ -1887,9 +1919,7 @@ fn set_pointer_position_status(data: &mut ObserverData, now_ms: u64) {
     let raw_input_available = data
         .capabilities
         .record(CapabilityFeature::PointerButtons, CapabilityScope::Desktop)
-        .is_some_and(|record| {
-            record.availability() == CapabilityAvailability::Available
-        });
+        .is_some_and(|record| record.availability() == CapabilityAvailability::Available);
     let outputs_available = data.outputs.iter().any(Option::is_some);
     let (availability, reason, confidence) = if !raw_input_available {
         (
@@ -1923,7 +1953,6 @@ fn set_pointer_position_status(data: &mut ObserverData, now_ms: u64) {
     );
 }
 
-
 fn monitor_identity(instance_id: u64, serial: u64, rect: NativeRect) -> Option<MonitorIdentity> {
     let (width, height) = rect.dimensions()?;
     let fallback = MonitorFallbackMatch::new(rect.left, rect.top, width, height).ok()?;
@@ -1934,9 +1963,7 @@ fn monitor_identity(instance_id: u64, serial: u64, rect: NativeRect) -> Option<M
 }
 
 fn reconcile_windows(shared: &SharedInner) {
-    if !shared.consent.window_metadata()
-        || !shared.window_hooks_available.load(Ordering::Acquire)
-    {
+    if !shared.consent.window_metadata() || !shared.window_hooks_available.load(Ordering::Acquire) {
         return;
     }
     let mut collector = WindowCollector::new();
@@ -2027,7 +2054,10 @@ fn input_desktop_state() -> InputDesktopState {
     if result == 0 {
         return InputDesktopState::Unknown;
     }
-    let length = name.iter().position(|value| *value == 0).unwrap_or(name.len());
+    let length = name
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(name.len());
     if class_matches(&name[..length], "Default") {
         InputDesktopState::Default
     } else {
@@ -2055,8 +2085,7 @@ fn fullscreen_overlap(rectangle: WindowRectangle, output: NativeRect) -> bool {
             Err(_) => return false,
         },
     })
-    .dimensions()
-    else {
+    .dimensions() else {
         return false;
     };
     let _ = (width, height);
@@ -2076,8 +2105,10 @@ fn fullscreen_overlap(rectangle: WindowRectangle, output: NativeRect) -> bool {
 }
 
 fn intersection_area(left: NativeRect, right: NativeRect) -> u64 {
-    let width = (i64::from(left.right.min(right.right)) - i64::from(left.left.max(right.left))).max(0);
-    let height = (i64::from(left.bottom.min(right.bottom)) - i64::from(left.top.max(right.top))).max(0);
+    let width =
+        (i64::from(left.right.min(right.right)) - i64::from(left.left.max(right.left))).max(0);
+    let height =
+        (i64::from(left.bottom.min(right.bottom)) - i64::from(left.top.max(right.top))).max(0);
     (width as u64).saturating_mul(height as u64)
 }
 
@@ -2223,7 +2254,10 @@ unsafe extern "system" fn winevent_proc(
                 event,
             });
         } else {
-            context.shared.callback_overflow.store(true, Ordering::Release);
+            context
+                .shared
+                .callback_overflow
+                .store(true, Ordering::Release);
         }
     });
 }
@@ -2276,7 +2310,9 @@ unsafe extern "system" fn observer_window_proc(
             }
             WM_WTSSESSION_CHANGE => {
                 if let Ok(mut queue) = context.native_events.try_borrow_mut() {
-                    queue.push(NativeEvent::SessionChange { code: wparam as u32 });
+                    queue.push(NativeEvent::SessionChange {
+                        code: wparam as u32,
+                    });
                 } else {
                     context
                         .shared
@@ -2289,7 +2325,10 @@ unsafe extern "system" fn observer_window_proc(
                 if let Ok(mut queue) = context.native_events.try_borrow_mut() {
                     queue.push(NativeEvent::DisplayChange);
                 } else {
-                    context.shared.callback_overflow.store(true, Ordering::Release);
+                    context
+                        .shared
+                        .callback_overflow
+                        .store(true, Ordering::Release);
                 }
                 return 0;
             }
@@ -2336,7 +2375,6 @@ fn read_raw_mouse(raw: Hrawinput) -> Option<u16> {
     // SAFETY: dwType is RIM_TYPEMOUSE and the validated RAWINPUT buffer contains RAWMOUSE.
     Some(unsafe { native.data.mouse.button_flags })
 }
-
 
 struct WindowCollector {
     records: [usize; MAX_ENUMERATED_WINDOWS],
@@ -2424,7 +2462,6 @@ unsafe extern "system" fn monitor_collector_proc(
     collector.len += 1;
     1
 }
-
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -2535,7 +2572,6 @@ struct CreateStructW {
     class: *const u16,
     extended_style: u32,
 }
-
 
 type Hwnd = *mut c_void;
 type Hmonitor = *mut c_void;
@@ -2673,7 +2709,6 @@ unsafe extern "system" {
     fn DwmGetWindowAttribute(window: Hwnd, attribute: u32, value: *mut c_void, size: u32) -> i32;
 }
 
-
 #[link(name = "wtsapi32")]
 unsafe extern "system" {
     fn WTSRegisterSessionNotification(window: Hwnd, flags: u32) -> i32;
@@ -2809,7 +2844,10 @@ mod tests {
         assert_eq!(queue.len, 1);
         assert!(matches!(
             queue.pop(),
-            Some(NativeEvent::RawInput { message_time: 2, .. })
+            Some(NativeEvent::RawInput {
+                message_time: 2,
+                ..
+            })
         ));
 
         for index in 0..NATIVE_QUEUE_CAPACITY {
@@ -2853,8 +2891,7 @@ mod tests {
         };
         assert_eq!(queued_press, RI_MOUSE_LEFT_BUTTON_DOWN);
         let sampled_buttons = 0;
-        let flags =
-            button_flags_for_processing(queue.button_state_uncertain, queued_press);
+        let flags = button_flags_for_processing(queue.button_state_uncertain, queued_press);
         let (final_buttons, down) = apply_button_flags(sampled_buttons, flags);
         assert_eq!(final_buttons, 0);
         assert_eq!(down, [None; 5]);
@@ -2872,13 +2909,15 @@ mod tests {
             .dimensions(),
             Some((1920, 1080))
         );
-        assert!(NativeRect {
-            left: 5,
-            top: 0,
-            right: 5,
-            bottom: 100,
-        }
-        .dimensions()
-        .is_none());
+        assert!(
+            NativeRect {
+                left: 5,
+                top: 0,
+                right: 5,
+                bottom: 100,
+            }
+            .dimensions()
+            .is_none()
+        );
     }
 }

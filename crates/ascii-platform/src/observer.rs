@@ -194,10 +194,7 @@ mod tests {
         let capabilities = observer.capabilities();
         assert_eq!(
             capabilities
-                .record(
-                    CapabilityFeature::PointerButtons,
-                    CapabilityScope::Desktop,
-                )
+                .record(CapabilityFeature::PointerButtons, CapabilityScope::Desktop,)
                 .unwrap()
                 .availability(),
             CapabilityAvailability::PermissionRequired
