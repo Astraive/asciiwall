@@ -2,8 +2,8 @@ use ascii_core::coordinates::{
     CharacterGrid, ClockDomainId, ClockDomainMapping, ClockEpochTracker, ClockMappingError,
     CoordinateError, DesktopLogicalPoint, DesktopLogicalRect, DisplayRoutingMode,
     EventFreshnessGate, FitMode, FittedContent, FixedStepError, FixedStepScheduler, OutputGeometry,
-    OutputRotation, OutputScale, SceneClockGroupId, ScenePoint, SceneRect,
-    SpanGapPolicy, SurfaceRect, TopologySnapshot, TopologyState, WindowForceFreshness,
+    OutputRotation, OutputScale, SceneClockGroupId, ScenePoint, SceneRect, SpanGapPolicy,
+    SurfaceRect, TopologySnapshot, TopologyState, WindowForceFreshness,
 };
 use ascii_core::events::{
     ButtonState, CapabilityScope, DesktopPoint, DesktopRect, EventEnvelope, EventOverflowCounters,
