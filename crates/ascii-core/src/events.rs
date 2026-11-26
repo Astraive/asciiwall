@@ -312,7 +312,7 @@ pub enum PointerButton {
 }
 
 /// A physical button edge; both press and release are non-coalescible.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointerButtonEvent {
     /// Button whose state changed.
     pub button: PointerButton,
