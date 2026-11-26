@@ -6,6 +6,14 @@ A capability record is not a boolean. It carries a stable name, availability sta
 
 The host computes effective capabilities from native support, granted permission, running session, sandbox limits, and adapter health. The engine does not infer availability from an OS name. A package can require basic render features and request optional signal capabilities, but it cannot grant itself permission.
 
+## Implemented contract boundary (WPH-001)
+
+`ascii-platform` defines the portable v1.0 capability contract: an allocation-free snapshot (10 baseline feeds, at most 32 scoped records) with explicit unknown/denied/unsupported/available states, freshness, confidence, adapter identity/version, health, and host restrictions. Feature dependencies are resolved narrowly; only declared dependents become ineffective after a feed is revoked. Fixed-capacity event batches and queues report the revision required for reconciliation. A host reconciliation snapshot carries the capability metadata, latest distinct feed values, and active leases at one revision; its feed and lease capacities are bounded and truncation is explicit. `reconcile` returns a typed incomplete-snapshot error that retains truncated state for inspection, while a snapshot behind the requested revision remains a distinct error.
+
+The portable surface lease registry binds an adapter-owned surface to a `MonitorIdentity`, non-wrapping `ascii-core::Generation`, and non-reusable process-local registry epoch. Destroying and reconstructing a registry cannot revive an old lease even when host, display, and local generation match. Native handles remain private to the adapter; stale leases fail after retirement/recreation even if the operating system reuses a handle. Requested/effective presentation resolution downgrades to preview or a user-consented static wallpaper path, never to an always-on-top window.
+
+The WPH-001 contract and deterministic lifecycle model are portable. WND-002 adds an experimental Windows `WindowsHost` implementation that reports the session-lock feed and a low-confidence wallpaper-surface capability after structural checks; it does not establish support for any named OS/session/GPU tuple. Below-icon placement, focus preservation, Win+D, Explorer restart/recovery, icon interaction, and application-level Stop remain unverified or unavailable. No Linux or macOS adapter is included.
+
 ## Fallback order
 
 For pointer effects, prefer approved passive observation; otherwise use host-forwarded/local events where compatible with desktop input; otherwise use a documented idle animation or disable the node. Do not create an invisible input-catching overlay to fake click-through interaction.

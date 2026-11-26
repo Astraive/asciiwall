@@ -54,7 +54,7 @@ The [repository layout](../architecture/repository-structure.md) defines crate b
 
 **Consumes and owns:** E01 D01; defines availability/reason/scope/freshness and surface generations.
 
-**Produces:** `HostAdapter::capabilities(&self) -> CapabilitySnapshot; HostAdapter::poll(&mut self) -> Vec<HostEvent>`
+**Produces:** `HostAdapter::capabilities(&self) -> CapabilitySnapshot`, `poll(&mut self) -> HostEventBatch`, and a bounded authoritative `reconciliation_snapshot()` / revision-checked `reconcile()` API for current feed values and active leases.
 
 **Dependencies:** E01 D01.
 

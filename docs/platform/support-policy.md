@@ -19,6 +19,8 @@ Expose wallpaper-surface, pointer-position, pointer-buttons, window-rectangles, 
 
 Each integration supplies its identity/version, supported capabilities, restrictions, and health. The UI displays requested versus effective behavior. For example: 'Window repulsion disabled: compositor does not expose window rectangles.' It must not show an enabled control that silently does nothing.
 
+The WPH-001 contract now supplies versioned per-feed metadata, bounded event batches, explicit requested/effective resolution, and generation-checked surface leases. It is not an OS adapter implementation or a support claim: only a Windows hierarchy probe exists, and native placement/recovery/interactivity gates remain unrun pending WND-001 evidence.
+
 ## Linux-specific policy
 
 X11 desktop hints, Wayland layer-shell, Plasma wallpaper plugins, and GNOME extensions are different products within the integration layer. A normal Wayland client cannot simply obtain arbitrary global geometry; layer-shell availability must be discovered. [S15](../research/source-register.md#s15) [S16](../research/source-register.md#s16) [S19](../research/source-register.md#s19) [S20](../research/source-register.md#s20) [S22](../research/source-register.md#s22)

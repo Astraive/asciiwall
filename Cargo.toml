@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ascii-core", "crates/ascii-convert", "crates/ascii-media", "crates/ascii-scene"]
+members = ["crates/ascii-core", "crates/ascii-convert", "crates/ascii-media", "crates/ascii-render", "crates/ascii-scene", "crates/ascii-platform"]
 resolver = "3"
 
 [workspace.package]

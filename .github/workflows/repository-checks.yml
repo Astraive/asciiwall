@@ -93,3 +93,17 @@ jobs:
         run: cargo test --locked --package ascii-media
       - name: Inspect core dependency boundary
         run: cargo tree --locked --package ascii-core --edges all
+
+  windows-host-probe:
+    name: Windows host hierarchy probe
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+      - name: Run non-disruptive host-probe and injected hierarchy tests
+        run: cargo test --locked --package ascii-platform
