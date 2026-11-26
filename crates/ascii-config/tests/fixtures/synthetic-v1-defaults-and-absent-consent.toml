@@ -1,0 +1,7 @@
+# Synthetic pre-release migration fixture; not deployed historical data.
+schema_version = 1
+revision = 4
+
+[settings]
+"conversion.brightness" = 0.0
+"conversion.gamma" = 1.0

@@ -48,6 +48,8 @@ The [repository layout](../architecture/repository-structure.md) defines crate b
 - [ ] Run `cargo test -p ascii-config --test settings_resolution -- --nocapture` again, then affected workspace regressions. Expected: all applicable assertions pass; record unsupported native environments separately, not as success.
 - [ ] Review the diff and commit this independently testable unit with its fixtures/spec changes. Do not amend a failing unrelated test merely to make the suite green.
 
+**Implementation boundary:** CFG-001 adds the common authority and persistence machinery, but does not populate the proposed registry's domain key groups; those remain owned by CFG-004..016. The only migration predecessor is a synthetic pre-release schema 1 fixture, not a claim about deployed historical data. No settings tests or other checks are claimed as executed by this implementation agent; verification is pending parent gates.
+
 ## P02: Manifest and scene semantic validator
 
 **Files:** Create or modify `crates/ascii-package/src/{manifest.rs,schema.rs,semantic.rs}`. Test file: `crates/ascii-package/tests/manifest_validation.rs`. Any necessary crate manifest/setup belongs to this unit, not an untestable separate scaffold ticket.

@@ -10,7 +10,7 @@ Reject unknown configuration keys unless they occur inside an explicitly namespa
 
 Keep the last valid saved configuration and an explicit migration backup. Write to a same-directory temporary file, flush as appropriate, then atomically replace. Preserve restrictive local permissions. Disk-full errors keep the old file and show an actionable message.
 
-A corrupted main config starts in safe mode with defaults and a repair prompt. It must not delete library entries. On startup, validate the last wallpaper before enabling it; repeated failures suppress automatic restore.
+A fully parsed supported-schema document whose recognized settings fail type, range, or cross-field validation may start with registry defaults in `RepairRequired`; that state permits only explicit repair and retains the stored revision. Future-schema, oversized, limit-exceeding, or otherwise unclassifiable documents start read-only and preserve their exact original bytes. Safe mode must not delete library entries. On startup, validate the last wallpaper before enabling it; repeated failures suppress automatic restore.
 
 ## Versioning
 
@@ -29,3 +29,17 @@ The controller owns active configuration. CLI and UI changes use a revision prec
 ## Tests
 
 Property-test range boundaries, overflow, nesting, duplicate keys, invalid UTF-8, unsupported versions, lost disk space, interrupted writes, stale revisions, and rollback. Golden migration fixtures include old defaults and explicit user overrides so upgrades do not erase intentional customization.
+
+## CFG-001 implementation boundary
+
+`crates/ascii-config` owns the common typed descriptor registry, layer-authority checks, requested/effective resolution, validation, immutable snapshots, revisioned batch controller, persistence, and schema migration machinery. Domain setting descriptors and their source-documented defaults remain assigned to CFG-004..016; `Registry::empty()` is the foundation default, and this change does not claim the proposed 172-key table is populated.
+
+The canonical file is `settings.toml`, selected under the platform's per-user config directory by the consuming application. Its current schema is `2`, independent from application and other format versions. Canonical writes use the closed envelope `schema_version`, `revision`, and an inline `settings = { ... }` table with quoted dotted scalar keys; the decoder also accepts `[settings]` table input. Unknown root fields and setting keys are rejected; no extension namespace is currently modeled. The decoder rejects invalid UTF-8, duplicate TOML keys, non-finite numbers, unsupported older versions, invalid scalar structures, excessive nesting, and files over 256 KiB. Preflight caps nesting at 16; `MAX_SETTING_ENTRIES` caps parsed setting entries at 4,096, in addition to the two envelope assignments.
+
+Writes go only through `SettingsController`: batches validate completely, compare the expected revision and current bytes, acquire a per-file OS lock, write a same-directory temporary file, sync it, atomically replace, and sync the parent directory where supported. A failed durable write does not publish the candidate snapshot; if replacement happened but directory sync failed, the old main bytes are restored or an indeterminate-commit error is returned. `.bak` holds the previous valid bytes. Explicit repair archives the replaced bytes after caller action and preserves `.bak`.
+
+Future schemas, oversized or invalid-UTF-8 files, depth or entry-limit breaches, unknown keys, and documents whose schema cannot be safely identified remain read-only. A bounded recovery scan admits malformed-TOML or missing/invalid-revision documents to `RepairRequired` only when it confirms the current schema and recognizes every setting key; fully parsed supported-schema documents with known settings that fail registry or cross-field validation also enter `RepairRequired`. Explicit repair resets settings, advances the stored revision (using revision zero when it was absent or invalid), preserves the recovery archive and backup, and leaves library content untouched.
+
+The `RestoreFailureState` API validates a last-wallpaper candidate before returning it and suppresses retries according to a caller-supplied policy. The host must persist that state and report activation/resource-preparation failures. No desktop host or CLI currently exists on main, so no automatic restore path is wired; CLI `--config` is also outside this change.
+
+Tests and synthetic golden fixtures cover authority, range endpoints/overflow, requested-versus-effective constraints, semantic checks, TOML bounds and corruption classes, schema/override migration, revision conflicts across independent controllers, batch rollback, explicit repair/backup restore, and injected storage failures. This implementation agent did not run checks; verification remains pending the parent gates.

@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, PNG/JPEG decoding, and the bounded `ascii-scene` runtime. **No application binary or published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes the current portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, `ascii-media` PNG/JPEG decoding, the bounded `ascii-scene` runtime, and the `ascii-config` crate implementation. **No application binary or published release tag exists yet.**
 
 ### Added
 
@@ -25,6 +25,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
+- Added `crates/ascii-config` as the sole typed settings authority, with P/A/O/S layer enforcement, requested/effective snapshots, bounded canonical TOML parsing, revision-conflict batch writes, same-directory atomic persistence, explicit backup/repair, read-only future-schema handling, and reversible synthetic v1→v2 migration fixtures. Domain settings, CLI wiring, and host startup restore integration remain out of scope; checks are pending parent gates.
+- [CFG-001] New-file publication uses Linux `renameat2(RENAME_NOREPLACE)` or macOS `renamex_np(RENAME_EXCL)` where supported, then a no-replace hard-link fallback; if neither is available, it returns `io::ErrorKind::Unsupported` instead of using overwriting `rename`.
+- Added fixed-seed, bounded `proptest` coverage for range endpoints, overflow, nesting, duplicate keys, invalid UTF-8, unsupported schemas, disk loss, interrupted writes, stale revisions, and rollback; migration golden cases cover absent defaults and explicit overrides ([CFG-001]).
 - Added the first-party `ascii-scene` SCN-001 contract: validated typed parameters and descriptor limits, a sealed executable generator trait with generic `SceneRuntime`, SplitMix64 node/effect streams, bounded Q16.16 simulation, reusable character buffers, capability-filtered snapshots, deterministic normalized-pointer attraction and recorded-event replay, aggregate resource reservations, and exact-step export with explicit idle fallback. No CFG/PKG schema, application UI, wallpaper, thumbnail, or native consumer is added.
 
 ### Changed
@@ -32,9 +35,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Repaired relative Markdown navigation across existing original root documentation entrypoints (`c321475`, committed after PR `#1` and prior to `[PRJ-004]`).
 - Updated Project 4 registries and audit semantics for layout-specific grouping (`BOARD_LAYOUT` `verticalGroupByFields` columns / `groupByFields` swimlanes; 17 `TABLE_LAYOUT` views with one `group_by`, UI-only `slice_by`, and two ordered sorts). Configured and saved all table views in the authenticated Orca browser, reloaded all 18 views, verified native axes/sorts against GraphQL, and recorded UI slice reads plus screenshots under external `../.issues/reports/project-view-ui-verification.json`.
 - Documented the PowerShell 7.5+ minimum requirement (`ConvertFrom-Json -DateKind String`) for `scripts/publish-issues.ps1` in [docs/backlog-publication.md](docs/backlog-publication.md).
+- Corrected [docs/architecture.md](docs/architecture.md) to describe the existing library workspace and proposed, not-yet-implemented CLI accurately, while identifying desktop/native host integration as unimplemented ([CFG-001]).
 
 ### Fixed
 
+- Bound inline-table dotted-key nesting and setting-entry counts, retained restore failure counts through activation, redacted stale settings bytes from errors, and enforced owner-only Unix modes for existing settings, backups, and oversized repair archives with deterministic regressions ([CFG-001]).
+- Keep restore failures suppressed when the wall clock moves backward, preserving the failure window until elapsed time is known ([CFG-001]).
+- Keep restore failures suppressed when wall-clock time or elapsed time is unknown, preserving retries until a known window expires ([CFG-001]).
+- Keep documents with unknown settings read-only even when a known invalid value sorts first, preserving the original bytes through rejected repair ([CFG-001]).
+- Keep the selected `.bak` unchanged when an explicit restore fails to replace the main document, so the restore can be retried ([CFG-001]).
+- Allow explicit repair of malformed current-schema documents only when the schema and all setting keys are safely recognized; keep unknown and future-schema documents read-only ([CFG-001]).
+- Keep malformed current-schema recovery read-only when any same-line setting assignment is unknown or ambiguous; explicit repair still handles recognized decode errors ([CFG-001]).
+- Keep unquoted dotted TOML paths read-only during missing-revision recovery, preserving the original bytes when explicit repair is rejected ([CFG-001]).
+- Preserve canonical inline-table output and exact document-size limits, repair recognized current-schema documents missing a revision, and prevent corrupt-archive name collisions from replacing existing data ([CFG-001]).
+- Fixed inline settings-table assignment preflight so exactly 4,096 entries pass and 4,097 fail in both inline and table forms ([CFG-001]).
+- Reopen a current-schema settings document after a stale migration CAS by rereading under the writer lock; keep corrupt or unreadable replacements classified rather than retrying indefinitely (`[CFG-001]`).
+- Resolve Preset preferences for O-scope settings below assignment and session values, preserve valid maximum-revision legacy settings in a read-only snapshot, and retry corrupt-archive name collisions without overwriting stale files ([CFG-001]).
+- Allow explicit repair of recognized settings with unsupported structures, including canonical inline values and quoted table/array headers, while unknown and ambiguous dotted/implicit keys remain read-only (`[CFG-001]`).
+- Preserve existing Windows target DACLs on replacement with `ReplaceFileW`; on partial replacement errors, avoid path-based backup restoration and report `CommitIndeterminate` rather than risk moving a substituted source or overwriting a raced target (`[CFG-001]`).
+- Publish first-time Windows main and backup files with restrictive DACLs and no-replace semantics; raced targets fail closed without adopting or overwriting their ACLs ([CFG-001]).
+- Preserve the replacement and displaced-original recovery artifacts after an indeterminate Windows replacement failure ([CFG-001]).
+- Keep TOML assignment preflight linear by tracking line starts and rejecting repeated same-line root assignments before rescanning prefixes ([CFG-001]).
+- Document canonical inline settings serialization and assert migration persists that exact current representation ([CFG-001]).
+- Corrected preflight scanning after legal extra quote/apostrophe runs at multiline string terminators and covered subsequent nesting-limit checks ([CFG-001]).
+- Count quoted basic and literal table-header key components when enforcing dotted-key nesting limits, including keys with escaped quotes and closing brackets ([CFG-001]).
+- Preflight encoded TOML document size before copying strings into serializer values, rejecting escape-expanded overflow (including NUL strings) while preserving exact-limit output ([CFG-001]).
 - Durable publication-ledger replacement uses a same-directory overwrite rename instead of the Windows PowerShell `File.Replace` null-backup binding; a real filesystem regression runs locally and in CI.
 - Project-field schema preflight preserves singleton GraphQL argument collections instead of mistaking a valid input object for multiple arguments.
 - Preserve ISO-looking JSON text and exact protected ledger timestamp strings through repeated reads and atomic writes; the real filesystem regression now exercises lossless reloads.

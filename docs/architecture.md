@@ -1,12 +1,15 @@
 # System architecture overview
 
-> **Design baseline:** This document summarizes the proposed architecture across [system overview](architecture/system-overview.md), [crate boundaries](architecture/crate-boundaries.md), [repository structure](architecture/repository-structure.md), [ADR 0001–0004](decisions/0001-native-rust-engine.md), and [stack decisions](tech-stack/stack-decisions.md). No Rust workspace, executable, or native host integration has been built yet.
+> **Design baseline:** This document summarizes the proposed architecture across [system overview](architecture/system-overview.md), [crate boundaries](architecture/crate-boundaries.md), [repository structure](architecture/repository-structure.md), [ADR 0001–0004](decisions/0001-native-rust-engine.md), and [stack decisions](tech-stack/stack-decisions.md).
+> The existing portable Rust workspace contains libraries; the standalone CLI under
+> `apps/cli` remains proposed and unimplemented. The desktop application and native host
+> integration also remain unimplemented.
 
 ## Two-repository and offline-core separation
 
 AsciiWall splits application engineering from curated artwork governance across two MIT-licensed public repositories:
 
-- **`Astraive/asciiwall` (main application & engine):** Owns the portable Rust engine, `egui` desktop controller, native host adapters, restricted media worker, local CLI, `.asciiwall` validator/packer, and compatibility tests (`278` local backlog tickets).
+- **`Astraive/asciiwall` (main application & engine):** Owns the portable Rust engine, `egui` desktop controller, native host adapters, restricted media worker, proposed local CLI, `.asciiwall` validator/packer, and compatibility tests (`278` local backlog tickets).
 - **`Astraive/asciiwall-library` (community artwork catalog):** Owns declarative starter recipes, asset rights/attribution ledgers, previews, and signed static catalog metadata (`78` local backlog tickets). It consumes pinned engine CLI contracts (`PKG-001`, `CLI-001`, `PKG-010`, `PKG-012`) rather than duplicating conversion or validation algorithms ([ADR 0004](decisions/0004-offline-core-and-static-library.md)).
 
 Normal playback, image/video conversion, scene simulation, preset editing, local gallery indexing, and package import/export run **100% offline** with zero account, telemetry, database server, or hosted backend (`EC-091`). Optional static catalog browsing and downloads (`library.online-catalog`) default to `"disabled"` and require explicit user consent.
@@ -16,7 +19,7 @@ Normal playback, image/video conversion, scene simulation, preset editing, local
 As specified in [system overview](architecture/system-overview.md) and [process model and IPC](architecture/process-model-and-ipc.md), runtime privileges and failure domains are separated into local same-user processes:
 
 ```text
-Desktop UI (egui) / CLI (asciiwall) / local scheduler
+Proposed desktop UI (egui) / proposed CLI / local scheduler
                  |
        versioned local IPC (<= 1 MiB, same-user/session auth)
                  v
@@ -39,9 +42,9 @@ Key architectural invariants:
 - **Generation discipline:** Every source load, seek, Apply, or surface resize increments a monotonic generation ID so stale asynchronous frames or resize events are dropped safely (`COR-002`, `EC-024`, `EC-084`).
 - **Host-native presenter exception:** `wgpu` is the default standalone presenter, whereas KDE Plasma (Qt Quick) and GNOME Shell (GJS/Mutter) own their desktop scene graphs and require explicit, separately benchmarked shell bridges (`LNX-004`–`LNX-008`) without decoding untrusted media inside the shell process.
 
-## Proposed Cargo workspace and crate boundaries
+## Current workspace and proposed crate boundaries
 
-Once `PRJ-001` establishes the workspace, crates are introduced only when exercised by real behavior ([crate boundaries](architecture/crate-boundaries.md)):
+The workspace currently contains foundation libraries; additional crates are introduced only when exercised by real behavior ([crate boundaries](architecture/crate-boundaries.md)):
 
 | Component | Proposed path | Primary responsibility | Negative boundary (must NOT own) |
 |---|---|---|---|
@@ -54,10 +57,10 @@ Once `PRJ-001` establishes the workspace, crates are introduced only when exerci
 | Platform adapters | `crates/ascii-platform` | Capability discovery, `SurfaceLease`, Windows/macOS/X11/Wayland adapters & bounded feeds | Package parsing, conversion logic |
 | Package contracts | `crates/ascii-package` | Draft v1 manifest/scene schemas, ZIP bomb/traversal validation, staged atomic import/export | Shell execution, permission grants |
 | Local library | `crates/ascii-library` | Immutable import receipts, search index, optional signed static catalog client | Core rendering, telemetry, background downloads |
-| Typed settings | `crates/ascii-config` | 172-key registry, layered precedence (`P`/`A`/`O`/`S`), TOML persistence, reversible migrations | Policy bypasses, host detection |
+| Typed settings | `crates/ascii-config` | Reusable typed descriptors and P/A/O/S authority, requested/effective resolution, canonical TOML persistence, revisioned controller, bounded reversible migrations; domain descriptors land with CFG-004..016 | Policy bypasses, host detection |
 | Local IPC | `crates/ascii-ipc` | Versioned envelopes, peer authentication, validated buffer handoff | Unvalidated peer file paths |
 | Control UI | `crates/ascii-ui` | `egui` navigation, live preview, requested/effective inspector, undo/Apply flows | Duplicate conversion/matching implementations |
-| Executables & bridges | `apps/{desktop,host,media-worker,cli}`, `integrations/{plasma,gnome}`, `xtask` | Process composition, CLI (`ascii-cli`), shell companions, repo automation | Re-implementing core library invariants |
+| Executables & bridges | `apps/{desktop,host,media-worker,cli}`, `integrations/{plasma,gnome}`, `xtask` | Process composition, proposed CLI (`ascii-cli`), shell companions, repo automation | Re-implementing core library invariants |
 
 ## Five source representations and pipeline
 
