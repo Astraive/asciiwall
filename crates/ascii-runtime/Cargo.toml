@@ -1,0 +1,10 @@
+[package]
+name = "ascii-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ascii-convert = { path = "../ascii-convert" }
+ascii-core = { path = "../ascii-core" }
