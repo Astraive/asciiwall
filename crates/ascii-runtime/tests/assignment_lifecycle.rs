@@ -1,0 +1,328 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use ascii_core::{AssignmentId, Generation};
+use ascii_runtime::{
+    ApplyInput, AssignmentController, AssignmentHost, AssignmentState, Blocker, CompletionOutcome,
+    ReasonCode, StopKind, SwitchTransition,
+};
+
+fn assignment(value: u8) -> AssignmentId {
+    AssignmentId::new([value; 16]).expect("nonzero assignment id")
+}
+
+#[derive(Clone)]
+struct Drops(Arc<AtomicUsize>);
+
+impl Drops {
+    fn count(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for Drops {
+    fn default() -> Self {
+        Self(Arc::new(AtomicUsize::new(0)))
+    }
+}
+
+struct Owned(Drops);
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        self.0.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct Prepared {
+    id: u8,
+    resource: Owned,
+}
+
+struct Attached {
+    id: u8,
+    resource: Owned,
+}
+
+struct Active {
+    id: u8,
+    transition: SwitchTransition,
+    _resource: Owned,
+}
+
+#[derive(Clone, Copy)]
+struct Input {
+    id: u8,
+    validation_fails: bool,
+}
+
+#[derive(Default)]
+struct Host {
+    drops: Drops,
+    prepare_fails: bool,
+    attach_fails: bool,
+    switch_fails: bool,
+}
+
+impl AssignmentHost for Host {
+    type Input = Input;
+    type Prepared = Prepared;
+    type Attached = Attached;
+    type Active = Active;
+
+    fn validate(&mut self, input: &Input) -> Result<(), ReasonCode> {
+        if input.validation_fails {
+            Err(ReasonCode::InvalidAssignment)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn prepare(&mut self, input: Input) -> Result<Prepared, ReasonCode> {
+        if self.prepare_fails {
+            Err(ReasonCode::PreparationFailed)
+        } else {
+            Ok(Prepared {
+                id: input.id,
+                resource: Owned(self.drops.clone()),
+            })
+        }
+    }
+
+    fn attach_hidden(&mut self, prepared: Prepared) -> Result<Attached, ReasonCode> {
+        if self.attach_fails {
+            Err(ReasonCode::AttachmentFailed)
+        } else {
+            Ok(Attached {
+                id: prepared.id,
+                resource: prepared.resource,
+            })
+        }
+    }
+
+    fn switch(
+        &mut self,
+        _previous: Option<&Active>,
+        attached: Attached,
+        transition: SwitchTransition,
+    ) -> Result<Active, ReasonCode> {
+        if self.switch_fails {
+            Err(ReasonCode::SwitchFailed)
+        } else {
+            Ok(Active {
+                id: attached.id,
+                transition,
+                _resource: attached.resource,
+            })
+        }
+    }
+}
+
+fn input(id: u8) -> ApplyInput<Input> {
+    input_with_transition(id, SwitchTransition::UserRequested)
+}
+
+fn input_with_transition(id: u8, transition: SwitchTransition) -> ApplyInput<Input> {
+    ApplyInput {
+        assignment: assignment(id),
+        transition,
+        payload: Input {
+            id,
+            validation_fails: false,
+        },
+    }
+}
+
+fn install_initial(controller: &mut AssignmentController<Active>, host: &mut Host) {
+    let job = controller.request(input(1), host).unwrap();
+    assert_eq!(
+        controller.complete_preparation(job.execute(host), host),
+        CompletionOutcome::Committed
+    );
+    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+}
+
+#[test]
+fn only_newest_generation_commits_and_stale_preparation_releases_its_resource() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    let old = controller.request(input(2), &mut host).unwrap();
+    let new = controller.request(input(3), &mut host).unwrap();
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+
+    let stale_completion = old.execute(&mut host);
+    let current_completion = new.execute(&mut host);
+    assert_eq!(
+        controller.complete_preparation(stale_completion, &mut host),
+        CompletionOutcome::Stale
+    );
+    assert_eq!(host.drops.count(), 1);
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+    assert_eq!(
+        controller.complete_preparation(current_completion, &mut host),
+        CompletionOutcome::Committed
+    );
+    assert_eq!(controller.snapshot().generation, Generation::from_value(3));
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(3)));
+    assert_eq!(controller.snapshot().state, AssignmentState::Running);
+    assert_eq!(controller.active_resource().map(|resource| resource.transition), Some(SwitchTransition::UserRequested));
+}
+
+#[test]
+fn immediate_replacement_is_distinct_from_user_switch_transition() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    let job = controller
+        .request(input_with_transition(2, SwitchTransition::Immediate), &mut host)
+        .unwrap();
+    assert_eq!(
+        controller.complete_preparation(job.execute(&mut host), &mut host),
+        CompletionOutcome::Committed
+    );
+    assert_eq!(controller.active_resource().map(|resource| resource.transition), Some(SwitchTransition::Immediate));
+}
+
+#[test]
+fn validation_failure_keeps_the_current_assignment_and_resource() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    let before = host.drops.count();
+    let result = controller.request(
+        ApplyInput {
+            assignment: assignment(4),
+            transition: SwitchTransition::UserRequested,
+            payload: Input {
+                id: 4,
+                validation_fails: true,
+            },
+        },
+        &mut host,
+    );
+    assert!(matches!(result, Err(ReasonCode::InvalidAssignment)));
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+    assert_eq!(controller.snapshot().state, AssignmentState::Failed);
+    assert_eq!(host.drops.count(), before);
+}
+
+#[test]
+fn preparation_failure_keeps_the_current_assignment_and_resource() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    let before = host.drops.count();
+    host.prepare_fails = true;
+    let job = controller.request(input(5), &mut host).unwrap();
+    assert_eq!(
+        controller.complete_preparation(job.execute(&mut host), &mut host),
+        CompletionOutcome::Failed(ReasonCode::PreparationFailed)
+    );
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+    assert_eq!(controller.snapshot().state, AssignmentState::Failed);
+    assert_eq!(host.drops.count(), before);
+}
+
+#[test]
+fn attachment_failure_keeps_the_current_assignment_and_releases_prepared_resource() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    let before = host.drops.count();
+    host.attach_fails = true;
+    let job = controller.request(input(6), &mut host).unwrap();
+    assert_eq!(
+        controller.complete_preparation(job.execute(&mut host), &mut host),
+        CompletionOutcome::Failed(ReasonCode::AttachmentFailed)
+    );
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+    assert_eq!(controller.snapshot().state, AssignmentState::Failed);
+    assert_eq!(host.drops.count(), before + 1);
+}
+
+#[test]
+fn switch_failure_keeps_the_previous_assignment_and_resource() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    let before = host.drops.count();
+    host.switch_fails = true;
+    let job = controller.request(input(7), &mut host).unwrap();
+    assert_eq!(
+        controller.complete_preparation(job.execute(&mut host), &mut host),
+        CompletionOutcome::Failed(ReasonCode::SwitchFailed)
+    );
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+    assert_eq!(controller.snapshot().state, AssignmentState::Failed);
+    assert_eq!(host.drops.count(), before + 1);
+}
+
+#[test]
+fn forced_stop_invalidates_pending_work_and_releases_active_resource() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    let pending = controller.request(input(8), &mut host).unwrap().execute(&mut host);
+    let before = host.drops.count();
+    let token = controller.begin_stop(StopKind::Forced);
+    assert_eq!(token.kind(), StopKind::Forced);
+    assert_eq!(controller.snapshot().state, AssignmentState::Stopping);
+    assert_eq!(controller.snapshot().reason, Some(ReasonCode::ForcedStop));
+    assert_eq!(
+        controller.complete_preparation(pending, &mut host),
+        CompletionOutcome::Stale
+    );
+    assert_eq!(host.drops.count(), before + 1);
+    assert!(controller.complete_stop(token));
+    assert_eq!(controller.snapshot().state, AssignmentState::Detached);
+    assert_eq!(controller.snapshot().active_assignment, None);
+    assert_eq!(host.drops.count(), before + 2);
+    assert!(controller.reset_unloaded());
+    assert_eq!(controller.snapshot().state, AssignmentState::Unloaded);
+}
+
+#[test]
+fn blockers_during_preparation_do_not_cancel_the_newest_generation() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    let job = controller.request(input(9), &mut host).unwrap();
+    controller.set_blocker(Blocker::SessionLocked, true);
+    assert_eq!(controller.snapshot().state, AssignmentState::Preparing);
+    assert_eq!(
+        controller.complete_preparation(job.execute(&mut host), &mut host),
+        CompletionOutcome::Committed
+    );
+    assert_eq!(controller.snapshot().state, AssignmentState::Suspended);
+    assert!(controller.snapshot().blockers.contains(Blocker::SessionLocked));
+    controller.set_blocker(Blocker::SessionLocked, false);
+    assert_eq!(controller.snapshot().state, AssignmentState::Running);
+}
+
+#[test]
+fn security_stop_has_a_distinct_non_transition_reason() {
+    let mut controller = AssignmentController::<Active>::new();
+    let token = controller.begin_stop(StopKind::Security);
+    assert_eq!(controller.snapshot().reason, Some(ReasonCode::SecurityStop));
+    assert_eq!(token.kind(), StopKind::Security);
+    assert!(controller.complete_stop(token));
+    assert_eq!(controller.snapshot().state, AssignmentState::Detached);
+}
+
+#[test]
+fn blockers_are_independent_and_expose_the_strongest_current_state() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    controller.set_blocker(Blocker::UserPause, true);
+    controller.set_blocker(Blocker::SessionLocked, true);
+    assert_eq!(controller.snapshot().state, AssignmentState::Suspended);
+    controller.set_blocker(Blocker::SessionLocked, false);
+    assert_eq!(controller.snapshot().state, AssignmentState::Paused);
+    assert_eq!(controller.snapshot().reason, Some(ReasonCode::UserPause));
+    controller.set_blocker(Blocker::UserPause, false);
+    assert_eq!(controller.snapshot().state, AssignmentState::Running);
+}

@@ -15,6 +15,14 @@ unloaded -> validating -> preparing -> attaching -> running
 
 Transitions are serialized by the controller. Heavy work occurs asynchronously and reports a generation-tagged result. A stale preparation cannot replace a newer requested wallpaper. Activation is transactional: validate, prepare a safe first frame, attach a hidden/ready surface, then switch. Keep the old assignment active until the new one can be shown.
 
+`ascii-runtime::AssignmentController` owns the portable, serialized lifecycle. `request` validates before returning a `PreparationJob`; callers execute the job on their chosen worker and submit its generation-tagged completion. A newer request or stop invalidates older completions, and stale successful output is dropped so its owned preparation resources are released.
+
+Activation is validate, prepare a safe first frame, attach it hidden/ready, then atomically switch. The previous active resource and identity remain owned until the host switch succeeds. Validation, preparation, attachment, and switch failures preserve that prior assignment. The `AssignmentHost::switch` contract requires an error result to leave the previous assignment visible; native Apply orchestration remains outside this portable module.
+
+Snapshots expose state, generation, active assignment identity, independent fixed-size blockers, and bounded `ReasonCode` values only. They retain no paths, window titles, input history, or arbitrary host error text. Blockers independently map policy pause, resource throttling, and session/display/host suspension.
+
+`SwitchTransition::UserRequested` permits a host's configured user wallpaper-switch behavior; immediate startup/recovery replacement and `StopKind::Security`/`Forced` are separate paths. Stop invalidates in-flight work before detach acknowledgement and releases the active resource on completion. No native detach or animation is implemented here. The workspace has no desktop/CLI app consumer yet; consumers can inspect the snapshot API once that surface exists.
+
 ## Pause reasons are a set, not one boolean
 
 Reasons include user pause, session lock, display off, fullscreen policy, low battery, battery saver, thermal policy, host unavailable, and export contention. Clearing one reason must not resume while another remains. Distinguish a paused simulation from a throttled renderer and a released graphics surface.

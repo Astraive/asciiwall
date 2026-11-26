@@ -35,9 +35,16 @@
 //! lease handle remains, dropping it releases storage and permits. Dropping a token or lease does
 //! not acknowledge completion.
 
+mod assignment;
 mod buffer_pool;
 mod queues;
 mod raster_consumer;
+
+pub use assignment::{
+    ApplyInput, AssignmentController, AssignmentHost, AssignmentSnapshot, AssignmentState, Blocker,
+    Blockers, CompletionOutcome, PreparationCompletion, PreparationJob, ReasonCode, StopKind,
+    StopToken, SwitchTransition,
+};
 
 pub use buffer_pool::{
     BufferPool, CompletionToken, FillLease, FrameDescriptor, FrameLease, RasterDescriptorMetadata,

@@ -4,6 +4,8 @@
 
 The controller owns saved configuration, package installs, permission policy, assignments, and supervision. A native host owns its event loop, surface leases, GPU device resources, and scene runtime. A restricted media worker owns decoder state and approved input handles. The UI owns drafts and preview requests, not active native handles.
 
+`ascii-runtime::AssignmentController` owns the active assignment resource and replaces it only after validation, asynchronous preparation, hidden attachment, and a successful host switch. Preparation jobs carry `ascii-core::Generation`; a superseded completion is dropped, including its owned resources. Failed precommit stages leave the previous active resource owned. Native surface attachment, detachment, and actual presentation remain host responsibilities.
+
 Core frames use owned/shared backing buffers with explicit lifetime. A borrowed raster view cannot outlive its buffer. A submitted GPU draw keeps its atlas/textures alive until the relevant GPU work completes. A Rust reference count alone does not prove the GPU has finished using a native allocation.
 
 ## Bounded handoff
