@@ -25,6 +25,8 @@ Snapshots expose state, generation, active assignment identity, independent fixe
 
 While `Stopping`, `request` rejects new assignments without advancing the generation or changing the stop reason/token, so the authorized detach acknowledgement remains valid.
 
+During preparation, a session-lock, display-off, or unavailable-host blocker invalidates the pending generation and suspends the previous committed assignment; its stale completion cannot replace that assignment. A precommit failure still retains the previous active resource, and a later hard blocker suspends it as well. New requests are rejected while any hard blocker remains. Clearing all hard blockers restores the previous assignment to the state derived from remaining blockers.
+
 ## Pause reasons are a set, not one boolean
 
 Reasons include user pause, session lock, display off, fullscreen policy, low battery, battery saver, thermal policy, host unavailable, and export contention. `AssignmentController` stores them as independent `Blockers`; clearing one cause never clears another. COR-004's pure `ascii_runtime::pause` policy maps lifecycle snapshots to explicit simulation, rendering, surface, and stop actions without introducing another lifecycle controller.

@@ -6,9 +6,7 @@
 
 use core::{fmt, num::NonZeroU64};
 
-use crate::{
-    AssignmentSnapshot, AssignmentState, Blocker, ReasonCode, StopKind,
-};
+use crate::{AssignmentSnapshot, AssignmentState, Blocker, Blockers, ReasonCode, StopKind};
 
 /// Whether a suspension keeps the surface attached or releases it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +93,25 @@ impl fmt::Display for PausePolicyError {
 
 impl std::error::Error for PausePolicyError {}
 
+fn hard_blocker_present(blockers: Blockers) -> bool {
+    blockers.contains(Blocker::SessionLocked)
+        || blockers.contains(Blocker::DisplayOff)
+        || blockers.contains(Blocker::HostUnavailable)
+}
+
+fn suspend_action(snapshot: AssignmentSnapshot, policy: SuspendPolicy) -> PauseAction {
+    let transition = if hard_blocker_present(snapshot.blockers) {
+        TransitionPolicy::Bypass
+    } else {
+        TransitionPolicy::AllowConfigured
+    };
+    PauseAction::Suspend {
+        resources: policy.resources,
+        surface: policy.surface,
+        transition,
+    }
+}
+
 /// Derives a portable presentation action without changing controller state.
 ///
 /// Stop is resolved before blocker policy. The assignment controller remains the sole owner of
@@ -108,20 +125,12 @@ pub fn pause_action(
         AssignmentState::Running => Ok(PauseAction::Continue),
         AssignmentState::Paused => Ok(PauseAction::FreezeSimulation),
         AssignmentState::Throttled => Ok(PauseAction::ThrottleRender),
-        AssignmentState::Suspended => {
-            let transition = if snapshot.blockers.contains(Blocker::SessionLocked)
-                || snapshot.blockers.contains(Blocker::DisplayOff)
-                || snapshot.blockers.contains(Blocker::HostUnavailable)
-            {
-                TransitionPolicy::Bypass
-            } else {
-                TransitionPolicy::AllowConfigured
-            };
-            Ok(PauseAction::Suspend {
-                resources: suspend_policy.resources,
-                surface: suspend_policy.surface,
-                transition,
-            })
+        AssignmentState::Suspended => Ok(suspend_action(snapshot, suspend_policy)),
+        AssignmentState::Preparing | AssignmentState::Failed
+            if snapshot.active_assignment.is_some()
+                && hard_blocker_present(snapshot.blockers) =>
+        {
+            Ok(suspend_action(snapshot, suspend_policy))
         }
         AssignmentState::Stopping => {
             let kind = match snapshot.reason {
