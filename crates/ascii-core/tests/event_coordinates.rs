@@ -1,14 +1,14 @@
 use ascii_core::coordinates::{
     CharacterGrid, ClockDomainId, ClockDomainMapping, ClockEpochTracker, ClockMappingError,
     CoordinateError, DesktopLogicalPoint, DesktopLogicalRect, DisplayRoutingMode,
-    EventFreshnessGate, FitMode, FittedContent, FixedStepError, FixedStepScheduler, MonotonicEpoch,
-    OutputGeometry, OutputRotation, OutputScale, SceneClockGroupId, ScenePoint, SceneRect,
+    EventFreshnessGate, FitMode, FittedContent, FixedStepError, FixedStepScheduler, OutputGeometry,
+    OutputRotation, OutputScale, SceneClockGroupId, ScenePoint, SceneRect,
     SpanGapPolicy, SurfaceRect, TopologySnapshot, TopologyState, WindowForceFreshness,
 };
 use ascii_core::events::{
     ButtonState, CapabilityScope, DesktopPoint, DesktopRect, EventEnvelope, EventOverflowCounters,
     EventPayload, EventPushErrorKind, EventPushOutcome, EventQueue, EventSequence, EventSourceId,
-    MissingReason, MonotonicInstant, Observation, PointerBoundary, PointerButton,
+    MissingReason, MonotonicEpoch, MonotonicInstant, Observation, PointerBoundary, PointerButton,
     PointerButtonEvent, PointerMotion, TopologyChange, UserCommand, WindowSnapshot,
 };
 use ascii_core::{Generation, MonitorId};
