@@ -338,6 +338,53 @@ fn hard_blockers_during_preparation_never_switch_replacement() {
 }
 
 #[test]
+fn hard_blocker_during_initial_preparation_never_switches_assignment() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+
+    controller.set_blocker(Blocker::DisplayOff, true);
+    assert_eq!(controller.snapshot().state, AssignmentState::Unloaded);
+    assert!(controller.snapshot().blockers.contains(Blocker::DisplayOff));
+    assert_eq!(controller.snapshot().reason, Some(ReasonCode::DisplayOff));
+
+    let job = controller.request(input(11), &mut host).unwrap();
+    assert!(controller.snapshot().blockers.contains(Blocker::DisplayOff));
+    let completion = job.execute(&mut host);
+    let drops_before_completion = host.drops.count();
+    controller.set_blocker(Blocker::SessionLocked, true);
+
+    assert_eq!(controller.snapshot().state, AssignmentState::Preparing);
+    assert_eq!(
+        controller.complete_preparation(completion, &mut host),
+        CompletionOutcome::Failed(ReasonCode::SessionLocked)
+    );
+    assert_eq!(host.switch_count, 0);
+    assert_eq!(host.drops.count(), drops_before_completion + 1);
+    assert_eq!(controller.snapshot().state, AssignmentState::Unloaded);
+    assert_eq!(
+        controller.snapshot().reason,
+        Some(ReasonCode::SessionLocked)
+    );
+    assert!(
+        controller
+            .snapshot()
+            .blockers
+            .contains(Blocker::SessionLocked)
+    );
+    assert!(controller.snapshot().blockers.contains(Blocker::DisplayOff));
+    assert_eq!(controller.snapshot().active_assignment, None);
+    assert!(controller.active_resource().is_none());
+
+    controller.set_blocker(Blocker::SessionLocked, false);
+    assert_eq!(controller.snapshot().state, AssignmentState::Unloaded);
+    assert_eq!(controller.snapshot().reason, Some(ReasonCode::DisplayOff));
+    controller.set_blocker(Blocker::DisplayOff, false);
+    assert_eq!(controller.snapshot().state, AssignmentState::Unloaded);
+    assert_eq!(controller.snapshot().reason, None);
+    assert_eq!(controller.snapshot().active_assignment, None);
+}
+
+#[test]
 fn soft_user_pause_during_preparation_does_not_cancel_replacement() {
     let mut controller = AssignmentController::<Active>::new();
     let mut host = Host::default();

@@ -399,7 +399,11 @@ impl<A> AssignmentController<A> {
             }
         };
         if let Some(reason) = hard_blocker_reason(self.blockers) {
-            self.state = state_for(self.blockers);
+            self.state = if self.active.is_some() {
+                state_for(self.blockers)
+            } else {
+                AssignmentState::Unloaded
+            };
             self.reason = Some(reason);
             return CompletionOutcome::Failed(reason);
         }
@@ -420,10 +424,12 @@ impl<A> AssignmentController<A> {
         }
     }
 
-    /// Adds/removes independent runtime blockers and derives paused/throttled/suspended state.
-    /// This is applicable only after an assignment has committed.
+    /// Tracks environment blockers and derives presentation state only for an active assignment.
     pub fn set_blocker(&mut self, blocker: Blocker, present: bool) {
-        if self.active.is_none() {
+        if matches!(
+            self.state,
+            AssignmentState::Stopping | AssignmentState::Detached
+        ) {
             return;
         }
         if present {
@@ -431,14 +437,18 @@ impl<A> AssignmentController<A> {
         } else {
             self.blockers.remove(blocker);
         }
-        if matches!(
-            self.state,
-            AssignmentState::Running
-                | AssignmentState::Paused
-                | AssignmentState::Throttled
-                | AssignmentState::Suspended
-        ) {
-            self.state = state_for(self.blockers);
+        if self.active.is_some() {
+            if matches!(
+                self.state,
+                AssignmentState::Running
+                    | AssignmentState::Paused
+                    | AssignmentState::Throttled
+                    | AssignmentState::Suspended
+            ) {
+                self.state = state_for(self.blockers);
+                self.reason = reason_for(self.blockers);
+            }
+        } else if self.state == AssignmentState::Unloaded {
             self.reason = reason_for(self.blockers);
         }
     }
