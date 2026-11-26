@@ -243,7 +243,7 @@ impl WindowsObserver {
             return Err(WindowsObserverError::InvalidConsentCombination);
         }
         let instance_id = NEXT_HOST_INSTANCE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 (value != 0 && value != u64::MAX).then_some(value + 1)
             })
             .map_err(|_| WindowsObserverError::WorkerInitializationFailed)?;
@@ -851,6 +851,7 @@ unsafe fn worker_setup_and_loop(
     context: &mut CallbackContext,
     ready: mpsc::SyncSender<Result<u32, WindowsObserverError>>,
 ) -> Result<(), u8> {
+    let context_user_data = context as *mut CallbackContext as *mut c_void;
     let shared = &context.shared;
     let thread_id = unsafe { GetCurrentThreadId() };
     let mut message = MaybeUninit::<Message>::uninit();
@@ -899,7 +900,7 @@ unsafe fn worker_setup_and_loop(
             null_mut(),
             null_mut(),
             instance,
-            context as *mut CallbackContext as *mut c_void,
+            context_user_data,
         )
     };
     if window.is_null() {
@@ -2110,7 +2111,7 @@ fn unregister_raw_input_if_owned(window: Hwnd) {
 }
 
 fn install_winevent_hooks() -> [HwinEventHook; 3] {
-    let callback = Some(winevent_proc);
+    let callback: Option<WinEventCallback> = Some(winevent_proc as WinEventCallback);
     let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
     [
         unsafe {
