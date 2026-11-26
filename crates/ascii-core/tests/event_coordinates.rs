@@ -236,6 +236,95 @@ fn negative_portrait_fractional_dpi_rotation_and_letterbox_roundtrip() {
 }
 
 #[test]
+fn rotated_transforms_roundtrip_closed_edges_without_changing_half_open_routing() {
+    let generation = Generation::from_value(8);
+    let desktop = DesktopLogicalRect::new(-10.0, 5.0, 12.0, 8.0).unwrap();
+    let scale = OutputScale::new(1.5, 2.0).unwrap();
+    let corners = [(-10.0, 5.0), (2.0, 5.0), (-10.0, 13.0), (2.0, 13.0)];
+    let rotations = [
+        OutputRotation::None,
+        OutputRotation::Clockwise90,
+        OutputRotation::Clockwise180,
+        OutputRotation::Clockwise270,
+    ];
+
+    for (index, rotation) in rotations.into_iter().enumerate() {
+        let (surface_width, surface_height) = match rotation {
+            OutputRotation::None | OutputRotation::Clockwise180 => (18.0, 16.0),
+            OutputRotation::Clockwise90 | OutputRotation::Clockwise270 => (16.0, 18.0),
+        };
+        let fitted = FittedContent::new(
+            SurfaceRect::new(0.0, 0.0, surface_width, surface_height).unwrap(),
+            SceneRect::new(0.0, 0.0, 1.0, 1.0).unwrap(),
+            FitMode::Stretch,
+        )
+        .unwrap();
+        let id = 10 + index as u8;
+        let output = geometry(id, desktop, scale, rotation, fitted);
+        let topology = TopologySnapshot::<1>::new(
+            generation,
+            DisplayRoutingMode::PerDisplay,
+            &[output],
+        )
+        .unwrap();
+        let transform = topology.output_transform(monitor(id), generation).unwrap();
+
+        for (corner_index, (x, y)) in corners.iter().copied().enumerate() {
+            let point = DesktopLogicalPoint::new(x, y).unwrap();
+            let local = transform
+                .desktop_to_output_logical(generation, point)
+                .unwrap();
+            let surface = transform.output_logical_to_surface(generation, local).unwrap();
+            if corner_index == 0 {
+                match rotation {
+                    OutputRotation::None => assert_eq!((surface.x(), surface.y()), (0.0, 0.0)),
+                    OutputRotation::Clockwise90 => {
+                        assert_eq!((surface.x(), surface.y()), (surface_width, 0.0));
+                    }
+                    OutputRotation::Clockwise180 => {
+                        assert_eq!((surface.x(), surface.y()), (surface_width, surface_height));
+                    }
+                    OutputRotation::Clockwise270 => {
+                        assert_eq!((surface.x(), surface.y()), (0.0, surface_height));
+                    }
+                }
+            }
+
+            let scene = transform.surface_to_scene(generation, surface).unwrap();
+            assert_eq!(
+                transform.desktop_to_scene(generation, point).unwrap(),
+                scene
+            );
+            let restored_surface = transform.scene_to_surface(generation, scene).unwrap();
+            let restored_local = transform
+                .surface_to_output_logical(generation, restored_surface)
+                .unwrap();
+            let restored_desktop = transform
+                .output_logical_to_desktop(generation, restored_local)
+                .unwrap();
+            assert!((restored_desktop.x() - x).abs() <= 1.0e-9);
+            assert!((restored_desktop.y() - y).abs() <= 1.0e-9);
+        }
+
+        let bottom_right = DesktopLogicalPoint::new(2.0, 13.0).unwrap();
+        assert_eq!(
+            topology.route_desktop_point(bottom_right, generation),
+            Err(CoordinateError::DisplayGap)
+        );
+        assert!(transform
+            .desktop_to_output_logical(generation, bottom_right)
+            .is_ok());
+        assert_eq!(
+            transform.desktop_to_output_logical(
+                generation,
+                DesktopLogicalPoint::new(2.0001, 13.0).unwrap(),
+            ),
+            Err(CoordinateError::OutsideOutputOrContent)
+        );
+    }
+}
+
+#[test]
 fn crop_maps_only_its_declared_scene_view() {
     let crop = FittedContent::new(
         SurfaceRect::new(0.0, 0.0, 400.0, 200.0).unwrap(),

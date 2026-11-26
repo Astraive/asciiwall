@@ -13,10 +13,10 @@ Payload variants distinguish pointer motion, button press/release, enter, leave,
 | Native desktop coordinates | OS-defined global or logical positions; may not exist on Wayland |
 | Output-local logical units | Coordinates relative to a monitor/output before physical scaling |
 | Surface pixels | Actual render-target pixels after scale/rotation |
-| Scene normalized coordinates | Usually x and y in [0, 1] inside the fitted content rectangle |
-| Character coordinates | Column/row plus optional sub-cell offsets |
+| Scene normalized coordinates | Fitted scene positions in [0, 1], including geometric outer-edge points |
+| Character coordinates | Half-open column/row cells plus optional sub-cell offsets |
 
-`ascii-core::coordinates::OutputTransform` names each conversion between signed desktop logical, output-local logical, surface-pixel, normalized fitted-scene, and character-cell coordinates. Output scale has independent positive x/y factors, and rotation is explicit. `FittedContent` names `Letterbox`, `Crop`, or `Stretch`; crop carries its visible normalized scene rectangle. Scene points use `[0, 1)` and all content rectangles are half-open, so points outside fitted content return an error instead of sticking to an edge. Each transform checks the caller's current `Generation`.
+`ascii-core::coordinates::OutputTransform` names each conversion between signed desktop logical, output-local logical, surface-pixel, normalized fitted-scene, and character-cell coordinates. Output scale has independent positive x/y factors, and rotation is explicit. `FittedContent` names `Letterbox`, `Crop`, or `Stretch`; crop carries its visible normalized scene rectangle. Rectangles retain half-open ownership for routing and gaps. Point transforms accept the selected output/content rectangle's exact closed outer edges, and `ScenePoint` represents the closed unit-square boundary so rotated inverses remain round-trippable. Points beyond those bounds are rejected, never clamped; the exclusive right/bottom scene edge has no character cell. Each transform checks the caller's current `Generation`.
 
 The deterministic regression assertion for desktop-position round trips is an absolute tolerance of `1e-9` desktop-logical units; character-cell/sub-cell round trips use `1e-12` normalized-scene units. These are numeric contract tolerances, not claims about native cursor precision.
 

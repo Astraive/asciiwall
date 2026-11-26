@@ -2,6 +2,8 @@
 //!
 //! This module contains only deterministic math and state machines. Monitor discovery, native
 //! routing, and clock sampling remain responsibilities of platform adapters.
+//! Rectangles assign points with half-open ownership; geometric point transforms accept
+//! closed outer edges exactly and never clamp points outside their content.
 
 use crate::events::{
     DesktopPoint, DesktopRect, EventEnvelope, EventPayload, MonotonicEpoch, MonotonicInstant,
@@ -88,6 +90,13 @@ impl Rect2 {
             && point.y >= self.top
             && point.x < self.right()
             && point.y < self.bottom()
+    }
+    // Ownership uses `contains`; transforms use this to preserve exact outer-edge inverses.
+    fn contains_closed(self, point: Point2) -> bool {
+        point.x >= self.left
+            && point.y >= self.top
+            && point.x <= self.right()
+            && point.y <= self.bottom()
     }
 
     fn contains_rect(self, other: Self) -> bool {
@@ -188,14 +197,14 @@ impl SurfacePoint {
     }
 }
 
-/// Normalized position inside the fitted scene viewport; both components are in `[0, 1)`.
+/// Normalized scene position; outer edges are representable geometric boundaries.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScenePoint(Point2);
 
 impl ScenePoint {
-    /// Creates a normalized scene point; the upper/right edges are excluded, never clamped.
+    /// Creates a normalized scene point in the closed unit square; outside points are rejected.
     pub fn new(x: f64, y: f64) -> Result<Self, CoordinateError> {
-        if x.is_finite() && y.is_finite() && (0.0..1.0).contains(&x) && (0.0..1.0).contains(&y) {
+        if x.is_finite() && y.is_finite() && (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) {
             Ok(Self(Point2 { x, y }))
         } else {
             Err(CoordinateError::OutsideOutputOrContent)
@@ -256,7 +265,7 @@ impl DesktopLogicalRect {
     }
 }
 
-/// Positive-area surface-pixel rectangle.
+/// Positive-area surface rectangle; point transforms accept its closed outer edges exactly.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceRect(Rect2);
 
@@ -267,7 +276,7 @@ impl SurfaceRect {
     }
 }
 
-/// Positive-area normalized scene rectangle contained in the unit square.
+/// Positive-area normalized scene rectangle; point transforms accept its closed outer edges.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SceneRect(Rect2);
 
@@ -434,14 +443,14 @@ impl OutputTransform {
         self.output.monitor
     }
 
-    /// Converts desktop coordinates to output-local logical units.
+    /// Converts a point on the selected output's closed desktop bounds to local logical units.
     pub fn desktop_to_output_logical(
         &self,
         current_generation: Generation,
         desktop: DesktopLogicalPoint,
     ) -> Result<OutputLogicalPoint, CoordinateError> {
         self.ensure_generation(current_generation)?;
-        if !self.output.desktop.0.contains(desktop.0) {
+        if !self.output.desktop.0.contains_closed(desktop.0) {
             return Err(CoordinateError::OutsideOutputOrContent);
         }
         Ok(OutputLogicalPoint(Point2::new(
@@ -457,7 +466,7 @@ impl OutputTransform {
         local: OutputLogicalPoint,
     ) -> Result<DesktopLogicalPoint, CoordinateError> {
         self.ensure_generation(current_generation)?;
-        if !self.output.local_bounds().contains(local.0) {
+        if !self.output.local_bounds().contains_closed(local.0) {
             return Err(CoordinateError::OutsideOutputOrContent);
         }
         Ok(DesktopLogicalPoint(Point2::new(
@@ -473,7 +482,7 @@ impl OutputTransform {
         local: OutputLogicalPoint,
     ) -> Result<SurfacePoint, CoordinateError> {
         self.ensure_generation(current_generation)?;
-        if !self.output.local_bounds().contains(local.0) {
+        if !self.output.local_bounds().contains_closed(local.0) {
             return Err(CoordinateError::OutsideOutputOrContent);
         }
         let width = self.output.desktop.width();
@@ -518,7 +527,7 @@ impl OutputTransform {
             }
         };
         let point = Point2::new(x, y)?;
-        if !self.output.local_bounds().contains(point) {
+        if !self.output.local_bounds().contains_closed(point) {
             return Err(CoordinateError::OutsideOutputOrContent);
         }
         Ok(OutputLogicalPoint(point))
@@ -532,7 +541,7 @@ impl OutputTransform {
     ) -> Result<ScenePoint, CoordinateError> {
         self.ensure_generation(current_generation)?;
         let content = self.output.fitted.surface.0;
-        if !content.contains(surface.0) {
+        if !content.contains_closed(surface.0) {
             return Err(CoordinateError::OutsideOutputOrContent);
         }
         let fitted_scene = self.output.fitted.scene.0;
@@ -552,7 +561,7 @@ impl OutputTransform {
     ) -> Result<SurfacePoint, CoordinateError> {
         self.ensure_generation(current_generation)?;
         let fitted_scene = self.output.fitted.scene.0;
-        if !fitted_scene.contains(scene.0) {
+        if !fitted_scene.contains_closed(scene.0) {
             return Err(CoordinateError::OutsideOutputOrContent);
         }
         let content = self.output.fitted.surface.0;
@@ -727,7 +736,7 @@ impl OutputGeometry {
             width: self.surface_width,
             height: self.surface_height,
         };
-        if bounds.contains(point) {
+        if bounds.contains_closed(point) {
             Ok(())
         } else {
             Err(CoordinateError::OutsideOutputOrContent)
@@ -931,7 +940,7 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
         })
     }
 
-    /// Routes a desktop position only to outputs whose logical rectangle contains it.
+    /// Routes by half-open output rectangles; points not owned by an output remain explicit gaps.
     pub fn route_desktop_point(
         &self,
         desktop: DesktopLogicalPoint,
@@ -965,7 +974,7 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
         Ok(route)
     }
 
-    /// Converts an output-local desktop point into its scene point under the chosen display policy.
+    /// Converts a point on the selected output's closed boundary under the display policy.
     pub fn desktop_to_scene(
         &self,
         monitor: MonitorId,
@@ -974,7 +983,7 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
     ) -> Result<ScenePoint, CoordinateError> {
         self.ensure_generation(current_generation)?;
         let output = self.find_output(monitor).ok_or(CoordinateError::UnknownOutput)?;
-        if !output.desktop.contains(desktop) {
+        if !output.desktop.0.contains_closed(desktop.0) {
             return Err(CoordinateError::OutsideOutputOrContent);
         }
         match self.mode {
@@ -1028,7 +1037,7 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
         policy: SpanGapPolicy,
     ) -> Result<ScenePoint, CoordinateError> {
         let output = self.find_output(monitor).ok_or(CoordinateError::UnknownOutput)?;
-        if !output.desktop.contains(desktop) {
+        if !output.desktop.0.contains_closed(desktop.0) {
             return Err(CoordinateError::OutsideOutputOrContent);
         }
         match policy {
@@ -1077,7 +1086,7 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
                 let prefix = self.horizontal_prefix(output)?;
                 let total = self.horizontal_total()?;
                 let compressed_x = scene.x() * total;
-                if compressed_x < prefix || compressed_x >= prefix + output.desktop.width() {
+                if compressed_x < prefix || compressed_x > prefix + output.desktop.width() {
                     return Err(CoordinateError::DisplayGap);
                 }
                 let first = self.outputs[0]
@@ -1092,7 +1101,7 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
                 let prefix = self.vertical_prefix(output)?;
                 let total = self.vertical_total()?;
                 let compressed_y = scene.y() * total;
-                if compressed_y < prefix || compressed_y >= prefix + output.desktop.height() {
+                if compressed_y < prefix || compressed_y > prefix + output.desktop.height() {
                     return Err(CoordinateError::DisplayGap);
                 }
                 let first = self.outputs[0]
@@ -1104,7 +1113,7 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
                 )?
             }
         };
-        if !output.desktop.0.contains(point) {
+        if !output.desktop.0.contains_closed(point) {
             return Err(CoordinateError::DisplayGap);
         }
         Ok(DesktopLogicalPoint(point))
