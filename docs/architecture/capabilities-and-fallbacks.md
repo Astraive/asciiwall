@@ -12,7 +12,7 @@ The host computes effective capabilities from native support, granted permission
 
 The portable surface lease registry binds an adapter-owned surface to a `MonitorIdentity`, non-wrapping `ascii-core::Generation`, and non-reusable process-local registry epoch. Destroying and reconstructing a registry cannot revive an old lease even when host, display, and local generation match. Native handles remain private to the adapter; stale leases fail after retirement/recreation even if the operating system reuses a handle. Requested/effective presentation resolution downgrades to preview or a user-consented static wallpaper path, never to an always-on-top window.
 
-This is a reusable contract and deterministic lifecycle model, not a production Windows host or a claim that any capability is supported on a named OS/session/GPU tuple. The Windows hierarchy probe is read-only; below-icon placement, focus preservation, Win+D, Explorer restart/recovery, and icon interaction remain unverified. No Linux or macOS adapter is included.
+The WPH-001 contract and deterministic lifecycle model are portable. WND-002 adds an experimental Windows `WindowsHost` implementation that reports the session-lock feed and a low-confidence wallpaper-surface capability after structural checks; it does not establish support for any named OS/session/GPU tuple. Below-icon placement, focus preservation, Win+D, Explorer restart/recovery, icon interaction, and application-level Stop remain unverified or unavailable. No Linux or macOS adapter is included.
 
 ## Fallback order
 
