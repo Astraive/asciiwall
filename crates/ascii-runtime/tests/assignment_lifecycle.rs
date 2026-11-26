@@ -333,7 +333,10 @@ fn soft_blocker_during_preparation_does_not_cancel_the_newest_generation() {
         CompletionOutcome::Committed
     );
     assert_eq!(controller.snapshot().state, AssignmentState::Paused);
-    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(9));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(9)
+    );
     controller.set_blocker(Blocker::UserPause, false);
     assert_eq!(controller.snapshot().state, AssignmentState::Running);
 }
@@ -348,7 +351,10 @@ fn lock_and_display_off_during_preparation_suspend_old_assignment_and_invalidate
 
     let mut event_snapshot = controller.snapshot();
     event_snapshot.blockers.insert(Blocker::SessionLocked);
-    assert_eq!(pause_action(event_snapshot, suspend_policy()), Ok(immediate_suspend_action()));
+    assert_eq!(
+        pause_action(event_snapshot, suspend_policy()),
+        Ok(immediate_suspend_action())
+    );
 
     let preparing_generation = controller.snapshot().generation;
     controller.set_blocker(Blocker::SessionLocked, true);
@@ -358,13 +364,22 @@ fn lock_and_display_off_during_preparation_suspend_old_assignment_and_invalidate
     assert_eq!(blocked.state, AssignmentState::Suspended);
     assert_eq!(blocked.reason, Some(ReasonCode::SessionLocked));
     assert_eq!(blocked.active_assignment, Some(assignment(1)));
-    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
-    assert_eq!(pause_action(blocked, suspend_policy()), Ok(immediate_suspend_action()));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
+    assert_eq!(
+        pause_action(blocked, suspend_policy()),
+        Ok(immediate_suspend_action())
+    );
     assert_eq!(
         controller.complete_preparation(completion, &mut host),
         CompletionOutcome::Stale
     );
-    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
     assert_eq!(host.drops.count(), 1);
     assert_eq!(
         controller.request(input(10), &mut host).map(|_| ()),
@@ -376,12 +391,17 @@ fn lock_and_display_off_during_preparation_suspend_old_assignment_and_invalidate
     assert_eq!(controller.snapshot().reason, Some(ReasonCode::DisplayOff));
     controller.set_blocker(Blocker::DisplayOff, false);
     assert_eq!(controller.snapshot().state, AssignmentState::Running);
-    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
 
     let token = controller.begin_stop(StopKind::User);
     assert_eq!(
         pause_action(controller.snapshot(), suspend_policy()),
-        Ok(PauseAction::Stop { kind: StopKind::User })
+        Ok(PauseAction::Stop {
+            kind: StopKind::User
+        })
     );
     assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
     assert!(controller.complete_stop(token));
@@ -405,13 +425,22 @@ fn host_unavailable_during_preparation_suspends_old_assignment_and_invalidates_j
     assert_eq!(blocked.state, AssignmentState::Suspended);
     assert_eq!(blocked.reason, Some(ReasonCode::HostUnavailable));
     assert_eq!(blocked.active_assignment, Some(assignment(1)));
-    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
-    assert_eq!(pause_action(blocked, suspend_policy()), Ok(immediate_suspend_action()));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
+    assert_eq!(
+        pause_action(blocked, suspend_policy()),
+        Ok(immediate_suspend_action())
+    );
     assert_eq!(
         controller.complete_preparation(completion, &mut host),
         CompletionOutcome::Stale
     );
-    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
     assert_eq!(host.drops.count(), 1);
     assert_eq!(
         controller.request(input(12), &mut host).map(|_| ()),
@@ -421,7 +450,10 @@ fn host_unavailable_during_preparation_suspends_old_assignment_and_invalidates_j
     controller.set_blocker(Blocker::HostUnavailable, false);
     assert_eq!(controller.snapshot().state, AssignmentState::Running);
     assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
-    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
 }
 #[test]
 fn display_off_during_failed_precommit_suspends_and_then_resumes_old_assignment() {
@@ -436,18 +468,27 @@ fn display_off_during_failed_precommit_suspends_and_then_resumes_old_assignment(
         CompletionOutcome::Failed(ReasonCode::PreparationFailed)
     );
     assert_eq!(controller.snapshot().state, AssignmentState::Failed);
-    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
     assert_eq!(host.drops.count(), 0);
 
     let mut event_snapshot = controller.snapshot();
     event_snapshot.blockers.insert(Blocker::DisplayOff);
-    assert_eq!(pause_action(event_snapshot, suspend_policy()), Ok(immediate_suspend_action()));
+    assert_eq!(
+        pause_action(event_snapshot, suspend_policy()),
+        Ok(immediate_suspend_action())
+    );
 
     controller.set_blocker(Blocker::DisplayOff, true);
     assert_eq!(controller.snapshot().state, AssignmentState::Suspended);
     assert_eq!(controller.snapshot().reason, Some(ReasonCode::DisplayOff));
     assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
-    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
     assert_eq!(
         controller.request(input(11), &mut host).map(|_| ()),
         Err(ReasonCode::DisplayOff)
@@ -456,7 +497,10 @@ fn display_off_during_failed_precommit_suspends_and_then_resumes_old_assignment(
     controller.set_blocker(Blocker::DisplayOff, false);
     assert_eq!(controller.snapshot().state, AssignmentState::Running);
     assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
-    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
 
     let token = controller.begin_stop(StopKind::Security);
     assert!(controller.complete_stop(token));

@@ -430,7 +430,10 @@ impl<A> AssignmentController<A> {
     /// Adds/removes independent runtime blockers and derives the active assignment's policy state.
     /// A hard blocker invalidates in-flight replacement work without discarding the old assignment.
     pub fn set_blocker(&mut self, blocker: Blocker, present: bool) {
-        if matches!(self.state, AssignmentState::Stopping | AssignmentState::Detached) {
+        if matches!(
+            self.state,
+            AssignmentState::Stopping | AssignmentState::Detached
+        ) {
             return;
         }
         if present {

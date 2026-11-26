@@ -51,8 +51,14 @@ fn clearing_user_pause_preserves_each_other_reason() {
     reasons.remove(Blocker::UserPause);
 
     assert!(!reasons.contains(Blocker::UserPause));
-    for reason in PAUSE_REASONS.into_iter().filter(|reason| *reason != Blocker::UserPause) {
-        assert!(reasons.contains(reason), "clearing user pause also cleared {reason:?}");
+    for reason in PAUSE_REASONS
+        .into_iter()
+        .filter(|reason| *reason != Blocker::UserPause)
+    {
+        assert!(
+            reasons.contains(reason),
+            "clearing user pause also cleared {reason:?}"
+        );
     }
     assert!(!reasons.is_empty());
 }
@@ -67,11 +73,17 @@ fn stop_action_has_priority_over_any_remaining_pause_reason() {
 
     assert_eq!(
         pause_action(stop_snapshot, suspend_policy()),
-        Ok(PauseAction::Stop { kind: StopKind::User }),
+        Ok(PauseAction::Stop {
+            kind: StopKind::User
+        }),
     );
     assert_eq!(
         pause_action(
-            snapshot(AssignmentState::Stopping, Blockers::default(), Some(ReasonCode::UserPause)),
+            snapshot(
+                AssignmentState::Stopping,
+                Blockers::default(),
+                Some(ReasonCode::UserPause)
+            ),
             suspend_policy(),
         ),
         Err(PausePolicyError::MissingStopKind),
@@ -84,7 +96,11 @@ fn lock_and_display_off_suspend_without_cosmetic_transition() {
         (ReasonCode::SessionLocked, Blocker::SessionLocked),
         (ReasonCode::DisplayOff, Blocker::DisplayOff),
     ] {
-        let snapshot = snapshot(AssignmentState::Suspended, blockers(&[blocker]), Some(reason));
+        let snapshot = snapshot(
+            AssignmentState::Suspended,
+            blockers(&[blocker]),
+            Some(reason),
+        );
         assert_eq!(
             pause_action(snapshot, suspend_policy()),
             Ok(PauseAction::Suspend {
@@ -114,10 +130,13 @@ fn user_pause_freezes_frame_but_suspend_applies_resource_policy() {
         Some(ReasonCode::HostUnavailable),
     );
     assert_eq!(
-        pause_action(suspended, SuspendPolicy {
-            resources: SuspendResourcePolicy::ReleaseExpensive,
-            surface: SurfaceDisposition::Retain,
-        }),
+        pause_action(
+            suspended,
+            SuspendPolicy {
+                resources: SuspendResourcePolicy::ReleaseExpensive,
+                surface: SurfaceDisposition::Retain,
+            }
+        ),
         Ok(PauseAction::Suspend {
             resources: SuspendResourcePolicy::ReleaseExpensive,
             surface: SurfaceDisposition::Retain,
@@ -199,7 +218,10 @@ fn resume_resets_baseline_drops_stale_events_and_clamps_catch_up() {
 fn resume_preserves_restore_or_realign_source_policy() {
     let mut clock = ResumeClock::new(10, 0, NonZeroU64::new(1).unwrap());
     let restore = clock.resume_after_reprobe(20, 5, PlaybackPositionPolicy::RestoreSavedPosition);
-    assert_eq!(restore.position, PlaybackPositionPolicy::RestoreSavedPosition);
+    assert_eq!(
+        restore.position,
+        PlaybackPositionPolicy::RestoreSavedPosition
+    );
 
     let realign = clock.resume_after_reprobe(30, 8, PlaybackPositionPolicy::RealignToClock);
     assert_eq!(realign.position, PlaybackPositionPolicy::RealignToClock);

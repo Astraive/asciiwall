@@ -127,8 +127,7 @@ pub fn pause_action(
         AssignmentState::Throttled => Ok(PauseAction::ThrottleRender),
         AssignmentState::Suspended => Ok(suspend_action(snapshot, suspend_policy)),
         AssignmentState::Preparing | AssignmentState::Failed
-            if snapshot.active_assignment.is_some()
-                && hard_blocker_present(snapshot.blockers) =>
+            if snapshot.active_assignment.is_some() && hard_blocker_present(snapshot.blockers) =>
         {
             Ok(suspend_action(snapshot, suspend_policy))
         }
@@ -183,12 +182,12 @@ pub struct ResumeClock {
 impl ResumeClock {
     /// Creates a clock with its initial baseline, event watermark, and nonzero per-tick bound.
     #[must_use]
-    pub const fn new(
-        baseline_ns: u64,
-        event_watermark: u64,
-        max_catch_up_ns: NonZeroU64,
-    ) -> Self {
-        Self { baseline_ns, max_catch_up_ns, event_watermark }
+    pub const fn new(baseline_ns: u64, event_watermark: u64, max_catch_up_ns: NonZeroU64) -> Self {
+        Self {
+            baseline_ns,
+            max_catch_up_ns,
+            event_watermark,
+        }
     }
 
     /// Resets time and stale-event state after fresh topology/capability probes have completed.
