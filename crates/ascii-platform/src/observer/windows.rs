@@ -1788,7 +1788,9 @@ fn update_window(
                 },
             );
         }
-        if !same_bounds(old.bounds, bounds) && let Some(bounds) = bounds {
+        if !same_bounds(old.bounds, bounds)
+            && let Some(bounds) = bounds
+        {
             publish_feed(&mut data, FeedEvent::WindowRectangle(bounds.rectangle));
         }
     } else {
