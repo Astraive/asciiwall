@@ -65,12 +65,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cancellation = CancellationToken::new();
     let repertoire = GlyphRepertoire::new(" .:-=+*#%@")?;
     let glyph_config = GlyphConfig::new(16.0, 8, 16, 13)?;
-    let glyph_table_bytes = glyph_table_memory_bytes(&repertoire, &glyph_config)?;
-    let glyph_build_memory_bytes = budget
+    let (glyph_table_bytes, glyph_table_payload_bytes) =
+        glyph_table_memory_bytes(&repertoire, &glyph_config)?;
+    let glyph_table_overhead_bytes = glyph_table_bytes
+        .checked_sub(glyph_table_payload_bytes)
+        .ok_or(RuntimeError::SizeOverflow)?;
+    let font_buffer_bytes = u64::try_from(
+        MAX_FONT_BYTES
+            .checked_add(1)
+            .ok_or(RuntimeError::SizeOverflow)?,
+    )
+    .map_err(|_| RuntimeError::SizeOverflow)?;
+    let glyph_build_memory_limit = budget
         .max_raster_bytes()
-        .checked_sub(glyph_table_bytes)
-        .ok_or(RuntimeError::MemoryBudgetExceeded)?;
-    let runtime_memory_limit = MAX_RASTER_BYTES
+        .checked_add(glyph_table_overhead_bytes)
+        .and_then(|bytes| bytes.checked_add(font_buffer_bytes))
+        .and_then(|bytes| bytes.checked_add(MAX_RUNTIME_METADATA_BYTES))
+        .ok_or(RuntimeError::SizeOverflow)?;
+    let raster_pipeline_memory_limit = MAX_RASTER_BYTES
         .checked_mul(4)
         .and_then(|raster_bytes| {
             MAX_FRAME_BYTES
@@ -80,15 +92,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|bytes| bytes.checked_add(glyph_table_bytes))
         .and_then(|bytes| bytes.checked_add(MAX_RUNTIME_METADATA_BYTES))
         .ok_or(RuntimeError::SizeOverflow)?;
+    let runtime_memory_limit = raster_pipeline_memory_limit.max(glyph_build_memory_limit);
     let runtime_resources =
         ResourceBudget::new(ResourceLimits::new(1, 1, 1, runtime_memory_limit, 0));
-    // Reserve the glyph builder's full bounded peak before it reads the font. Its core budget
-    // includes font input and parser/raster scratch; the retained table is charged separately.
+    // Charge both the retained table and read_bounded's full reserved font-buffer capacity before
+    // allocation. The builder's core budget includes font length but not Vec capacity.
     let _glyph_table_memory =
         runtime_resources.try_reserve_memory(MemoryUsage::new(glyph_table_bytes, 0))?;
+    let _font_buffer_memory =
+        runtime_resources.try_reserve_memory(MemoryUsage::new(font_buffer_bytes, 0))?;
+    let font_bytes = read_bounded(&font_path, MAX_FONT_BYTES)?;
+    let font_input_bytes =
+        u64::try_from(font_bytes.len()).map_err(|_| RuntimeError::SizeOverflow)?;
+    let glyph_build_memory_bytes = budget
+        .max_raster_bytes()
+        .checked_sub(glyph_table_payload_bytes)
+        .and_then(|bytes| bytes.checked_sub(font_input_bytes))
+        .ok_or(RuntimeError::MemoryBudgetExceeded)?;
     let _glyph_build_memory =
         runtime_resources.try_reserve_memory(MemoryUsage::new(glyph_build_memory_bytes, 0))?;
-    let font_bytes = read_bounded(&font_path, MAX_FONT_BYTES)?;
     let glyph_table = Arc::new(build_glyph_table(
         &font_bytes,
         &repertoire,
@@ -99,6 +121,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     drop(font_bytes);
     drop(repertoire);
     drop(_glyph_build_memory);
+    drop(_font_buffer_memory);
 
     let decode_resources = DecodeResources::new(1, MAX_RASTER_BYTES);
     let decode_limits = DecodeLimits::new(
@@ -225,8 +248,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     fn glyph_table_memory_bytes(
         repertoire: &GlyphRepertoire,
         config: &GlyphConfig,
-    ) -> Result<u64, RuntimeError> {
-        // The builder reserves the record vector and each mask from these exact validated sizes.
+    ) -> Result<(u64, u64), RuntimeError> {
+        // The builder reserves the record vector and each mask from these validated sizes.
         let glyph_count =
             u64::try_from(repertoire.characters().len()).map_err(|_| RuntimeError::SizeOverflow)?;
         let mask_bytes = u64::from(config.cell_width())
@@ -237,15 +260,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|_| RuntimeError::SizeOverflow)?
             .checked_mul(glyph_count)
             .ok_or(RuntimeError::SizeOverflow)?;
+        let table_payload_bytes = record_bytes
+            .checked_add(mask_bytes)
+            .ok_or(RuntimeError::SizeOverflow)?;
         let allocation_headers = std::mem::size_of::<GlyphTable>()
             .checked_add(std::mem::size_of::<[usize; 2]>())
             .ok_or(RuntimeError::SizeOverflow)?;
         let allocation_headers =
             u64::try_from(allocation_headers).map_err(|_| RuntimeError::SizeOverflow)?;
-        allocation_headers
-            .checked_add(record_bytes)
-            .and_then(|bytes| bytes.checked_add(mask_bytes))
-            .ok_or(RuntimeError::SizeOverflow)
+        let table_bytes = allocation_headers
+            .checked_add(table_payload_bytes)
+            .ok_or(RuntimeError::SizeOverflow)?;
+        Ok((table_bytes, table_payload_bytes))
     }
 
     fn usage_error() -> std::io::Error {
