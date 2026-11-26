@@ -372,6 +372,39 @@ fn lock_and_display_off_during_preparation_suspend_old_assignment_and_invalidate
 }
 
 #[test]
+fn host_unavailable_during_preparation_suspends_old_assignment_and_invalidates_job() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    let job = controller.request(input(6), &mut host).unwrap();
+    let completion = job.execute(&mut host);
+
+    let preparing_generation = controller.snapshot().generation;
+    controller.set_blocker(Blocker::HostUnavailable, true);
+    let blocked = controller.snapshot();
+    assert_ne!(blocked.generation, preparing_generation);
+    assert_eq!(blocked.state, AssignmentState::Suspended);
+    assert_eq!(blocked.reason, Some(ReasonCode::HostUnavailable));
+    assert_eq!(blocked.active_assignment, Some(assignment(1)));
+    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+    assert_eq!(pause_action(blocked, suspend_policy()), Ok(immediate_suspend_action()));
+    assert_eq!(
+        controller.complete_preparation(completion, &mut host),
+        CompletionOutcome::Stale
+    );
+    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+    assert_eq!(host.drops.count(), 1);
+    assert_eq!(
+        controller.request(input(12), &mut host).map(|_| ()),
+        Err(ReasonCode::HostUnavailable)
+    );
+
+    controller.set_blocker(Blocker::HostUnavailable, false);
+    assert_eq!(controller.snapshot().state, AssignmentState::Running);
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+}
+#[test]
 fn display_off_during_failed_precommit_suspends_and_then_resumes_old_assignment() {
     let mut controller = AssignmentController::<Active>::new();
     let mut host = Host::default();
