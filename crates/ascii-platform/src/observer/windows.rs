@@ -1345,15 +1345,15 @@ fn process_pointer_event(
         data.position = Some(position);
         publish_feed(&mut data, FeedEvent::PointerPosition(position));
     }
-    if previous != next || data.buttons.is_none() {
-        if let Some(buttons) = PointerButtons::new(next) {
-            let update = PointerButtonsUpdate {
-                buttons,
-                observed_at_ms: now_ms,
-            };
-            data.buttons = Some(update);
-            publish_feed(&mut data, FeedEvent::PointerButtons(update));
-        }
+    if (previous != next || data.buttons.is_none())
+        && let Some(buttons) = PointerButtons::new(next)
+    {
+        let update = PointerButtonsUpdate {
+            buttons,
+            observed_at_ms: now_ms,
+        };
+        data.buttons = Some(update);
+        publish_feed(&mut data, FeedEvent::PointerButtons(update));
     }
     if shared.consent.desktop_click_classification() {
         let age = unsafe { GetTickCount() }.wrapping_sub(message_time);
