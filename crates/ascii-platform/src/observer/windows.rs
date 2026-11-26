@@ -1751,22 +1751,22 @@ fn update_window(
         bounds.rectangle.window = identity;
     }
     let mut fullscreen = [None; MAX_FULLSCREEN_OBSERVATIONS];
-    if matches!(state, WindowState::Normal | WindowState::Maximized) {
-        if let Some(bounds) = bounds {
-            let output_records = data.outputs;
-            let mut count = 0;
-            for output in output_records.iter().flatten() {
-                if fullscreen_overlap(bounds.rectangle, output.rect) {
-                    if count < MAX_FULLSCREEN_OBSERVATIONS {
-                        fullscreen[count] = Some(FullscreenCandidate {
-                            window: identity,
-                            display: output.identity,
-                            confidence: Confidence::Medium,
-                            observed_at_ms: now_ms,
-                        });
-                        count += 1;
-                    }
-                }
+    if matches!(state, WindowState::Normal | WindowState::Maximized)
+        && let Some(bounds) = bounds
+    {
+        let output_records = data.outputs;
+        let mut count = 0;
+        for output in output_records.iter().flatten() {
+            if fullscreen_overlap(bounds.rectangle, output.rect)
+                && count < MAX_FULLSCREEN_OBSERVATIONS
+            {
+                fullscreen[count] = Some(FullscreenCandidate {
+                    window: identity,
+                    display: output.identity,
+                    confidence: Confidence::Medium,
+                    observed_at_ms: now_ms,
+                });
+                count += 1;
             }
         }
     }
@@ -1788,10 +1788,8 @@ fn update_window(
                 },
             );
         }
-        if !same_bounds(old.bounds, bounds) {
-            if let Some(bounds) = bounds {
-                publish_feed(&mut data, FeedEvent::WindowRectangle(bounds.rectangle));
-            }
+        if !same_bounds(old.bounds, bounds) && let Some(bounds) = bounds {
+            publish_feed(&mut data, FeedEvent::WindowRectangle(bounds.rectangle));
         }
     } else {
         publish_feed(
@@ -1830,17 +1828,16 @@ fn remove_window(shared: &SharedInner, handle: usize, now_ms: u64) {
         .windows
         .iter()
         .position(|entry| entry.is_some_and(|entry| entry.handle == handle))
+        && let Some(entry) = data.windows[index].take()
     {
-        if let Some(entry) = data.windows[index].take() {
-            publish_feed(
-                &mut data,
-                FeedEvent::WindowState {
-                    window: entry.identity,
-                    state: WindowState::Hidden,
-                    observed_at_ms: now_ms,
-                },
-            );
-        }
+        publish_feed(
+            &mut data,
+            FeedEvent::WindowState {
+                window: entry.identity,
+                state: WindowState::Hidden,
+                observed_at_ms: now_ms,
+            },
+        );
     }
 }
 
@@ -1982,10 +1979,7 @@ fn reconcile_windows(shared: &SharedInner) {
     if !collector.truncated {
         let data = lock_data(shared);
         for entry in data.windows.iter().flatten() {
-            if !collector.records[..collector.len]
-                .iter()
-                .any(|handle| *handle == entry.handle)
-            {
+            if !collector.records[..collector.len].contains(&entry.handle) {
                 stale[stale_len] = entry.handle;
                 stale_len += 1;
             }
