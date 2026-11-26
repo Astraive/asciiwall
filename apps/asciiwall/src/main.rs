@@ -21,17 +21,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Duration;
 
     use ascii_convert::{
-        ConversionSettings, GlyphConfig, GlyphRepertoire, GridSizing, LinearRgb,
-        NormalizedRasterResources, build_glyph_table, convert_density,
+        GlyphConfig, GlyphRepertoire, GridSizing, LinearRgb, NormalizedRasterResources,
+        build_glyph_table,
     };
-    use ascii_core::{Budget, CancellationToken, FrameMetadata, GlyphTableId};
-    use ascii_media::{DecodeLimits, DecodeResources, decode_image};
+    use ascii_core::{AsciiFrame, Budget, CancellationToken, RasterOrientation};
+    use ascii_media::{DecodeLimits, DecodeResources, DecodedFrame, decode_image};
     use ascii_platform::{HostAdapter, WindowsHost, WindowsHostConfig};
+    use ascii_runtime::{
+        BoundedHandoff, MemoryPermit, MemoryUsage, RasterDescriptorMetadata,
+        RasterToAsciiConsumer, ResourceBudget, ResourceLimits, RuntimeError,
+    };
 
     const MAX_FONT_BYTES: usize = 16 * 1024 * 1024;
     const MAX_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
     const MAX_RASTER_BYTES: u64 = 128 * 1024 * 1024;
     const MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
+    // One slot and one descriptor/control queue entry have bounded metadata; the raster and frame
+    // payloads are charged independently below.
+    const MAX_RUNTIME_METADATA_BYTES: u64 = 4 * 1024;
     const MAX_WORK_UNITS: u64 = 1_000_000_000;
     const MAX_IMAGE_DIMENSION: u32 = 4096;
     const DEFAULT_COLUMNS: u32 = 120;
@@ -55,8 +62,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err(usage_error().into());
     }
 
+    let runtime_memory_limit = MAX_RASTER_BYTES
+        .checked_mul(4)
+        .and_then(|raster_bytes| {
+            MAX_FRAME_BYTES
+                .checked_mul(2)
+                .and_then(|frame_bytes| raster_bytes.checked_add(frame_bytes))
+        })
+        .and_then(|bytes| bytes.checked_add(MAX_RUNTIME_METADATA_BYTES))
+        .ok_or(RuntimeError::SizeOverflow)?;
     let budget = Budget::new(MAX_FRAME_BYTES, MAX_RASTER_BYTES, MAX_WORK_UNITS);
     let cancellation = CancellationToken::new();
+    let runtime_resources = ResourceBudget::new(ResourceLimits::new(
+        1,
+        1,
+        1,
+        runtime_memory_limit,
+        0,
+    ));
     let decode_resources = DecodeResources::new(1, MAX_RASTER_BYTES);
     let decode_limits = DecodeLimits::new(
         budget,
@@ -79,27 +102,65 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     drop(font_bytes);
 
     let mut image_file = std::fs::File::open(&image_path)?;
+    let decode_permit = runtime_resources.try_acquire_decode()?;
     let decoded = decode_image(&mut image_file, &decode_limits, &cancellation)?;
-    let metadata = FrameMetadata::new(GlyphTableId::new(*glyph_table.fingerprint()), 1, 1, 0, 0);
-    let settings = ConversionSettings::new(
-        GridSizing::columns(columns),
-        metadata,
+    drop(decode_permit);
+    let decoded_memory = runtime_resources.try_reserve_memory(MemoryUsage::new(
+        u64::try_from(decoded.pixels().len()).map_err(|_| RuntimeError::SizeOverflow)?,
+        0,
+    ))?;
+    let decoded = ChargedDecodedFrame {
+        frame: decoded,
+        _memory_permit: decoded_memory,
+    };
+    let input_bytes = decoded.frame.pixels().len();
+    let handoff = BoundedHandoff::new(&runtime_resources, 1, 1, input_bytes, 1, 1)?;
+    handoff.submit_frame(
+        RasterDescriptorMetadata {
+            width: decoded.frame.width(),
+            height: decoded.frame.height(),
+            row_stride: decoded.frame.row_stride(),
+            format: decoded.frame.format(),
+            color: decoded.frame.color(),
+            orientation: RasterOrientation::TopDown,
+            media_timestamp_ns: 0,
+        },
+        decoded.frame.pixels(),
+        &budget,
         &cancellation,
+    )?;
+    // Submission copied source bytes into the bounded pool; release the decoded raster before
+    // allocating consumer scratch or converting.
+    drop(decoded);
+    let mut consumer = RasterToAsciiConsumer::new(
+        &runtime_resources,
+        input_bytes,
+        GridSizing::columns(columns),
         LinearRgb::WHITE,
         LinearRgb::BLACK,
+        NormalizedRasterResources::new(MAX_RASTER_BYTES),
     )?;
-    // The one-shot conversion is passed directly to the host. The runtime consumer keeps its
-    // output lease private, so extracting that frame into the host's Arc would break accounting.
-    let normalized_resources = NormalizedRasterResources::new(MAX_RASTER_BYTES);
-    let frame = Arc::new(convert_density(
-        decoded.view(),
-        &glyph_table,
-        &settings,
-        &budget,
-        &normalized_resources,
-    )?);
-    drop(decoded);
 
+    // The consumer holds an output-count permit, but its ASCII cell allocation is only bounded by
+    // the per-frame core budget. Reserve that maximum before conversion so the original output and
+    // the host-owned copy both stay covered by the shared CPU-memory ledger.
+    let _converted_frame_memory = reserve_frame_memory(&budget, &runtime_resources, false)?;
+    let converted = consumer
+        .convert_next(&handoff, &glyph_table, &budget, &cancellation)?
+        .ok_or_else(|| io::Error::other("bounded handoff produced no converted frame"))?;
+    drop(consumer);
+    drop(handoff);
+
+    // WindowsHost requires Arc ownership, so copy only while retaining `converted` (and its
+    // acknowledged source lease/output permit) for the full host lifetime.
+    let _host_frame_memory = reserve_frame_memory(&budget, &runtime_resources, true)?;
+    let glyph_count = u32::try_from(glyph_table.glyphs().len())?;
+    let frame = Arc::new(copy_frame_for_host(
+        converted.frame(),
+        glyph_count,
+        &budget,
+        &cancellation,
+    )?);
     // The caller supplies its own licensed font file; no font asset is bundled or redistributed.
     let mut host = pollster::block_on(WindowsHost::new(WindowsHostConfig::new(
         Arc::clone(&glyph_table),
@@ -189,5 +250,50 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    struct ChargedDecodedFrame {
+        frame: DecodedFrame,
+        // Keep this after `frame` so its backing pixels are freed before their runtime charge.
+        _memory_permit: MemoryPermit,
+    }
+    fn reserve_frame_memory(
+        budget: &Budget,
+        resources: &ResourceBudget,
+        arc_owned: bool,
+    ) -> Result<ascii_runtime::MemoryPermit, RuntimeError> {
+        let arc_header_bytes = if arc_owned {
+            std::mem::size_of::<[usize; 2]>()
+        } else {
+            0
+        };
+        let overhead = std::mem::size_of::<AsciiFrame>()
+            .checked_add(arc_header_bytes)
+            .ok_or(RuntimeError::SizeOverflow)?;
+        let overhead = u64::try_from(overhead).map_err(|_| RuntimeError::SizeOverflow)?;
+        let bytes = budget
+            .max_frame_bytes()
+            .checked_add(overhead)
+            .ok_or(RuntimeError::SizeOverflow)?;
+        resources.try_reserve_memory(MemoryUsage::new(bytes, 0))
+    }
+
+    fn copy_frame_for_host(
+        source: &AsciiFrame,
+        glyph_count: u32,
+        budget: &Budget,
+        cancellation: &CancellationToken,
+    ) -> Result<AsciiFrame, Box<dyn std::error::Error>> {
+        let mut cells = Vec::new();
+        cells.try_reserve_exact(source.cells().len())?;
+        cells.extend_from_slice(source.cells());
+        Ok(AsciiFrame::try_new(
+            source.size(),
+            source.metadata(),
+            cells,
+            glyph_count,
+            budget,
+            cancellation,
+        )?)
+    }
+
     Ok(())
 }

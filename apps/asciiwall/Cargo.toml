@@ -15,4 +15,5 @@ ascii-convert = { path = "../../crates/ascii-convert" }
 ascii-core = { path = "../../crates/ascii-core" }
 ascii-media = { path = "../../crates/ascii-media" }
 ascii-platform = { path = "../../crates/ascii-platform" }
+ascii-runtime = { path = "../../crates/ascii-runtime" }
 pollster = "=0.4.0"
