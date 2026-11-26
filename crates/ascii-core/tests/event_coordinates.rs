@@ -325,6 +325,105 @@ fn rotated_transforms_roundtrip_closed_edges_without_changing_half_open_routing(
 }
 
 #[test]
+fn fitted_content_edges_roundtrip_and_outside_points_are_not_clamped() {
+    let letterbox_generation = Generation::from_value(9);
+    let letterbox = FittedContent::new(
+        SurfaceRect::new(10.0, 20.0, 40.0, 60.0).unwrap(),
+        SceneRect::new(0.0, 0.0, 1.0, 1.0).unwrap(),
+        FitMode::Letterbox,
+    )
+    .unwrap();
+    let letterbox_output = geometry(
+        20,
+        DesktopLogicalRect::new(-100.0, 0.0, 100.0, 60.0).unwrap(),
+        OutputScale::new(1.0, 1.0).unwrap(),
+        OutputRotation::Clockwise90,
+        letterbox,
+    );
+    let letterbox_transform = TopologySnapshot::<1>::new(
+        letterbox_generation,
+        DisplayRoutingMode::PerDisplay,
+        &[letterbox_output],
+    )
+    .unwrap()
+    .output_transform(monitor(20), letterbox_generation)
+    .unwrap();
+    for (desktop_x, desktop_y, scene_x, scene_y) in [
+        (-80.0, 50.0, 0.0, 0.0),
+        (-80.0, 10.0, 1.0, 0.0),
+        (-20.0, 50.0, 0.0, 1.0),
+        (-20.0, 10.0, 1.0, 1.0),
+    ] {
+        let point = DesktopLogicalPoint::new(desktop_x, desktop_y).unwrap();
+        let scene = letterbox_transform
+            .desktop_to_scene(letterbox_generation, point)
+            .unwrap();
+        assert!((scene.x() - scene_x).abs() <= 1.0e-12);
+        assert!((scene.y() - scene_y).abs() <= 1.0e-12);
+        let restored = letterbox_transform
+            .scene_to_desktop(letterbox_generation, scene)
+            .unwrap();
+        assert!((restored.x() - desktop_x).abs() <= 1.0e-9);
+        assert!((restored.y() - desktop_y).abs() <= 1.0e-9);
+    }
+    assert_eq!(
+        letterbox_transform.desktop_to_scene(
+            letterbox_generation,
+            DesktopLogicalPoint::new(-50.0, 50.001).unwrap(),
+        ),
+        Err(CoordinateError::OutsideOutputOrContent)
+    );
+
+    let crop_generation = Generation::from_value(10);
+    let crop = FittedContent::new(
+        SurfaceRect::new(0.0, 0.0, 100.0, 50.0).unwrap(),
+        SceneRect::new(0.25, 0.2, 0.5, 0.6).unwrap(),
+        FitMode::Crop,
+    )
+    .unwrap();
+    let crop_output = geometry(
+        21,
+        DesktopLogicalRect::new(-300.0, 100.0, 100.0, 50.0).unwrap(),
+        OutputScale::new(1.0, 1.0).unwrap(),
+        OutputRotation::None,
+        crop,
+    );
+    let crop_transform = TopologySnapshot::<1>::new(
+        crop_generation,
+        DisplayRoutingMode::PerDisplay,
+        &[crop_output],
+    )
+    .unwrap()
+    .output_transform(monitor(21), crop_generation)
+    .unwrap();
+    for (desktop_x, desktop_y, scene_x, scene_y) in [
+        (-300.0, 100.0, 0.25, 0.2),
+        (-200.0, 100.0, 0.75, 0.2),
+        (-300.0, 150.0, 0.25, 0.8),
+        (-200.0, 150.0, 0.75, 0.8),
+    ] {
+        let point = DesktopLogicalPoint::new(desktop_x, desktop_y).unwrap();
+        let scene = crop_transform
+            .desktop_to_scene(crop_generation, point)
+            .unwrap();
+        assert!((scene.x() - scene_x).abs() <= 1.0e-12);
+        assert!((scene.y() - scene_y).abs() <= 1.0e-12);
+        let restored = crop_transform
+            .scene_to_desktop(crop_generation, scene)
+            .unwrap();
+        assert!((restored.x() - desktop_x).abs() <= 1.0e-9);
+        assert!((restored.y() - desktop_y).abs() <= 1.0e-9);
+    }
+    assert_eq!(
+        crop_transform.scene_to_surface(
+            crop_generation,
+            ScenePoint::new(0.2499, 0.5).unwrap(),
+        ),
+        Err(CoordinateError::OutsideOutputOrContent)
+    );
+}
+
+#[test]
 fn crop_maps_only_its_declared_scene_view() {
     let crop = FittedContent::new(
         SurfaceRect::new(0.0, 0.0, 400.0, 200.0).unwrap(),
