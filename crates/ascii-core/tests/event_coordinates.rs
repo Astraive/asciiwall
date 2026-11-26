@@ -1,14 +1,14 @@
 use ascii_core::coordinates::{
     CharacterGrid, ClockDomainId, ClockDomainMapping, ClockEpochTracker, ClockMappingError,
-    CoordinateError, DesktopLogicalPoint, DesktopLogicalRect, DisplayRoutingMode, EventFreshnessGate,
-    FitMode, FixedStepError, FixedStepScheduler, FittedContent, MonotonicEpoch, OutputGeometry,
-    OutputRotation, OutputScale, SceneClockGroupId, ScenePoint, SceneRect, SpanGapPolicy, SurfaceRect,
-    TopologySnapshot, TopologyState, WindowForceFreshness,
+    CoordinateError, DesktopLogicalPoint, DesktopLogicalRect, DisplayRoutingMode,
+    EventFreshnessGate, FitMode, FittedContent, FixedStepError, FixedStepScheduler, MonotonicEpoch,
+    OutputGeometry, OutputRotation, OutputScale, SceneClockGroupId, ScenePoint, SceneRect,
+    SpanGapPolicy, SurfaceRect, TopologySnapshot, TopologyState, WindowForceFreshness,
 };
 use ascii_core::events::{
     ButtonState, CapabilityScope, DesktopPoint, DesktopRect, EventEnvelope, EventOverflowCounters,
     EventPayload, EventPushErrorKind, EventPushOutcome, EventQueue, EventSequence, EventSourceId,
-    MonotonicInstant, MissingReason, Observation, PointerBoundary, PointerButton,
+    MissingReason, MonotonicInstant, Observation, PointerBoundary, PointerButton,
     PointerButtonEvent, PointerMotion, TopologyChange, UserCommand, WindowSnapshot,
 };
 use ascii_core::{Generation, MonitorId};
@@ -75,7 +75,10 @@ fn envelope_preserves_missing_reasons_and_motion_coalescing_is_barrier_safe() {
     assert_eq!(missing.value(), None);
     assert_eq!(missing.reason(), Some(MissingReason::PermissionDenied));
     assert_eq!(queue.push(first_motion), Ok(EventPushOutcome::Queued));
-    assert_eq!(queue.push(newer_motion), Ok(EventPushOutcome::CoalescedMotion));
+    assert_eq!(
+        queue.push(newer_motion),
+        Ok(EventPushOutcome::CoalescedMotion)
+    );
     assert_eq!(queue.pop(), Some(newer_motion));
     assert_eq!(
         queue.overflow_counters(),
@@ -261,12 +264,9 @@ fn rotated_transforms_roundtrip_closed_edges_without_changing_half_open_routing(
         .unwrap();
         let id = 10 + index as u8;
         let output = geometry(id, desktop, scale, rotation, fitted);
-        let topology = TopologySnapshot::<1>::new(
-            generation,
-            DisplayRoutingMode::PerDisplay,
-            &[output],
-        )
-        .unwrap();
+        let topology =
+            TopologySnapshot::<1>::new(generation, DisplayRoutingMode::PerDisplay, &[output])
+                .unwrap();
         let transform = topology.output_transform(monitor(id), generation).unwrap();
 
         for (corner_index, (x, y)) in corners.iter().copied().enumerate() {
@@ -274,7 +274,9 @@ fn rotated_transforms_roundtrip_closed_edges_without_changing_half_open_routing(
             let local = transform
                 .desktop_to_output_logical(generation, point)
                 .unwrap();
-            let surface = transform.output_logical_to_surface(generation, local).unwrap();
+            let surface = transform
+                .output_logical_to_surface(generation, local)
+                .unwrap();
             if corner_index == 0 {
                 match rotation {
                     OutputRotation::None => assert_eq!((surface.x(), surface.y()), (0.0, 0.0)),
@@ -311,9 +313,11 @@ fn rotated_transforms_roundtrip_closed_edges_without_changing_half_open_routing(
             topology.route_desktop_point(bottom_right, generation),
             Err(CoordinateError::DisplayGap)
         );
-        assert!(transform
-            .desktop_to_output_logical(generation, bottom_right)
-            .is_ok());
+        assert!(
+            transform
+                .desktop_to_output_logical(generation, bottom_right)
+                .is_ok()
+        );
         assert_eq!(
             transform.desktop_to_output_logical(
                 generation,
@@ -415,10 +419,7 @@ fn fitted_content_edges_roundtrip_and_outside_points_are_not_clamped() {
         assert!((restored.y() - desktop_y).abs() <= 1.0e-9);
     }
     assert_eq!(
-        crop_transform.scene_to_surface(
-            crop_generation,
-            ScenePoint::new(0.2499, 0.5).unwrap(),
-        ),
+        crop_transform.scene_to_surface(crop_generation, ScenePoint::new(0.2499, 0.5).unwrap(),),
         Err(CoordinateError::OutsideOutputOrContent)
     );
 }
@@ -584,11 +585,7 @@ fn topology_swap_invalidates_old_transforms_routes_gaps_and_handles_mirror_clock
     let vertical_scene = vertical_route.span_scene_point().unwrap();
     assert!((vertical_scene.y() - (550.0 / 1_100.0)).abs() <= 1.0e-12);
     assert_eq!(
-        vertical.scene_to_desktop(
-            monitor(5),
-            vertical_scene,
-            Generation::from_value(5),
-        ),
+        vertical.scene_to_desktop(monitor(5), vertical_scene, Generation::from_value(5),),
         Err(CoordinateError::DisplayGap)
     );
 
@@ -670,8 +667,8 @@ fn topology_swap_invalidates_old_transforms_routes_gaps_and_handles_mirror_clock
 #[test]
 fn clock_epochs_fixed_steps_pause_clicks_and_window_force_decay_are_explicit() {
     let domain = ClockDomainId::new(9);
-    let mapping = ClockDomainMapping::new(domain, 2, MonotonicEpoch::new(3), 1_000, 500, 1, 2)
-        .unwrap();
+    let mapping =
+        ClockDomainMapping::new(domain, 2, MonotonicEpoch::new(3), 1_000, 500, 1, 2).unwrap();
     assert_eq!(
         mapping.map(domain, 2, 1_020).unwrap(),
         MonotonicInstant::new(MonotonicEpoch::new(3), 510)
@@ -684,9 +681,18 @@ fn clock_epochs_fixed_steps_pause_clicks_and_window_force_decay_are_explicit() {
     assert_eq!(epochs.advance(), Ok(MonotonicEpoch::new(4)));
 
     let mut scheduler = FixedStepScheduler::new(100).unwrap();
-    assert_eq!(scheduler.step_for(MonotonicInstant::new(MonotonicEpoch::new(3), 500)), Ok(0));
-    assert_eq!(scheduler.step_for(MonotonicInstant::new(MonotonicEpoch::new(3), 599)), Ok(0));
-    assert_eq!(scheduler.step_for(MonotonicInstant::new(MonotonicEpoch::new(3), 600)), Ok(1));
+    assert_eq!(
+        scheduler.step_for(MonotonicInstant::new(MonotonicEpoch::new(3), 500)),
+        Ok(0)
+    );
+    assert_eq!(
+        scheduler.step_for(MonotonicInstant::new(MonotonicEpoch::new(3), 599)),
+        Ok(0)
+    );
+    assert_eq!(
+        scheduler.step_for(MonotonicInstant::new(MonotonicEpoch::new(3), 600)),
+        Ok(1)
+    );
     assert_eq!(
         scheduler.step_for(MonotonicInstant::new(MonotonicEpoch::new(3), 550)),
         Err(FixedStepError::OutOfOrder)
@@ -700,21 +706,36 @@ fn clock_epochs_fixed_steps_pause_clicks_and_window_force_decay_are_explicit() {
     let mut gate = EventFreshnessGate::new(generation, MonotonicEpoch::new(3), 1_000);
     let pause = event(1, 100, 4, EventPayload::UserCommand(UserCommand::Pause));
     let resume = event(2, 200, 4, EventPayload::UserCommand(UserCommand::Resume));
-    assert_eq!(gate.accept(pause, MonotonicInstant::new(MonotonicEpoch::new(3), 100)), Ok(()));
-    assert_eq!(gate.accept(resume, MonotonicInstant::new(MonotonicEpoch::new(3), 200)), Ok(()));
-    let old_click = event(3, 150, 4, button(ButtonState::Pressed));
     assert_eq!(
-        gate.accept(old_click, MonotonicInstant::new(MonotonicEpoch::new(3), 210)),
-        Err(ascii_core::coordinates::EventRejection::StaleClick)
-    );
-    let current_click = event(4, 205, 4, button(ButtonState::Pressed));
-    assert_eq!(gate.accept(current_click, MonotonicInstant::new(MonotonicEpoch::new(3), 210)), Ok(()));
-    assert_eq!(
-        gate.replace_generation(Generation::from_value(5)),
+        gate.accept(pause, MonotonicInstant::new(MonotonicEpoch::new(3), 100)),
         Ok(())
     );
     assert_eq!(
-        gate.accept(current_click, MonotonicInstant::new(MonotonicEpoch::new(3), 210)),
+        gate.accept(resume, MonotonicInstant::new(MonotonicEpoch::new(3), 200)),
+        Ok(())
+    );
+    let old_click = event(3, 150, 4, button(ButtonState::Pressed));
+    assert_eq!(
+        gate.accept(
+            old_click,
+            MonotonicInstant::new(MonotonicEpoch::new(3), 210)
+        ),
+        Err(ascii_core::coordinates::EventRejection::StaleClick)
+    );
+    let current_click = event(4, 205, 4, button(ButtonState::Pressed));
+    assert_eq!(
+        gate.accept(
+            current_click,
+            MonotonicInstant::new(MonotonicEpoch::new(3), 210)
+        ),
+        Ok(())
+    );
+    assert_eq!(gate.replace_generation(Generation::from_value(5)), Ok(()));
+    assert_eq!(
+        gate.accept(
+            current_click,
+            MonotonicInstant::new(MonotonicEpoch::new(3), 210)
+        ),
         Err(ascii_core::coordinates::EventRejection::StaleGeneration)
     );
     let mut topology_gate =
@@ -728,7 +749,10 @@ fn clock_epochs_fixed_steps_pause_clicks_and_window_force_decay_are_explicit() {
         ),
     );
     assert_eq!(
-        topology_gate.accept(topology_event, MonotonicInstant::new(MonotonicEpoch::new(3), 220)),
+        topology_gate.accept(
+            topology_event,
+            MonotonicInstant::new(MonotonicEpoch::new(3), 220)
+        ),
         Ok(())
     );
     let stale_after_hotplug = event(2, 225, 1, button(ButtonState::Pressed));
@@ -743,10 +767,28 @@ fn clock_epochs_fixed_steps_pause_clicks_and_window_force_decay_are_explicit() {
     let known_bounds = Observation::known(DesktopRect::new(-10.0, 0.0, 20.0, 30.0).unwrap());
     let missing_bounds = Observation::<DesktopRect>::missing(MissingReason::NotObserved);
     let mut freshness = WindowForceFreshness::new(100, 200).unwrap();
-    freshness.observe(MonotonicInstant::new(MonotonicEpoch::new(3), 0), &known_bounds);
-    freshness.observe(MonotonicInstant::new(MonotonicEpoch::new(3), 50), &missing_bounds);
-    assert_eq!(freshness.weight_at(MonotonicInstant::new(MonotonicEpoch::new(3), 100)), 1.0);
-    assert_eq!(freshness.weight_at(MonotonicInstant::new(MonotonicEpoch::new(3), 200)), 0.5);
-    assert_eq!(freshness.weight_at(MonotonicInstant::new(MonotonicEpoch::new(3), 300)), 0.0);
-    assert_eq!(freshness.weight_at(MonotonicInstant::new(MonotonicEpoch::new(4), 150)), 0.0);
+    freshness.observe(
+        MonotonicInstant::new(MonotonicEpoch::new(3), 0),
+        &known_bounds,
+    );
+    freshness.observe(
+        MonotonicInstant::new(MonotonicEpoch::new(3), 50),
+        &missing_bounds,
+    );
+    assert_eq!(
+        freshness.weight_at(MonotonicInstant::new(MonotonicEpoch::new(3), 100)),
+        1.0
+    );
+    assert_eq!(
+        freshness.weight_at(MonotonicInstant::new(MonotonicEpoch::new(3), 200)),
+        0.5
+    );
+    assert_eq!(
+        freshness.weight_at(MonotonicInstant::new(MonotonicEpoch::new(3), 300)),
+        0.0
+    );
+    assert_eq!(
+        freshness.weight_at(MonotonicInstant::new(MonotonicEpoch::new(4), 150)),
+        0.0
+    );
 }

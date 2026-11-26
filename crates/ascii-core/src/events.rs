@@ -692,11 +692,7 @@ impl<const CAPACITY: usize> EventQueue<CAPACITY> {
         let event = self.entries[self.head].take();
         self.len -= 1;
         let next_head = self.head + 1;
-        self.head = if next_head == CAPACITY {
-            0
-        } else {
-            next_head
-        };
+        self.head = if next_head == CAPACITY { 0 } else { next_head };
         event
     }
 
@@ -710,10 +706,7 @@ impl<const CAPACITY: usize> EventQueue<CAPACITY> {
         }
     }
 
-    fn reject_full(
-        &mut self,
-        event: EventEnvelope,
-    ) -> Result<EventPushOutcome, EventPushError> {
+    fn reject_full(&mut self, event: EventEnvelope) -> Result<EventPushOutcome, EventPushError> {
         EventOverflowCounters::increment(&mut self.overflow.critical_backpressure);
         Err(EventPushError {
             event,

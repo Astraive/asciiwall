@@ -497,7 +497,8 @@ impl OutputTransform {
             OutputRotation::Clockwise180 => ((width - x) * sx, (height - y) * sy),
             OutputRotation::Clockwise270 => (y * sy, (width - x) * sx),
         };
-        self.output.check_surface(Point2::new(surface_x, surface_y)?)?;
+        self.output
+            .check_surface(Point2::new(surface_x, surface_y)?)?;
         Ok(SurfacePoint(Point2::new(surface_x, surface_y)?))
     }
 
@@ -515,16 +516,9 @@ impl OutputTransform {
         let sy = self.output.scale.y;
         let (x, y) = match self.output.rotation {
             OutputRotation::None => (surface.x() / sx, surface.y() / sy),
-            OutputRotation::Clockwise90 => {
-                (surface.y() / sx, height - surface.x() / sy)
-            }
-            OutputRotation::Clockwise180 => (
-                width - surface.x() / sx,
-                height - surface.y() / sy,
-            ),
-            OutputRotation::Clockwise270 => {
-                (width - surface.y() / sx, surface.x() / sy)
-            }
+            OutputRotation::Clockwise90 => (surface.y() / sx, height - surface.x() / sy),
+            OutputRotation::Clockwise180 => (width - surface.x() / sx, height - surface.y() / sy),
+            OutputRotation::Clockwise270 => (width - surface.y() / sx, surface.x() / sy),
         };
         let point = Point2::new(x, y)?;
         if !self.output.local_bounds().contains_closed(point) {
@@ -567,7 +561,10 @@ impl OutputTransform {
         let content = self.output.fitted.surface.0;
         let u = (scene.x() - fitted_scene.left) / fitted_scene.width;
         let v = (scene.y() - fitted_scene.top) / fitted_scene.height;
-        let point = Point2::new(content.left + u * content.width, content.top + v * content.height)?;
+        let point = Point2::new(
+            content.left + u * content.width,
+            content.top + v * content.height,
+        )?;
         self.output.check_surface(point)?;
         Ok(SurfacePoint(point))
     }
@@ -636,8 +633,7 @@ impl OutputTransform {
         ScenePoint::new(
             (f64::from(character.column) + character.subcell_x)
                 / f64::from(self.output.grid.columns),
-            (f64::from(character.row) + character.subcell_y)
-                / f64::from(self.output.grid.rows),
+            (f64::from(character.row) + character.subcell_y) / f64::from(self.output.grid.rows),
         )
     }
 
@@ -676,9 +672,7 @@ impl OutputGeometry {
         let scaled_width = desktop.width() * scale.x;
         let scaled_height = desktop.height() * scale.y;
         let (surface_width, surface_height) = match rotation {
-            OutputRotation::None | OutputRotation::Clockwise180 => {
-                (scaled_width, scaled_height)
-            }
+            OutputRotation::None | OutputRotation::Clockwise180 => (scaled_width, scaled_height),
             OutputRotation::Clockwise90 | OutputRotation::Clockwise270 => {
                 (scaled_height, scaled_width)
             }
@@ -919,7 +913,8 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
         current_generation: Generation,
     ) -> Result<Option<SceneClockGroupId>, CoordinateError> {
         self.ensure_generation(current_generation)?;
-        self.find_output(monitor).ok_or(CoordinateError::UnknownOutput)?;
+        self.find_output(monitor)
+            .ok_or(CoordinateError::UnknownOutput)?;
         match self.mode {
             DisplayRoutingMode::Mirror { clock_group } => Ok(Some(clock_group)),
             DisplayRoutingMode::PerDisplay | DisplayRoutingMode::Span(_) => Ok(None),
@@ -933,7 +928,9 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
         current_generation: Generation,
     ) -> Result<OutputTransform, CoordinateError> {
         self.ensure_generation(current_generation)?;
-        let output = self.find_output(monitor).ok_or(CoordinateError::UnknownOutput)?;
+        let output = self
+            .find_output(monitor)
+            .ok_or(CoordinateError::UnknownOutput)?;
         Ok(OutputTransform {
             generation: self.generation,
             output: *output,
@@ -967,9 +964,11 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
             return Err(CoordinateError::DisplayGap);
         }
         if let DisplayRoutingMode::Span(policy) = self.mode {
-            route.span_scene = Some(self.span_scene_point(desktop, route.outputs[0].ok_or(
-                CoordinateError::InvalidOutputCount,
-            )?, policy)?);
+            route.span_scene = Some(self.span_scene_point(
+                desktop,
+                route.outputs[0].ok_or(CoordinateError::InvalidOutputCount)?,
+                policy,
+            )?);
         }
         Ok(route)
     }
@@ -982,7 +981,9 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
         current_generation: Generation,
     ) -> Result<ScenePoint, CoordinateError> {
         self.ensure_generation(current_generation)?;
-        let output = self.find_output(monitor).ok_or(CoordinateError::UnknownOutput)?;
+        let output = self
+            .find_output(monitor)
+            .ok_or(CoordinateError::UnknownOutput)?;
         if !output.desktop.0.contains_closed(desktop.0) {
             return Err(CoordinateError::OutsideOutputOrContent);
         }
@@ -1004,7 +1005,9 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
         current_generation: Generation,
     ) -> Result<DesktopLogicalPoint, CoordinateError> {
         self.ensure_generation(current_generation)?;
-        let output = self.find_output(monitor).ok_or(CoordinateError::UnknownOutput)?;
+        let output = self
+            .find_output(monitor)
+            .ok_or(CoordinateError::UnknownOutput)?;
         match self.mode {
             DisplayRoutingMode::PerDisplay | DisplayRoutingMode::Mirror { .. } => OutputTransform {
                 generation: self.generation,
@@ -1036,7 +1039,9 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
         monitor: MonitorId,
         policy: SpanGapPolicy,
     ) -> Result<ScenePoint, CoordinateError> {
-        let output = self.find_output(monitor).ok_or(CoordinateError::UnknownOutput)?;
+        let output = self
+            .find_output(monitor)
+            .ok_or(CoordinateError::UnknownOutput)?;
         if !output.desktop.0.contains_closed(desktop.0) {
             return Err(CoordinateError::OutsideOutputOrContent);
         }
@@ -1076,7 +1081,9 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
         monitor: MonitorId,
         policy: SpanGapPolicy,
     ) -> Result<DesktopLogicalPoint, CoordinateError> {
-        let output = self.find_output(monitor).ok_or(CoordinateError::UnknownOutput)?;
+        let output = self
+            .find_output(monitor)
+            .ok_or(CoordinateError::UnknownOutput)?;
         let point = match policy {
             SpanGapPolicy::Preserve => Point2::new(
                 self.desktop_bounds.left + scene.x() * self.desktop_bounds.width,
@@ -1119,12 +1126,12 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
         Ok(DesktopLogicalPoint(point))
     }
 
-    fn horizontal_prefix(
-        &self,
-        output: &OutputGeometry,
-    ) -> Result<f64, CoordinateError> {
+    fn horizontal_prefix(&self, output: &OutputGeometry) -> Result<f64, CoordinateError> {
         let mut prefix = 0.0;
-        for current in self.outputs[..self.len].iter().filter_map(|entry| entry.as_ref()) {
+        for current in self.outputs[..self.len]
+            .iter()
+            .filter_map(|entry| entry.as_ref())
+        {
             if current.desktop.left() < output.desktop.left() {
                 prefix += current.desktop.width();
             }
@@ -1138,7 +1145,10 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
 
     fn horizontal_total(&self) -> Result<f64, CoordinateError> {
         let mut total = 0.0;
-        for output in self.outputs[..self.len].iter().filter_map(|entry| entry.as_ref()) {
+        for output in self.outputs[..self.len]
+            .iter()
+            .filter_map(|entry| entry.as_ref())
+        {
             total += output.desktop.width();
         }
         if total.is_finite() && total > 0.0 {
@@ -1148,12 +1158,12 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
         }
     }
 
-    fn vertical_prefix(
-        &self,
-        output: &OutputGeometry,
-    ) -> Result<f64, CoordinateError> {
+    fn vertical_prefix(&self, output: &OutputGeometry) -> Result<f64, CoordinateError> {
         let mut prefix = 0.0;
-        for current in self.outputs[..self.len].iter().filter_map(|entry| entry.as_ref()) {
+        for current in self.outputs[..self.len]
+            .iter()
+            .filter_map(|entry| entry.as_ref())
+        {
             if current.desktop.top() < output.desktop.top() {
                 prefix += current.desktop.height();
             }
@@ -1167,7 +1177,10 @@ impl<const CAPACITY: usize> TopologySnapshot<CAPACITY> {
 
     fn vertical_total(&self) -> Result<f64, CoordinateError> {
         let mut total = 0.0;
-        for output in self.outputs[..self.len].iter().filter_map(|entry| entry.as_ref()) {
+        for output in self.outputs[..self.len]
+            .iter()
+            .filter_map(|entry| entry.as_ref())
+        {
             total += output.desktop.height();
         }
         if total.is_finite() && total > 0.0 {
@@ -1343,7 +1356,10 @@ impl ClockEpochTracker {
 
     /// Starts a new epoch after a clock discontinuity or source restart.
     pub fn advance(&mut self) -> Result<MonotonicEpoch, ClockMappingError> {
-        self.current = self.current.checked_next().ok_or(ClockMappingError::ArithmeticOverflow)?;
+        self.current = self
+            .current
+            .checked_next()
+            .ok_or(ClockMappingError::ArithmeticOverflow)?;
         Ok(self.current)
     }
 }
@@ -1449,11 +1465,7 @@ pub struct EventFreshnessGate {
 impl EventFreshnessGate {
     /// Creates a session gate for one topology/assignment generation and clock epoch.
     #[must_use]
-    pub const fn new(
-        generation: Generation,
-        epoch: MonotonicEpoch,
-        max_click_age_ns: u64,
-    ) -> Self {
+    pub const fn new(generation: Generation, epoch: MonotonicEpoch, max_click_age_ns: u64) -> Self {
         Self {
             generation,
             epoch,
@@ -1466,10 +1478,7 @@ impl EventFreshnessGate {
     }
 
     /// Replaces the accepted generation only after a strictly newer snapshot is committed.
-    pub fn replace_generation(
-        &mut self,
-        generation: Generation,
-    ) -> Result<(), EventRejection> {
+    pub fn replace_generation(&mut self, generation: Generation) -> Result<(), EventRejection> {
         if generation.value() <= self.generation.value() {
             return Err(EventRejection::StaleGeneration);
         }
@@ -1568,11 +1577,7 @@ impl WindowForceFreshness {
     }
 
     /// Records a timestamp only when a real window geometry observation is present.
-    pub fn observe(
-        &mut self,
-        timestamp: MonotonicInstant,
-        observation: &Observation<DesktopRect>,
-    ) {
+    pub fn observe(&mut self, timestamp: MonotonicInstant, observation: &Observation<DesktopRect>) {
         if observation.is_known() {
             self.last_good = Some(timestamp);
         }
@@ -1598,4 +1603,3 @@ impl WindowForceFreshness {
         }
     }
 }
-
