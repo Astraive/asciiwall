@@ -153,6 +153,18 @@ const fn reason_for(blockers: Blockers) -> Option<ReasonCode> {
     }
 }
 
+const fn hard_blocker_reason(blockers: Blockers) -> Option<ReasonCode> {
+    if blockers.contains(Blocker::SessionLocked) {
+        Some(ReasonCode::SessionLocked)
+    } else if blockers.contains(Blocker::DisplayOff) {
+        Some(ReasonCode::DisplayOff)
+    } else if blockers.contains(Blocker::HostUnavailable) {
+        Some(ReasonCode::HostUnavailable)
+    } else {
+        None
+    }
+}
+
 /// Current observable state. No path, title, input history, or arbitrary error string is retained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AssignmentSnapshot {
@@ -386,6 +398,12 @@ impl<A> AssignmentController<A> {
                 return CompletionOutcome::Failed(reason);
             }
         };
+        if let Some(reason) = hard_blocker_reason(self.blockers) {
+            self.state = state_for(self.blockers);
+            self.reason = Some(reason);
+            return CompletionOutcome::Failed(reason);
+        }
+
         match host.switch(self.active.as_ref(), attached, completion.transition) {
             Ok(active) => {
                 self.active = Some(active);

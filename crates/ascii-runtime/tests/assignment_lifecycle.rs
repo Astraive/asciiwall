@@ -64,6 +64,7 @@ struct Host {
     prepare_fails: bool,
     attach_fails: bool,
     switch_fails: bool,
+    switch_count: usize,
 }
 
 impl AssignmentHost for Host {
@@ -108,6 +109,7 @@ impl AssignmentHost for Host {
         attached: Attached,
         transition: SwitchTransition,
     ) -> Result<Active, ReasonCode> {
+        self.switch_count += 1;
         if self.switch_fails {
             Err(ReasonCode::SwitchFailed)
         } else {
@@ -304,25 +306,53 @@ fn forced_stop_invalidates_pending_work_and_releases_active_resource() {
 }
 
 #[test]
-fn blockers_during_preparation_do_not_cancel_the_newest_generation() {
+fn hard_blockers_during_preparation_never_switch_replacement() {
+    for (blocker, reason) in [
+        (Blocker::SessionLocked, ReasonCode::SessionLocked),
+        (Blocker::DisplayOff, ReasonCode::DisplayOff),
+        (Blocker::HostUnavailable, ReasonCode::HostUnavailable),
+    ] {
+        let mut controller = AssignmentController::<Active>::new();
+        let mut host = Host::default();
+        install_initial(&mut controller, &mut host);
+        let job = controller.request(input(9), &mut host).unwrap();
+        let completion = job.execute(&mut host);
+        let switch_count = host.switch_count;
+        let drops_before_completion = host.drops.count();
+        controller.set_blocker(blocker, true);
+
+        assert_eq!(
+            controller.complete_preparation(completion, &mut host),
+            CompletionOutcome::Failed(reason)
+        );
+        assert_eq!(host.switch_count, switch_count);
+        assert_eq!(host.drops.count(), drops_before_completion + 1);
+        assert_eq!(controller.snapshot().state, AssignmentState::Suspended);
+        assert_eq!(controller.snapshot().reason, Some(reason));
+        assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+        assert_eq!(
+            controller.active_resource().map(|resource| resource.id),
+            Some(1)
+        );
+    }
+}
+
+#[test]
+fn soft_user_pause_during_preparation_does_not_cancel_replacement() {
     let mut controller = AssignmentController::<Active>::new();
     let mut host = Host::default();
     install_initial(&mut controller, &mut host);
     let job = controller.request(input(9), &mut host).unwrap();
-    controller.set_blocker(Blocker::SessionLocked, true);
+    controller.set_blocker(Blocker::UserPause, true);
     assert_eq!(controller.snapshot().state, AssignmentState::Preparing);
     assert_eq!(
         controller.complete_preparation(job.execute(&mut host), &mut host),
         CompletionOutcome::Committed
     );
-    assert_eq!(controller.snapshot().state, AssignmentState::Suspended);
-    assert!(
-        controller
-            .snapshot()
-            .blockers
-            .contains(Blocker::SessionLocked)
-    );
-    controller.set_blocker(Blocker::SessionLocked, false);
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(9)));
+    assert_eq!(controller.snapshot().state, AssignmentState::Paused);
+    assert!(controller.snapshot().blockers.contains(Blocker::UserPause));
+    controller.set_blocker(Blocker::UserPause, false);
     assert_eq!(controller.snapshot().state, AssignmentState::Running);
 }
 
