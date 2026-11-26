@@ -634,6 +634,7 @@ impl<const CAPACITY: usize> EventQueue<CAPACITY> {
     }
 
     /// Enqueues an event, coalescing adjacent motion and returning unadmitted critical events.
+    #[allow(clippy::result_large_err)] // Preserve the original event for allocation-free retry.
     pub fn push(&mut self, event: EventEnvelope) -> Result<EventPushOutcome, EventPushError> {
         if CAPACITY == 0 {
             if event.payload.is_coalescible_motion() {
@@ -706,6 +707,7 @@ impl<const CAPACITY: usize> EventQueue<CAPACITY> {
         }
     }
 
+    #[allow(clippy::result_large_err)] // Return refused events without boxing or losing data.
     fn reject_full(&mut self, event: EventEnvelope) -> Result<EventPushOutcome, EventPushError> {
         EventOverflowCounters::increment(&mut self.overflow.critical_backpressure);
         Err(EventPushError {
