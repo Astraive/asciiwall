@@ -377,7 +377,7 @@ fn fitted_content_edges_roundtrip_and_outside_points_are_not_clamped() {
     let crop_generation = Generation::from_value(10);
     let crop = FittedContent::new(
         SurfaceRect::new(0.0, 0.0, 100.0, 50.0).unwrap(),
-        SceneRect::new(0.25, 0.2, 0.5, 0.6).unwrap(),
+        SceneRect::new(0.25, 0.25, 0.5, 0.5).unwrap(),
         FitMode::Crop,
     )
     .unwrap();
@@ -397,10 +397,10 @@ fn fitted_content_edges_roundtrip_and_outside_points_are_not_clamped() {
     .output_transform(monitor(21), crop_generation)
     .unwrap();
     for (desktop_x, desktop_y, scene_x, scene_y) in [
-        (-300.0, 100.0, 0.25, 0.2),
-        (-200.0, 100.0, 0.75, 0.2),
-        (-300.0, 150.0, 0.25, 0.8),
-        (-200.0, 150.0, 0.75, 0.8),
+        (-300.0, 100.0, 0.25, 0.25),
+        (-200.0, 100.0, 0.75, 0.25),
+        (-300.0, 150.0, 0.25, 0.75),
+        (-200.0, 150.0, 0.75, 0.75),
     ] {
         let point = DesktopLogicalPoint::new(desktop_x, desktop_y).unwrap();
         let scene = crop_transform
