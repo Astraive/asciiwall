@@ -2108,27 +2108,31 @@ fn intersection_area(left: NativeRect, right: NativeRect) -> u64 {
     (width as u64).saturating_mul(height as u64)
 }
 
+fn registered_raw_input_devices(devices: &mut [RawInputDevice; 64]) -> Option<usize> {
+    let mut count = devices.len() as u32;
+    let returned = unsafe {
+        GetRegisteredRawInputDevices(
+            devices.as_mut_ptr(),
+            &mut count,
+            size_of::<RawInputDevice>() as u32,
+        )
+    };
+    if returned == u32::MAX || returned != count || count > devices.len() as u32 {
+        return None;
+    }
+    Some(count as usize)
+}
+
 fn register_raw_input(window: Hwnd) -> bool {
-    let mut bytes = size_of::<RawInputDevice>() as u32;
-    let count = unsafe { GetRegisteredRawInputDevices(null_mut(), &mut bytes) };
-    if count == u32::MAX || bytes as usize != size_of::<RawInputDevice>() {
-        return false;
-    }
-    if count as usize > 64 {
-        return false;
-    }
     let mut devices = [RawInputDevice::EMPTY; 64];
-    if count != 0 {
-        let actual = unsafe { GetRegisteredRawInputDevices(devices.as_mut_ptr(), &mut bytes) };
-        if actual == u32::MAX || actual != count {
-            return false;
-        }
-        if devices[..count as usize]
-            .iter()
-            .any(|device| device.usage_page == 1 && device.usage == 2)
-        {
-            return false;
-        }
+    let Some(count) = registered_raw_input_devices(&mut devices) else {
+        return false;
+    };
+    if devices[..count]
+        .iter()
+        .any(|device| device.usage_page == 1 && device.usage == 2)
+    {
+        return false;
     }
     let device = RawInputDevice {
         usage_page: 1,
@@ -2140,18 +2144,11 @@ fn register_raw_input(window: Hwnd) -> bool {
 }
 
 fn unregister_raw_input_if_owned(window: Hwnd) {
-    let mut bytes = size_of::<RawInputDevice>() as u32;
-    let count = unsafe { GetRegisteredRawInputDevices(null_mut(), &mut bytes) };
-    if count == u32::MAX || bytes as usize != size_of::<RawInputDevice>() || count > 64 {
-        return;
-    }
     let mut devices = [RawInputDevice::EMPTY; 64];
-    if count == 0
-        || unsafe { GetRegisteredRawInputDevices(devices.as_mut_ptr(), &mut bytes) } != count
-    {
+    let Some(count) = registered_raw_input_devices(&mut devices) else {
         return;
-    }
-    let ours = devices[..count as usize].iter().any(|device| {
+    };
+    let ours = devices[..count].iter().any(|device| {
         device.usage_page == 1
             && device.usage == 2
             && device.flags == RIDEV_INPUTSINK
@@ -2645,7 +2642,11 @@ unsafe extern "system" {
         parameter: isize,
     ) -> i32;
     fn MonitorFromPoint(point: Point, flags: u32) -> Hmonitor;
-    fn GetRegisteredRawInputDevices(devices: *mut RawInputDevice, bytes: *mut u32) -> u32;
+    fn GetRegisteredRawInputDevices(
+        devices: *mut RawInputDevice,
+        count: *mut u32,
+        size: u32,
+    ) -> u32;
     fn RegisterRawInputDevices(devices: *const RawInputDevice, count: u32, bytes: u32) -> i32;
     fn GetRawInputData(
         raw: Hrawinput,
