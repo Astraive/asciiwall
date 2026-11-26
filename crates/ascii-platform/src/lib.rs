@@ -4,6 +4,8 @@ mod capability;
 mod events;
 mod host;
 #[cfg(windows)]
+mod observer;
+#[cfg(windows)]
 mod probe;
 
 pub use capability::{
@@ -19,6 +21,13 @@ pub use events::{
     HostStateSnapshotError, MAX_HOST_EVENTS, MAX_RECONCILIATION_FEEDS, MAX_RECONCILIATION_LEASES,
     PointerButtons, PointerButtonsUpdate, PointerPosition, SessionLockState, StaticWallpaperUpdate,
     WindowIdentity, WindowRectangle, WindowState,
+};
+#[cfg(windows)]
+pub use observer::{
+    DesktopClickBatch, DesktopClickObservation, DesktopHitClassification, FullscreenCandidate,
+    ObservedWindowBounds, WindowsObserver, WindowsObserverConsent, WindowsObserverError,
+    WindowsObserverSnapshot, WindowBoundsSource, MAX_DESKTOP_CLICK_OBSERVATIONS,
+    MAX_FULLSCREEN_OBSERVATIONS, MAX_WINDOWS_OBSERVED,
 };
 pub use host::{
     HostAdapter, ReconciliationError, SurfaceLease, SurfaceLeaseError, SurfaceLeaseRegistry,
