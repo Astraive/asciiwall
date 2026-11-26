@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - `HostAdapter::reconcile` now rejects truncated snapshots as successful reconciliation while preserving retained feed/lease state in a typed error; behind-revision errors retain precedence.
+- Assignment requests are rejected during `Stopping`, preserving the generation and stop acknowledgement for security and forced shutdown ([COR-003]).
 
 ### Added
 

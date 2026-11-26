@@ -303,13 +303,32 @@ fn blockers_during_preparation_do_not_cancel_the_newest_generation() {
 }
 
 #[test]
-fn security_stop_has_a_distinct_non_transition_reason() {
-    let mut controller = AssignmentController::<Active>::new();
-    let token = controller.begin_stop(StopKind::Security);
-    assert_eq!(controller.snapshot().reason, Some(ReasonCode::SecurityStop));
-    assert_eq!(token.kind(), StopKind::Security);
-    assert!(controller.complete_stop(token));
-    assert_eq!(controller.snapshot().state, AssignmentState::Detached);
+fn requests_are_rejected_during_security_and_forced_stop() {
+    for (kind, reason) in [
+        (StopKind::Security, ReasonCode::SecurityStop),
+        (StopKind::Forced, ReasonCode::ForcedStop),
+    ] {
+        let mut controller = AssignmentController::<Active>::new();
+        let mut host = Host::default();
+        install_initial(&mut controller, &mut host);
+        let token = controller.begin_stop(kind);
+        assert_eq!(token.kind(), kind);
+        assert_eq!(controller.snapshot().reason, Some(reason));
+        let stopping = controller.snapshot();
+
+        assert!(matches!(
+            controller.request(input(10), &mut host),
+            Err(ReasonCode::StopInProgress)
+        ));
+        assert_eq!(controller.snapshot(), stopping);
+        assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+        assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+
+        assert!(controller.complete_stop(token));
+        assert_eq!(controller.snapshot().state, AssignmentState::Detached);
+        assert_eq!(controller.snapshot().active_assignment, None);
+        assert_eq!(host.drops.count(), 1);
+    }
 }
 
 #[test]

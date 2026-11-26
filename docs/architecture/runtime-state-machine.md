@@ -23,6 +23,8 @@ Snapshots expose state, generation, active assignment identity, independent fixe
 
 `SwitchTransition::UserRequested` permits a host's configured user wallpaper-switch behavior; immediate startup/recovery replacement and `StopKind::Security`/`Forced` are separate paths. Stop invalidates in-flight work before detach acknowledgement and releases the active resource on completion. No native detach or animation is implemented here. The workspace has no desktop/CLI app consumer yet; consumers can inspect the snapshot API once that surface exists.
 
+While `Stopping`, `request` rejects new assignments without advancing the generation or changing the stop reason/token, so the authorized detach acknowledgement remains valid.
+
 ## Pause reasons are a set, not one boolean
 
 Reasons include user pause, session lock, display off, fullscreen policy, low battery, battery saver, thermal policy, host unavailable, and export contention. Clearing one reason must not resume while another remains. Distinguish a paused simulation from a throttled renderer and a released graphics surface.

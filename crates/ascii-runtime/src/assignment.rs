@@ -39,9 +39,9 @@ pub enum ReasonCode {
     ThermalPolicy,
     HostUnavailable,
     ExportContention,
+    StopInProgress,
     UserStop,
     SecurityStop,
-    ForcedStop,
 }
 
 /// Conditions blocking or reducing active presentation.
@@ -335,6 +335,9 @@ impl<A> AssignmentController<A> {
     where
         H: AssignmentHost<Active = A>,
     {
+        if self.state == AssignmentState::Stopping {
+            return Err(ReasonCode::StopInProgress);
+        }
         let Some(generation) = self.generation.checked_next() else {
             self.state = AssignmentState::Failed;
             self.reason = Some(ReasonCode::GenerationExhausted);
