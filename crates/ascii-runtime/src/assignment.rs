@@ -42,6 +42,7 @@ pub enum ReasonCode {
     StopInProgress,
     UserStop,
     SecurityStop,
+    ForcedStop,
 }
 
 /// Conditions blocking or reducing active presentation.
