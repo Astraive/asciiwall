@@ -99,6 +99,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "asciiwall-windows"
+version = "0.1.0"
+dependencies = [
+ "ascii-convert",
+ "ascii-core",
+ "ascii-media",
+ "ascii-platform",
+ "pollster",
+]
+
+[[package]]
 name = "ash"
 version = "0.37.3+1.3.251"
 source = "registry+https://github.com/rust-lang/crates.io-index"

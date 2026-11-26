@@ -1,6 +1,8 @@
 # Development workflow and local tooling
 
-> **Current repository state:** `asciiwall` contains project governance, `.github/` configuration/templates, `.githooks/`, documentation, Python/PowerShell tooling, and a committed Rust workspace with `ascii-core`, `ascii-convert`, `ascii-media`, and `ascii-scene` members (resolver 3, edition 2024, Rust 1.100.0). `ascii-core` is dependency-free and `no_std`; the conversion and image-decoding crates have their own tested boundaries, and `ascii-scene` implements a bounded deterministic runtime. There is no application binary, CLI, or buildable installer, and no video, native-host, catalog, or profiling workspace member/feature subset. The workspace commands below are runnable; future `asciiwall` CLI examples are not.
+> **Current repository state:** `asciiwall` contains project governance, documentation, repository tooling, and a committed Rust workspace with `ascii-core`, `ascii-convert`, `ascii-media`, `ascii-render`, `ascii-platform`, `ascii-scene`, and the Windows-only `apps/asciiwall` console entrypoint. The app composes one bounded local-image decode, direct CPU conversion, and experimental Windows host presentation using a caller-supplied font; Windows native/manual acceptance remains **NOT RUN**. There is no buildable installer or distributable release, and no video, catalog, or profiling workspace member/feature subset. The workspace commands below are runnable; native desktop invocation is not a CI or verification step.
+
+The Windows-only one-shot image caller is invoked from a console with `cargo run --package asciiwall-windows -- <image-file> <licensed-font-file> [columns]` (columns default to 120 and may be 1–2048). It loads the external font without bundling it, presents on each reported display, polls the host, and detaches when Enter is pressed. Running it changes the logged-in Windows desktop; this command is usage documentation, not a CI or acceptance test. WND-002 native/manual acceptance remains **NOT RUN**.
 
 ## Current repository tooling and prerequisites
 
@@ -70,13 +72,13 @@ The workspace now has separate `ascii-core`, `ascii-convert`, `ascii-media`, and
 |---|---|
 | Core-only | Implemented by dependency-free `ascii-core`; checks frame, borrowed-raster, budget, cancellation, and typed-error contracts. |
 | Image | Implemented in `ascii-media`: `ReadSeek`, `DecodeLimits`, owned `DecodedFrame`, and PNG/JPEG decoding with committed regression tests against core raster/budget contracts. This is a package boundary, not an optional Cargo feature or image-specific CI matrix. |
-| Scene runtime | Implemented in `ascii-scene`: bounded deterministic generator/runtime, simulation, snapshots, and exact-step exports; committed contract tests are not currently run by this CI workflow. It has no application, UI, wallpaper, thumbnail, or native-host consumer. |
+| Scene runtime | Implemented in `ascii-scene`: bounded deterministic generator/runtime, simulation, snapshots, and exact-step exports; committed contract tests are not currently run by this CI workflow. The scene runtime itself has no consumer; the Windows image app performs a separate one-shot direct conversion. |
 | Video | No video decoder exists. VID-001 owns a restricted `VideoDecoder::next_frame` interface over approved local inputs and owned image frames, and depends on IMG-001. |
-| Native host | No host adapter or native surface interface exists. WPH-001 owns versioned capabilities/events and generation-bound `SurfaceLease`; it depends on WND-001 and requires evidence for each actual host tuple. |
+| Native host | An experimental Windows host exists in `ascii-platform`; its generation-bound `SurfaceLease` and capability/event contracts are implemented, but native/manual acceptance remains **NOT RUN**. No macOS or Linux host is implemented. |
 | Catalog | No catalog or local-library package exists in this workspace. Static catalog schema/fixtures belong to `asciiwall-library` CAT-001 (dependent on LIB-001 and engine PKG-001); the app-side local index belongs to LIBAPP-001 (dependent on PKG-008). |
 | Profiling | No metrics API or benchmark report exists. PERF-001 owns versioned stage metrics and deterministic synthetic report tests; host/GPU measurements require the corresponding implemented adapters and instrumentation. |
 
-The core-only, image-decoding, and deterministic scene-runtime package boundaries are implemented, but PRJ-001 remains incomplete: video, native-host, catalog, and profiling interfaces and their exercised subsets are absent, as is app/CLI composition. Do not add empty crates or inert Cargo features to fill those gaps. In particular, `--all-features` is not a substitute for independent portable and native-target gates.
+The core-only, image-decoding, deterministic scene-runtime, renderer, and experimental Windows-host package boundaries are implemented. PRJ-001 remains incomplete: the Windows app currently handles one local image and does not compose the scene runtime or a worker/transport pipeline; video, catalog, and profiling interfaces and their exercised subsets are also absent. Do not add empty crates or inert Cargo features to fill those gaps. In particular, `--all-features` is not a substitute for independent portable and native-target gates.
 
 The current CI Rust gates (also used for local verification) are:
 

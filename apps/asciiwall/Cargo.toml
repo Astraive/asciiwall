@@ -1,0 +1,18 @@
+[package]
+name = "asciiwall-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "asciiwall"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+ascii-convert = { path = "../../crates/ascii-convert" }
+ascii-core = { path = "../../crates/ascii-core" }
+ascii-media = { path = "../../crates/ascii-media" }
+ascii-platform = { path = "../../crates/ascii-platform" }
+pollster = "=0.4.0"
