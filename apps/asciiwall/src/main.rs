@@ -16,8 +16,8 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     use std::io;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use ascii_convert::{
@@ -80,13 +80,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut image_file = std::fs::File::open(&image_path)?;
     let decoded = decode_image(&mut image_file, &decode_limits, &cancellation)?;
-    let metadata = FrameMetadata::new(
-        GlyphTableId::new(*glyph_table.fingerprint()),
-        1,
-        1,
-        0,
-        0,
-    );
+    let metadata = FrameMetadata::new(GlyphTableId::new(*glyph_table.fingerprint()), 1, 1, 0, 0);
     let settings = ConversionSettings::new(
         GridSizing::columns(columns),
         metadata,
@@ -115,9 +109,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )))?;
     let displays = host.displays()?;
     if displays.iter().next().is_none() {
-        return Err(
-            io::Error::new(io::ErrorKind::NotFound, "Windows reported no displays").into(),
-        );
+        return Err(io::Error::new(io::ErrorKind::NotFound, "Windows reported no displays").into());
+    }
 
     let mut leases = Vec::new();
     for display in displays.iter() {
@@ -150,7 +143,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     for lease in leases {
         host.detach(lease)?;
     }
-    Ok(())
 
     fn usage_error() -> std::io::Error {
         std::io::Error::new(
@@ -197,4 +189,5 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    Ok(())
 }
