@@ -1,6 +1,8 @@
 # Development workflow and local tooling
 
-> **Current repository state:** The Rust workspace contains the portable `ascii-core` frame contract, the `ascii-convert` glyph-table implementation, and bounded `ascii-runtime` contracts alongside project governance, documentation, and Python/PowerShell tooling. There is no application binary or buildable installer yet; future `asciiwall` CLI examples are not currently runnable.
+> **Current repository state:** `asciiwall` contains project governance, documentation, repository tooling, and a committed Rust workspace with `ascii-core`, `ascii-convert`, `ascii-media`, `ascii-runtime`, `ascii-render`, `ascii-platform`, `ascii-scene`, and the Windows-only `apps/asciiwall` console entrypoint. The app composes one bounded local-image decode, the process-local bounded raster handoff/consumer, and experimental Windows host presentation using a caller-supplied font; its host-owned `Arc<AsciiFrame>` copy has a separate runtime memory reservation while `ConvertedFrame` retains the acknowledged source lease/output permit through detach. This does not provide COR-005 native transport/device completion; Windows native/manual acceptance remains **NOT RUN**. There is no buildable installer or distributable release, and no video, catalog, or profiling workspace member/feature subset. The workspace commands below are runnable; native desktop invocation is not a CI or verification step.
+
+The Windows-only one-shot image caller is invoked from a console with `cargo run --package asciiwall-windows -- <image-file> <licensed-font-file> [columns]` (columns default to 120 and may be 1–2048). It loads the external font without bundling it, presents on each reported display, polls the host, and detaches when Enter is pressed. Running it changes the logged-in Windows desktop; this command is usage documentation, not a CI or acceptance test. WND-002 native/manual acceptance remains **NOT RUN**.
 
 ## Current repository tooling and prerequisites
 
@@ -62,14 +64,39 @@ Repository hooks live under `.githooks/` (`pre-commit`, `commit-msg`, and `.gith
 - `.githooks/commit-msg` invokes `scripts/check-conventions.py --message-file` to enforce subject format and forbid `Co-authored-by` trailers case-insensitively.
 - **Contributor identity rule:** The maintainer identity `Neeraj Sathish Kumar <neerajcodz@gmail.com>` applies **only** to this initial infrastructure setup operation. Future contributors must use their own standard Git author/committer identity (`user.name` / `user.email`); repository hooks never force or rewrite contributor identities, and no `Co-authored-by` trailers are permitted by project convention.
 
-## Rust workspace workflows
+## Rust workspace workflows and feature boundaries
 
-The workspace uses the Rust toolchain pinned in `rust-toolchain.toml`. Implementation follows the test-first loop in [contributor workflow](delivery/contributor-workflow.md) and [build environment and toolchain](tech-stack/build-environment-and-toolchain.md):
+The workspace uses the Rust toolchain pinned in `rust-toolchain.toml`. Implementation follows the test-first loop in [contributor workflow](delivery/contributor-workflow.md) and [build environment and toolchain](tech-stack/build-environment-and-toolchain.md).
 
-1. Write a failing contract test for the target work unit (`E01`–`E12`, `D01`–`D12`, `P01`–`P08`, `H01`–`H08`) and verify the intended failure.
-2. Implement the minimal complete behavior inside the owning crate without leaking platform `cfg` branches into `ascii-core` or duplicating conversion/validation logic.
-3. Run scoped `cargo fmt`, `cargo clippy`, and `cargo test` commands for the touched feature subset (avoiding invalid cross-platform `--all-features` assumptions) plus manual native host verification where desktop integration is affected.
-4. Keep an emergency Stop path (`CLI` / relaunch) reachable without depending on a system tray when testing debug desktop hosts.
+The workspace now has separate `ascii-core`, `ascii-convert`, `ascii-media`, `ascii-runtime`, `ascii-render`, `ascii-platform`, and `ascii-scene` package boundaries, plus the Windows-only `apps/asciiwall` entrypoint. Portability CI checks and tests the dependency-free core on Windows, Linux, and macOS and runs the `ascii-convert` and `ascii-media` package test suites on all three; formatting and Clippy gates cover all workspace members. `ascii-scene` has committed contract tests, but this workflow does not run its test suite. This is not a complete feature matrix:
+
+| Subset | Current interface and blocker |
+|---|---|
+| Core-only | Implemented by dependency-free `ascii-core`; checks frame, borrowed-raster, budget, cancellation, and typed-error contracts. |
+| Image | Implemented in `ascii-media`: `ReadSeek`, `DecodeLimits`, owned `DecodedFrame`, and PNG/JPEG decoding with committed regression tests against core raster/budget contracts. This is a package boundary, not an optional Cargo feature or image-specific CI matrix. |
+| Scene runtime | Implemented in `ascii-scene`: bounded deterministic generator/runtime, simulation, snapshots, and exact-step exports; committed contract tests are not currently run by this CI workflow. The scene runtime itself has no consumer; the Windows image app uses a separate one-shot process-local raster handoff/consumer, not `SceneRuntime`. |
+| Video | No video decoder exists. VID-001 owns a restricted `VideoDecoder::next_frame` interface over approved local inputs and owned image frames, and depends on IMG-001. |
+| Native host | An experimental Windows host exists in `ascii-platform`; its generation-bound `SurfaceLease` and capability/event contracts are implemented, but native/manual acceptance remains **NOT RUN**. No macOS or Linux host is implemented. |
+| Catalog | No catalog or local-library package exists in this workspace. Static catalog schema/fixtures belong to `asciiwall-library` CAT-001 (dependent on LIB-001 and engine PKG-001); the app-side local index belongs to LIBAPP-001 (dependent on PKG-008). |
+| Profiling | No metrics API or benchmark report exists. PERF-001 owns versioned stage metrics and deterministic synthetic report tests; host/GPU measurements require the corresponding implemented adapters and instrumentation. |
+
+The core-only, image-decoding, deterministic scene-runtime, renderer, and experimental Windows-host package boundaries are implemented. PRJ-001 remains incomplete: the Windows app handles one local image through the bounded process-local runtime consumer, but does not compose `SceneRuntime`, a persistent worker pipeline, native transport, or device-completion ownership; video, catalog, and profiling interfaces and their exercised subsets are also absent. Do not add empty crates or inert Cargo features to fill those gaps. In particular, `--all-features` is not a substitute for independent portable and native-target gates.
+
+The current CI Rust gates (also used for local verification) are:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo check --locked --package ascii-core --no-default-features
+cargo test --locked --package ascii-core --no-default-features
+cargo test --locked --package ascii-convert
+cargo test --locked --package ascii-media
+cargo tree --locked --package ascii-core --edges all
+```
+
+For additional Rust implementation, follow the test-first loop in [contributor workflow](delivery/contributor-workflow.md) and [build environment and toolchain](tech-stack/build-environment-and-toolchain.md): write and run the contract test, implement inside the owning crate, and run only the applicable feature/target gates. Do not leak platform `cfg` branches into `ascii-core` or duplicate engine algorithms. Native integration still requires a named real host environment; a portable compile is not native-host evidence.
+
+Keep an emergency Stop path (`CLI` / relaunch) reachable without depending on a system tray when testing future debug desktop hosts.
 
 ## Contributor safety and workflow rules
 

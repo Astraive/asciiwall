@@ -1,7 +1,7 @@
 # AsciiWall
 
-> **Project status:** **Research, architecture specification, and repository-infrastructure baseline (pre-implementation).**
-> There are **no compiled application binaries, Rust crates (`Cargo.toml`), installers, or published wallpaper packages** in this repository yet. All application features, CLI commands, and native platform integrations described in `docs/` are planned engineering specifications tracked for implementation.
+> **Project status:** **Early Rust implementation** alongside repository infrastructure and product specifications.
+> The workspace currently contains `ascii-core`, `ascii-convert`, `ascii-media`, `ascii-render`, `ascii-platform`, and `ascii-scene`, plus a Windows-only one-shot image-to-host console app that loads a caller-supplied licensed font. Windows native/manual acceptance remains **NOT RUN**; there is no installer or distributable release, and video, catalog, and profiling work is not implemented. See [docs/development.md](docs/development.md) for the verified boundaries and gaps.
 
 AsciiWall is a planned open-source, local-first, offline-capable desktop wallpaper application and CLI powered by an original Rust ASCII conversion, procedural scene, and `wgpu`/`egui` rendering engine. It is designed around **capability-aware native desktop adapters** (targeting Windows first, followed by independently gated macOS and named Linux X11, layer-shell Wayland, KDE Plasma, and GNOME adapters) and **declarative `.asciiwall` packages** without accounts, telemetry, hosted servers, or executable package code.
 
@@ -16,7 +16,7 @@ Start with the specification orientation, then inspect the planning and architec
   - [docs/plan.md](docs/plan.md) — master engineering plan and critical-path overview
   - [docs/roadmap.md](docs/roadmap.md) — expanded `M0`–`M10` milestones and `L0`–`L4` library cadence
   - [docs/architecture.md](docs/architecture.md) — crate boundaries, process/worker isolation, and native host model
-  - [docs/development.md](docs/development.md) — current local verification tooling, opt-in hooks, and future workspace workflow
+  - [docs/development.md](docs/development.md) — current workspace implementation, local verification tooling, and opt-in hooks
   - [docs/issue-conventions.md](docs/issue-conventions.md) — stable ticket IDs, label taxonomy, PR/commit rules, and external backlog separation
   - [docs/dependency-graph.md](docs/dependency-graph.md) — dependency-order summary and critical-chain analysis
   - [docs/quality-gates.md](docs/quality-gates.md) — `QA-M0`–`QA-M10` / `LQA-L0`–`LQA-L4` acceptance policy and evidence tiers
@@ -30,10 +30,13 @@ Start with the specification orientation, then inspect the planning and architec
 
 ## Current Repository Contents
 
-Only actual tracked documentation, policies, templates, hooks, and validation/configuration scripts live in this repository today:
+This repository contains project documentation, policies, tooling, and an implemented Rust workspace:
 
 | Path | Current Contents |
 | --- | --- |
+| `Cargo.toml` | Rust workspace manifest (resolver 3; members: Windows app, `ascii-core`, `ascii-convert`, `ascii-media`, `ascii-render`, `ascii-platform`, `ascii-scene`) |
+| `crates/` | Workspace packages for core invariants, conversion, PNG/JPEG image decoding, GPU rendering, experimental Windows hosting, and bounded deterministic scene runtime |
+| `apps/asciiwall/` | Windows-only console entrypoint composing bounded local-image decoding, direct CPU conversion, and Windows host presentation; requires a caller-supplied font file |
 | `LICENSE` | MIT License (`Copyright (c) 2026 Astraive`) |
 | `docs/` | 100 original specification documents, 11 planning entrypoints, GitHub setup guide, and backlog validation/publication guides |
 | `scripts/` | `check-repository.py`, `check-conventions.py`, `check-powershell.ps1`, `validate-backlog.py`, `publish-issues.ps1`, `configure-github.ps1` |
@@ -41,7 +44,7 @@ Only actual tracked documentation, policies, templates, hooks, and validation/co
 | `.githooks/` | Read-only `pre-commit` / `commit-msg` hooks and opt-in `install.ps1` ([.githooks/README.md](.githooks/README.md)) |
 | Root files | `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `GOVERNANCE.md`, `CODE_OF_CONDUCT.md`, `CHANGELOG.md`, `VERSIONING.md`, `.editorconfig`, `.gitattributes`, `.gitignore` |
 
-> **No fake scaffolds:** Rust crates, `Cargo.toml`, desktop binaries, bundled fonts, and media fixtures are not yet created; planned module layouts in [docs/architecture/repository-structure.md](docs/architecture/repository-structure.md) are introduced only as real implementation milestones execute.
+> **No fake scaffolds:** the workspace contains implemented core, conversion, image-decoding, renderer, scene-runtime, and experimental Windows-host boundaries, plus a real one-shot Windows image-to-host application. Native/manual host acceptance remains unrun; no installer, video, catalog, or profiling package is added just to suggest completion. Planned module layouts in [docs/architecture/repository-structure.md](docs/architecture/repository-structure.md) are introduced only as real implementation milestones execute.
 
 ---
 
