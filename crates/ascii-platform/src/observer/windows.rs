@@ -1171,7 +1171,6 @@ fn process_native_queue(shared: &SharedInner, context: &CallbackContext) -> Resu
     }
     if buttons_uncertain {
         mark_click_history_uncertain(shared);
-        refresh_button_state(shared);
     }
     if position_uncertain {
         refresh_pointer_position(shared);
@@ -1206,7 +1205,12 @@ fn process_native_queue(shared: &SharedInner, context: &CallbackContext) -> Resu
                 position,
             } => {
                 if shared.consent.pointer_buttons() {
-                    process_pointer_event(shared, button_flags, message_time, position);
+                    process_pointer_event(
+                        shared,
+                        button_flags_for_processing(buttons_uncertain, button_flags),
+                        message_time,
+                        position,
+                    );
                 }
             }
             NativeEvent::SessionChange { code } => match code {
@@ -1222,6 +1226,9 @@ fn process_native_queue(shared: &SharedInner, context: &CallbackContext) -> Resu
                 }
             }
         }
+    }
+    if buttons_uncertain {
+        refresh_button_state(shared);
     }
     Ok(())
 }
@@ -1258,16 +1265,15 @@ fn mark_click_history_uncertain(shared: &SharedInner) {
     }
 }
 
-fn process_pointer_event(
-    shared: &SharedInner,
-    button_flags: u16,
-    message_time: u32,
-    sampled_point: Option<Point>,
-) {
-    let now_ms = elapsed_ms(shared.started);
-    let point = sampled_point.and_then(|point| pointer_position_at(shared, point, now_ms));
-    let mut data = lock_data(shared);
-    let previous = data.buttons.map_or(0, |update| update.buttons.bits());
+fn button_flags_for_processing(buttons_uncertain: bool, flags: u16) -> u16 {
+    if buttons_uncertain {
+        0
+    } else {
+        flags
+    }
+}
+
+fn apply_button_flags(previous: u8, button_flags: u16) -> (u8, [Option<u8>; 5]) {
     let mut next = previous;
     let mut down = [None; 5];
     let transitions = [
@@ -1288,6 +1294,20 @@ fn process_pointer_event(
             next &= !bit;
         }
     }
+    (next, down)
+}
+
+fn process_pointer_event(
+    shared: &SharedInner,
+    button_flags: u16,
+    message_time: u32,
+    sampled_point: Option<Point>,
+) {
+    let now_ms = elapsed_ms(shared.started);
+    let point = sampled_point.and_then(|point| pointer_position_at(shared, point, now_ms));
+    let mut data = lock_data(shared);
+    let previous = data.buttons.map_or(0, |update| update.buttons.bits());
+    let (next, down) = apply_button_flags(previous, button_flags);
     if let Some(position) = point {
         data.position = Some(position);
         publish_feed(&mut data, FeedEvent::PointerPosition(position));
@@ -1428,13 +1448,10 @@ fn classify_desktop_hit(position: PointerPosition) -> DesktopHitClassification {
     {
         return DesktopHitClassification::Unknown;
     }
-    let item_hit = list_view_item_at(target, point);
-    classify_shell_surface(
+    classify_desktop_list_hit(
         root_is_desktop,
-        false,
-        true,
-        true,
-        item_hit,
+        target_process == unsafe { GetCurrentProcessId() },
+        || list_view_item_at(target, point),
     )
 }
 
@@ -1470,6 +1487,20 @@ fn list_view_item_at(window: Hwnd, mut point: Point) -> Option<i32> {
         return None;
     }
     Some(hit.item)
+}
+
+fn classify_desktop_list_hit(
+    verified_shell_desktop: bool,
+    target_is_local_process: bool,
+    hit_test: impl FnOnce() -> Option<i32>,
+) -> DesktopHitClassification {
+    if !verified_shell_desktop {
+        return DesktopHitClassification::Occupied;
+    }
+    if !target_is_local_process {
+        return DesktopHitClassification::Unknown;
+    }
+    classify_shell_surface(true, false, true, true, hit_test())
 }
 
 fn classify_shell_surface(
@@ -2716,6 +2747,21 @@ mod tests {
     }
 
     #[test]
+    fn foreign_process_desktop_list_hit_is_unknown_without_sending_pointer_message() {
+        let mut sent_pointer_message = false;
+        let hit = classify_desktop_list_hit(true, false, || {
+            sent_pointer_message = true;
+            Some(-1)
+        });
+        assert_eq!(hit, DesktopHitClassification::Unknown);
+        assert!(!sent_pointer_message);
+        assert_eq!(
+            classify_desktop_list_hit(true, true, || Some(-1)),
+            DesktopHitClassification::EmptyWallpaper
+        );
+    }
+
+    #[test]
     fn click_observation_overflow_is_explicit_and_bounded() {
         let display = monitor_identity(
             1,
@@ -2781,6 +2827,37 @@ mod tests {
         assert_eq!(queue.len, NATIVE_QUEUE_CAPACITY);
         assert!(queue.button_state_uncertain);
         assert!(queue.position_uncertain);
+    }
+
+    #[test]
+    fn dropped_release_discards_queued_press_and_stays_released() {
+        let mut queue = NativeQueue::new();
+        queue.push(NativeEvent::RawInput {
+            button_flags: RI_MOUSE_LEFT_BUTTON_DOWN,
+            message_time: 1,
+            position: None,
+        });
+        for _ in 1..NATIVE_QUEUE_CAPACITY {
+            queue.push(NativeEvent::DisplayChange);
+        }
+        queue.push(NativeEvent::RawInput {
+            button_flags: RI_MOUSE_LEFT_BUTTON_UP,
+            message_time: 2,
+            position: None,
+        });
+        assert!(queue.button_state_uncertain);
+
+        let queued_press = match queue.pop() {
+            Some(NativeEvent::RawInput { button_flags, .. }) => button_flags,
+            _ => panic!("queued press must be first"),
+        };
+        assert_eq!(queued_press, RI_MOUSE_LEFT_BUTTON_DOWN);
+        let sampled_buttons = 0;
+        let flags =
+            button_flags_for_processing(queue.button_state_uncertain, queued_press);
+        let (final_buttons, down) = apply_button_flags(sampled_buttons, flags);
+        assert_eq!(final_buttons, 0);
+        assert_eq!(down, [None; 5]);
     }
 
     #[test]
