@@ -21,23 +21,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Duration;
 
     use ascii_convert::{
-        GlyphConfig, GlyphRepertoire, GridSizing, LinearRgb, NormalizedRasterResources,
-        build_glyph_table,
+        GlyphConfig, GlyphRecord, GlyphRepertoire, GlyphTable, GridSizing, LinearRgb,
+        NormalizedRasterResources, build_glyph_table,
     };
     use ascii_core::{AsciiFrame, Budget, CancellationToken, RasterOrientation};
     use ascii_media::{DecodeLimits, DecodeResources, DecodedFrame, decode_image};
     use ascii_platform::{HostAdapter, WindowsHost, WindowsHostConfig};
     use ascii_runtime::{
-        BoundedHandoff, MemoryPermit, MemoryUsage, RasterDescriptorMetadata,
-        RasterToAsciiConsumer, ResourceBudget, ResourceLimits, RuntimeError,
+        BoundedHandoff, MemoryPermit, MemoryUsage, RasterDescriptorMetadata, RasterToAsciiConsumer,
+        ResourceBudget, ResourceLimits, RuntimeError,
     };
-
     const MAX_FONT_BYTES: usize = 16 * 1024 * 1024;
     const MAX_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
     const MAX_RASTER_BYTES: u64 = 128 * 1024 * 1024;
     const MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
-    // One slot and one descriptor/control queue entry have bounded metadata; the raster and frame
-    // payloads are charged independently below.
+    // One slot, one descriptor/control entry, and small config metadata; payloads are charged
+    // separately, as is the retained glyph table.
     const MAX_RUNTIME_METADATA_BYTES: u64 = 4 * 1024;
     const MAX_WORK_UNITS: u64 = 1_000_000_000;
     const MAX_IMAGE_DIMENSION: u32 = 4096;
@@ -62,6 +61,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err(usage_error().into());
     }
 
+    let budget = Budget::new(MAX_FRAME_BYTES, MAX_RASTER_BYTES, MAX_WORK_UNITS);
+    let cancellation = CancellationToken::new();
+    let repertoire = GlyphRepertoire::new(" .:-=+*#%@")?;
+    let glyph_config = GlyphConfig::new(16.0, 8, 16, 13)?;
+    let glyph_table_bytes = glyph_table_memory_bytes(&repertoire, &glyph_config)?;
+    let glyph_build_memory_bytes = budget
+        .max_raster_bytes()
+        .checked_sub(glyph_table_bytes)
+        .ok_or(RuntimeError::MemoryBudgetExceeded)?;
     let runtime_memory_limit = MAX_RASTER_BYTES
         .checked_mul(4)
         .and_then(|raster_bytes| {
@@ -69,46 +77,50 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .checked_mul(2)
                 .and_then(|frame_bytes| raster_bytes.checked_add(frame_bytes))
         })
+        .and_then(|bytes| bytes.checked_add(glyph_table_bytes))
         .and_then(|bytes| bytes.checked_add(MAX_RUNTIME_METADATA_BYTES))
         .ok_or(RuntimeError::SizeOverflow)?;
-    let budget = Budget::new(MAX_FRAME_BYTES, MAX_RASTER_BYTES, MAX_WORK_UNITS);
-    let cancellation = CancellationToken::new();
-    let runtime_resources = ResourceBudget::new(ResourceLimits::new(
-        1,
-        1,
-        1,
-        runtime_memory_limit,
-        0,
-    ));
+    let runtime_resources =
+        ResourceBudget::new(ResourceLimits::new(1, 1, 1, runtime_memory_limit, 0));
+    // Reserve the glyph builder's full bounded peak before it reads the font. Its core budget
+    // includes font input and parser/raster scratch; the retained table is charged separately.
+    let _glyph_table_memory =
+        runtime_resources.try_reserve_memory(MemoryUsage::new(glyph_table_bytes, 0))?;
+    let _glyph_build_memory =
+        runtime_resources.try_reserve_memory(MemoryUsage::new(glyph_build_memory_bytes, 0))?;
+    let font_bytes = read_bounded(&font_path, MAX_FONT_BYTES)?;
+    let glyph_table = Arc::new(build_glyph_table(
+        &font_bytes,
+        &repertoire,
+        &glyph_config,
+        &budget,
+        &cancellation,
+    )?);
+    drop(font_bytes);
+    drop(repertoire);
+    drop(_glyph_build_memory);
+
     let decode_resources = DecodeResources::new(1, MAX_RASTER_BYTES);
     let decode_limits = DecodeLimits::new(
         budget,
-        decode_resources,
+        decode_resources.clone(),
         MAX_IMAGE_DIMENSION,
         MAX_IMAGE_DIMENSION,
         MAX_ENCODED_BYTES,
         MAX_RASTER_BYTES,
     );
 
-    let font_bytes = read_bounded(&font_path, MAX_FONT_BYTES)?;
-    let repertoire = GlyphRepertoire::new(" .:-=+*#%@")?;
-    let glyph_table = Arc::new(build_glyph_table(
-        &font_bytes,
-        &repertoire,
-        &GlyphConfig::new(16.0, 8, 16, 13)?,
-        &budget,
-        &cancellation,
-    )?);
-    drop(font_bytes);
-
     let mut image_file = std::fs::File::open(&image_path)?;
+    // DecodeResources bounds the compressed snapshot, codec scratch/temporary source, and output
+    // together. Mirror that full one-shot ceiling in the process-wide ledger while decoding.
+    let _decoder_memory_ceiling =
+        runtime_resources.try_reserve_memory(MemoryUsage::new(MAX_RASTER_BYTES, 0))?;
     let decode_permit = runtime_resources.try_acquire_decode()?;
     let decoded = decode_image(&mut image_file, &decode_limits, &cancellation)?;
     drop(decode_permit);
-    let decoded_memory = runtime_resources.try_reserve_memory(MemoryUsage::new(
-        u64::try_from(decoded.pixels().len()).map_err(|_| RuntimeError::SizeOverflow)?,
-        0,
-    ))?;
+    let decoded_memory = runtime_resources
+        .try_reserve_memory(MemoryUsage::new(decode_resources.cpu_bytes_in_use(), 0))?;
+    drop(_decoder_memory_ceiling);
     let decoded = ChargedDecodedFrame {
         frame: decoded,
         _memory_permit: decoded_memory,
@@ -140,14 +152,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         LinearRgb::BLACK,
         NormalizedRasterResources::new(MAX_RASTER_BYTES),
     )?;
+    // Conversion normalizes at most one raster; reserve that independent resource ceiling in the
+    // same ledger while the single consumer runs.
+    let _normalized_memory =
+        runtime_resources.try_reserve_memory(MemoryUsage::new(MAX_RASTER_BYTES, 0))?;
 
     // The consumer holds an output-count permit, but its ASCII cell allocation is only bounded by
     // the per-frame core budget. Reserve that maximum before conversion so the original output and
-    // the host-owned copy both stay covered by the shared CPU-memory ledger.
+    // host-owned copy both stay covered by the shared CPU-memory ledger.
     let _converted_frame_memory = reserve_frame_memory(&budget, &runtime_resources, false)?;
     let converted = consumer
         .convert_next(&handoff, &glyph_table, &budget, &cancellation)?
         .ok_or_else(|| io::Error::other("bounded handoff produced no converted frame"))?;
+    drop(_normalized_memory);
     drop(consumer);
     drop(handoff);
 
@@ -203,6 +220,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| io::Error::other("console input thread panicked"))??;
     for lease in leases {
         host.detach(lease)?;
+    }
+
+    fn glyph_table_memory_bytes(
+        repertoire: &GlyphRepertoire,
+        config: &GlyphConfig,
+    ) -> Result<u64, RuntimeError> {
+        // The builder reserves the record vector and each mask from these exact validated sizes.
+        let glyph_count =
+            u64::try_from(repertoire.characters().len()).map_err(|_| RuntimeError::SizeOverflow)?;
+        let mask_bytes = u64::from(config.cell_width())
+            .checked_mul(u64::from(config.cell_height()))
+            .and_then(|bytes| bytes.checked_mul(glyph_count))
+            .ok_or(RuntimeError::SizeOverflow)?;
+        let record_bytes = u64::try_from(std::mem::size_of::<GlyphRecord>())
+            .map_err(|_| RuntimeError::SizeOverflow)?
+            .checked_mul(glyph_count)
+            .ok_or(RuntimeError::SizeOverflow)?;
+        let allocation_headers = std::mem::size_of::<GlyphTable>()
+            .checked_add(std::mem::size_of::<[usize; 2]>())
+            .ok_or(RuntimeError::SizeOverflow)?;
+        let allocation_headers =
+            u64::try_from(allocation_headers).map_err(|_| RuntimeError::SizeOverflow)?;
+        allocation_headers
+            .checked_add(record_bytes)
+            .and_then(|bytes| bytes.checked_add(mask_bytes))
+            .ok_or(RuntimeError::SizeOverflow)
     }
 
     fn usage_error() -> std::io::Error {
