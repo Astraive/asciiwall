@@ -47,6 +47,11 @@ pub use assignment::{
     StopToken, SwitchTransition,
 };
 
+pub use pause::{
+    PauseAction, PausePolicyError, PlaybackPositionPolicy, ResumeClock, ResumePlan,
+    SurfaceDisposition, SuspendPolicy, SuspendResourcePolicy, TransitionPolicy, pause_action,
+};
+
 pub use buffer_pool::{
     BufferPool, CompletionToken, FillLease, FrameDescriptor, FrameLease, RasterDescriptorMetadata,
     SlotState,
