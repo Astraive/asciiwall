@@ -27,11 +27,11 @@ While `Stopping`, `request` rejects new assignments without advancing the genera
 
 ## Pause reasons are a set, not one boolean
 
-Reasons include user pause, session lock, display off, fullscreen policy, low battery, battery saver, thermal policy, host unavailable, and export contention. Clearing one reason must not resume while another remains. Distinguish a paused simulation from a throttled renderer and a released graphics surface.
+Reasons include user pause, session lock, display off, fullscreen policy, low battery, battery saver, thermal policy, host unavailable, and export contention. `AssignmentController` stores them as independent `Blockers`; clearing one cause never clears another. COR-004's pure `ascii_runtime::pause` policy maps lifecycle snapshots to explicit simulation, rendering, surface, and stop actions without introducing another lifecycle controller.
 
-A `user-stop` detaches wallpaper surfaces and ends background work. A `user-pause` freezes the approved frame but retains the assignment. A `suspend` releases expensive resources according to policy. Resume may restore the playback position or realign to a clock; that choice belongs to the source settings.
+`PauseAction::FreezeSimulation` retains the assignment and freezes the approved frame. `PauseAction::ThrottleRender` reduces rendering without describing the simulation as paused. `PauseAction::Suspend` keeps resource release and surface release as explicit consumer policy. `PauseAction::Stop` reflects the controller's stop path: the host must detach, end background work, and acknowledge stop; `AssignmentController::begin_stop` remains the single owner that invalidates pending work.
 
-## Session events
+The portable policy marks lock, display-off, and unavailable-host suspension as transition-bypassing. It performs no native calls. A host consumer must reprobe fresh topology and capabilities after unlock/resume, then call `ResumeClock::resume_after_reprobe`; this resets the monotonic baseline, records the event watermark for discarding queued stale events, and bounds each simulation delta. The source policy selects restoring playback position or realigning to a clock. PWR-001 owns native signal subscriptions and effective platform policy.
 
 On lock or display power-off, stop visual work promptly; do not play an exit animation on a security transition. On unlock, reprobe topology and capabilities before displaying a fresh frame. On suspend/resume, reset monotonic baselines, discard stale external events, and clamp simulation catch-up. Never integrate hours of missed physics in one tick.
 

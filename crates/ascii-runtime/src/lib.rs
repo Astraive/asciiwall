@@ -39,6 +39,7 @@ mod assignment;
 mod buffer_pool;
 mod queues;
 mod raster_consumer;
+pub mod pause;
 
 pub use assignment::{
     ApplyInput, AssignmentController, AssignmentHost, AssignmentSnapshot, AssignmentState, Blocker,
