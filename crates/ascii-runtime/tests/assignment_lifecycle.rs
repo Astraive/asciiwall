@@ -141,7 +141,10 @@ fn install_initial(controller: &mut AssignmentController<Active>, host: &mut Hos
         controller.complete_preparation(job.execute(host), host),
         CompletionOutcome::Committed
     );
-    assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
 }
 
 #[test]
@@ -168,7 +171,12 @@ fn only_newest_generation_commits_and_stale_preparation_releases_its_resource() 
     assert_eq!(controller.snapshot().generation, Generation::from_value(3));
     assert_eq!(controller.snapshot().active_assignment, Some(assignment(3)));
     assert_eq!(controller.snapshot().state, AssignmentState::Running);
-    assert_eq!(controller.active_resource().map(|resource| resource.transition), Some(SwitchTransition::UserRequested));
+    assert_eq!(
+        controller
+            .active_resource()
+            .map(|resource| resource.transition),
+        Some(SwitchTransition::UserRequested)
+    );
 }
 
 #[test]
@@ -177,13 +185,21 @@ fn immediate_replacement_is_distinct_from_user_switch_transition() {
     let mut host = Host::default();
     install_initial(&mut controller, &mut host);
     let job = controller
-        .request(input_with_transition(2, SwitchTransition::Immediate), &mut host)
+        .request(
+            input_with_transition(2, SwitchTransition::Immediate),
+            &mut host,
+        )
         .unwrap();
     assert_eq!(
         controller.complete_preparation(job.execute(&mut host), &mut host),
         CompletionOutcome::Committed
     );
-    assert_eq!(controller.active_resource().map(|resource| resource.transition), Some(SwitchTransition::Immediate));
+    assert_eq!(
+        controller
+            .active_resource()
+            .map(|resource| resource.transition),
+        Some(SwitchTransition::Immediate)
+    );
 }
 
 #[test]
@@ -265,7 +281,10 @@ fn forced_stop_invalidates_pending_work_and_releases_active_resource() {
     let mut controller = AssignmentController::<Active>::new();
     let mut host = Host::default();
     install_initial(&mut controller, &mut host);
-    let pending = controller.request(input(8), &mut host).unwrap().execute(&mut host);
+    let pending = controller
+        .request(input(8), &mut host)
+        .unwrap()
+        .execute(&mut host);
     let before = host.drops.count();
     let token = controller.begin_stop(StopKind::Forced);
     assert_eq!(token.kind(), StopKind::Forced);
@@ -297,7 +316,12 @@ fn blockers_during_preparation_do_not_cancel_the_newest_generation() {
         CompletionOutcome::Committed
     );
     assert_eq!(controller.snapshot().state, AssignmentState::Suspended);
-    assert!(controller.snapshot().blockers.contains(Blocker::SessionLocked));
+    assert!(
+        controller
+            .snapshot()
+            .blockers
+            .contains(Blocker::SessionLocked)
+    );
     controller.set_blocker(Blocker::SessionLocked, false);
     assert_eq!(controller.snapshot().state, AssignmentState::Running);
 }
@@ -322,7 +346,10 @@ fn requests_are_rejected_during_security_and_forced_stop() {
         ));
         assert_eq!(controller.snapshot(), stopping);
         assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
-        assert_eq!(controller.active_resource().map(|resource| resource.id), Some(1));
+        assert_eq!(
+            controller.active_resource().map(|resource| resource.id),
+            Some(1)
+        );
 
         assert!(controller.complete_stop(token));
         assert_eq!(controller.snapshot().state, AssignmentState::Detached);

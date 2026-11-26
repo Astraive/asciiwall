@@ -435,7 +435,10 @@ impl<A> AssignmentController<A> {
             StopKind::Security => ReasonCode::SecurityStop,
             StopKind::Forced => ReasonCode::ForcedStop,
         });
-        StopToken { generation: self.generation, kind }
+        StopToken {
+            generation: self.generation,
+            kind,
+        }
     }
 
     /// Completes detach only for the current stop token; owned active resources are then released.
