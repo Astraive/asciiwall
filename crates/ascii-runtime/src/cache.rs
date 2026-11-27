@@ -2985,6 +2985,14 @@ fn windows_file_identity(file: &File) -> io::Result<(u32, u64)> {
 static OUTPUT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 fn create_output_temp(destination: &Path) -> io::Result<(PathBuf, File)> {
+    #[cfg(unix)]
+    let destination_permissions = match fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_file() => Some(metadata.permissions()),
+        Ok(_) => None,
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+
     let parent = destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -3001,13 +3009,21 @@ fn create_output_temp(destination: &Path) -> io::Result<(PathBuf, File)> {
             continue;
         }
         let temp_path = parent.join(temp_name);
-        match OpenOptions::new()
-            .write(true)
-            .read(true)
-            .create_new(true)
-            .open(&temp_path)
+        let mut options = OpenOptions::new();
+        options.write(true).read(true).create_new(true);
+        #[cfg(unix)]
         {
-            Ok(file) => return Ok((temp_path, file)),
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&temp_path) {
+            Ok(file) => {
+                #[cfg(unix)]
+                if let Some(permissions) = destination_permissions {
+                    file.set_permissions(permissions)?;
+                }
+                return Ok((temp_path, file));
+            }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                 attempts = attempts
                     .checked_add(1)
@@ -3939,6 +3955,52 @@ mod tests {
             })
             .count();
         assert_eq!(transaction_temps, 0);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn transactional_output_preserves_existing_mode_and_restricts_new_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempManagedDirectory::new();
+        let output_dir = fs::canonicalize(&directory.0).unwrap();
+        let registry = OutputRegistry::default();
+        let budget = DiskBudget::new(128, 0);
+        let reservation = budget
+            .reserve(DiskRequirements {
+                output_bytes: 64,
+                ..DiskRequirements::default()
+            })
+            .unwrap();
+        let existing = output_dir.join("restricted-output");
+        fs::write(&existing, b"original").unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o600)).unwrap();
+
+        registry
+            .write_transactional(
+                cache_test_identity(203),
+                &existing,
+                &reservation,
+                |output| output.write_all(b"replacement"),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let new_file = output_dir.join("new-output");
+        registry
+            .write_transactional(
+                cache_test_identity(204),
+                &new_file,
+                &reservation,
+                |output| output.write_all(b"new"),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&new_file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[cfg(any(unix, windows))]

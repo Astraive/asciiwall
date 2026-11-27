@@ -48,6 +48,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - [COR-009] Reject symlink output destinations and retain dangling recovery paths; roll back
   published output on parent-directory sync failure with distinct staged/recovery paths.
 
+- [COR-009] Preserve existing Unix output-file permissions during transactional replacement and
+  create new outputs with owner-only permissions.
+
 - [COR-009] Keep expanded-input and scratch capacity charged after reservation drop until a fresh
   host-space probe reconciles files that can survive cancellation or errors.
 - [COR-009] Bound managed cache files during store, reopen, and trim while preserving empty entries
