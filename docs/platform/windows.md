@@ -26,7 +26,18 @@ Native evidence is **partially measured; not accepted**. On Windows 11 Home Sing
 
 One guarded Explorer restart/recovery was observed (evidence: PR #371, code head `b443d0ef37d1780c271c4a13d0812b3b87fea4c2`): the monitor reported `SurfaceRetired`/HostLost and health became Unavailable, then capability returned Available/Healthy with replacement `SurfaceAttached` generation 1 and registry epoch 1. After 150 seconds it remained Healthy; `WallpaperSurface` was Available at Low confidence with lease_count 1. Host drop reported owned windows released.
 
-Still unverified: below-icon placement, focus/nonactivation, desktop icon click/selection/menus, typing into an app, shell visual recovery, Task View/virtual desktops, topology/hotplug, lock/disconnect, recovery exhaustion, and application-controller Stop. Win+D was inconclusive: no host events were recorded, and delivery or visible effect was not confirmed. No user visual observation was provided. These observations do not establish zero leaks, icon interaction, focus preservation, or acceptance; WND-002 remains experimental and unsupported.
+Still unverified: below-icon placement, focus/nonactivation, desktop icon click/selection/menus, typing into an app, shell visual recovery, Task View/virtual desktops, topology/hotplug, lock/disconnect, recovery exhaustion, and application-controller Stop. Win+D was inconclusive: no host events were recorded, and delivery or visible effect was not confirmed. A subsequent user visual attempt is recorded below. These observations do not establish zero leaks, icon interaction, focus preservation, or acceptance; WND-002 remains experimental and unsupported.
+
+### User visual acceptance attempt
+
+The user ran `C:\Users\gskne\AppData\Local\Temp\wnd002-manual-check\wnd002-manual-check.exe`. It printed `READY: synthetic frame presented on the first current display; 180-second hold started.` followed by countdown `179` through `161`; the user pressed Ctrl+C. The runner printed `Graceful Ctrl+C requested; detaching.` and `EXIT: detached and host dropped cleanly.` User report: **“no i didnt see anything changed in desktop bg”**. The visible-background gate is **NOT PASSED** for this attempt. `READY` records that `host.present(...)` returned without error, not that the compositor visibly displayed the frame; the user reported no visible background change. Clean teardown is distinct from visible presentation.
+
+- Runner source SHA-256: `8986aa92113818aee0e2dda853d5c1e6699e61fbfacbc62698b00c41e0af78c1`.
+- Runner executable SHA-256: `9e83cda913833cfe4f88d4bd09e5acd833cfc338745bba22acfe1bcf749805d0`.
+- `Cargo.lock` SHA-256: `91bc65be2e89983c92f0157bb124178a147fdd114e04e054dec46a0232e0abf6`.
+- `Cargo.toml` SHA-256: `40e44cc390c1bdfc0f51320e40a7101b7e43f9f8ee3c59b8171f44e1aadbf3c2`.
+
+Desktop icon click/selection and typing into an application remain **NOT TESTED**. No screenshot, focus pass, root cause, or production support is established by this attempt.
 
 ## Pointer and window feeds
 
