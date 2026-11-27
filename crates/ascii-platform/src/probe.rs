@@ -146,9 +146,7 @@ pub struct HierarchySummary {
     /// Number of `SHELLDLL_DefView` descendants under `GetShellWindow`, `Progman`, or `WorkerW`
     /// roots, regardless of owner.
     pub desktop_view_count: u16,
-    /// Number of views under other roots, kept separate from plausible desktop hierarchy.
-    pub non_desktop_shell_view_count: u16,
-    /// Number of those desktop views owned by the shell-window process.
+    /// Number of desktop views owned by the shell-window process.
     pub shell_owned_desktop_view_count: u16,
     /// Shell-owned desktop views whose direct parent class was `Progman`.
     pub desktop_views_parented_by_progman: u16,
@@ -306,7 +304,6 @@ fn classify_snapshot(snapshot: &HierarchySnapshot) -> HierarchyObservation {
                 WindowClass::Progman | WindowClass::WorkerW
             );
         if !desktop_root {
-            summary.non_desktop_shell_view_count += 1;
             continue;
         }
         summary.desktop_view_count += 1;
@@ -504,7 +501,6 @@ mod tests {
             ObservationReason::DesktopViewNotFound
         );
         assert_eq!(result.summary.desktop_view_count, 0);
-        assert_eq!(result.summary.non_desktop_shell_view_count, 1);
         assert_eq!(result.summary.shell_owned_desktop_view_count, 0);
     }
 
