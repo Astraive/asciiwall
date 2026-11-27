@@ -44,6 +44,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Durable publication-ledger replacement uses a same-directory overwrite rename instead of the Windows PowerShell `File.Replace` null-backup binding; a real filesystem regression runs locally and in CI.
 - Redacted complete whitespace-containing and drive-relative paths from diagnostic logs, rejected Windows-trimmed and reserved-device registry/journal path components, compared storage-root and registry-path aliases with Windows ordinal case-insensitive semantics (including final sigma), and bounded explicit restore of oversized settings files ([COR-008]).
+- Preserve existing Windows destination DACLs with ACL-preserving replacement; first creation is no-clobber so a concurrent destination is never replaced with the temporary file's inherited ACL ([COR-008]).
 - Project-field schema preflight preserves singleton GraphQL argument collections instead of mistaking a valid input object for multiple arguments.
 - Preserve ISO-looking JSON text and exact protected ledger timestamp strings through repeated reads and atomic writes; the real filesystem regression now exercises lossless reloads.
 - Hardened FNT-001 cancellation through parser preflight, glyph description, rasterization, and final sorting; prevented implicit deep clones of budgeted tables, validated legacy cmap format 2 beside Unicode maps, fixed one-pixel edge descriptors, expanded fingerprint invalidation coverage, and documented the checked parser-allocation envelope.
