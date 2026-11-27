@@ -2081,9 +2081,10 @@ pub struct OutputRegistry {
     state: Arc<Mutex<OutputRegistryState>>,
 }
 
-struct OutputTransactionHooks<S, R, D> {
+struct OutputTransactionHooks<S, R, D, B> {
     sync_file: S,
     replace: R,
+    restore: B,
     sync_parent_directory: D,
 }
 
@@ -2105,11 +2106,11 @@ impl OutputRegistry {
     /// cleanup. If sync fails after publication, the previous destination is restored (or a new
     /// destination is removed); `partial_temp_path` never points at the published file.
     ///
-    /// The stage handle stays open and its file identity is checked before the path-based commit.
-    /// Unix/Windows use stable file identifiers; other targets compare available file metadata.
-    /// This detects substitutions before that check, but std has no portable rename-by-handle API;
-    /// therefore the destination parent must not be writable by an untrusted concurrent actor
-    /// during a transaction (a check-to-rename race remains otherwise).
+    /// The stage handle stays open while its file identity is checked, then is closed before
+    /// path-based replacement. Unix/Windows use stable file identifiers; other targets compare
+    /// available file metadata. This detects substitutions before that check, but std has no
+    /// portable rename-by-handle API; therefore the destination parent must not be writable by an
+    /// untrusted concurrent actor during a transaction (a check-to-replace race remains otherwise).
     pub fn write_transactional<F>(
         &self,
         identity: CacheIdentity,
@@ -2127,29 +2128,34 @@ impl OutputRegistry {
             writer,
             OutputTransactionHooks {
                 sync_file: File::sync_all,
-                replace: replace_destination,
+                replace: |source: &Path, destination: &Path| {
+                    replace_destination(source, destination)
+                },
+                restore: restore_output_backup,
                 sync_parent_directory: crate::storage::sync_parent_directory,
             },
         )
     }
 
-    fn write_transactional_with_sync<F, S, R, D>(
+    fn write_transactional_with_sync<F, S, R, D, B>(
         &self,
         identity: CacheIdentity,
         destination: &Path,
         reservation: &DiskReservation,
         writer: F,
-        hooks: OutputTransactionHooks<S, R, D>,
+        hooks: OutputTransactionHooks<S, R, D, B>,
     ) -> Result<PathBuf, OutputWriteError>
     where
         F: FnOnce(&mut dyn Write) -> io::Result<()>,
         S: FnOnce(&File) -> io::Result<()>,
         R: FnMut(&Path, &Path) -> io::Result<()>,
         D: FnMut(&Path) -> io::Result<()>,
+        B: FnMut(&Path, &Path) -> io::Result<()>,
     {
         let OutputTransactionHooks {
             sync_file,
             mut replace,
+            mut restore,
             mut sync_parent_directory,
         } = hooks;
         let mut registry = lock_unpoisoned(&self.state);
@@ -2247,34 +2253,70 @@ impl OutputRegistry {
             } else {
                 OutputFailureKind::Sync
             };
-            let recovery_path = if fs::remove_file(backup_path).is_err() && backup_path.exists() {
-                Some(backup_path.clone())
-            } else {
-                None
-            };
-            let mut output_error = OutputWriteError::new(kind, Some(temp_path), Some(error));
-            output_error.recovery_path = recovery_path;
-            return Err(output_error);
-        }
-        if let Err(error) = replace(&temp_path, &destination) {
-            let kind = if is_disk_full(&error) {
-                OutputFailureKind::DiskFull
-            } else {
-                OutputFailureKind::Commit
-            };
-            let recovery_path = backup_path.as_ref().and_then(|backup_path| {
-                if fs::remove_file(backup_path).is_err() && backup_path.exists() {
+            let recovery_path =
+                if fs::remove_file(backup_path).is_err() && output_path_may_exist(backup_path) {
                     Some(backup_path.clone())
                 } else {
                     None
-                }
-            });
+                };
             let mut output_error = OutputWriteError::new(kind, Some(temp_path), Some(error));
             output_error.recovery_path = recovery_path;
             return Err(output_error);
         }
         let committed_file_identity = output_file_identity_from_file(&file).ok().flatten();
         drop(file);
+        if let Err(error) = replace(&temp_path, &destination) {
+            let kind = if is_disk_full(&error) {
+                OutputFailureKind::DiskFull
+            } else {
+                OutputFailureKind::Commit
+            };
+            let replacement_error = error.get_ref().and_then(|source| {
+                source.downcast_ref::<crate::storage::ReplaceDestinationError>()
+            });
+            let preserve_backup =
+                replacement_error.is_some_and(|replacement| replacement.preserve_source);
+            let source_consumed =
+                replacement_error.is_some_and(|replacement| replacement.source_consumed);
+            let helper_recovery_path =
+                replacement_error.and_then(|replacement| replacement.recovery_path.clone());
+            let mut recovery_path = helper_recovery_path.clone();
+            let mut cleanup_detail = None;
+            if let Some(backup_path) = backup_path.as_ref() {
+                if preserve_backup && !source_consumed {
+                    if recovery_path.is_none() {
+                        recovery_path = Some(backup_path.clone());
+                    } else {
+                        cleanup_detail = Some(format!(
+                            "additional output recovery file remains at {}",
+                            backup_path.display()
+                        ));
+                    }
+                } else if preserve_backup && helper_recovery_path.is_none() {
+                    recovery_path = Some(backup_path.clone());
+                } else if fs::remove_file(backup_path).is_err()
+                    && output_path_may_exist(backup_path)
+                {
+                    if recovery_path.is_none() {
+                        recovery_path = Some(backup_path.clone());
+                    } else {
+                        cleanup_detail = Some(format!(
+                            "additional output recovery file remains at {}",
+                            backup_path.display()
+                        ));
+                    }
+                }
+            }
+            let error = if let Some(detail) = cleanup_detail {
+                io::Error::new(error.kind(), format!("{error}; {detail}"))
+            } else {
+                error
+            };
+            let mut output_error =
+                OutputWriteError::new(kind, (!source_consumed).then_some(temp_path), Some(error));
+            output_error.recovery_path = recovery_path;
+            return Err(output_error);
+        }
         let committed_path = destination.clone();
         let committed_canonical_destination = canonical_destination;
         if let Err(error) = sync_parent_directory(destination_parent) {
@@ -2287,7 +2329,7 @@ impl OutputRegistry {
                 &destination,
                 destination_parent,
                 backup_path.as_deref(),
-                &mut replace,
+                &mut restore,
                 &mut sync_parent_directory,
             ) {
                 if !destination_restored {
@@ -2324,7 +2366,7 @@ impl OutputRegistry {
                     &destination,
                     destination_parent,
                     Some(backup_path),
-                    &mut replace,
+                    &mut restore,
                     &mut sync_parent_directory,
                 ) {
                     if !destination_restored {
@@ -2369,19 +2411,19 @@ impl OutputRegistry {
     }
 }
 
-fn rollback_published_output<R, D>(
+fn rollback_published_output<B, D>(
     destination: &Path,
     destination_parent: &Path,
     backup_path: Option<&Path>,
-    replace: &mut R,
+    restore: &mut B,
     sync_parent_directory: &mut D,
 ) -> Result<(), (io::Error, bool)>
 where
-    R: FnMut(&Path, &Path) -> io::Result<()>,
+    B: FnMut(&Path, &Path) -> io::Result<()>,
     D: FnMut(&Path) -> io::Result<()>,
 {
     let restore_result = match backup_path {
-        Some(backup_path) => replace(backup_path, destination),
+        Some(backup_path) => restore(backup_path, destination),
         None => fs::remove_file(destination),
     };
     if let Err(error) = restore_result {
@@ -2391,6 +2433,13 @@ where
         return Err((error, true));
     }
     Ok(())
+}
+
+fn output_path_may_exist(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) => error.kind() != io::ErrorKind::NotFound,
+    }
 }
 
 fn output_recovery_path(backup_path: Option<&Path>, destination: &Path) -> Option<PathBuf> {
@@ -3112,10 +3161,45 @@ fn move_file_write_through(
         Ok(())
     }
 }
+#[cfg(windows)]
+fn restore_output_backup(backup: &Path, destination: &Path) -> io::Result<()> {
+    // Moving the original backup back retains its security descriptor, unlike ReplaceFileW,
+    // which would inherit the newly published destination's DACL.
+    move_file_write_through(backup, destination, true)
+}
+
+#[cfg(not(windows))]
+fn restore_output_backup(backup: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(backup, destination)
+}
 
 #[cfg(windows)]
 fn replace_destination(temp_path: &Path, destination: &Path) -> io::Result<()> {
-    move_file_write_through(temp_path, destination, true)
+    match crate::storage::replace_destination(temp_path, destination) {
+        Ok(Some(backup)) => {
+            if let Err(error) = fs::remove_file(&backup) {
+                let error = io::Error::new(
+                    error.kind(),
+                    format!(
+                        "replacement was published; output replacement backup remains at {}: {error}",
+                        backup.display()
+                    ),
+                );
+                return Err(io::Error::new(
+                    error.kind(),
+                    crate::storage::ReplaceDestinationError {
+                        error,
+                        preserve_source: false,
+                        recovery_path: Some(backup),
+                        source_consumed: true,
+                    },
+                ));
+            }
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(error) => Err(io::Error::new(error.error.kind(), error)),
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -3369,6 +3453,8 @@ fn notify_eviction_test_hook(point: EvictionTestPoint) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use crate::storage::windows_acl_test_support as windows_acl;
 
     struct TempManagedDirectory(std::path::PathBuf);
 
@@ -3789,6 +3875,7 @@ mod tests {
                         commit_events.borrow_mut().push(CommitEvent::Replace);
                         replace_destination(temporary, destination)
                     },
+                    restore: restore_output_backup,
                     sync_parent_directory: |parent: &Path| {
                         assert_eq!(parent, output_dir.as_path());
                         assert_eq!(fs::read(&destination)?, b"committed");
@@ -3831,6 +3918,7 @@ mod tests {
                         failed_events.borrow_mut().push(CommitEvent::Replace);
                         replace_destination(temporary, destination)
                     },
+                    restore: restore_output_backup,
                     sync_parent_directory: |parent: &Path| {
                         assert_eq!(parent, output_dir.as_path());
                         let sync_call = failed_sync_calls.get();
@@ -3898,6 +3986,7 @@ mod tests {
             .unwrap();
 
         let sync_calls = Cell::new(0usize);
+        let restore_calls = Cell::new(0usize);
         let error = registry
             .write_transactional_with_sync(
                 failed_identity.clone(),
@@ -3907,6 +3996,10 @@ mod tests {
                 OutputTransactionHooks {
                     sync_file: |_: &File| Ok(()),
                     replace: replace_destination,
+                    restore: |backup: &Path, destination: &Path| {
+                        restore_calls.set(restore_calls.get() + 1);
+                        restore_output_backup(backup, destination)
+                    },
                     sync_parent_directory: |parent: &Path| {
                         assert_eq!(parent, output_dir.as_path());
                         let sync_call = sync_calls.get();
@@ -3938,6 +4031,7 @@ mod tests {
         assert_eq!(error.partial_temp_path, None);
         assert_eq!(error.recovery_path, None);
         assert_eq!(sync_calls.get(), 3);
+        assert_eq!(restore_calls.get(), 1);
         assert_eq!(fs::read(&destination).unwrap(), b"original bytes");
         assert_eq!(
             registry.registered_path(&existing_identity),
@@ -3955,6 +4049,73 @@ mod tests {
             })
             .count();
         assert_eq!(transaction_temps, 0);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn transactional_output_parent_sync_rollback_preserves_existing_dacl() {
+        use std::cell::Cell;
+
+        let directory = TempManagedDirectory::new();
+        let output_dir = fs::canonicalize(&directory.0).unwrap();
+        let destination = output_dir.join("existing-output-dacl");
+        let registry = OutputRegistry::default();
+        let budget = DiskBudget::new(128, 0);
+        let reservation = budget
+            .reserve(DiskRequirements {
+                output_bytes: 64,
+                ..DiskRequirements::default()
+            })
+            .unwrap();
+        registry
+            .write_transactional(
+                cache_test_identity(204),
+                &destination,
+                &reservation,
+                |output| output.write_all(b"original bytes"),
+            )
+            .unwrap();
+        windows_acl::set_custom_dacl(&destination)
+            .expect("set up the Windows output DACL regression fixture");
+        let expected_dacl = windows_acl::dacl(&destination).expect("read custom output DACL");
+        assert!(expected_dacl.1, "the test DACL must be protected");
+
+        let sync_calls = Cell::new(0usize);
+        let error = registry
+            .write_transactional_with_sync(
+                cache_test_identity(205),
+                &destination,
+                &reservation,
+                |output| output.write_all(b"replacement bytes"),
+                OutputTransactionHooks {
+                    sync_file: |_: &File| Ok(()),
+                    replace: replace_destination,
+                    restore: restore_output_backup,
+                    sync_parent_directory: |parent: &Path| {
+                        assert_eq!(parent, output_dir.as_path());
+                        let call = sync_calls.get();
+                        sync_calls.set(call + 1);
+                        match call {
+                            0 => Ok(()),
+                            1 => {
+                                assert_eq!(fs::read(&destination)?, b"replacement bytes");
+                                assert_eq!(windows_acl::dacl(&destination)?, expected_dacl);
+                                Err(io::Error::other("injected parent sync failure"))
+                            }
+                            2 => {
+                                assert_eq!(fs::read(&destination)?, b"original bytes");
+                                Ok(())
+                            }
+                            _ => panic!("unexpected parent-directory sync"),
+                        }
+                    },
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind, OutputFailureKind::Sync);
+        assert_eq!(fs::read(&destination).unwrap(), b"original bytes");
+        assert_eq!(windows_acl::dacl(&destination).unwrap(), expected_dacl);
+        assert_eq!(sync_calls.get(), 3);
     }
     #[cfg(unix)]
     #[test]
