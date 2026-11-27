@@ -60,6 +60,8 @@ pub enum RuntimeError {
     AllocationFailed,
     /// The buffer pool has no reusable slot.
     NoFreeSlots,
+    /// A nonblocking control-queue operation could not acquire the ordinary queue lock.
+    QueueContended,
     /// A bounded control queue is full.
     QueueFull,
     /// The requested transition is not valid for the current slot or lease state.
@@ -91,6 +93,7 @@ impl core::fmt::Display for RuntimeError {
             Self::SizeOverflow => formatter.write_str("runtime size overflow"),
             Self::AllocationFailed => formatter.write_str("runtime allocation failed"),
             Self::NoFreeSlots => formatter.write_str("no free shared-buffer slot"),
+            Self::QueueContended => formatter.write_str("control queue is contended"),
             Self::QueueFull => formatter.write_str("bounded queue is full"),
             Self::InvalidState => formatter.write_str("invalid ownership state transition"),
             Self::StaleGeneration => formatter.write_str("stale runtime generation"),

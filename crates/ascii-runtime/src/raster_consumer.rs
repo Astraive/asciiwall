@@ -9,6 +9,7 @@
 //! consumer and does not implement native mapping, transport ownership, disconnect recovery, or
 //! device completion.
 
+use std::mem::size_of;
 use std::vec::Vec;
 
 use ascii_convert::{
@@ -161,12 +162,13 @@ impl RasterToAsciiConsumer {
         let result = self.convert_lease(&lease, descriptor, glyphs, budget, cancellation);
 
         match result {
-            Ok(frame) => {
+            Ok((frame, output_permit)) => {
                 token.acknowledge();
                 Ok(Some(ConvertedFrame {
                     frame,
                     descriptor,
                     _lease: lease,
+                    _output_permit: output_permit,
                 }))
             }
             Err(error) => {
@@ -184,7 +186,7 @@ impl RasterToAsciiConsumer {
         glyphs: &GlyphTable,
         budget: &Budget,
         cancellation: &CancellationToken,
-    ) -> Result<AsciiFrame, RasterConsumerError> {
+    ) -> Result<(AsciiFrame, MemoryPermit), RasterConsumerError> {
         let byte_length =
             usize::try_from(descriptor.byte_length).map_err(|_| RuntimeError::MappingBounds)?;
         if byte_length > self.scratch_bound {
@@ -205,6 +207,26 @@ impl RasterToAsciiConsumer {
                 Ok(())
             })
             .map_err(RasterConsumerError::Runtime)??;
+
+        let output_grid = self.sizing.resolve(
+            descriptor.width,
+            descriptor.height,
+            glyphs.cell_width(),
+            glyphs.cell_height(),
+        )?;
+        let output_cells = usize::try_from(output_grid.columns())
+            .map_err(|_| RuntimeError::SizeOverflow)?
+            .checked_mul(
+                usize::try_from(output_grid.rows()).map_err(|_| RuntimeError::SizeOverflow)?,
+            )
+            .ok_or(RuntimeError::SizeOverflow)?;
+        let output_bytes = output_cells
+            .checked_mul(size_of::<ascii_core::AsciiCell>())
+            .ok_or(RuntimeError::SizeOverflow)?;
+        let output_permit = self.resource_budget.try_reserve_memory(MemoryUsage::new(
+            u64::try_from(output_bytes).map_err(|_| RuntimeError::SizeOverflow)?,
+            0,
+        ))?;
 
         let row_stride =
             usize::try_from(descriptor.row_stride).map_err(|_| RuntimeError::MappingBounds)?;
@@ -237,14 +259,15 @@ impl RasterToAsciiConsumer {
             self.foreground,
             self.background,
         )?;
-        convert_density(
+        let frame = convert_density(
             validated.view(),
             glyphs,
             &settings,
             budget,
             &self.normalized_resources,
         )
-        .map_err(RasterConsumerError::Conversion)
+        .map_err(RasterConsumerError::Conversion)?;
+        Ok((frame, output_permit))
     }
 }
 
@@ -257,6 +280,7 @@ pub struct ConvertedFrame {
     frame: AsciiFrame,
     descriptor: FrameDescriptor,
     _lease: FrameLease,
+    _output_permit: MemoryPermit,
 }
 
 impl ConvertedFrame {
@@ -283,8 +307,8 @@ mod tests {
     use super::synthetic_font;
     use super::{ConvertedFrame, RasterConsumerError, RasterToAsciiConsumer};
     use crate::{
-        BoundedHandoff, RasterDescriptorMetadata, ResourceBudget, ResourceLimits, RuntimeError,
-        SlotState,
+        BoundedHandoff, MemoryUsage, RasterDescriptorMetadata, ResourceBudget, ResourceLimits,
+        RuntimeError, SlotState,
     };
     use ascii_convert::{
         GlyphConfig, GlyphRepertoire, GridSizing, LinearRgb, NormalizedRasterResources,
@@ -294,6 +318,7 @@ mod tests {
         AlphaMode, Budget, CancellationToken, ColorDescription, GlyphTableId, PixelFormat,
         RasterOrientation,
     };
+    use std::mem::size_of;
 
     fn core_budget() -> Budget {
         Budget::new(1 << 20, 1 << 20, 1 << 20)
@@ -398,7 +423,19 @@ mod tests {
             SlotState::Consumed
         );
         assert_eq!(resources.snapshot().outputs, 1);
-        assert_eq!(resources.snapshot().memory, memory_after_construction);
+        let output_bytes = u64::try_from(
+            first
+                .frame()
+                .cells()
+                .len()
+                .checked_mul(size_of::<ascii_core::AsciiCell>())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            resources.snapshot().memory.cpu_bytes,
+            memory_after_construction.cpu_bytes + output_bytes
+        );
         assert_eq!(consumer.scratch.as_ptr(), scratch_address);
         assert_eq!(consumer.scratch.capacity(), scratch_capacity);
         drop(first);
@@ -414,11 +451,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_output_is_bound(&second, second_descriptor, &table);
-        assert_eq!(resources.snapshot().memory, memory_after_construction);
+        assert_eq!(
+            resources.snapshot().memory.cpu_bytes,
+            memory_after_construction.cpu_bytes + output_bytes
+        );
         assert_eq!(consumer.scratch.as_ptr(), scratch_address);
         assert_eq!(consumer.scratch.capacity(), scratch_capacity);
         drop(second);
         assert_eq!(resources.snapshot().outputs, 0);
+        assert_eq!(resources.snapshot().memory, memory_after_construction);
+    }
+
+    #[test]
+    fn insufficient_output_memory_budget_releases_source_lease() {
+        let resources = resource_budget();
+        let handoff = BoundedHandoff::new(&resources, 9, 1, 3, 1, 1).unwrap();
+        let mut consumer = consumer(&resources, 3);
+        let table = glyph_table();
+        let descriptor = submit_one(&handoff, 123_000, &[255, 255, 255]);
+        let baseline = resources.snapshot().memory;
+        let output_bytes = u64::try_from(size_of::<ascii_core::AsciiCell>()).unwrap();
+        let held_bytes = (1 << 20) - baseline.cpu_bytes - output_bytes + 1;
+        let blocker = resources
+            .try_reserve_memory(MemoryUsage::new(held_bytes, 0))
+            .unwrap();
+
+        assert!(matches!(
+            consumer.convert_next(&handoff, &table, &core_budget(), &CancellationToken::new()),
+            Err(RasterConsumerError::Runtime(
+                RuntimeError::MemoryBudgetExceeded
+            ))
+        ));
+        assert_eq!(
+            handoff.slot_state(descriptor.slot_id).unwrap(),
+            SlotState::Free
+        );
+        assert_eq!(resources.snapshot().outputs, 0);
+        drop(blocker);
+        assert_eq!(resources.snapshot().memory, baseline);
     }
 
     #[test]
@@ -474,7 +544,7 @@ mod tests {
             .unwrap();
         lease.pin_output().unwrap();
         let token = lease.completion_token().unwrap();
-        let frame = consumer
+        let (frame, output_permit) = consumer
             .convert_lease(
                 &lease,
                 descriptor,
@@ -491,7 +561,9 @@ mod tests {
             frame,
             descriptor,
             _lease: lease,
+            _output_permit: output_permit,
         };
+
         assert_eq!(resources.snapshot().outputs, 1);
         assert_output_is_bound(&output, descriptor, &table);
         drop(output);
@@ -543,6 +615,7 @@ mod tests {
         )
         .unwrap();
 
+        let memory_before = resources.snapshot().memory;
         assert!(matches!(
             consumer.convert_next(
                 &handoff,
@@ -558,6 +631,7 @@ mod tests {
         );
         assert_eq!(resources.snapshot().outputs, 0);
         assert_eq!(resources.snapshot().cpu_jobs, 0);
+        assert_eq!(resources.snapshot().memory, memory_before);
     }
 
     #[test]
