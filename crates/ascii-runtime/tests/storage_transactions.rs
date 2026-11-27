@@ -3206,6 +3206,25 @@ fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
 }
 
 #[test]
+fn portable_export_redacts_generic_multicomponent_relative_paths() {
+    let source = json!({
+        "project_note": "draft is at projects/private-client/drafts",
+        "client_note": "review clients/acme-corporation/contracts before sharing",
+        "ordinary_slash_prose": "Choose input/output; the ratio is 3/4."
+    });
+    let portable =
+        ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
+            .expect("portable export");
+
+    assert!(portable.content().get("project_note").is_none());
+    assert!(portable.content().get("client_note").is_none());
+    assert_eq!(
+        portable.content()["ordinary_slash_prose"],
+        json!("Choose input/output; the ratio is 3/4.")
+    );
+}
+
+#[test]
 fn portable_export_filters_host_components_but_preserves_local_backup() {
     let source = json!({
         "host": "buildhost",

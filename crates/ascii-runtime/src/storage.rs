@@ -2272,18 +2272,22 @@ fn looks_like_relative_local_path(value: &str) -> bool {
     let Some(first) = components.next() else {
         return false;
     };
-    let Some(mut final_component) = components.next() else {
+    let Some(second_component) = components.next() else {
         return false;
     };
-    if first.is_empty() || final_component.is_empty() {
+    if first.is_empty() || second_component.is_empty() {
         return false;
     }
+    let mut final_component = second_component;
+    let mut component_count = 2;
     for component in components {
         if component.is_empty() {
             return false;
         }
+        component_count += 1;
         final_component = component;
     }
+
     let relative_prefix = matches!(first, "." | "..");
     const COMMON_LOCAL_DIRECTORY_ROOTS: &[&str] = &[
         "documents",
@@ -2301,13 +2305,34 @@ fn looks_like_relative_local_path(value: &str) -> bool {
         || COMMON_LOCAL_DIRECTORY_ROOTS
             .iter()
             .any(|root| first.eq_ignore_ascii_case(root));
-    if recognized_root && final_component.starts_with('.') {
-        return true;
+    let version_pair = component_count == 2
+        && is_version_component(first)
+        && is_version_component(second_component);
+    if version_pair {
+        return false;
     }
-    if let Some((stem, _)) = final_component.rsplit_once('.') {
-        return recognized_root && !stem.is_empty();
-    }
-    recognized_root && !final_component.is_empty()
+
+    // Any three-component relative path is local-looking regardless of directory names.
+    // For shorter paths, retain the extension and familiar user-directory signals.
+    component_count >= 3
+        || (recognized_root && final_component.starts_with('.'))
+        || final_component
+            .rsplit_once('.')
+            .is_some_and(|(stem, _)| !stem.is_empty())
+        || (recognized_root && !final_component.is_empty())
+}
+
+fn is_version_component(value: &str) -> bool {
+    let Some(version) = value.strip_prefix('v').or_else(|| value.strip_prefix('V')) else {
+        return false;
+    };
+    let mut parts = version.split('.');
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    !major.is_empty()
+        && major.bytes().all(|byte| byte.is_ascii_digit())
+        && parts.all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn is_unicode_quote_boundary(character: char) -> bool {
