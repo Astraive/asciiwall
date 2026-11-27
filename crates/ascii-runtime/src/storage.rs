@@ -1875,18 +1875,34 @@ fn preserve_existing_file_permissions(temporary: &Path, destination: &Path) -> i
 }
 
 #[derive(Debug)]
-struct ReplaceDestinationError {
-    error: io::Error,
-    preserve_source: bool,
+pub(crate) struct ReplaceDestinationError {
+    pub(crate) error: io::Error,
+    pub(crate) preserve_source: bool,
+    pub(crate) recovery_path: Option<PathBuf>,
+    pub(crate) source_consumed: bool,
 }
 
+impl std::fmt::Display for ReplaceDestinationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ReplaceDestinationError {}
 #[cfg(windows)]
 impl ReplaceDestinationError {
     fn new(error: io::Error, preserve_source: bool) -> Self {
         Self {
             error,
             preserve_source,
+            recovery_path: None,
+            source_consumed: false,
         }
+    }
+
+    fn with_recovery_path(mut self, path: PathBuf) -> Self {
+        self.recovery_path = Some(path);
+        self
     }
 }
 
@@ -1949,7 +1965,7 @@ fn restore_replace_backup_without_clobber(backup: &Path, destination: &Path) -> 
 }
 
 #[cfg(windows)]
-fn replace_destination(
+pub(crate) fn replace_destination(
     source: &Path,
     destination: &Path,
 ) -> Result<Option<PathBuf>, ReplaceDestinationError> {
@@ -2090,12 +2106,14 @@ fn replace_destination_with_after_missing(
                                 ),
                             ),
                             true,
-                        ));
+                        )
+                        .with_recovery_path(backup.clone()));
                     }
                 }
             }
             Some(ERROR_UNABLE_TO_REMOVE_REPLACED | ERROR_UNABLE_TO_MOVE_REPLACEMENT) => {
                 let backup_state = path_exists_conservatively(&backup);
+                let recovery_file_exists = matches!(&backup_state, Ok(true));
                 let detail = match backup_state {
                     Ok(true) => format!("unexpected recovery file remains at {}", backup.display()),
                     Ok(false) => format!(
@@ -2116,10 +2134,17 @@ fn replace_destination_with_after_missing(
                         source.display()
                     ),
                 );
-                return Err(ReplaceDestinationError::new(error, true));
+                let replacement_error = ReplaceDestinationError::new(error, true);
+                return Err(if recovery_file_exists {
+                    replacement_error.with_recovery_path(backup.clone())
+                } else {
+                    replacement_error
+                });
             }
             _ => {
-                let detail = match path_exists_conservatively(&backup) {
+                let backup_state = path_exists_conservatively(&backup);
+                let recovery_file_exists = matches!(&backup_state, Ok(true));
+                let detail = match backup_state {
                     Ok(true) => format!("recovery file may remain at {}", backup.display()),
                     Ok(false) => "no backup file was confirmed".to_owned(),
                     Err(error) => format!(
@@ -2134,7 +2159,12 @@ fn replace_destination_with_after_missing(
                         source.display()
                     ),
                 );
-                return Err(ReplaceDestinationError::new(error, true));
+                let replacement_error = ReplaceDestinationError::new(error, true);
+                return Err(if recovery_file_exists {
+                    replacement_error.with_recovery_path(backup.clone())
+                } else {
+                    replacement_error
+                });
             }
         }
     }
@@ -2184,12 +2214,14 @@ fn replace_destination(
         .map_err(|error| ReplaceDestinationError {
             error,
             preserve_source: false,
+            recovery_path: None,
+            source_consumed: false,
         })
 }
 
 #[cfg(all(test, windows))]
 #[path = "../tests/support/windows_acl.rs"]
-mod windows_acl_test_support;
+pub(crate) mod windows_acl_test_support;
 
 #[cfg(all(test, windows))]
 mod windows_replace_tests {
