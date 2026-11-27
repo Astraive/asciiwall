@@ -746,6 +746,117 @@ fn windows_filesystem_atomic_save_recovery_smoke() {
     );
 }
 
+#[cfg(windows)]
+#[path = "support/windows_acl.rs"]
+mod windows_acl;
+
+#[cfg(windows)]
+#[test]
+fn windows_atomic_config_replacement_preserves_custom_destination_dacl() {
+    let temp = TempDir::new();
+    let roots = StorageRoots::resolve(
+        "org.astraive.asciiwall",
+        &DirectoryInputs::Windows {
+            roaming_app_data: temp.path().join("roaming-app-data"),
+            local_app_data: temp.path().join("local-app-data"),
+        },
+    )
+    .expect("resolve native Windows roots");
+    let storage = Storage::new(roots);
+    let initial = config(json!({"theme": "before-acl-replacement"}));
+    save_current_config(&storage, &initial, validate_test_config)
+        .expect("create initial destination");
+
+    let destination = storage.config_path();
+    if let Err(error) = windows_acl::set_custom_dacl(&destination) {
+        if matches!(error.raw_os_error(), Some(1 | 5 | 50 | 1314)) {
+            eprintln!(
+                "skipping Windows DACL regression: this filesystem/account cannot set an explicit DACL \
+                 (Windows error {:?}: {error})",
+                error.raw_os_error()
+            );
+            return;
+        }
+        panic!("set custom destination DACL: {error}");
+    }
+    let expected_dacl = windows_acl::dacl(&destination).expect("read explicit destination DACL");
+    assert!(
+        expected_dacl.1,
+        "the regression fixture must have a protected explicit DACL"
+    );
+
+    let replacement = config(json!({"theme": "after-acl-replacement"}));
+    save_current_config(&storage, &replacement, validate_test_config)
+        .expect("replace destination while preserving its DACL");
+
+    assert_eq!(
+        windows_acl::dacl(&destination).expect("read replacement DACL"),
+        expected_dacl,
+        "replacement preserves the destination ACL and its protected-DACL state"
+    );
+    assert_eq!(
+        storage
+            .load_config(validate_test_config)
+            .expect("load replacement")
+            .expect("replacement exists")
+            .value(),
+        replacement.value()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_atomic_first_create_replaces_racing_destination_without_losing_dacl() {
+    let temp = TempDir::new();
+    let roots = StorageRoots::resolve(
+        "org.astraive.asciiwall",
+        &DirectoryInputs::Windows {
+            roaming_app_data: temp.path().join("roaming-app-data"),
+            local_app_data: temp.path().join("local-app-data"),
+        },
+    )
+    .expect("resolve native Windows roots");
+    let storage = Storage::new(roots);
+    let destination = storage.config_path();
+    let concurrently_created = config(json!({"theme": "concurrent-writer"}));
+    let replacement = config(json!({"theme": "atomic-writer"}));
+    let mut acl_setup_error = None::<i32>;
+    let mut expected_dacl = None;
+
+    let result = storage.save_config_with_hook(None, &replacement, validate_test_config, |stage| {
+        if stage == AtomicWriteStage::TemporarySynced {
+            fs::write(&destination, concurrently_created.as_bytes())?;
+            if let Err(error) = windows_acl::set_custom_dacl(&destination) {
+                acl_setup_error = error.raw_os_error();
+                return Err(error);
+            }
+            expected_dacl = Some(windows_acl::dacl(&destination)?);
+        }
+        Ok(())
+    });
+    if let Some(error_code @ (1 | 5 | 50 | 1314)) = acl_setup_error {
+        eprintln!(
+            "skipping Windows first-create race regression: this filesystem/account cannot set an explicit DACL \
+             (Windows error {error_code})"
+        );
+        return;
+    }
+    result.expect("first-create race resolves through ACL-preserving replacement");
+
+    assert_eq!(
+        windows_acl::dacl(&destination).expect("read replaced destination DACL"),
+        expected_dacl.expect("race fixture recorded its explicit DACL")
+    );
+    assert_eq!(
+        storage
+            .load_config(validate_test_config)
+            .expect("load race replacement")
+            .expect("destination exists")
+            .value(),
+        replacement.value()
+    );
+}
+
 #[test]
 fn application_identifiers_reject_path_and_windows_device_names() {
     for valid in ["org.astraive.asciiwall", "ascii-wall_2", "a"] {
