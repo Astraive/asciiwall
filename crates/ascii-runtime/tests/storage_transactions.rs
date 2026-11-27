@@ -964,14 +964,22 @@ fn registry_update_rollback_failure_retains_original_and_startup_cleans_orphans(
     );
 
     let parent = registry_path.parent().expect("registry parent");
+    let retained_sequence = retained
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.rsplit_once('-').map(|(_, sequence)| sequence))
+        .and_then(|sequence| sequence.strip_suffix(".tmp"))
+        .and_then(|sequence| sequence.parse::<usize>().ok())
+        .expect("retained recovery sequence");
     for restart in 0..4 {
+        let current_bytes = fs::read(&registry_path).expect("read current registry");
         for sequence in 0..64 {
             fs::write(
                 parent.join(format!(
                     ".ascii-runtime-install-registry.json.recovery-original-{}.tmp",
-                    restart * 64 + sequence
+                    retained_sequence + restart * 64 + sequence + 1
                 )),
-                b"stale crash orphan",
+                &current_bytes,
             )
             .expect("seed interrupted recovery copy");
         }
@@ -982,19 +990,21 @@ fn registry_update_rollback_failure_retains_original_and_startup_cleans_orphans(
             ),
             Err(StorageError::Io(_))
         ));
-        let recovery_orphans = fs::read_dir(parent)
+        let recovery_orphans: Vec<_> = fs::read_dir(parent)
             .expect("read registry parent")
             .filter_map(Result::ok)
             .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains(".recovery-original-")
+                entry.path() != retained
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".recovery-original-")
             })
-            .count();
-        assert_eq!(
-            recovery_orphans, 0,
-            "restart {restart} removes crash orphans"
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            recovery_orphans.is_empty(),
+            "restart {restart} leaves {recovery_orphans:?}; retained {retained:?}"
         );
     }
 
