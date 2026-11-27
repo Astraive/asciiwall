@@ -175,7 +175,13 @@ impl ControlQueue {
                 Ok(())
             }
             ordinary => {
-                let mut queue = lock_unpoisoned(&self.ordinary);
+                let mut queue = match self.ordinary.try_lock() {
+                    Ok(queue) => queue,
+                    Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        return Err(RuntimeError::QueueContended);
+                    }
+                };
                 if queue.items.len() == queue.capacity {
                     return Err(RuntimeError::QueueFull);
                 }
@@ -621,6 +627,17 @@ mod tests {
             orientation: RasterOrientation::TopDown,
             media_timestamp_ns: timestamp,
         }
+    }
+
+    #[test]
+    fn ordinary_control_send_reports_lock_contention_without_waiting() {
+        let controls = ControlQueue::new(&resource_budget(), 1).unwrap();
+        let _queue_lock = controls.ordinary.lock().unwrap();
+
+        assert_eq!(
+            controls.try_send(ControlEvent::Refresh),
+            Err(RuntimeError::QueueContended)
+        );
     }
 
     #[test]

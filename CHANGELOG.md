@@ -53,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Made `NormalizedRaster` intentionally non-`Clone` to prevent unbudgeted pixel-buffer copies, and clarified that `ascii-media` decoding is outside this PR's scope ([CNV-002]).
 - Keep the published frame intact when a one-slot replacement is cancelled by staging within bounded, budget-charged resources (`[COR-005]`).
 - Keep a converted output's budget permit owned by its `FrameLease`, not the pool slot, so generation invalidation cannot uncharge an accessible `ConvertedFrame`; a dropped unacknowledged lease transfers its permit to the quarantined slot.
+- Make ordinary `ControlQueue::try_send` use a nonblocking lock and report lock contention separately from a full queue, with a deterministic held-lock regression (`[COR-005]`).
 - Linearize one-slot replacement cancellation against fill-lease acquisition: cancellation before acquisition restores the prior `Published` frame; after acquisition, copying and publication finish despite cancellation (`[COR-005]`).
 - Assign checked, non-reused process-unique identities to public COR-005 frame descriptors so same-generation metadata from different pools cannot alias; add deterministic public-path regression coverage ([COR-005]).
 - Replace deprecated `AtomicU64::fetch_update` with `try_update` for COR-005 pool identities, preserving checked non-wrapping allocation and relaxed ordering (`[COR-005]`).
