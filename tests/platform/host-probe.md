@@ -39,6 +39,15 @@ This is separate from the historical user-provided observation above and from th
 
 These logs establish one attach and clean detach only. They do not verify visual placement below icons, focus/nonactivation, icon behavior, or recovery. No Win+D, Explorer restart, Task View, virtual-desktop, display-topology, lock, or remote-session tests were run.
 
+### User visual acceptance attempt
+
+- The user ran `C:\Users\gskne\AppData\Local\Temp\wnd002-manual-check\wnd002-manual-check.exe`. It printed `READY: synthetic frame presented on the first current display; 180-second hold started.` followed by countdown `179` through `161`; the user pressed Ctrl+C. The runner printed `Graceful Ctrl+C requested; detaching.` and `EXIT: detached and host dropped cleanly.`
+- User report: **“no i didnt see anything changed in desktop bg”**. The visible-background gate is **NOT PASSED** for this attempt. `READY` means `host.present(...)` returned without error; it is not evidence that the compositor displayed the frame. Teardown returned cleanly, but visible output was not observed.
+- Runner source SHA-256: `8986aa92113818aee0e2dda853d5c1e6699e61fbfacbc62698b00c41e0af78c1`; executable SHA-256: `9e83cda913833cfe4f88d4bd09e5acd833cfc338745bba22acfe1bcf749805d0`; `Cargo.lock` SHA-256: `91bc65be2e89983c92f0157bb124178a147fdd114e04e054dec46a0232e0abf6`; `Cargo.toml` SHA-256: `40e44cc390c1bdfc0f51320e40a7101b7e43f9f8ee3c59b8171f44e1aadbf3c2`.
+- Desktop icon click/selection and typing into an application: **NOT TESTED**.
+
+This evidence does not establish why the frame was not visible, a screenshot, focus preservation, or production support.
+
 ## Windows test evidence
 
 **Historical local Windows evidence:** `cargo fmt --package ascii-platform -- --check` passed; `cargo clippy --locked --package ascii-platform --all-targets -- -D warnings` passed; `cargo test --locked --package ascii-platform` passed (9 tests across 3 suites). These results describe the earlier source revision and are retained as historical evidence:
