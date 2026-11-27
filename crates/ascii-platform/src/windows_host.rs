@@ -361,9 +361,7 @@ impl WindowsHost {
     pub async fn new(config: WindowsHostConfig) -> Result<Self, WindowsHostError> {
         let owner_thread = std::thread::current().id();
         require_default_input_desktop(native::default_input_desktop().map_err(map_native)?)?;
-        if config.cancellation.is_cancelled() {
-            return Err(WindowsHostError::InvalidFrame(ascii_core::Error::Cancelled));
-        }
+        check_cancellation(&config.cancellation)?;
         let glyph_count = u32::try_from(config.glyph_table.glyphs().len())
             .map_err(|_| WindowsHostError::InvalidFrame(ascii_core::Error::SizeOverflow))?;
         validate_frame(
@@ -407,20 +405,21 @@ impl WindowsHost {
             })
         }
         .map_err(|_| WindowsHostError::SurfaceCreationFailed)?;
-        let adapter = instance
+        let adapter_result = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
                 compatible_surface: Some(&bootstrap_surface),
             })
-            .await
-            .ok_or(WindowsHostError::AdapterUnavailable)?;
+            .await;
+        check_cancellation(&config.cancellation)?;
+        let adapter = adapter_result.ok_or(WindowsHostError::AdapterUnavailable)?;
         if std::thread::current().id() != owner_thread {
             return Err(WindowsHostError::WrongThread);
         }
         let mut required_limits = wgpu::Limits::downlevel_defaults();
         required_limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
-        let (device, queue) = adapter
+        let device_result = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("AsciiWall Windows wallpaper host"),
@@ -429,8 +428,9 @@ impl WindowsHost {
                 },
                 None,
             )
-            .await
-            .map_err(|_| WindowsHostError::DeviceRequestFailed)?;
+            .await;
+        check_cancellation(&config.cancellation)?;
+        let (device, queue) = device_result.map_err(|_| WindowsHostError::DeviceRequestFailed)?;
         drop(bootstrap_surface);
         if std::thread::current().id() != owner_thread {
             return Err(WindowsHostError::WrongThread);
@@ -494,6 +494,7 @@ impl WindowsHost {
         host.set_health(HostHealth::Degraded);
         host.last_session_check = Instant::now();
         require_default_input_desktop(native::default_input_desktop().map_err(map_native)?)?;
+        check_cancellation(&host.cancellation)?;
         Ok(host)
     }
 
@@ -732,10 +733,12 @@ impl WindowsHost {
             shell_process_id: target.process_id,
         };
         let first_target = render_target(&hosted, None);
-        let first_outcome = self
-            .renderer
-            .present(&self.current_frame, &first_target)
-            .map_err(WindowsHostError::Renderer)?;
+        let first_outcome = self.renderer.present(&self.current_frame, &first_target);
+        if let Err(error) = check_cancellation(&self.cancellation) {
+            hosted.window.hide();
+            return Err(error);
+        }
+        let first_outcome = first_outcome.map_err(WindowsHostError::Renderer)?;
         if !matches!(
             first_outcome,
             ascii_render::PresentOutcome::Presented { .. }
@@ -769,6 +772,10 @@ impl WindowsHost {
             return Err(WindowsHostError::PlacementVerificationFailed);
         }
         drop(revalidated);
+        if let Err(error) = check_cancellation(&self.cancellation) {
+            hosted.window.hide();
+            return Err(error);
+        }
         self.ensure_session_available()?;
         let foreground_before = native::foreground_window();
 
@@ -776,11 +783,22 @@ impl WindowsHost {
             .leases
             .attach(display_record.info.identity)
             .map_err(WindowsHostError::Lease)?;
-        if let Err(error) =
+        if let Err(error) = check_cancellation(&self.cancellation) {
+            hosted.window.hide();
+            let _ = self.leases.retire(lease);
+            return Err(error);
+        }
+        let reveal_result =
             hosted
                 .window
-                .show_no_activate(target.parent, target.process_id, foreground_before)
-        {
+                .show_no_activate(target.parent, target.process_id, foreground_before);
+        if let Err(error) = check_cancellation(&self.cancellation) {
+            hosted.window.hide();
+            let _ = self.leases.retire(lease);
+            return Err(error);
+        }
+        if let Err(error) = reveal_result {
+            hosted.window.hide();
             let _ = self.leases.retire(lease);
             return Err(map_native(error));
         }
@@ -1581,6 +1599,14 @@ fn require_default_input_desktop(is_default: bool) -> Result<(), WindowsHostErro
     }
 }
 
+fn check_cancellation(cancellation: &CancellationToken) -> Result<(), WindowsHostError> {
+    if cancellation.is_cancelled() {
+        Err(WindowsHostError::InvalidFrame(ascii_core::Error::Cancelled))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1631,5 +1657,16 @@ mod tests {
             Err(WindowsHostError::SecureDesktop)
         );
         assert_eq!(require_default_input_desktop(true), Ok(()));
+    }
+
+    #[test]
+    fn cancellation_check_returns_the_typed_frame_error() {
+        let cancellation = CancellationToken::new();
+        assert_eq!(check_cancellation(&cancellation), Ok(()));
+        cancellation.cancel();
+        assert_eq!(
+            check_cancellation(&cancellation),
+            Err(WindowsHostError::InvalidFrame(ascii_core::Error::Cancelled))
+        );
     }
 }
