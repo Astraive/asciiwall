@@ -325,14 +325,12 @@ fn storage_roots_and_persisted_files_are_owner_only() {
             & 0o777,
         0o600
     );
-    fs::set_permissions(storage.config_path(), fs::Permissions::from_mode(0o644))
-        .expect("make old config broadly readable for replacement regression");
     save_current_config(
         &storage,
-        &config(json!({"theme": "replacement"})),
+        &config(json!({"theme": "replacement-0600"})),
         validate_test_config,
     )
-    .expect("replace config without broadening permissions");
+    .expect("replace config while preserving owner-only permissions");
     assert_eq!(
         fs::metadata(storage.config_path())
             .expect("replacement config metadata")
@@ -340,6 +338,22 @@ fn storage_roots_and_persisted_files_are_owner_only() {
             .mode()
             & 0o777,
         0o600
+    );
+    fs::set_permissions(storage.config_path(), fs::Permissions::from_mode(0o644))
+        .expect("make old config broadly readable for replacement regression");
+    save_current_config(
+        &storage,
+        &config(json!({"theme": "replacement-0644"})),
+        validate_test_config,
+    )
+    .expect("preserve existing config permissions");
+    assert_eq!(
+        fs::metadata(storage.config_path())
+            .expect("replacement config metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
     );
 
     let initial_registry = registry("1.0.0");
@@ -1801,33 +1815,41 @@ fn failed_backup_replacements_remove_both_owned_temporaries() {
     let backup_temporary = parent.join(".ascii-runtime-settings.toml.last-good.state.tmp");
     for attempt in 0..3 {
         let candidate = config(json!({"theme": format!("candidate-{attempt}")}));
-        let error = save_current_config_with_hook(
-            &storage,
-            &candidate,
-            validate_test_config,
-            |stage| {
+        let error =
+            save_current_config_with_hook(&storage, &candidate, validate_test_config, |stage| {
                 if stage == AtomicWriteStage::BackupTemporarySynced {
                     return Err(io::Error::other("injected backup replacement failure"));
                 }
                 Ok(())
-            },
-        )
-        .expect_err("injected backup replacement failure");
+            })
+            .expect_err("injected backup replacement failure");
         assert!(matches!(error, StorageError::Io(_)));
-        assert!(!current_temporary.exists(), "failed save removes current temporary");
-        assert!(!backup_temporary.exists(), "failed save removes backup temporary");
+        assert!(
+            !current_temporary.exists(),
+            "failed save removes current temporary"
+        );
+        assert!(
+            !backup_temporary.exists(),
+            "failed save removes backup temporary"
+        );
         assert_eq!(
             parse_config(&fs::read(&current_path).expect("read current config")).value(),
             original.value(),
             "failed backup replacement leaves the current document unchanged"
         );
-        assert!(!backup_path.exists(), "failed backup replacement leaves no backup");
+        assert!(
+            !backup_path.exists(),
+            "failed backup replacement leaves no backup"
+        );
         let temporary_count = fs::read_dir(parent)
             .expect("read config directory")
             .filter_map(Result::ok)
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".state.tmp"))
             .count();
-        assert_eq!(temporary_count, 0, "retries do not accumulate temporary files");
+        assert_eq!(
+            temporary_count, 0,
+            "retries do not accumulate temporary files"
+        );
     }
 }
 
