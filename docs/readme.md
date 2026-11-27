@@ -27,6 +27,6 @@ Public sources are linked near the relevant claims and collected in `docs/resear
 
 ## Pack inventory
 
-100 Markdown documents; 62 primary-source reference entries; 172 proposed settings (80 portable v1 visual defaults); three embedded JSON Schemas (manifest, scene, catalog); 40 implementation work units across four plans; 120 planned failure/edge scenarios; and 36 starter wallpaper recipe briefs.
+100 original source Markdown documents, plus 15 repository and planning guides; 62 primary-source reference entries; 172 proposed settings (80 portable v1 visual defaults); three embedded JSON Schemas (manifest, scene, catalog); 40 implementation work units across four plans; 120 planned failure/edge scenarios; and 36 starter wallpaper recipe briefs.
 
 This is a researched engineering blueprint, not an executable application, populated art collection, or native-platform certification. The [verification report](quality/documentation-verification.md) distinguishes actual documentation checks from planned product tests.
