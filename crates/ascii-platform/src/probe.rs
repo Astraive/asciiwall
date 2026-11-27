@@ -7,7 +7,7 @@ mod windows;
 
 const MAX_WINDOW_RECORDS: usize = 512;
 const PROBE_TIMEOUT_MILLIS: u64 = 250;
-const PROBE_STRATEGY: &str = "windows-shell-hierarchy-enumeration-v1";
+const PROBE_STRATEGY: &str = "windows-shell-hierarchy-enumeration-v4";
 
 /// Whether a probe result is established, exploratory, unavailable, or deliberately unrun.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -154,10 +154,35 @@ pub struct HierarchySummary {
     pub desktop_views_parented_by_workerw: u16,
     /// Shell-owned desktop views with another or unreadable direct parent class.
     pub desktop_views_with_other_parent: u16,
+    /// Class of the top-level sibling immediately before the unique shell window.
+    pub top_level_previous_sibling_class: Option<WindowClass>,
+    /// Class of the top-level sibling immediately after the unique shell window.
+    pub top_level_next_sibling_class: Option<WindowClass>,
+    /// Whether the first shell-owned WorkerW after the shell window was observed.
+    pub first_shell_owned_workerw_after_shell: Option<bool>,
     /// Shell-owned desktop views whose top-level ancestor class was `Progman`.
     pub desktop_views_under_progman_root: u16,
     /// Shell-owned desktop views whose top-level ancestor class was `WorkerW`.
     pub desktop_views_under_workerw_root: u16,
+    /// Direct parent class for the unique shell-owned desktop view.
+    pub desktop_view_parent_class: Option<WindowClass>,
+    /// Previous sibling class for the unique shell-owned desktop view.
+    pub desktop_view_previous_sibling_class: Option<WindowClass>,
+    /// Next sibling class for the unique shell-owned desktop view.
+    pub desktop_view_next_sibling_class: Option<WindowClass>,
+    /// Whether a WorkerW sibling followed the unique shell-owned desktop view.
+    pub workerw_sibling_after_desktop_view: Option<bool>,
+    /// Whether the unique shell-owned top-level Progman has WS_EX_NOREDIRECTIONBITMAP.
+    /// `None` means Progman was not unique/shell-owned or the style query failed.
+    pub progman_no_redirection_bitmap: Option<bool>,
+    /// Whether the unique direct-child shell-owned DefView has WS_EX_LAYERED.
+    /// `None` means the required window was not unique/valid or the style query failed.
+    pub desktop_view_layered: Option<bool>,
+    /// Whether the unique shell-owned direct-child WorkerW is the immediate lower-Z sibling
+    /// of the unique direct-child DefView under Progman. `None` means evidence was incomplete.
+    pub workerw_immediately_after_desktop_view: Option<bool>,
+    /// Count of shell-owned direct-child WorkerWs under the unique Progman.
+    pub shell_owned_progman_child_workerw_count: u16,
 }
 
 /// Read-only hierarchy result for the current Windows environment.
@@ -212,6 +237,12 @@ struct WindowRecord {
     root_is_shell_window: bool,
     shell_owned: bool,
     top_level: bool,
+    parent_is_root: bool,
+    no_redirection_bitmap: Option<bool>,
+    layered: Option<bool>,
+    previous_sibling_class: Option<WindowClass>,
+    next_sibling_class: Option<WindowClass>,
+    workerw_sibling_after: Option<bool>,
 }
 
 impl WindowRecord {
@@ -222,6 +253,12 @@ impl WindowRecord {
         root_is_shell_window: false,
         shell_owned: false,
         top_level: false,
+        parent_is_root: false,
+        no_redirection_bitmap: None,
+        layered: None,
+        previous_sibling_class: None,
+        next_sibling_class: None,
+        workerw_sibling_after: None,
     };
 }
 
@@ -230,6 +267,9 @@ struct HierarchySnapshot {
     shell_window_available: bool,
     shell_window_class: Option<WindowClass>,
     shell_window_enumerated: bool,
+    top_level_previous_sibling_class: Option<WindowClass>,
+    top_level_next_sibling_class: Option<WindowClass>,
+    first_shell_owned_workerw_after_shell: Option<bool>,
     records: [WindowRecord; MAX_WINDOW_RECORDS],
     record_count: usize,
     failure: Option<ScanFailure>,
@@ -241,6 +281,9 @@ impl HierarchySnapshot {
             shell_window_available: false,
             shell_window_class: None,
             shell_window_enumerated: false,
+            top_level_previous_sibling_class: None,
+            top_level_next_sibling_class: None,
+            first_shell_owned_workerw_after_shell: None,
             records: [WindowRecord::EMPTY; MAX_WINDOW_RECORDS],
             record_count: 0,
             failure: None,
@@ -283,16 +326,40 @@ fn classify_snapshot(snapshot: &HierarchySnapshot) -> HierarchyObservation {
     let mut summary = HierarchySummary {
         shell_window_class: snapshot.shell_window_class,
         shell_window_enumerated: snapshot.shell_window_enumerated,
+        top_level_previous_sibling_class: snapshot.top_level_previous_sibling_class,
+        top_level_next_sibling_class: snapshot.top_level_next_sibling_class,
+        first_shell_owned_workerw_after_shell: snapshot.first_shell_owned_workerw_after_shell,
         ..HierarchySummary::default()
     };
 
+    let mut unique_view = None;
+    let mut unique_view_is_ambiguous = false;
+    let mut unique_progman = None;
+    let mut unique_progman_is_ambiguous = false;
     for record in &snapshot.records[..snapshot.record_count] {
         if record.top_level {
             match record.class {
-                WindowClass::Progman => summary.top_level_progman_count += 1,
+                WindowClass::Progman => {
+                    summary.top_level_progman_count += 1;
+                    if record.shell_owned {
+                        if unique_progman.is_none() {
+                            unique_progman = Some(*record);
+                        } else {
+                            unique_progman_is_ambiguous = true;
+                        }
+                    }
+                }
                 WindowClass::WorkerW => summary.top_level_workerw_count += 1,
                 _ => {}
             }
+        }
+        if record.class == WindowClass::WorkerW
+            && record.shell_owned
+            && record.parent_class == WindowClass::Progman
+            && record.parent_is_root
+            && record.root_class == WindowClass::Progman
+        {
+            summary.shell_owned_progman_child_workerw_count += 1;
         }
 
         if record.class != WindowClass::ShellDefView {
@@ -311,6 +378,11 @@ fn classify_snapshot(snapshot: &HierarchySnapshot) -> HierarchyObservation {
             continue;
         }
         summary.shell_owned_desktop_view_count += 1;
+        if unique_view.is_none() {
+            unique_view = Some(*record);
+        } else {
+            unique_view_is_ambiguous = true;
+        }
         match record.parent_class {
             WindowClass::Progman => summary.desktop_views_parented_by_progman += 1,
             WindowClass::WorkerW => summary.desktop_views_parented_by_workerw += 1,
@@ -321,6 +393,49 @@ fn classify_snapshot(snapshot: &HierarchySnapshot) -> HierarchyObservation {
             WindowClass::WorkerW => summary.desktop_views_under_workerw_root += 1,
             _ => {}
         }
+    }
+    if summary.shell_owned_desktop_view_count == 1
+        && !unique_view_is_ambiguous
+        && let Some(view) = unique_view
+    {
+        summary.desktop_view_parent_class = Some(view.parent_class);
+        summary.desktop_view_previous_sibling_class = view.previous_sibling_class;
+        summary.desktop_view_next_sibling_class = view.next_sibling_class;
+        summary.workerw_sibling_after_desktop_view = view.workerw_sibling_after;
+    }
+    if summary.top_level_progman_count == 1
+        && !unique_progman_is_ambiguous
+        && let Some(progman) = unique_progman
+    {
+        summary.progman_no_redirection_bitmap = progman.no_redirection_bitmap;
+        let valid_view = unique_view.filter(|view| {
+            !unique_view_is_ambiguous
+                && view.shell_owned
+                && view.parent_is_root
+                && view.parent_class == WindowClass::Progman
+                && view.root_class == WindowClass::Progman
+        });
+        if let Some(view) = valid_view {
+            summary.desktop_view_layered = view.layered;
+            let unique_workerw = summary.shell_owned_progman_child_workerw_count == 1;
+            summary.workerw_immediately_after_desktop_view = match (
+                progman.no_redirection_bitmap,
+                view.layered,
+                unique_workerw,
+                view.workerw_sibling_after,
+            ) {
+                (Some(true), Some(true), true, Some(true)) => Some(true),
+                (Some(false), _, _, _) | (_, Some(false), _, _) | (_, _, false, _) => Some(false),
+                (_, _, true, Some(false)) => Some(false),
+                _ => None,
+            };
+        }
+    }
+
+    if snapshot.failure.is_some() {
+        summary.progman_no_redirection_bitmap = None;
+        summary.desktop_view_layered = None;
+        summary.workerw_immediately_after_desktop_view = None;
     }
 
     let observation = if !snapshot.shell_window_available {
@@ -424,12 +539,294 @@ mod tests {
     ) -> WindowRecord {
         WindowRecord {
             class: WindowClass::ShellDefView,
+
             parent_class,
             root_class,
             root_is_shell_window,
             shell_owned: true,
             top_level: false,
+            parent_is_root: parent_class == root_class,
+            no_redirection_bitmap: None,
+            layered: None,
+            previous_sibling_class: None,
+            next_sibling_class: None,
+            workerw_sibling_after: None,
         }
+    }
+
+    fn view_with_siblings(
+        parent_class: WindowClass,
+        root_class: WindowClass,
+        previous_sibling_class: Option<WindowClass>,
+        next_sibling_class: Option<WindowClass>,
+        workerw_sibling_after: Option<bool>,
+    ) -> WindowRecord {
+        let mut record = view(parent_class, root_class, false);
+        record.previous_sibling_class = previous_sibling_class;
+        record.next_sibling_class = next_sibling_class;
+        record.workerw_sibling_after = workerw_sibling_after;
+        record
+    }
+
+    fn raised_chain(
+        styles: (Option<bool>, Option<bool>),
+        view_case: (bool, WindowClass),
+        worker_case: (bool, WindowClass, usize),
+        order: Option<bool>,
+    ) -> HierarchySnapshot {
+        let progman = WindowRecord {
+            class: WindowClass::Progman,
+            parent_class: WindowClass::Unknown,
+            root_class: WindowClass::Progman,
+            root_is_shell_window: true,
+            shell_owned: true,
+            top_level: true,
+            parent_is_root: false,
+            no_redirection_bitmap: styles.0,
+            layered: None,
+            previous_sibling_class: None,
+            next_sibling_class: None,
+            workerw_sibling_after: None,
+        };
+        let mut defview = view(view_case.1, WindowClass::Progman, false);
+        defview.shell_owned = view_case.0;
+        defview.parent_is_root = view_case.1 == WindowClass::Progman;
+        defview.layered = styles.1;
+        defview.workerw_sibling_after = order;
+        let worker = WindowRecord {
+            class: WindowClass::WorkerW,
+            parent_class: worker_case.1,
+            root_class: WindowClass::Progman,
+            root_is_shell_window: false,
+            shell_owned: worker_case.0,
+            top_level: false,
+            parent_is_root: worker_case.1 == WindowClass::Progman,
+            no_redirection_bitmap: None,
+            layered: None,
+            previous_sibling_class: None,
+            next_sibling_class: None,
+            workerw_sibling_after: None,
+        };
+        let records = [progman, defview, worker, worker];
+        snapshot(true, &records[..2 + worker_case.2])
+    }
+
+    #[test]
+    fn raised_workerw_candidate_requires_complete_unique_style_and_order_chain() {
+        let valid = classify_snapshot(&raised_chain(
+            (Some(true), Some(true)),
+            (true, WindowClass::Progman),
+            (true, WindowClass::Progman, 1),
+            Some(true),
+        ));
+        assert_eq!(
+            valid.summary.workerw_immediately_after_desktop_view,
+            Some(true)
+        );
+
+        let cases = [
+            raised_chain(
+                (None, Some(true)),
+                (true, WindowClass::Progman),
+                (true, WindowClass::Progman, 1),
+                Some(true),
+            ),
+            raised_chain(
+                (Some(true), None),
+                (true, WindowClass::Progman),
+                (true, WindowClass::Progman, 1),
+                Some(true),
+            ),
+            raised_chain(
+                (Some(false), Some(true)),
+                (true, WindowClass::Progman),
+                (true, WindowClass::Progman, 1),
+                Some(true),
+            ),
+            raised_chain(
+                (Some(true), Some(false)),
+                (true, WindowClass::Progman),
+                (true, WindowClass::Progman, 1),
+                Some(true),
+            ),
+            raised_chain(
+                (Some(true), Some(true)),
+                (false, WindowClass::Progman),
+                (true, WindowClass::Progman, 1),
+                Some(true),
+            ),
+            raised_chain(
+                (Some(true), Some(true)),
+                (true, WindowClass::Other),
+                (true, WindowClass::Progman, 1),
+                Some(true),
+            ),
+            raised_chain(
+                (Some(true), Some(true)),
+                (true, WindowClass::Progman),
+                (false, WindowClass::Progman, 1),
+                Some(true),
+            ),
+            raised_chain(
+                (Some(true), Some(true)),
+                (true, WindowClass::Progman),
+                (true, WindowClass::Other, 1),
+                Some(true),
+            ),
+            raised_chain(
+                (Some(true), Some(true)),
+                (true, WindowClass::Progman),
+                (true, WindowClass::Progman, 0),
+                Some(false),
+            ),
+            raised_chain(
+                (Some(true), Some(true)),
+                (true, WindowClass::Progman),
+                (true, WindowClass::Progman, 2),
+                Some(true),
+            ),
+            raised_chain(
+                (Some(true), Some(true)),
+                (true, WindowClass::Progman),
+                (true, WindowClass::Progman, 1),
+                Some(false),
+            ),
+            raised_chain(
+                (Some(true), Some(true)),
+                (true, WindowClass::Progman),
+                (true, WindowClass::Progman, 1),
+                None,
+            ),
+        ];
+        for case in cases {
+            assert_ne!(
+                classify_snapshot(&case)
+                    .summary
+                    .workerw_immediately_after_desktop_view,
+                Some(true)
+            );
+        }
+    }
+
+    #[test]
+    fn raised_desktop_reports_nested_workerw_after_defview_not_top_level_counts() {
+        let records = [view_with_siblings(
+            WindowClass::Progman,
+            WindowClass::Progman,
+            None,
+            Some(WindowClass::WorkerW),
+            Some(true),
+        )];
+        let result = classify_snapshot(&snapshot(true, &records));
+        assert_eq!(result.summary.top_level_workerw_count, 0);
+        assert_eq!(
+            result.summary.desktop_view_parent_class,
+            Some(WindowClass::Progman)
+        );
+        assert_eq!(
+            result.summary.desktop_view_next_sibling_class,
+            Some(WindowClass::WorkerW)
+        );
+        assert_eq!(
+            result.summary.workerw_sibling_after_desktop_view,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn non_raised_desktop_reports_no_workerw_sibling_after_defview() {
+        let records = [view_with_siblings(
+            WindowClass::Progman,
+            WindowClass::Progman,
+            None,
+            None,
+            Some(false),
+        )];
+        let result = classify_snapshot(&snapshot(true, &records));
+        assert_eq!(result.summary.desktop_view_next_sibling_class, None);
+        assert_eq!(
+            result.summary.workerw_sibling_after_desktop_view,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn workerw_before_defview_is_not_reported_as_wallpaper_sibling_below_it() {
+        let records = [view_with_siblings(
+            WindowClass::Progman,
+            WindowClass::Progman,
+            Some(WindowClass::WorkerW),
+            Some(WindowClass::Other),
+            Some(false),
+        )];
+        let result = classify_snapshot(&snapshot(true, &records));
+        assert_eq!(
+            result.summary.desktop_view_previous_sibling_class,
+            Some(WindowClass::WorkerW)
+        );
+        assert_eq!(
+            result.summary.desktop_view_next_sibling_class,
+            Some(WindowClass::Other)
+        );
+        assert_eq!(
+            result.summary.workerw_sibling_after_desktop_view,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn unreadable_sibling_makes_workerw_order_unknown() {
+        let records = [view_with_siblings(
+            WindowClass::Progman,
+            WindowClass::Progman,
+            None,
+            Some(WindowClass::Unknown),
+            None,
+        )];
+        let result = classify_snapshot(&snapshot(true, &records));
+        assert_eq!(
+            result.summary.desktop_view_next_sibling_class,
+            Some(WindowClass::Unknown)
+        );
+        assert_eq!(result.summary.workerw_sibling_after_desktop_view, None);
+    }
+
+    #[test]
+    fn multiple_desktop_views_suppress_unique_sibling_report() {
+        let records = [
+            view_with_siblings(
+                WindowClass::Progman,
+                WindowClass::Progman,
+                None,
+                Some(WindowClass::WorkerW),
+                Some(true),
+            ),
+            view(WindowClass::WorkerW, WindowClass::Progman, false),
+        ];
+        let result = classify_snapshot(&snapshot(true, &records));
+        assert_eq!(result.summary.shell_owned_desktop_view_count, 2);
+        assert_eq!(result.summary.desktop_view_parent_class, None);
+        assert_eq!(result.summary.desktop_view_next_sibling_class, None);
+        assert_eq!(result.summary.workerw_sibling_after_desktop_view, None);
+    }
+
+    #[test]
+    fn top_level_workerw_order_is_exposed_as_a_candidate_only() {
+        let mut snapshot = snapshot(true, &[]);
+        snapshot.top_level_previous_sibling_class = Some(WindowClass::Other);
+        snapshot.top_level_next_sibling_class = Some(WindowClass::WorkerW);
+        snapshot.first_shell_owned_workerw_after_shell = Some(true);
+
+        let summary = classify_snapshot(&snapshot).summary;
+        assert_eq!(
+            summary.top_level_previous_sibling_class,
+            Some(WindowClass::Other)
+        );
+        assert_eq!(
+            summary.top_level_next_sibling_class,
+            Some(WindowClass::WorkerW)
+        );
+        assert_eq!(summary.first_shell_owned_workerw_after_shell, Some(true));
     }
 
     #[test]
@@ -452,6 +849,12 @@ mod tests {
                 root_is_shell_window: false,
                 shell_owned: true,
                 top_level: true,
+                parent_is_root: false,
+                no_redirection_bitmap: None,
+                layered: None,
+                previous_sibling_class: None,
+                next_sibling_class: None,
+                workerw_sibling_after: None,
             },
             view(WindowClass::WorkerW, WindowClass::WorkerW, false),
         ];
@@ -527,6 +930,24 @@ mod tests {
         assert_eq!(result.observation.status, ProbeStatus::Unavailable);
         assert_eq!(result.observation.reason, ObservationReason::TimedOut);
         assert_eq!(result.summary.shell_owned_desktop_view_count, 1);
+    }
+
+    #[test]
+    fn incomplete_scan_suppresses_raised_desktop_proof_fields() {
+        for failure in [ScanFailure::TimedOut, ScanFailure::WorkBudgetExceeded] {
+            let mut snapshot = raised_chain(
+                (Some(true), Some(true)),
+                (true, WindowClass::Progman),
+                (true, WindowClass::Progman, 1),
+                Some(true),
+            );
+            snapshot.failure = Some(failure);
+
+            let summary = classify_snapshot(&snapshot).summary;
+            assert_eq!(summary.progman_no_redirection_bitmap, None);
+            assert_eq!(summary.desktop_view_layered, None);
+            assert_eq!(summary.workerw_immediately_after_desktop_view, None);
+        }
     }
 
     #[test]
