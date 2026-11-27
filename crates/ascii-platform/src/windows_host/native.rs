@@ -906,13 +906,50 @@ struct HierarchyScan {
     failure: Option<NativeError>,
 }
 
+fn check_hierarchy_deadline(scan: &mut HierarchyScan) -> bool {
+    if Instant::now() >= scan.deadline {
+        scan.failure = Some(NativeError::HierarchyBoundExceeded);
+        false
+    } else {
+        true
+    }
+}
+
 fn reserve_hierarchy_work(scan: &mut HierarchyScan) -> bool {
-    if Instant::now() >= scan.deadline || scan.work >= MAX_HIERARCHY_RECORDS {
+    if !check_hierarchy_deadline(scan) || scan.work >= MAX_HIERARCHY_RECORDS {
         scan.failure = Some(NativeError::HierarchyBoundExceeded);
         return false;
     }
     scan.work += 1;
     true
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TopLevelAction {
+    Continue,
+    ScanCandidate,
+    Abort,
+}
+
+fn decide_top_level_action(
+    scan: &mut HierarchyScan,
+    is_shell_duplicate: bool,
+    class_query: impl FnOnce() -> Option<WindowKind>,
+) -> TopLevelAction {
+    if !check_hierarchy_deadline(scan) {
+        return TopLevelAction::Abort;
+    }
+    if is_shell_duplicate || !is_top_level_candidate(class_query()) {
+        return TopLevelAction::Continue;
+    }
+    if !reserve_hierarchy_work(scan) {
+        TopLevelAction::Abort
+    } else {
+        TopLevelAction::ScanCandidate
+    }
+}
+
+fn is_top_level_candidate(kind: Option<WindowKind>) -> bool {
+    matches!(kind, Some(WindowKind::Progman | WindowKind::WorkerW))
 }
 
 fn scan_root(pointer: *mut HierarchyScan, root: HWND, known_shell: bool) -> bool {
@@ -924,6 +961,19 @@ fn scan_root(pointer: *mut HierarchyScan, root: HWND, known_shell: bool) -> bool
     if !reserve_hierarchy_work(scan) {
         return false;
     }
+    scan_root_with_reserved_work(pointer, root, known_shell)
+}
+
+fn scan_root_with_reserved_work(
+    pointer: *mut HierarchyScan,
+    root: HWND,
+    known_shell: bool,
+) -> bool {
+    if pointer.is_null() {
+        return false;
+    }
+    // SAFETY: pointer refers to the live stack scan used by the synchronous Win32 enumeration.
+    let scan = unsafe { &mut *pointer };
     let kind = class_of(root);
     let mut process_id = 0;
     // SAFETY: root is a borrowed live HWND from GetShellWindow/EnumWindows.
@@ -971,30 +1021,24 @@ unsafe extern "system" fn child_callback(child: HWND, parameter: LPARAM) -> BOOL
     }
     1
 }
-
 unsafe extern "system" fn top_level_callback(window: HWND, parameter: LPARAM) -> BOOL {
     if parameter == 0 {
         return 0;
     }
-    // SAFETY: EnumWindows invokes the callback synchronously with the live scan pointer.
+    // SAFETY: EnumWindows invokes the callback synchronously while scan remains alive.
     let scan = unsafe { &mut *(parameter as *mut HierarchyScan) };
-    if window == scan.shell {
-        return 1;
+    let action = decide_top_level_action(scan, window == scan.shell, || class_of(window));
+    match action {
+        TopLevelAction::Continue => 1,
+        TopLevelAction::ScanCandidate => {
+            if scan_root_with_reserved_work(parameter as *mut HierarchyScan, window, false) {
+                1
+            } else {
+                0
+            }
+        }
+        TopLevelAction::Abort => 0,
     }
-    if !reserve_hierarchy_work(scan) {
-        return 0;
-    }
-    if !matches!(
-        class_of(window),
-        Some(WindowKind::Progman | WindowKind::WorkerW)
-    ) {
-        return 1;
-    }
-    // SAFETY: scan remains live for the nested synchronous child enumeration.
-    if !scan_root(parameter as *mut HierarchyScan, window, false) {
-        return 0;
-    }
-    1
 }
 
 pub(super) fn foreground_window() -> HWND {
@@ -1134,5 +1178,59 @@ mod tests {
         assert_eq!(MAX_NATIVE_DISPLAYS, 16);
         assert_eq!(MAX_HIERARCHY_RECORDS, 512);
         assert_eq!(HIERARCHY_DEADLINE, Duration::from_millis(250));
+    }
+    fn hierarchy_scan(deadline: Instant) -> HierarchyScan {
+        HierarchyScan {
+            shell: null_mut(),
+            shell_pid: 1,
+            candidate: null_mut(),
+            work: 0,
+            deadline,
+            failure: None,
+        }
+    }
+
+    #[test]
+    fn unrelated_top_level_classes_do_not_consume_candidate_budget() {
+        let mut scan = hierarchy_scan(Instant::now() + HIERARCHY_DEADLINE);
+        for _ in 0..=MAX_HIERARCHY_RECORDS {
+            assert_eq!(
+                decide_top_level_action(&mut scan, false, || Some(WindowKind::Other)),
+                TopLevelAction::Continue
+            );
+        }
+        assert_eq!(scan.work, 0);
+        assert_eq!(
+            decide_top_level_action(&mut scan, false, || Some(WindowKind::WorkerW)),
+            TopLevelAction::ScanCandidate
+        );
+        assert_eq!(scan.work, 1);
+    }
+
+    #[test]
+    fn candidate_work_budget_exhaustion_fails_closed() {
+        let mut scan = hierarchy_scan(Instant::now() + HIERARCHY_DEADLINE);
+        scan.work = MAX_HIERARCHY_RECORDS;
+        assert_eq!(
+            decide_top_level_action(&mut scan, false, || Some(WindowKind::Progman)),
+            TopLevelAction::Abort
+        );
+        assert_eq!(scan.failure, Some(NativeError::HierarchyBoundExceeded));
+    }
+
+    #[test]
+    fn deadline_is_checked_for_skipped_unrelated_top_level_classes() {
+        let mut scan = hierarchy_scan(Instant::now());
+        let mut queried = false;
+        assert_eq!(
+            decide_top_level_action(&mut scan, false, || {
+                queried = true;
+                Some(WindowKind::Other)
+            }),
+            TopLevelAction::Abort
+        );
+        assert!(!queried);
+        assert_eq!(scan.work, 0);
+        assert_eq!(scan.failure, Some(NativeError::HierarchyBoundExceeded));
     }
 }
