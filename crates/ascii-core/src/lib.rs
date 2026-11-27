@@ -7,7 +7,9 @@
 extern crate alloc;
 
 mod budget;
+pub mod coordinates;
 mod error;
+pub mod events;
 mod frame;
 mod generation;
 mod ids;
