@@ -1429,6 +1429,8 @@ fn atomic_replace_locked(
         )?;
         stage(AtomicWriteStage::BackupReplaced)?;
     }
+    #[cfg(unix)]
+    preserve_existing_file_permissions(temporary.path(), destination)?;
     fs::rename(temporary.path(), destination)?;
     temporary.disarm();
     if let Err(sync_error) = before_parent_sync().and_then(|()| sync_parent_directory(parent)) {
@@ -1726,6 +1728,17 @@ impl Drop for OwnedTempFile {
         if self.cleanup {
             let _ = fs::remove_file(&self.path);
         }
+    }
+}
+#[cfg(unix)]
+fn preserve_existing_file_permissions(temporary: &Path, destination: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            fs::set_permissions(temporary, metadata.permissions())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
