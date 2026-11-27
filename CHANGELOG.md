@@ -61,6 +61,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Keep a converted output's budget permit owned by its `FrameLease`, not the pool slot, so generation invalidation cannot uncharge an accessible `ConvertedFrame`; a dropped unacknowledged lease transfers its permit to the quarantined slot.
 - Keep the active old-scene COR-005 memory permit borrowed while a transition is staged; abort releases only the candidate charge, while completion releases the old charge once and deactivates the original permit.
 - Linearize urgent Stop/revocation publication against the final ordinary FIFO dequeue with an atomic dequeue-commit bit; a pending urgent event wins the commit race (`[COR-005]`).
+- Make ordinary `ControlQueue::try_send` use a nonblocking lock and report lock contention separately from a full queue, with a deterministic held-lock regression (`[COR-005]`).
+- Reserve the exact CPU cell-storage bytes for converted COR-005 frames and retain the charge with each `ConvertedFrame`, releasing it on errors and drop (`[COR-005]`).
 - Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
 - Preserve queued COR-005 frames when replacement is cancelled during staging, before publication, with public `submit_frame` regression coverage (`[COR-005]`).
 - Linearize one-slot replacement cancellation against fill-lease acquisition: cancellation before acquisition restores the prior `Published` frame; after acquisition, copying and publication finish despite cancellation (`[COR-005]`).
