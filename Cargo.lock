@@ -53,6 +53,12 @@ version = "0.1.0"
 dependencies = [
  "ascii-convert",
  "ascii-core",
+ "icu_casemap",
+ "icu_normalizer",
+ "icu_properties",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -60,12 +66,6 @@ name = "ascii-scene"
 version = "0.1.0"
 dependencies = [
  "ascii-core",
- "icu_casemap",
- "icu_normalizer",
- "icu_properties",
- "serde",
- "serde_json",
- "toml",
 ]
 
 [[package]]

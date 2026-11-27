@@ -63,19 +63,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
 - Preserve queued COR-005 frames when replacement is cancelled during staging, before publication, with public `submit_frame` regression coverage (`[COR-005]`).
 - Linearize one-slot replacement cancellation against fill-lease acquisition: cancellation before acquisition restores the prior `Published` frame; after acquisition, copying and publication finish despite cancellation (`[COR-005]`).
-- Assign checked, non-reused process-unique identities to public COR-005 frame descriptors so same-generation metadata from different pools cannot alias; add deterministic public-path regression coverage ([COR-005]).
-- Replace deprecated `AtomicU64::fetch_update` with `try_update` for COR-005 pool identities, preserving checked non-wrapping allocation and relaxed ordering (`[COR-005]`).
-- Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
-- Size density grids from the selected custom-crop geometry, retain normalized profile warnings in detailed conversion results, and preflight and cancellably initialize bounded quality-patch storage ([CNV-001]).
-- Charge premultiplied validation and readable input extent to density-conversion work and simultaneous-memory budgets; cancel before quality-patch buffer reservations and reject sRGB8-indistinguishable foreground/background colors ([CNV-001]).
-- Include final frame cell validation in density work ceilings, preserve typed unsupported pixel-format errors through preflight, and poll cancellation before reserving output cells ([CNV-001]).
-- Preserve orientation error precedence for unsupported-depth density inputs while rejecting validly oriented unsupported sample depths before stride calculations ([CNV-001]).
-- Preflight unsupported alpha layouts and HDR/wide-gamut metadata before density sampling geometry, work, and stride checks ([CNV-001]).
-- Explain unsupported raster color profiles in the core error display so the convenience density API directs callers to supply SDR sRGB instead of reporting only generic unsupported input ([CNV-001]).
-- Account for local f64 coordinate precision when checking mapped crop edges, while rejecting extents that are collapsed beyond a conservative fraction of their size (`[CNV-001]`).
-- Reject contain transforms when f64 rounding cannot preserve centered letterbox margins at extreme destination sizes (`#294`).
-- Normalize box-sampling overlap per axis before combining weights, allowing valid subnormal footprints without requiring representable absolute 2D area (`[CNV-001]`).
-- Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
 - [COR-008] Serialize atomic writes, importer journal transitions, and diagnostic-log rotation by
   storage directory; clean owned interrupted-write temporaries, sync newly created directory
   entries where supported, preserve only schema-valid last-good configs, and redact clipped
@@ -144,3 +131,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   portable-export strings while preserving ordinary slash prose; add embedded path coverage.
 - [COR-008] Add serialized atomic registry read-modify-write updates so concurrent callers preserve
   independent package changes; retain full replacement for explicit save operations.
+- Assign checked, non-reused process-unique identities to public COR-005 frame descriptors so same-generation metadata from different pools cannot alias; add deterministic public-path regression coverage ([COR-005]).
+- Replace deprecated `AtomicU64::fetch_update` with `try_update` for COR-005 pool identities, preserving checked non-wrapping allocation and relaxed ordering (`[COR-005]`).
+- Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
+- Size density grids from the selected custom-crop geometry, retain normalized profile warnings in detailed conversion results, and preflight and cancellably initialize bounded quality-patch storage ([CNV-001]).
+- Charge premultiplied validation and readable input extent to density-conversion work and simultaneous-memory budgets; cancel before quality-patch buffer reservations and reject sRGB8-indistinguishable foreground/background colors ([CNV-001]).
+- Include final frame cell validation in density work ceilings, preserve typed unsupported pixel-format errors through preflight, and poll cancellation before reserving output cells ([CNV-001]).
+- Preserve orientation error precedence for unsupported-depth density inputs while rejecting validly oriented unsupported sample depths before stride calculations ([CNV-001]).
+- Preflight unsupported alpha layouts and HDR/wide-gamut metadata before density sampling geometry, work, and stride checks ([CNV-001]).
+- Explain unsupported raster color profiles in the core error display so the convenience density API directs callers to supply SDR sRGB instead of reporting only generic unsupported input ([CNV-001]).
+- Account for local f64 coordinate precision when checking mapped crop edges, while rejecting extents that are collapsed beyond a conservative fraction of their size (`[CNV-001]`).
+- Reject contain transforms when f64 rounding cannot preserve centered letterbox margins at extreme destination sizes (`#294`).
+- Normalize box-sampling overlap per axis before combining weights, allowing valid subnormal footprints without requiring representable absolute 2D area (`[CNV-001]`).
+- Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
