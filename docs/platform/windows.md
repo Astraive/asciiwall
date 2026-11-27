@@ -22,7 +22,11 @@ The adapter currently reports `session.lock-state` and a low-confidence `wallpap
 
 ## Native acceptance status
 
-Native/manual acceptance is **NOT RUN**. No evidence is available for visible below-icon placement, the 20-cycle requirement, icon clicks/selection/context menus, focus preservation, Win+D/Show Desktop/Task View, Explorer restart recovery, mixed-DPI hotplug, lock/disconnect behavior on a named Windows/GPU tuple, or stopping from an application controller. The implementation remains experimental; no Windows support tier or production placement claim is promoted. Do not run these gates on an unattended or unrelated user desktop.
+Native evidence is **partially measured; not accepted**. On Windows 11 Home Single Language build 26300 (x64), one host/display completed 20/20 attach/present/detach cycles: each `present` returned `Skipped(Unchanged)`, each detach returned `Ok(())`, and host drop reported owned windows released. Attach #1 took 282.0724 ms; cycles 2–20 took 13.2384–16.3314 ms. No separate HWND/leak count was collected.
+
+One guarded Explorer restart/recovery was observed (evidence: PR #371, code head `b443d0ef37d1780c271c4a13d0812b3b87fea4c2`): the monitor reported `SurfaceRetired`/HostLost and health became Unavailable, then capability returned Available/Healthy with replacement `SurfaceAttached` generation 1 and registry epoch 1. After 150 seconds it remained Healthy; `WallpaperSurface` was Available at Low confidence with lease_count 1. Host drop reported owned windows released.
+
+Still unverified: below-icon placement, focus/nonactivation, desktop icon click/selection/menus, typing into an app, shell visual recovery, Task View/virtual desktops, topology/hotplug, lock/disconnect, recovery exhaustion, and application-controller Stop. Win+D was inconclusive: no host events were recorded, and delivery or visible effect was not confirmed. No user visual observation was provided. These observations do not establish zero leaks, icon interaction, focus preservation, or acceptance; WND-002 remains experimental and unsupported.
 
 ## Pointer and window feeds
 
