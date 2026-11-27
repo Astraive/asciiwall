@@ -44,7 +44,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- [WND-001] Restrict child traversal and owner-process queries to the shell window and candidate `Progman` / `WorkerW` roots; unrelated Explorer trees no longer consume the probe budget or fail a desktop-hierarchy observation. Ignore `EnumChildWindows`'s documented-unused return value so empty `WorkerW` roots do not fail the scan. Remove the non-desktop view count, which this scoped scan cannot truthfully provide.
+- [WND-001] Count only the known shell window and candidate `Progman` / `WorkerW` roots and children against the 512 work/record cap; unrelated top-level roots are class-checked under the 250 ms deadline without owner queries or traversal. Preserve explicit timeout/fail-closed reporting and ignore `EnumChildWindows`'s documented-unused return value.
 
 - [COR-009] Continue cache eviction past lock-blocked entries sharing an LRU tick; test identity
   changes for every GPU uniform independently.
