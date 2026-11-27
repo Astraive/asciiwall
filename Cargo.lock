@@ -75,6 +75,7 @@ dependencies = [
  "ascii-convert",
  "ascii-core",
  "ascii-render",
+ "pollster",
  "raw-window-handle",
  "wgpu",
  "windows-sys",
