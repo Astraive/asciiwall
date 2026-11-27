@@ -113,7 +113,6 @@ pub enum StorageError {
     },
     UnsupportedPlatform,
 }
-
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1032,6 +1031,7 @@ impl Storage {
                 stage: &mut stage_hook,
                 before_parent_sync: &mut sync_hook,
                 before_rollback_rename: &mut rollback_hook,
+                before_rollback_sync: &mut || Ok(()),
                 rollback_on_sync_error: Some(rollback),
             },
         )?;
@@ -1195,6 +1195,7 @@ impl Storage {
                 stage: &mut |_| Ok(()),
                 before_parent_sync: &mut sync_hook,
                 before_rollback_rename: &mut rollback_hook,
+                before_rollback_sync: &mut || Ok(()),
                 rollback_on_sync_error: Some(rollback),
             },
         )?;
@@ -1323,6 +1324,7 @@ struct AtomicReplaceHooks<'a> {
     stage: &'a mut dyn FnMut(AtomicWriteStage) -> io::Result<()>,
     before_parent_sync: &'a mut dyn FnMut() -> io::Result<()>,
     before_rollback_rename: &'a mut dyn FnMut() -> io::Result<()>,
+    before_rollback_sync: &'a mut dyn FnMut() -> io::Result<()>,
     rollback_on_sync_error: Option<ReplaceRollback>,
 }
 
@@ -1352,6 +1354,7 @@ fn atomic_replace(
             stage: hook,
             before_parent_sync: &mut || Ok(()),
             before_rollback_rename: &mut || Ok(()),
+            before_rollback_sync: &mut || Ok(()),
             rollback_on_sync_error: None,
         },
     )
@@ -1370,6 +1373,7 @@ fn atomic_replace_locked(
         stage,
         before_parent_sync,
         before_rollback_rename,
+        before_rollback_sync,
         rollback_on_sync_error,
     } = hooks;
     let parent = destination
@@ -1424,6 +1428,7 @@ fn atomic_replace_locked(
                 stage: &mut backup_hook,
                 before_parent_sync: &mut || Ok(()),
                 before_rollback_rename: &mut || Ok(()),
+                before_rollback_sync: &mut || Ok(()),
                 rollback_on_sync_error: None,
             },
         )?;
@@ -1431,28 +1436,141 @@ fn atomic_replace_locked(
     }
     #[cfg(unix)]
     preserve_existing_file_permissions(temporary.path(), destination)?;
-    fs::rename(temporary.path(), destination)?;
+    let replacement_backup = match replace_destination(temporary.path(), destination) {
+        Ok(backup) => backup,
+        Err(error) => {
+            if error.preserve_source {
+                temporary.disarm();
+            }
+            return Err(error.error.into());
+        }
+    };
     temporary.disarm();
     if let Err(sync_error) = before_parent_sync().and_then(|()| sync_parent_directory(parent)) {
         if let Some(rollback) = rollback_on_sync_error {
             let rollback_result = match rollback.restore(destination, before_rollback_rename) {
-                Ok(()) => sync_parent_directory(parent).map_err(|error| (error, None)),
+                Ok(rollback_backup) => {
+                    match before_rollback_sync().and_then(|()| sync_parent_directory(parent)) {
+                        Ok(()) => Ok(rollback_backup),
+                        Err(error) => Err((rollback_sync_error(error, rollback_backup), None)),
+                    }
+                }
                 Err(error) => Err(error),
             };
-            if let Err((rollback_error, retained_recovery_copy)) = rollback_result {
-                let retained_recovery_copy = retained_recovery_copy
-                    .and_then(|path| mark_recovery_copy_retained(destination, &path));
-                return Err(StorageError::RecoveryRollbackFailed {
-                    sync_error,
-                    rollback_error,
-                    retained_recovery_copy,
-                });
+            match rollback_result {
+                Ok(rollback_backup) => {
+                    let mut cleanup_error = None;
+                    for (path, context) in [
+                        (replacement_backup.as_ref(), "rolled-back replacement"),
+                        (rollback_backup.as_ref(), "rollback replacement"),
+                    ] {
+                        if let Some(path) = path
+                            && let Err(error) = remove_replace_backup(path, context)
+                        {
+                            let detail =
+                                format!("{context} remains at {} ({error})", path.display());
+                            cleanup_error = Some(match cleanup_error {
+                                Some(previous) => format!("{previous}; {detail}"),
+                                None => detail,
+                            });
+                        }
+                    }
+                    if let Some(detail) = cleanup_error {
+                        return Err(io::Error::other(format!(
+                            "replacement rollback succeeded but recovery cleanup failed: {detail}"
+                        ))
+                        .into());
+                    }
+                }
+                Err((mut rollback_error, retained_recovery_copy)) => {
+                    // The recovery-original copy is the path startup cleanup knows how to
+                    // preserve. ReplaceFileW's backup is an additional copy, not a substitute
+                    // for that explicitly retained rollback source.
+                    let retained_recovery_copy = retained_recovery_copy
+                        .as_deref()
+                        .and_then(|path| mark_recovery_copy_retained(destination, path));
+                    if let Some(path) = replacement_backup.as_ref() {
+                        match retained_recovery_copy.as_deref() {
+                            Some(retained) => match files_have_same_bytes(retained, path) {
+                                Ok(true) => {
+                                    if let Err(error) =
+                                        remove_replace_backup(path, "duplicate rollback backup")
+                                    {
+                                        rollback_error = io::Error::new(
+                                            rollback_error.kind(),
+                                            format!(
+                                                "{rollback_error}; duplicate backup remains at {} ({error})",
+                                                path.display()
+                                            ),
+                                        );
+                                    }
+                                }
+                                Ok(false) => {
+                                    rollback_error = io::Error::new(
+                                        rollback_error.kind(),
+                                        format!(
+                                            "{rollback_error}; additional recovery data remains at {}",
+                                            path.display()
+                                        ),
+                                    );
+                                }
+                                Err(error) => {
+                                    rollback_error = io::Error::new(
+                                        rollback_error.kind(),
+                                        format!(
+                                            "{rollback_error}; could not compare additional recovery data at {} ({error})",
+                                            path.display()
+                                        ),
+                                    );
+                                }
+                            },
+                            None => {
+                                rollback_error = io::Error::new(
+                                    rollback_error.kind(),
+                                    format!(
+                                        "{rollback_error}; additional recovery data remains at {}",
+                                        path.display()
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    return Err(StorageError::RecoveryRollbackFailed {
+                        sync_error,
+                        rollback_error,
+                        retained_recovery_copy,
+                    });
+                }
             }
+        } else if let Some(path) = replacement_backup.as_ref() {
+            return Err(io::Error::new(
+                sync_error.kind(),
+                format!(
+                    "parent-directory sync failed ({sync_error}); prior state remains at {}",
+                    path.display()
+                ),
+            )
+            .into());
         }
         return Err(sync_error.into());
     }
+    if let Some(path) = replacement_backup.as_ref() {
+        remove_replace_backup(path, "committed replacement")?;
+    }
     stage(AtomicWriteStage::TargetReplaced)?;
     Ok(())
+}
+fn rollback_sync_error(error: io::Error, rollback_backup: Option<PathBuf>) -> io::Error {
+    match rollback_backup {
+        Some(path) => io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; rollback replacement backup remains at {}",
+                path.display()
+            ),
+        ),
+        None => error,
+    }
 }
 
 enum ReplaceRollback {
@@ -1465,20 +1583,23 @@ impl ReplaceRollback {
         self,
         destination: &Path,
         before_restore: &mut dyn FnMut() -> io::Result<()>,
-    ) -> Result<(), (io::Error, Option<PathBuf>)> {
+    ) -> Result<Option<PathBuf>, (io::Error, Option<PathBuf>)> {
         match self {
             Self::Restore(mut original) => {
                 original.close();
                 let retained_copy = original.path().to_path_buf();
                 original.cleanup = false;
-                match before_restore().and_then(|()| fs::rename(&retained_copy, destination)) {
-                    Ok(()) => Ok(()),
+                match before_restore() {
                     Err(error) => Err((error, Some(retained_copy))),
+                    Ok(()) => match replace_destination(&retained_copy, destination) {
+                        Ok(backup) => Ok(backup),
+                        Err(error) => Err((error.error, Some(retained_copy))),
+                    },
                 }
             }
             Self::Remove => match fs::remove_file(destination) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Ok(()) => Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err((error, None)),
             },
         }
@@ -1530,6 +1651,7 @@ fn cleanup_stale_recovery_copies(destination: &Path) -> Result<(), StorageError>
         .to_string_lossy();
     let prefix = format!(".ascii-runtime-{name}.recovery-original-");
     let mut newest_unmatched = None;
+    let mut unmatched_count = 0usize;
     for entry in fs::read_dir(parent)? {
         let entry = entry?;
         let file_name = entry.file_name();
@@ -1543,6 +1665,7 @@ fn cleanup_stale_recovery_copies(destination: &Path) -> Result<(), StorageError>
             continue;
         }
         if !files_have_same_bytes(destination, &entry.path())? {
+            unmatched_count += 1;
             newest_unmatched =
                 Some(newest_unmatched.map_or(sequence, |current: u64| current.max(sequence)));
         }
@@ -1560,11 +1683,19 @@ fn cleanup_stale_recovery_copies(destination: &Path) -> Result<(), StorageError>
         if !entry.file_type()?.is_file() || is_recovery_copy_retained(destination, sequence) {
             continue;
         }
-        if newest_unmatched == Some(sequence) && !files_have_same_bytes(destination, &entry.path())?
+        let same_as_destination = files_have_same_bytes(destination, &entry.path())?;
+        if (unmatched_count > 1 && !same_as_destination)
+            || (newest_unmatched == Some(sequence) && !same_as_destination)
         {
             continue;
         }
         fs::remove_file(entry.path())?;
+    }
+    if unmatched_count > 1 {
+        return Err(io::Error::other(
+            "multiple unmarked recovery copies contain differing originals; refusing cleanup",
+        )
+        .into());
     }
     Ok(())
 }
@@ -1679,9 +1810,10 @@ fn mark_recovery_copy_retained_with(
         return Some(retained);
     }
     if !copy.exists() {
-        return None;
+        return retained.exists().then_some(retained);
     }
-    create_marker(&retained_recovery_marker(destination, sequence)).ok()?;
+    let marker = retained_recovery_marker(destination, sequence);
+    let _ = create_marker(&marker);
     Some(copy.to_path_buf())
 }
 
@@ -1739,6 +1871,428 @@ fn preserve_existing_file_permissions(temporary: &Path, destination: &Path) -> i
         Ok(_) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+#[derive(Debug)]
+struct ReplaceDestinationError {
+    error: io::Error,
+    preserve_source: bool,
+}
+
+#[cfg(windows)]
+impl ReplaceDestinationError {
+    fn new(error: io::Error, preserve_source: bool) -> Self {
+        Self {
+            error,
+            preserve_source,
+        }
+    }
+}
+
+fn remove_replace_backup(path: &Path, context: &str) -> io::Result<()> {
+    fs::remove_file(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("{context} backup remains at {}: {error}", path.display()),
+        )
+    })
+}
+
+#[cfg(windows)]
+fn path_exists_conservatively(path: &Path) -> Result<bool, io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn restore_replace_backup_without_clobber(backup: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+    let backup_wide: Vec<u16> = backup
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // No MOVEFILE_REPLACE_EXISTING: a concurrent destination must never be clobbered.
+    // SAFETY: both paths are NUL-terminated UTF-16 and remain valid for the call.
+    if unsafe {
+        MoveFileExW(
+            backup_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    } != 0
+    {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn replace_destination(
+    source: &Path,
+    destination: &Path,
+) -> Result<Option<PathBuf>, ReplaceDestinationError> {
+    replace_destination_with_after_missing(source, destination, || Ok(()))
+}
+
+#[cfg(windows)]
+fn replace_destination_with_after_missing(
+    source: &Path,
+    destination: &Path,
+    mut after_missing_destination: impl FnMut() -> io::Result<()>,
+) -> Result<Option<PathBuf>, ReplaceDestinationError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn ReplaceFileW(
+            replaced_file_name: *const u16,
+            replacement_file_name: *const u16,
+            backup_file_name: *const u16,
+            replace_flags: u32,
+            exclude: *mut core::ffi::c_void,
+            reserved: *mut core::ffi::c_void,
+        ) -> i32;
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+    const ERROR_PATH_NOT_FOUND: i32 = 3;
+    const ERROR_FILE_EXISTS: i32 = 80;
+    const ERROR_ALREADY_EXISTS: i32 = 183;
+    const ERROR_UNABLE_TO_REMOVE_REPLACED: i32 = 1175;
+    const ERROR_UNABLE_TO_MOVE_REPLACEMENT: i32 = 1176;
+    const ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+    const MAX_REPLACEMENT_RACES: usize = 8;
+
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let source_wide: Vec<u16> = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let backup = unique_replace_backup_path(destination).map_err(|error| {
+        ReplaceDestinationError::new(
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not allocate ReplaceFileW recovery path; staged replacement remains at {}: {error}",
+                    source.display()
+                ),
+            ),
+            true,
+        )
+    })?;
+    let backup_wide: Vec<u16> = backup
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    for _ in 0..MAX_REPLACEMENT_RACES {
+        // A unique absent sibling keeps the recovery file on the same volume.
+        // ReplaceFileW preserves the replaced file's DACL unless an ignore-ACL flag is supplied.
+        // SAFETY: all paths are NUL-terminated UTF-16; optional arguments are null and flags zero.
+        if unsafe {
+            ReplaceFileW(
+                destination_wide.as_ptr(),
+                source_wide.as_ptr(),
+                backup_wide.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        } != 0
+        {
+            return Ok(Some(backup));
+        }
+
+        let replace_error = io::Error::last_os_error();
+        match replace_error.raw_os_error() {
+            Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => {
+                after_missing_destination()
+                    .map_err(|error| ReplaceDestinationError::new(error, false))?;
+                // First creation must not replace a destination concurrently created with a
+                // different ACL. MoveFileExW without MOVEFILE_REPLACE_EXISTING is no-clobber.
+                // SAFETY: both paths are NUL-terminated UTF-16 and remain valid for the call.
+                if unsafe {
+                    MoveFileExW(
+                        source_wide.as_ptr(),
+                        destination_wide.as_ptr(),
+                        MOVEFILE_WRITE_THROUGH,
+                    )
+                } != 0
+                {
+                    return Ok(None);
+                }
+
+                let create_error = io::Error::last_os_error();
+                if matches!(
+                    create_error.raw_os_error(),
+                    Some(ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS)
+                ) {
+                    continue;
+                }
+                return Err(ReplaceDestinationError::new(create_error, false));
+            }
+            Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) => {
+                match restore_replace_backup_without_clobber(&backup, destination) {
+                    Ok(()) => {
+                        return Err(ReplaceDestinationError::new(
+                            io::Error::new(
+                                replace_error.kind(),
+                                format!(
+                                    "ReplaceFileW failed ({replace_error}); prior destination was restored at {}",
+                                    destination.display()
+                                ),
+                            ),
+                            false,
+                        ));
+                    }
+                    Err(restore_error) => {
+                        return Err(ReplaceDestinationError::new(
+                            io::Error::new(
+                                replace_error.kind(),
+                                format!(
+                                    "ReplaceFileW failed ({replace_error}); restoring prior destination from {} failed ({restore_error}); replacement remains staged at {}",
+                                    backup.display(),
+                                    source.display()
+                                ),
+                            ),
+                            true,
+                        ));
+                    }
+                }
+            }
+            Some(ERROR_UNABLE_TO_REMOVE_REPLACED | ERROR_UNABLE_TO_MOVE_REPLACEMENT) => {
+                let backup_state = path_exists_conservatively(&backup);
+                let detail = match backup_state {
+                    Ok(true) => format!("unexpected recovery file remains at {}", backup.display()),
+                    Ok(false) => format!(
+                        "no recovery file was found at {}; staged replacement remains at {}",
+                        backup.display(),
+                        source.display()
+                    ),
+                    Err(error) => format!(
+                        "could not inspect recovery path {} ({error}); staged replacement remains at {}",
+                        backup.display(),
+                        source.display()
+                    ),
+                };
+                let error = io::Error::new(
+                    replace_error.kind(),
+                    format!(
+                        "ReplaceFileW failed ({replace_error}); staged replacement remains at {}; {detail}",
+                        source.display()
+                    ),
+                );
+                return Err(ReplaceDestinationError::new(error, true));
+            }
+            _ => {
+                let detail = match path_exists_conservatively(&backup) {
+                    Ok(true) => format!("recovery file may remain at {}", backup.display()),
+                    Ok(false) => "no backup file was confirmed".to_owned(),
+                    Err(error) => format!(
+                        "could not inspect recovery path {} ({error})",
+                        backup.display()
+                    ),
+                };
+                let error = io::Error::new(
+                    replace_error.kind(),
+                    format!(
+                        "ReplaceFileW failed ({replace_error}); staged replacement path is {}; {detail}",
+                        source.display()
+                    ),
+                );
+                return Err(ReplaceDestinationError::new(error, true));
+            }
+        }
+    }
+
+    Err(ReplaceDestinationError::new(
+        io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "destination kept changing during ACL-preserving replacement",
+        ),
+        false,
+    ))
+}
+
+#[cfg(windows)]
+fn unique_replace_backup_path(destination: &Path) -> io::Result<PathBuf> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_REPLACE_BACKUP: AtomicUsize = AtomicUsize::new(0);
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
+    for _ in 0..16 {
+        let sequence = NEXT_REPLACE_BACKUP.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".ascii-runtime-replace-backup-{}-{sequence}.tmp",
+            std::process::id()
+        ));
+        match fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique ReplaceFileW backup path",
+    ))
+}
+
+#[cfg(not(windows))]
+fn replace_destination(
+    source: &Path,
+    destination: &Path,
+) -> Result<Option<PathBuf>, ReplaceDestinationError> {
+    fs::rename(source, destination)
+        .map(|()| None)
+        .map_err(|error| ReplaceDestinationError {
+            error,
+            preserve_source: false,
+        })
+}
+
+#[cfg(all(test, windows))]
+#[path = "../tests/support/windows_acl.rs"]
+mod windows_acl_test_support;
+
+#[cfg(all(test, windows))]
+mod windows_replace_tests {
+    use super::{
+        replace_destination_with_after_missing, restore_replace_backup_without_clobber,
+        windows_acl_test_support,
+    };
+    use std::fs;
+    use std::io;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir() -> PathBuf {
+        loop {
+            let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "ascii-runtime-replace-race-{}-{sequence}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return path,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create replacement-race test directory: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn restoring_replacefile_backup_never_clobbers_a_concurrent_destination() {
+        let directory = temp_dir();
+        let backup = directory.join("replace-backup.tmp");
+        let destination = directory.join("state.json");
+        fs::write(&backup, b"original destination").expect("write prior destination backup");
+        fs::write(&destination, b"concurrent destination").expect("write concurrent destination");
+
+        let error = restore_replace_backup_without_clobber(&backup, &destination)
+            .expect_err("restore must not replace a concurrent destination");
+        assert!(
+            error.raw_os_error().is_some(),
+            "no-clobber restore returned a non-OS error: {error}"
+        );
+        assert_eq!(
+            fs::read(&backup).expect("recovery backup remains"),
+            b"original destination"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("concurrent destination remains"),
+            b"concurrent destination"
+        );
+
+        fs::remove_dir_all(directory).expect("remove restore test directory");
+    }
+
+    #[test]
+    fn concurrent_destination_after_missing_replace_keeps_its_dacl() {
+        let directory = temp_dir();
+        let source = directory.join("replacement.tmp");
+        let destination = directory.join("state.json");
+        fs::write(&source, b"replacement bytes").expect("write staged replacement");
+        let mut acl_setup_error = None::<i32>;
+        let mut expected_dacl = None;
+
+        let result = replace_destination_with_after_missing(&source, &destination, || {
+            // The callback runs only after the real ReplaceFileW reports the destination missing
+            // and immediately before the real no-clobber MoveFileExW attempt.
+            fs::write(&destination, b"concurrent destination")?;
+            if let Err(error) = windows_acl_test_support::set_custom_dacl(&destination) {
+                acl_setup_error = error.raw_os_error().or(Some(0));
+                return Err(error);
+            }
+            expected_dacl = Some(windows_acl_test_support::dacl(&destination)?);
+            Ok(())
+        });
+        if let Some(error_code @ (1 | 5 | 50 | 1314)) = acl_setup_error {
+            eprintln!(
+                "skipping Windows replacement race regression: this filesystem/account cannot set an explicit DACL \
+                 (Windows error {error_code})"
+            );
+            let _ = fs::remove_dir_all(&directory);
+            return;
+        }
+        let backup = result
+            .expect("no-clobber move detects the race and retries ReplaceFileW")
+            .expect("ReplaceFileW reports its recovery backup");
+
+        let expected_dacl = expected_dacl.expect("race fixture records its explicit DACL");
+        assert!(expected_dacl.1, "race fixture DACL must be protected");
+        assert_eq!(
+            windows_acl_test_support::dacl(&destination).expect("read final destination DACL"),
+            expected_dacl
+        );
+        assert_eq!(
+            fs::read(&destination).expect("read committed replacement"),
+            b"replacement bytes"
+        );
+        assert!(!source.exists(), "replacement source was consumed");
+        assert_eq!(
+            fs::read(backup).expect("read replaced concurrent destination backup"),
+            b"concurrent destination"
+        );
+        fs::remove_dir_all(&directory).expect("remove replacement-race test directory");
     }
 }
 
@@ -2183,6 +2737,7 @@ impl ImportJournal {
                 stage: &mut |_| Ok(()),
                 before_parent_sync: &mut || Ok(()),
                 before_rollback_rename: &mut || Ok(()),
+                before_rollback_sync: &mut || Ok(()),
                 rollback_on_sync_error: None,
             },
         )?;
@@ -2893,6 +3448,10 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
 }
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::{
+        AtomicReplaceHooks, CurrentExpectation, atomic_replace_locked, prepare_replace_rollback,
+    };
     use super::{
         bounded_log_input, cleanup_stale_recovery_copies, mark_recovery_copy_retained_with,
         redact_log_message,
@@ -2901,6 +3460,78 @@ mod tests {
     use std::io;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_rollback_sync_failure_restores_old_bytes_and_reports_backup() {
+        let root = temporary_storage_test_root();
+        let destination = root.join("state.json");
+        fs::write(&destination, b"previous bytes").expect("write prior destination");
+        let rollback = prepare_replace_rollback(&destination, 1024).expect("prepare rollback");
+        let mut stage = |_| Ok(());
+        let mut parent_sync = || Err(io::Error::other("injected initial sync failure"));
+        let mut rollback_rename = || Ok(());
+        let mut rollback_sync = || Err(io::Error::other("injected rollback sync failure"));
+        let error = atomic_replace_locked(
+            &destination,
+            b"replacement bytes",
+            CurrentExpectation::Unchecked,
+            None,
+            None,
+            AtomicReplaceHooks {
+                stage: &mut stage,
+                before_parent_sync: &mut parent_sync,
+                before_rollback_rename: &mut rollback_rename,
+                before_rollback_sync: &mut rollback_sync,
+                rollback_on_sync_error: Some(rollback),
+            },
+        )
+        .expect_err("rollback directory sync fails");
+        assert_eq!(
+            fs::read(&destination).expect("read restored destination"),
+            b"previous bytes"
+        );
+        let backups = fs::read_dir(&root)
+            .expect("read rollback directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .starts_with(".ascii-runtime-replace-backup-")
+                })
+            })
+            .collect::<Vec<_>>();
+        let initial_backup = backups
+            .iter()
+            .find(|path| fs::read(path).is_ok_and(|bytes| bytes == b"previous bytes"))
+            .expect("initial replacement backup remains");
+        let rollback_backup = backups
+            .iter()
+            .find(|path| fs::read(path).is_ok_and(|bytes| bytes == b"replacement bytes"))
+            .expect("displaced replacement backup remains");
+        assert_eq!(
+            fs::read(initial_backup).expect("read initial replacement backup"),
+            b"previous bytes"
+        );
+        let error_text = error.to_string();
+        assert!(
+            error_text.contains(&initial_backup.display().to_string()),
+            "error reports initial backup: {error_text}"
+        );
+        assert!(
+            error_text.contains(&format!(
+                "rollback replacement backup remains at {}",
+                rollback_backup.display()
+            )),
+            "error reports rollback backup path: {error_text}"
+        );
+        assert_eq!(
+            fs::read(rollback_backup).expect("read displaced replacement"),
+            b"replacement bytes"
+        );
+        fs::remove_dir_all(root).expect("remove rollback test directory");
+    }
 
     static TEMP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
@@ -2915,21 +3546,23 @@ mod tests {
     }
 
     #[test]
-    fn failed_retention_mark_never_reports_a_copy_cleanup_can_delete() {
+    fn failed_retention_mark_fails_closed_with_multiple_unique_copies() {
         let root = temporary_storage_test_root();
         let destination = root.join("state.json");
-        fs::write(&destination, b"new state").expect("write current destination");
+        fs::write(&destination, b"current state").expect("write current destination");
         for sequence in 1..=64 {
             fs::write(
                 root.join(format!(
                     ".ascii-runtime-state.json.recovery-original-{sequence}.tmp"
                 )),
-                b"older crash orphan",
+                b"current state",
             )
-            .expect("seed crash orphan");
+            .expect("seed duplicate crash orphan");
         }
         let copy = root.join(".ascii-runtime-state.json.recovery-original-65.tmp");
+        let second_copy = root.join(".ascii-runtime-state.json.recovery-original-66.tmp");
         fs::write(&copy, b"recoverable original").expect("write recovery copy");
+        fs::write(&second_copy, b"different original").expect("write second recovery copy");
 
         let reported = mark_recovery_copy_retained_with(
             &destination,
@@ -2937,17 +3570,16 @@ mod tests {
             |_, _| Err(io::Error::other("injected retained rename failure")),
             |_| Err(io::Error::other("injected marker creation failure")),
         );
-        assert!(
-            reported.is_none(),
-            "unmarked copies must not be reported retained"
-        );
+        assert_eq!(reported.as_deref(), Some(copy.as_path()));
 
-        cleanup_stale_recovery_copies(&destination).expect("clean stale recovery files");
-        assert!(
-            reported.as_ref().is_none_or(|path| path.exists()),
-            "cleanup must not delete a reported recoverable copy"
-        );
-        assert!(copy.exists(), "preserve the newest unmarked original");
+        for _ in 0..2 {
+            assert!(
+                cleanup_stale_recovery_copies(&destination).is_err(),
+                "cleanup must fail closed while multiple unique originals are unmarked"
+            );
+            assert!(copy.exists(), "reported recovery copy remains");
+            assert!(second_copy.exists(), "other unique recovery copy remains");
+        }
         let leftovers = fs::read_dir(&root)
             .expect("read recovery directory")
             .filter_map(Result::ok)
@@ -2958,7 +3590,10 @@ mod tests {
                     .contains(".recovery-original-")
             })
             .count();
-        assert_eq!(leftovers, 1, "repeated leftovers remain bounded");
+        assert_eq!(
+            leftovers, 2,
+            "duplicates are bounded away without losing originals"
+        );
         fs::remove_dir_all(root).expect("remove storage test directory");
     }
 
