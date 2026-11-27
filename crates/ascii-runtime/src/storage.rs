@@ -84,6 +84,8 @@ pub enum AtomicWriteStage {
     ParentDirectorySync,
     /// A preserved prior-state copy is about to be renamed into place during rollback.
     RecoveryRollbackRename,
+    /// The previous destination has been synced to a temporary backup, before backup replacement.
+    BackupTemporarySynced,
 }
 
 /// Filesystem error, malformed persisted state, or rejected input.
@@ -1406,6 +1408,12 @@ fn atomic_replace_locked(
     stage(AtomicWriteStage::TemporarySynced)?;
 
     if let (Some((backup_path, _)), Some(old_bytes)) = (backup, previous.as_deref()) {
+        let mut backup_hook = |nested_stage| {
+            if nested_stage == AtomicWriteStage::TemporarySynced {
+                stage(AtomicWriteStage::BackupTemporarySynced)?;
+            }
+            Ok(())
+        };
         atomic_replace_locked(
             backup_path,
             old_bytes,
@@ -1413,7 +1421,7 @@ fn atomic_replace_locked(
             None,
             None,
             AtomicReplaceHooks {
-                stage: &mut |_| Ok(()),
+                stage: &mut backup_hook,
                 before_parent_sync: &mut || Ok(()),
                 before_rollback_rename: &mut || Ok(()),
                 rollback_on_sync_error: None,
@@ -1421,6 +1429,8 @@ fn atomic_replace_locked(
         )?;
         stage(AtomicWriteStage::BackupReplaced)?;
     }
+    #[cfg(unix)]
+    preserve_existing_file_permissions(temporary.path(), destination)?;
     fs::rename(temporary.path(), destination)?;
     temporary.disarm();
     if let Err(sync_error) = before_parent_sync().and_then(|()| sync_parent_directory(parent)) {
@@ -1430,6 +1440,8 @@ fn atomic_replace_locked(
                 Err(error) => Err(error),
             };
             if let Err((rollback_error, retained_recovery_copy)) = rollback_result {
+                let retained_recovery_copy = retained_recovery_copy
+                    .and_then(|path| mark_recovery_copy_retained(destination, &path));
                 return Err(StorageError::RecoveryRollbackFailed {
                     sync_error,
                     rollback_error,
@@ -1480,6 +1492,7 @@ fn prepare_replace_rollback(
     let parent = destination
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
+    cleanup_stale_recovery_copies(destination)?;
     match fs::symlink_metadata(destination) {
         Ok(metadata) => {
             if metadata.len() > max_bytes {
@@ -1503,6 +1516,173 @@ fn prepare_replace_rollback(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ReplaceRollback::Remove),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Removes crash-orphaned rollback copies before a new rollback slot is allocated.
+/// Explicitly retained copies use a distinct name and are never removed here.
+fn cleanup_stale_recovery_copies(destination: &Path) -> Result<(), StorageError> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no file name"))?
+        .to_string_lossy();
+    let prefix = format!(".ascii-runtime-{name}.recovery-original-");
+    let mut newest_unmatched = None;
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(sequence) = recovery_copy_sequence(file_name, &prefix) else {
+            continue;
+        };
+        if !entry.file_type()?.is_file() || is_recovery_copy_retained(destination, sequence) {
+            continue;
+        }
+        if !files_have_same_bytes(destination, &entry.path())? {
+            newest_unmatched =
+                Some(newest_unmatched.map_or(sequence, |current: u64| current.max(sequence)));
+        }
+    }
+
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(sequence) = recovery_copy_sequence(file_name, &prefix) else {
+            continue;
+        };
+        if !entry.file_type()?.is_file() || is_recovery_copy_retained(destination, sequence) {
+            continue;
+        }
+        if newest_unmatched == Some(sequence) && !files_have_same_bytes(destination, &entry.path())?
+        {
+            continue;
+        }
+        fs::remove_file(entry.path())?;
+    }
+    Ok(())
+}
+
+fn recovery_copy_sequence(file_name: &str, prefix: &str) -> Option<u64> {
+    file_name
+        .strip_prefix(prefix)?
+        .strip_suffix(".tmp")?
+        .parse()
+        .ok()
+}
+
+fn is_recovery_copy_retained(destination: &Path, sequence: u64) -> bool {
+    let retained_name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let retained_name = format!(".ascii-runtime-{retained_name}.recovery-retained-{sequence}.tmp");
+    destination
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(retained_name)
+        .exists()
+        || retained_recovery_marker(destination, &sequence.to_string()).exists()
+}
+
+fn retained_recovery_marker(destination: &Path, sequence: &str) -> PathBuf {
+    let name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    destination
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".ascii-runtime-{name}.recovery-retained-{sequence}.marker"
+        ))
+}
+
+fn files_have_same_bytes(left: &Path, right: &Path) -> io::Result<bool> {
+    let left_metadata = match fs::metadata(left) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let right_metadata = fs::metadata(right)?;
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+    let mut left = File::open(left)?;
+    let mut right = File::open(right)?;
+    let mut left_buffer = [0; 8192];
+    let mut right_buffer = [0; 8192];
+    let mut remaining = left_metadata.len();
+    while remaining > 0 {
+        let count = remaining.min(left_buffer.len() as u64) as usize;
+        left.read_exact(&mut left_buffer[..count])?;
+        right.read_exact(&mut right_buffer[..count])?;
+        if left_buffer[..count] != right_buffer[..count] {
+            return Ok(false);
+        }
+        remaining -= count as u64;
+    }
+    Ok(true)
+}
+
+fn mark_recovery_copy_retained(destination: &Path, copy: &Path) -> Option<PathBuf> {
+    let parent = destination.parent()?;
+    mark_recovery_copy_retained_with(
+        destination,
+        copy,
+        |source, retained| {
+            fs::rename(source, retained)?;
+            sync_parent_directory(parent)
+        },
+        |marker| {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(marker)?;
+            file.sync_all()?;
+            let parent = marker.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "recovery marker has no parent")
+            })?;
+            sync_parent_directory(parent)
+        },
+    )
+}
+
+fn mark_recovery_copy_retained_with(
+    destination: &Path,
+    copy: &Path,
+    mut rename_copy: impl FnMut(&Path, &Path) -> io::Result<()>,
+    mut create_marker: impl FnMut(&Path) -> io::Result<()>,
+) -> Option<PathBuf> {
+    let name = destination.file_name()?;
+    let copy_name = copy.file_name()?.to_str()?;
+    let prefix = format!(
+        ".ascii-runtime-{}.recovery-original-",
+        name.to_string_lossy()
+    );
+    let sequence = copy_name.strip_prefix(&prefix)?.strip_suffix(".tmp")?;
+    if sequence.is_empty() || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let parent = destination.parent()?;
+    let retained = parent.join(format!(
+        ".ascii-runtime-{}.recovery-retained-{sequence}.tmp",
+        name.to_string_lossy()
+    ));
+    if rename_copy(copy, &retained).is_ok() {
+        return Some(retained);
+    }
+    if !copy.exists() {
+        return None;
+    }
+    create_marker(&retained_recovery_marker(destination, sequence)).ok()?;
+    Some(copy.to_path_buf())
 }
 
 fn read_guarded_state(
@@ -1550,6 +1730,17 @@ impl Drop for OwnedTempFile {
         }
     }
 }
+#[cfg(unix)]
+fn preserve_existing_file_permissions(temporary: &Path, destination: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            fs::set_permissions(temporary, metadata.permissions())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
 
 /// Uses one reserved slot per destination so retries clean crash leftovers without scanning a
 /// directory or touching unrelated entries. The caller must hold the directory lock.
@@ -1585,6 +1776,35 @@ fn create_unique_sibling_temp(destination: &Path, label: &str) -> io::Result<Own
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no file name"))?
         .to_string_lossy();
     static NEXT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+    if label == "recovery-original" {
+        let original_prefix = format!(".ascii-runtime-{name}.recovery-original-");
+        let retained_prefix = format!(".ascii-runtime-{name}.recovery-retained-");
+        let mut next_sequence = 0;
+        for entry in fs::read_dir(parent)? {
+            let file_name = entry?.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                continue;
+            };
+            let sequence = file_name
+                .strip_prefix(&original_prefix)
+                .and_then(|suffix| suffix.strip_suffix(".tmp"))
+                .or_else(|| {
+                    file_name
+                        .strip_prefix(&retained_prefix)
+                        .and_then(|suffix| suffix.strip_suffix(".tmp"))
+                })
+                .or_else(|| {
+                    file_name
+                        .strip_prefix(&retained_prefix)
+                        .and_then(|suffix| suffix.strip_suffix(".marker"))
+                })
+                .and_then(|sequence| sequence.parse::<usize>().ok());
+            if let Some(sequence) = sequence {
+                next_sequence = next_sequence.max(sequence.saturating_add(1));
+            }
+        }
+        NEXT_SEQUENCE.fetch_max(next_sequence, Ordering::Relaxed);
+    }
     loop {
         let sequence = NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(format!(".ascii-runtime-{name}.{label}-{sequence}.tmp"));
@@ -2272,42 +2492,35 @@ fn looks_like_relative_local_path(value: &str) -> bool {
     let Some(first) = components.next() else {
         return false;
     };
-    let Some(mut final_component) = components.next() else {
+    let Some(second) = components.next() else {
         return false;
     };
-    if first.is_empty() || final_component.is_empty() {
-        return false;
-    }
-    for component in components {
-        if component.is_empty() {
-            return false;
-        }
-        final_component = component;
-    }
-    let relative_prefix = matches!(first, "." | "..");
-    const COMMON_LOCAL_DIRECTORY_ROOTS: &[&str] = &[
-        "documents",
-        "desktop",
-        "downloads",
-        "pictures",
-        "photos",
-        "videos",
-        "movies",
-        "music",
-        "media",
-        "library",
-    ];
-    let recognized_root = relative_prefix
-        || COMMON_LOCAL_DIRECTORY_ROOTS
-            .iter()
-            .any(|root| first.eq_ignore_ascii_case(root));
-    if recognized_root && final_component.starts_with('.') {
+    if first.is_empty() || second.is_empty() || components.next().is_some() {
         return true;
     }
-    if let Some((stem, _)) = final_component.rsplit_once('.') {
-        return recognized_root && !stem.is_empty();
-    }
-    recognized_root && !final_component.is_empty()
+
+    let benign_input_output =
+        first.eq_ignore_ascii_case("input") && second.eq_ignore_ascii_case("output");
+    let numeric_ratio = is_numeric_component(first) && is_numeric_component(second);
+    let version_pair = is_version_component(first) && is_version_component(second);
+    !(benign_input_output || numeric_ratio || version_pair)
+}
+
+fn is_numeric_component(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_version_component(value: &str) -> bool {
+    let Some(version) = value.strip_prefix('v').or_else(|| value.strip_prefix('V')) else {
+        return false;
+    };
+    let mut parts = version.split('.');
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    !major.is_empty()
+        && major.bytes().all(|byte| byte.is_ascii_digit())
+        && parts.all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn is_unicode_quote_boundary(character: char) -> bool {
@@ -2680,8 +2893,74 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
 }
 #[cfg(test)]
 mod tests {
-    use super::{bounded_log_input, redact_log_message};
+    use super::{
+        bounded_log_input, cleanup_stale_recovery_copies, mark_recovery_copy_retained_with,
+        redact_log_message,
+    };
+    use std::fs;
+    use std::io;
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn temporary_storage_test_root() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ascii-runtime-storage-test-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("create storage test directory");
+        root
+    }
+
+    #[test]
+    fn failed_retention_mark_never_reports_a_copy_cleanup_can_delete() {
+        let root = temporary_storage_test_root();
+        let destination = root.join("state.json");
+        fs::write(&destination, b"new state").expect("write current destination");
+        for sequence in 1..=64 {
+            fs::write(
+                root.join(format!(
+                    ".ascii-runtime-state.json.recovery-original-{sequence}.tmp"
+                )),
+                b"older crash orphan",
+            )
+            .expect("seed crash orphan");
+        }
+        let copy = root.join(".ascii-runtime-state.json.recovery-original-65.tmp");
+        fs::write(&copy, b"recoverable original").expect("write recovery copy");
+
+        let reported = mark_recovery_copy_retained_with(
+            &destination,
+            &copy,
+            |_, _| Err(io::Error::other("injected retained rename failure")),
+            |_| Err(io::Error::other("injected marker creation failure")),
+        );
+        assert!(
+            reported.is_none(),
+            "unmarked copies must not be reported retained"
+        );
+
+        cleanup_stale_recovery_copies(&destination).expect("clean stale recovery files");
+        assert!(
+            reported.as_ref().is_none_or(|path| path.exists()),
+            "cleanup must not delete a reported recoverable copy"
+        );
+        assert!(copy.exists(), "preserve the newest unmarked original");
+        let leftovers = fs::read_dir(&root)
+            .expect("read recovery directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".recovery-original-")
+            })
+            .count();
+        assert_eq!(leftovers, 1, "repeated leftovers remain bounded");
+        fs::remove_dir_all(root).expect("remove storage test directory");
+    }
 
     #[test]
     fn diagnostic_redaction_receives_bounded_input_and_hides_partial_path_values() {

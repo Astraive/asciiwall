@@ -325,14 +325,12 @@ fn storage_roots_and_persisted_files_are_owner_only() {
             & 0o777,
         0o600
     );
-    fs::set_permissions(storage.config_path(), fs::Permissions::from_mode(0o644))
-        .expect("make old config broadly readable for replacement regression");
     save_current_config(
         &storage,
-        &config(json!({"theme": "replacement"})),
+        &config(json!({"theme": "replacement-0600"})),
         validate_test_config,
     )
-    .expect("replace config without broadening permissions");
+    .expect("replace config while preserving owner-only permissions");
     assert_eq!(
         fs::metadata(storage.config_path())
             .expect("replacement config metadata")
@@ -340,6 +338,22 @@ fn storage_roots_and_persisted_files_are_owner_only() {
             .mode()
             & 0o777,
         0o600
+    );
+    fs::set_permissions(storage.config_path(), fs::Permissions::from_mode(0o644))
+        .expect("make old config broadly readable for replacement regression");
+    save_current_config(
+        &storage,
+        &config(json!({"theme": "replacement-0644"})),
+        validate_test_config,
+    )
+    .expect("preserve existing config permissions");
+    assert_eq!(
+        fs::metadata(storage.config_path())
+            .expect("replacement config metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
     );
 
     let initial_registry = registry("1.0.0");
@@ -923,12 +937,15 @@ fn registry_update_parent_sync_failure_restores_exact_prior_state() {
 }
 
 #[test]
-fn registry_update_rollback_failure_reports_prior_state_wording() {
+fn registry_update_rollback_failure_retains_original_and_startup_cleans_orphans() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
+    let previous = registry("1.0.0");
     storage
-        .save_registry(&registry("1.0.0"))
+        .save_registry(&previous)
         .expect("save initial registry");
+    let registry_path = storage.registry_path();
+    let previous_bytes = fs::read(&registry_path).expect("capture original registry");
 
     let error = storage
         .update_registry_with_hook(
@@ -944,16 +961,71 @@ fn registry_update_rollback_failure_reports_prior_state_wording() {
             },
         )
         .expect_err("registry rollback failure should be reported");
-    assert!(matches!(
-        &error,
-        StorageError::RecoveryRollbackFailed {
-            retained_recovery_copy: Some(_),
-            ..
-        }
-    ));
     let display = error.to_string();
+    let retained = match error {
+        StorageError::RecoveryRollbackFailed {
+            retained_recovery_copy: Some(path),
+            ..
+        } => path,
+        other => panic!("expected retained recovery copy, got {other}"),
+    };
     assert!(display.contains("parent-directory sync failed (injected sync failure)"));
     assert!(display.contains("restoring prior state also failed (injected rollback failure)"));
+    assert!(retained.exists());
+    assert_eq!(
+        fs::read(&retained).expect("read retained original registry"),
+        previous_bytes
+    );
+
+    let parent = registry_path.parent().expect("registry parent");
+    let retained_sequence = retained
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.rsplit_once('-').map(|(_, sequence)| sequence))
+        .and_then(|sequence| sequence.strip_suffix(".tmp"))
+        .and_then(|sequence| sequence.parse::<usize>().ok())
+        .expect("retained recovery sequence");
+    for restart in 0..4 {
+        let current_bytes = fs::read(&registry_path).expect("read current registry");
+        for sequence in 0..64 {
+            fs::write(
+                parent.join(format!(
+                    ".ascii-runtime-install-registry.json.recovery-original-{}.tmp",
+                    retained_sequence + restart * 64 + sequence + 1
+                )),
+                &current_bytes,
+            )
+            .expect("seed interrupted recovery copy");
+        }
+        assert!(matches!(
+            storage.update_registry_with_hook(
+                |current| *current = registry("3.0.0"),
+                injected_failure(AtomicWriteStage::TemporaryCreated),
+            ),
+            Err(StorageError::Io(_))
+        ));
+        let recovery_orphans: Vec<_> = fs::read_dir(parent)
+            .expect("read registry parent")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path() != retained
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".recovery-original-")
+            })
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            recovery_orphans.is_empty(),
+            "restart {restart} leaves {recovery_orphans:?}; retained {retained:?}"
+        );
+    }
+
+    assert_eq!(
+        fs::read(&retained).expect("explicitly retained original remains available"),
+        previous_bytes
+    );
 }
 
 #[test]
@@ -1726,6 +1798,58 @@ fn configuration_failures_at_each_atomic_boundary_preserve_valid_recovery() {
         let replaced_backup =
             parse_config(&fs::read(&backup_path).expect("subsequent write records last-good"));
         assert_eq!(replaced_backup.value(), expected_current);
+    }
+}
+#[test]
+fn failed_backup_replacements_remove_both_owned_temporaries() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let current_path = storage.config_path();
+    let backup_path = storage.config_backup_path();
+    let original = config(json!({"theme": "original"}));
+    save_current_config(&storage, &original, validate_test_config)
+        .expect("save initial config without backup");
+
+    let parent = current_path.parent().expect("configuration directory");
+    let current_temporary = parent.join(".ascii-runtime-settings.toml.state.tmp");
+    let backup_temporary = parent.join(".ascii-runtime-settings.toml.last-good.state.tmp");
+    for attempt in 0..3 {
+        let candidate = config(json!({"theme": format!("candidate-{attempt}")}));
+        let error =
+            save_current_config_with_hook(&storage, &candidate, validate_test_config, |stage| {
+                if stage == AtomicWriteStage::BackupTemporarySynced {
+                    return Err(io::Error::other("injected backup replacement failure"));
+                }
+                Ok(())
+            })
+            .expect_err("injected backup replacement failure");
+        assert!(matches!(error, StorageError::Io(_)));
+        assert!(
+            !current_temporary.exists(),
+            "failed save removes current temporary"
+        );
+        assert!(
+            !backup_temporary.exists(),
+            "failed save removes backup temporary"
+        );
+        assert_eq!(
+            parse_config(&fs::read(&current_path).expect("read current config")).value(),
+            original.value(),
+            "failed backup replacement leaves the current document unchanged"
+        );
+        assert!(
+            !backup_path.exists(),
+            "failed backup replacement leaves no backup"
+        );
+        let temporary_count = fs::read_dir(parent)
+            .expect("read config directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".state.tmp"))
+            .count();
+        assert_eq!(
+            temporary_count, 0,
+            "retries do not accumulate temporary files"
+        );
     }
 }
 
@@ -3201,6 +3325,41 @@ fn portable_export_redacts_embedded_relative_paths_in_generic_strings() {
     );
     assert_eq!(
         portable.content()["harmless_supported_versions"],
+        json!("Supported versions v1.0/v2.0")
+    );
+}
+
+#[test]
+fn portable_export_redacts_generic_multicomponent_relative_paths() {
+    let source = json!({
+        "project_note": "draft is at projects/private-client/drafts",
+        "client_note": "review clients/acme-corporation/contracts before sharing",
+        "two_component_path": "note at projects/private-client",
+        "whitespace_path": "draft saved in projects/private client",
+        "ordinary_slash_prose": "Choose input/output; the ratio is 3/4.",
+        "supported_versions": "Supported versions v1.0/v2.0"
+    });
+    let portable =
+        ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
+            .expect("portable export");
+
+    for private_key in [
+        "project_note",
+        "client_note",
+        "two_component_path",
+        "whitespace_path",
+    ] {
+        assert!(
+            portable.content().get(private_key).is_none(),
+            "portable export retained {private_key}"
+        );
+    }
+    assert_eq!(
+        portable.content()["ordinary_slash_prose"],
+        json!("Choose input/output; the ratio is 3/4.")
+    );
+    assert_eq!(
+        portable.content()["supported_versions"],
         json!("Supported versions v1.0/v2.0")
     );
 }
