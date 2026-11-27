@@ -259,15 +259,25 @@ unsafe extern "system" fn top_level_callback(window: Hwnd, parameter: Lparam) ->
     if scan_ptr.is_null() {
         return 0;
     }
-    // SAFETY: the caller supplies a live NativeScan pointer for the duration of synchronous EnumWindows.
+    // Every root is deadline-checked, while unrelated classes consume no work unit.
+    // SAFETY: scan_ptr is live for this synchronous callback.
+    if Instant::now() >= unsafe { (*scan_ptr).deadline } {
+        unsafe { set_timeout(scan_ptr) };
+        return 0;
+    }
+    // SAFETY: caller supplies a live NativeScan throughout EnumWindows.
     if window == unsafe { (*scan_ptr).shell_window } {
-        // The known shell root and its descendants were already inspected before EnumWindows.
-        // SAFETY: scan_ptr is live and this callback owns its sequential mutation window.
         unsafe { note_shell_window_enumerated(&mut *scan_ptr) };
         return 1;
     }
-    // SAFETY: scan_ptr is live for this synchronous callback.
+    if !is_candidate_root(class_of(window)) {
+        return 1;
+    }
     unsafe { scan_root(scan_ptr, window, false) as Bool }
+}
+
+fn is_candidate_root(class: WindowClass) -> bool {
+    matches!(class, WindowClass::Progman | WindowClass::WorkerW)
 }
 
 unsafe extern "system" fn child_callback(window: Hwnd, parameter: Lparam) -> Bool {
@@ -284,8 +294,7 @@ unsafe fn scan_root(scan_ptr: *mut NativeScan, window: Hwnd, is_shell_window: bo
         return false;
     }
     let class = class_of(window);
-    let is_desktop_root =
-        is_shell_window || matches!(class, WindowClass::Progman | WindowClass::WorkerW);
+    let is_desktop_root = is_shell_window || is_candidate_root(class);
     let shell_owned = if is_desktop_root {
         let Some(shell_owned) = belongs_to_shell_process(scan_ptr, window) else {
             return false;
@@ -369,7 +378,7 @@ fn record_root(
     }
     scan.current_root_class = class;
     scan.current_root_is_shell_window = is_shell_window;
-    if is_shell_window || matches!(class, WindowClass::Progman | WindowClass::WorkerW) {
+    if is_shell_window || is_candidate_root(class) {
         RootScanAction::EnumerateChildren
     } else {
         RootScanAction::SkipChildren
@@ -432,6 +441,13 @@ unsafe fn set_native_failure(scan_ptr: *mut NativeScan, error: u32) {
         scan.snapshot.failure = Some(ScanFailure::NativeEnumerationFailed(error));
     }
 }
+unsafe fn set_timeout(scan_ptr: *mut NativeScan) {
+    // SAFETY: caller holds the active synchronous scan pointer.
+    let scan = unsafe { &mut *scan_ptr };
+    if scan.snapshot.failure.is_none() {
+        scan.snapshot.failure = Some(ScanFailure::TimedOut);
+    }
+}
 
 fn class_of(window: Hwnd) -> WindowClass {
     if window.is_null() {
@@ -486,7 +502,8 @@ mod tests {
     use super::super::{ObservationReason, ProbeStatus, ScanFailure, classify_snapshot};
     use super::{
         MAX_ENUMERATION_WORK, NativeScan, RootScanAction, WindowClass, child_enumeration_succeeded,
-        note_shell_window_enumerated, record_child, record_root, scan_shell_before_top_level,
+        is_candidate_root, note_shell_window_enumerated, record_child, record_root,
+        scan_shell_before_top_level,
     };
     use std::cell::RefCell;
 
@@ -523,10 +540,10 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_descendants_cannot_starve_known_shell_inspection() {
+    fn unrelated_top_level_roots_do_not_starve_candidate_or_duplicate_shell_record() {
         let shell_window = std::ptr::NonNull::<std::ffi::c_void>::dangling().as_ptr();
         let scan = RefCell::new(NativeScan::new(shell_window, 1, WindowClass::Progman));
-        let unrelated_descendants = [WindowClass::Other; MAX_ENUMERATION_WORK as usize];
+        let unrelated_roots = [WindowClass::Other; MAX_ENUMERATION_WORK as usize + 1];
 
         let succeeded = scan_shell_before_top_level(
             || {
@@ -540,36 +557,40 @@ mod tests {
                 )
             },
             || {
-                // Ignore unrelated shell-owned trees; they must not starve the WorkerW candidate.
                 let mut scan = scan.borrow_mut();
-                let unrelated_scanned = visit_synthetic_root(
-                    &mut scan,
-                    WindowClass::Other,
-                    true,
-                    false,
-                    &unrelated_descendants,
-                );
-                let workerw_scanned = unrelated_scanned
-                    && visit_synthetic_root(
-                        &mut scan,
-                        WindowClass::WorkerW,
-                        false,
-                        false,
-                        &[WindowClass::ShellDefView],
-                    );
+                // EnumWindows returns the pre-inspected shell again; mirror the production
+                // callback's mark-and-continue branch without recording it a second time.
                 note_shell_window_enumerated(&mut scan);
-                workerw_scanned
+                for class in unrelated_roots {
+                    if is_candidate_root(class)
+                        && !visit_synthetic_root(&mut scan, class, false, false, &[])
+                    {
+                        return false;
+                    }
+                }
+                visit_synthetic_root(
+                    &mut scan,
+                    WindowClass::WorkerW,
+                    false,
+                    false,
+                    &[WindowClass::ShellDefView],
+                )
             },
         );
         let scan = scan.into_inner();
 
         assert!(succeeded);
         assert_eq!(scan.snapshot.failure, None);
-        assert_eq!(scan.work_units, 5);
-        assert_eq!(scan.snapshot.record_count, 5);
+        assert_eq!(scan.work_units, 4);
+        assert_eq!(scan.snapshot.record_count, 4);
         assert!(scan.snapshot.shell_window_enumerated);
-        assert!(scan.snapshot.records[0].root_is_shell_window);
-        assert_eq!(scan.snapshot.records[1].class, WindowClass::ShellDefView);
+        assert_eq!(
+            scan.snapshot.records[..scan.snapshot.record_count]
+                .iter()
+                .filter(|record| record.root_is_shell_window && record.top_level)
+                .count(),
+            1
+        );
 
         let hierarchy = classify_snapshot(&scan.snapshot);
         assert_eq!(hierarchy.observation.status, ProbeStatus::Experimental);
@@ -577,7 +598,22 @@ mod tests {
             hierarchy.observation.reason,
             ObservationReason::ShellHierarchyObserved
         );
-        assert_eq!(hierarchy.summary.shell_owned_desktop_view_count, 2);
         assert_eq!(hierarchy.summary.desktop_views_parented_by_workerw, 1);
+    }
+
+    #[test]
+    fn candidate_roots_still_use_bounded_recording() {
+        let shell_window = std::ptr::NonNull::<std::ffi::c_void>::dangling().as_ptr();
+        let mut scan = NativeScan::new(shell_window, 1, WindowClass::Progman);
+        scan.work_units = MAX_ENUMERATION_WORK;
+        assert!(is_candidate_root(WindowClass::WorkerW));
+        assert!(!visit_synthetic_root(
+            &mut scan,
+            WindowClass::WorkerW,
+            false,
+            false,
+            &[]
+        ));
+        assert_eq!(scan.snapshot.failure, Some(ScanFailure::WorkBudgetExceeded));
     }
 }
