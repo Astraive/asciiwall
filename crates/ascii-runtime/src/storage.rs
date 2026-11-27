@@ -2471,54 +2471,22 @@ fn looks_like_relative_local_path(value: &str) -> bool {
     let Some(first) = components.next() else {
         return false;
     };
-    let Some(second_component) = components.next() else {
+    let Some(second) = components.next() else {
         return false;
     };
-    if first.is_empty() || second_component.is_empty() {
-        return false;
-    }
-    let mut final_component = second_component;
-    let mut component_count = 2;
-    for component in components {
-        if component.is_empty() {
-            return false;
-        }
-        component_count += 1;
-        final_component = component;
+    if first.is_empty() || second.is_empty() || components.next().is_some() {
+        return true;
     }
 
-    let relative_prefix = matches!(first, "." | "..");
-    const COMMON_LOCAL_DIRECTORY_ROOTS: &[&str] = &[
-        "documents",
-        "desktop",
-        "downloads",
-        "pictures",
-        "photos",
-        "videos",
-        "movies",
-        "music",
-        "media",
-        "library",
-    ];
-    let recognized_root = relative_prefix
-        || COMMON_LOCAL_DIRECTORY_ROOTS
-            .iter()
-            .any(|root| first.eq_ignore_ascii_case(root));
-    let version_pair = component_count == 2
-        && is_version_component(first)
-        && is_version_component(second_component);
-    if version_pair {
-        return false;
-    }
+    let benign_input_output =
+        first.eq_ignore_ascii_case("input") && second.eq_ignore_ascii_case("output");
+    let numeric_ratio = is_numeric_component(first) && is_numeric_component(second);
+    let version_pair = is_version_component(first) && is_version_component(second);
+    !(benign_input_output || numeric_ratio || version_pair)
+}
 
-    // Any three-component relative path is local-looking regardless of directory names.
-    // For shorter paths, retain the extension and familiar user-directory signals.
-    component_count >= 3
-        || (recognized_root && final_component.starts_with('.'))
-        || final_component
-            .rsplit_once('.')
-            .is_some_and(|(stem, _)| !stem.is_empty())
-        || (recognized_root && !final_component.is_empty())
+fn is_numeric_component(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn is_version_component(value: &str) -> bool {

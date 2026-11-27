@@ -3268,17 +3268,33 @@ fn portable_export_redacts_generic_multicomponent_relative_paths() {
     let source = json!({
         "project_note": "draft is at projects/private-client/drafts",
         "client_note": "review clients/acme-corporation/contracts before sharing",
-        "ordinary_slash_prose": "Choose input/output; the ratio is 3/4."
+        "two_component_path": "note at projects/private-client",
+        "whitespace_path": "draft saved in projects/private client",
+        "ordinary_slash_prose": "Choose input/output; the ratio is 3/4.",
+        "supported_versions": "Supported versions v1.0/v2.0"
     });
     let portable =
         ascii_runtime::storage::PortableExport::from_value(&source, ExportMode::Portable)
             .expect("portable export");
 
-    assert!(portable.content().get("project_note").is_none());
-    assert!(portable.content().get("client_note").is_none());
+    for private_key in [
+        "project_note",
+        "client_note",
+        "two_component_path",
+        "whitespace_path",
+    ] {
+        assert!(
+            portable.content().get(private_key).is_none(),
+            "portable export retained {private_key}"
+        );
+    }
     assert_eq!(
         portable.content()["ordinary_slash_prose"],
         json!("Choose input/output; the ratio is 3/4.")
+    );
+    assert_eq!(
+        portable.content()["supported_versions"],
+        json!("Supported versions v1.0/v2.0")
     );
 }
 
