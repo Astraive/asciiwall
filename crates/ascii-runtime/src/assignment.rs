@@ -411,6 +411,16 @@ impl<A> AssignmentController<A> {
                 return CompletionOutcome::Failed(reason);
             }
         };
+        if let Some(reason) = hard_blocker_reason(self.blockers) {
+            self.state = if self.active.is_some() {
+                state_for(self.blockers)
+            } else {
+                AssignmentState::Unloaded
+            };
+            self.reason = Some(reason);
+            return CompletionOutcome::Failed(reason);
+        }
+
         match host.switch(self.active.as_ref(), attached, completion.transition) {
             Ok(active) => {
                 self.active = Some(active);
@@ -427,8 +437,8 @@ impl<A> AssignmentController<A> {
         }
     }
 
-    /// Adds/removes independent runtime blockers and derives the active assignment's policy state.
-    /// A hard blocker invalidates in-flight replacement work without discarding the old assignment.
+    /// Adds/removes runtime blockers, immediately invalidating hard-blocked preparation while
+    /// preserving any active assignment and keeping unloaded blocker reasons observable.
     pub fn set_blocker(&mut self, blocker: Blocker, present: bool) {
         if matches!(
             self.state,
@@ -446,7 +456,9 @@ impl<A> AssignmentController<A> {
             if self.state == AssignmentState::Preparing && hard_reason.is_some() {
                 self.generation = self.generation.checked_next().unwrap_or(self.generation);
                 self.state = AssignmentState::Unloaded;
-                self.reason = None;
+            }
+            if self.state == AssignmentState::Unloaded {
+                self.reason = reason_for(self.blockers);
             }
             return;
         }

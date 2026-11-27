@@ -125,10 +125,12 @@ impl HostRestrictions {
         }
     }
 
-    /// Returns whether the supplied restriction is present.
+    /// Returns whether all supplied known restrictions are present.
     #[must_use]
     pub const fn contains(self, restriction: u16) -> bool {
-        self.0 & restriction != 0
+        restriction != 0
+            && restriction & !Self::KNOWN_BITS == 0
+            && self.0 & restriction == restriction
     }
 
     /// Returns the encoded, known restriction bits.

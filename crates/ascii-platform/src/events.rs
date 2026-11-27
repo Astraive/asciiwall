@@ -76,10 +76,10 @@ impl PointerButtons {
         }
     }
 
-    /// Returns whether the selected button is down.
+    /// Returns whether all selected known buttons are down.
     #[must_use]
     pub const fn contains(self, button: u8) -> bool {
-        self.0 & button != 0
+        button != 0 && button & !Self::KNOWN_BITS == 0 && self.0 & button == button
     }
 
     /// Returns all currently-down button bits.
