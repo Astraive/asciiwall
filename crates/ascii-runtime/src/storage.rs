@@ -84,6 +84,8 @@ pub enum AtomicWriteStage {
     ParentDirectorySync,
     /// A preserved prior-state copy is about to be renamed into place during rollback.
     RecoveryRollbackRename,
+    /// The previous destination has been synced to a temporary backup, before backup replacement.
+    BackupTemporarySynced,
 }
 
 /// Filesystem error, malformed persisted state, or rejected input.
@@ -1406,6 +1408,12 @@ fn atomic_replace_locked(
     stage(AtomicWriteStage::TemporarySynced)?;
 
     if let (Some((backup_path, _)), Some(old_bytes)) = (backup, previous.as_deref()) {
+        let mut backup_hook = |nested_stage| {
+            if nested_stage == AtomicWriteStage::TemporarySynced {
+                stage(AtomicWriteStage::BackupTemporarySynced)?;
+            }
+            Ok(())
+        };
         atomic_replace_locked(
             backup_path,
             old_bytes,
@@ -1413,7 +1421,7 @@ fn atomic_replace_locked(
             None,
             None,
             AtomicReplaceHooks {
-                stage: &mut |_| Ok(()),
+                stage: &mut backup_hook,
                 before_parent_sync: &mut || Ok(()),
                 before_rollback_rename: &mut || Ok(()),
                 rollback_on_sync_error: None,
