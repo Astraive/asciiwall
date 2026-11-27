@@ -20,8 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Append-only `-CreateMissing` issue-publication mode in `scripts/publish-issues.ps1` with durable `creation_batch` pinning, read-only preservation of existing issues and ledger records, milestone ownership isolation, per-item non-`Status` project custom-field GraphQL batching, offline preview basis reporting, and an isolated scope/preservation regression (`scripts/test-publisher-scope.ps1`) documented in [docs/backlog-publication.md](docs/backlog-publication.md).
 - Full `356`-issue planning publication across `Astraive/asciiwall` (`278`) and `Astraive/asciiwall-library` (`78`) (`39` protected foundation issues plus `317` newly verified `-CreateMissing` issues including `asciiwall/M1`), confirmed by an independent REST/GraphQL audit (`354` native parent edges, `576` native hard blockers including `38` cross-repo edges, `356` Project 4 issue items with zero drafts, and unchanged protected issue/project metadata) documented in [docs/setup-audit.md](docs/setup-audit.md).
 - Dependency-free `crates/ascii-core` COR-001 contracts for bounded ASCII frames, allocator-safe grid preflight, reusable owned cell storage, cancellation, typed displayable errors, and zero-copy validated raster views, with behavior-focused integration tests; updated the [data model contract](docs/architecture/data-model-and-contracts.md) and [E01 implementation plan](docs/plans/engine-implementation-plan.md).
-- Added `ascii-core` package, assignment, and local monitor identities; immutable package-release and assignment-binding conflicts; generation-stale-result guards; and a fixed v1 package-release wire descriptor with exact golden and rejection vectors ([COR-002]).
 - COR-009 content cache identities for conversion, video, and GPU-derived results; source-observation revalidation, byte-budget LRU eviction with explicit resource leases, shared-root accounting and serialized store publication, disk-space reservations, and loss-safe transactional output with recoverable partial artifacts.
+- Added `ascii-core` package, assignment, and local monitor identities; immutable package-release and assignment-binding conflicts; generation-stale-result guards; and a fixed v1 package-release wire descriptor with exact golden and rejection vectors ([COR-002]).
 - Bounded `ascii-convert` glyph tables with measured cell-clipped masks, descriptors, deterministic fingerprints, and typed font-validation failures ([FNT-001](docs/engine/glyph-matching-and-fonts.md)).
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
@@ -30,7 +30,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added COR-008 storage support for platform-specific roots, a versioned atomic JSON install registry, schema-validated configuration with last-good recovery, importer transaction journaling, bounded redacted diagnostics, and privacy-filtered portable exports, with focused storage transaction tests.
 - Added a process-local `RasterToAsciiConsumer` that receives the bounded handoff, copies into construction-time budgeted scratch outside conversion, validates descriptor-derived raster/frame metadata, and invokes `ascii-convert`; the returned wrapper retains its acknowledged lease/output permit until dropped, including across generation invalidation. This does not add a native mapping, production transport or decoder owner, crash/disconnect recovery, or GPU/device completion.
 - Added the first-party `ascii-scene` SCN-001 contract: validated typed parameters and descriptor limits, a sealed executable generator trait with generic `SceneRuntime`, SplitMix64 node/effect streams, bounded Q16.16 simulation, reusable character buffers, capability-filtered snapshots, deterministic normalized-pointer attraction and recorded-event replay, aggregate resource reservations, and exact-step export with explicit idle fallback. No CFG/PKG schema, application UI, wallpaper, thumbnail, or native consumer is added.
-- COR-009 content cache identities for conversion, video, and GPU-derived results; source-observation revalidation, byte-budget LRU eviction with explicit resource leases, disk-space reservations, and loss-safe transactional output with recoverable partial artifacts.
 
 ### Changed
 
@@ -123,6 +122,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
   explicitly labeled nonportable local backups.
+- COR-009 cache hardening preserves output bytes written after a disk-probe snapshot, captures
+  absolute output destinations, resolves case-variant registrations using filesystem semantics,
+  atomically publishes marked cache roots, and retains a process-wide shared file lock per pinned
+  entry until all its leases are acknowledged, even after cache and lease handles drop.
+  Lease acknowledgement remains retryable; retained-byte accounting, OS file locks, and failed-write
+  protections remain.
+- [COR-009] Bind GPU cache identity to typed GPU-stage uniforms, including color/effect values and pointer, click, and window interaction controls.
+- [COR-009] Resolve Windows drive-relative export destinations to stable absolute targets before writer callbacks, preserving publication when a callback changes the process CWD.
+- [COR-009] Serialize operations on a shared cache root with a process-local per-root mutex before
+  the OS file lock, preserving root accounting and generated-file publication across Windows threads.
+- [COR-009] Persist a monotonic generated-file ID high-water mark before file creation, reconcile
+  legacy files, and fail closed on damaged initialized or exhausted counter state to prevent
+  filename reuse after eviction.
+- [COR-009] Sync the managed directory after durably creating the high-water counter and initialization
+  marker on platforms that support directory sync, preserving ID evidence across eviction.
+- [COR-009] Update existing generated-file ID high-water marks via a synced sibling and
+  target-specific replacement, preserving the prior counter on publication failure.
+- [COR-009] Stage initial counter bytes in a fully written, synced sibling before no-clobber
+  publication; partial-write failures leave no final counter behind.
+- [COR-009] Use a synced recoverable backup swap where filesystems cannot replace an existing
+  high-water counter name; transactional output publication remains no-clobber on those targets.
+- [COR-009] Recover malformed uninitialized high-water counters from live generated IDs; backup
+  recovery retains the greatest valid mark and restores it durably, while fallback output
+  publication continues to reject existing destinations.
+- [COR-009] Sync the marked-cache staging directory before publishing it and sync the root after rename
+  on platforms that support directory sync; report either barrier's failure.
+- [COR-009] Sync destination directories after transactional output replacement and before registering
+  output identities; directory-sync failures return an unregistered transaction error.
 - [COR-008] Redact user-qualified home paths in generic portable-export strings, including
   `=`-prefixed values, while preserving tilde text without a path; reject over-limit journal paths
   before cloning and retain the final whole-document size guard.
@@ -168,4 +195,3 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reject contain transforms when f64 rounding cannot preserve centered letterbox margins at extreme destination sizes (`#294`).
 - Normalize box-sampling overlap per axis before combining weights, allowing valid subnormal footprints without requiring representable absolute 2D area (`[CNV-001]`).
 - Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
-- COR-009 cache eviction uses marked ownership scopes and OS file locks; output reservations charge retained bytes, suppressed I/O failures cannot publish partial results, and filesystem file identity clears replaced-output registrations across case aliases.
