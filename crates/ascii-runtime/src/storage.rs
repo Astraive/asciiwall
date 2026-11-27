@@ -1430,6 +1430,8 @@ fn atomic_replace_locked(
                 Err(error) => Err(error),
             };
             if let Err((rollback_error, retained_recovery_copy)) = rollback_result {
+                let retained_recovery_copy = retained_recovery_copy
+                    .map(|path| mark_recovery_copy_retained(destination, &path));
                 return Err(StorageError::RecoveryRollbackFailed {
                     sync_error,
                     rollback_error,
@@ -1480,6 +1482,7 @@ fn prepare_replace_rollback(
     let parent = destination
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
+    cleanup_stale_recovery_copies(destination)?;
     match fs::symlink_metadata(destination) {
         Ok(metadata) => {
             if metadata.len() > max_bytes {
@@ -1503,6 +1506,93 @@ fn prepare_replace_rollback(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ReplaceRollback::Remove),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Removes crash-orphaned rollback copies before a new rollback slot is allocated.
+/// Explicitly retained copies use a distinct name and are never removed here.
+fn cleanup_stale_recovery_copies(destination: &Path) -> Result<(), StorageError> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no file name"))?
+        .to_string_lossy();
+    let prefix = format!(".ascii-runtime-{name}.recovery-original-");
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let sequence = file_name
+            .strip_prefix(&prefix)
+            .and_then(|suffix| suffix.strip_suffix(".tmp"))
+            .filter(|sequence| {
+                !sequence.is_empty() && sequence.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        if let Some(sequence) = sequence
+            && entry.file_type()?.is_file()
+            && retained_recovery_marker(destination, sequence).exists()
+        {
+            continue;
+        }
+        if sequence.is_some() && entry.file_type()?.is_file() {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn retained_recovery_marker(destination: &Path, sequence: &str) -> PathBuf {
+    let name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    destination
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".ascii-runtime-{name}.recovery-retained-{sequence}.marker"
+        ))
+}
+
+fn mark_recovery_copy_retained(destination: &Path, copy: &Path) -> PathBuf {
+    let Some(name) = destination.file_name() else {
+        return copy.to_path_buf();
+    };
+    let Some(copy_name) = copy.file_name().and_then(|name| name.to_str()) else {
+        return copy.to_path_buf();
+    };
+    let prefix = format!(
+        ".ascii-runtime-{}.recovery-original-",
+        name.to_string_lossy()
+    );
+    let Some(sequence) = copy_name
+        .strip_prefix(&prefix)
+        .and_then(|suffix| suffix.strip_suffix(".tmp"))
+        .filter(|sequence| {
+            !sequence.is_empty() && sequence.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    else {
+        return copy.to_path_buf();
+    };
+    let Some(parent) = destination.parent() else {
+        return copy.to_path_buf();
+    };
+    let retained = parent.join(format!(
+        ".ascii-runtime-{}.recovery-retained-{sequence}.tmp",
+        name.to_string_lossy()
+    ));
+    if fs::rename(copy, &retained).is_ok() {
+        return retained;
+    }
+    let marker = retained_recovery_marker(destination, sequence);
+    if let Ok(mut file) = OpenOptions::new().write(true).create_new(true).open(marker) {
+        let _ = file.write_all(copy.to_string_lossy().as_bytes());
+        let _ = file.sync_all();
+    }
+    copy.to_path_buf()
 }
 
 fn read_guarded_state(
