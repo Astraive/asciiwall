@@ -1,0 +1,1454 @@
+{
+  "schema": "asciiwall.m1-gate-receipt/v1",
+  "receipt_version": "draft-10",
+  "recorded_on": "2026-11-23",
+  "decision": "no-go",
+  "record_status": "draft_pending_independent_signoff",
+  "immutability": {
+    "snapshot_identity": "The Git commit containing this file is the immutable identity of this receipt snapshot.",
+    "amendment_policy": "Future evidence or corrections must be recorded in a new committed receipt revision; this draft is not a signoff and must not be silently rewritten as one.",
+    "previous_snapshot_hashes": {
+      "signoff-revision-7-2026-11-22.json": "f46e2710254dc3111eb79a28750cc2df59c15c28d932808ffdc54dd9baaa7916",
+      "CURRENT.md-before-revision-8": "350c1079143d1cc073d98fdfc51e48ca732915ca4b51e45d6260a2c4319728e7",
+      "signoff-revision-8-2026-11-22.json": "79a5e7aa5418b9a72be3e6fde056fdfd471e434074e91497ac178175f4a2d81a",
+      "CURRENT.md-before-revision-9": "c14e74ed21ce8432e91b25023babd97c47b0387cf55c0d132add09f8eb207162"
+    }
+  },
+  "gate": {
+    "issue": 211,
+    "url": "https://github.com/Astraive/asciiwall/issues/211",
+    "title": "[QA-M1] Sign off M1 ASCII Engine Prototype acceptance gate",
+    "state_observed": "OPEN",
+    "status_change": "none",
+    "m1_acceptance_status": "BLOCKED",
+    "completion_claim": false,
+    "supported_scope_claimed": []
+  },
+  "candidate": {
+    "repository": "Astraive/asciiwall",
+    "source_revision": {
+      "branch": "main",
+      "sha": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
+      "meaning": "origin/main at refreshed 2026-11-16 receipt snapshot; fetched and matched to the live origin/main ref after CNV-002 PR #307 merged"
+    },
+    "integrated_candidate_exists": false,
+    "binary_sha256": null,
+    "binary_sha256_status": "unavailable; no integrated M1 candidate binary was identified or built; the separate CLI branch binary is recorded only as component evidence",
+    "fixture_bundle_sha256": null,
+    "fixture_bundle_sha256_status": "unavailable; no single M1 candidate fixture bundle is identified",
+    "settings_bundle_sha256": null,
+    "settings_bundle_sha256_status": "unavailable; no single M1 candidate settings bundle is identified",
+    "artifact_sha256": null,
+    "artifact_sha256_status": "unavailable; branch-scoped CLI artifacts exist, but no M1 acceptance artifact bundle was produced",
+    "main_tree_observations": [
+      {
+        "path": "apps/cli",
+        "status": "absent",
+        "source_revision": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea"
+      },
+      {
+        "path": "crates/ascii-convert/src/density.rs",
+        "status": "absent",
+        "source_revision": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea"
+      },
+      {
+        "path": "crates/ascii-convert/src/color.rs",
+        "status": "present",
+        "source_revision": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea"
+      }
+    ],
+    "interpretation": "The candidate.source_revision and its three main_tree_observations above are the explicitly historical 2026-11-16 candidate snapshot at main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; they do not describe current main. Current main is separately observed at 7552713a9c8b4515904d3e562c8b1c188a9d8676 below. Density and raster-budget changes are now on main via merged PRs #332 and #339, but no integrated M1 candidate exists because apps/cli is still absent and full gate evidence/sign-offs are missing."
+  },
+  "current_main_snapshot": {
+    "observed_on": "2026-11-22",
+    "source_revision": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+    "tree_observations": [
+      {
+        "path": "apps/cli",
+        "status": "absent"
+      },
+      {
+        "path": "crates/ascii-convert/src/density.rs",
+        "status": "present"
+      },
+      {
+        "path": "crates/ascii-convert/src/color.rs",
+        "status": "present"
+      },
+      {
+        "path": "crates/ascii-media/src/image.rs",
+        "status": "present"
+      }
+    ],
+    "merged_component_changes": [
+      {
+        "pull_request": 332,
+        "issue": 118,
+        "state": "MERGED",
+        "head_sha": "20d84094bf23008948c44c6baf14997297704ee5",
+        "merge_commit": "7bb0a7bebe39c214ce0b3e7b221c8d2152ce35bd",
+        "merged_on": "2026-11-21"
+      },
+      {
+        "pull_request": 339,
+        "state": "MERGED",
+        "head_sha": "fa18a2a145a7fc2fd1a2ba6471a7389e984e5d82",
+        "merge_commit": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+        "merged_on": "2026-11-21"
+      }
+    ],
+    "interpretation": "Density conversion is on main via merged PR #332 and raster-budget changes via merged PR #339; PR #314 is closed unmerged and issue #118 is closed. apps/cli remains absent. No integrated M1 candidate or go decision is implied because CLI is absent and full gate evidence and sign-offs remain missing."
+  },
+  "receipt_branch_provenance": {
+    "branch": "test/qa-m1-no-go-receipt-linear",
+    "base_revision_at_branch_creation": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
+    "current_main_revision_at_capture": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+    "scope": "Receipt and branch-scoped evidence only. Branch creation was based on historical main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; current main at this revision-5 capture remains 7552713a9c8b4515904d3e562c8b1c188a9d8676. This branch preserves main and does not integrate a candidate.",
+    "pre_edit_pr313_snapshot": {
+      "observed_on": "2026-11-23",
+      "pull_request": 313,
+      "state": "OPEN",
+      "draft": true,
+      "head_ref": "test/qa-m1-no-go-receipt-linear",
+      "head_sha": "f7158c2cc2cbe82a7a44cd5750e716c8e6b05659",
+      "base_ref": "main",
+      "base_sha": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+      "issue": 211,
+      "issue_state": "OPEN",
+      "scope": "Live GitHub queries on 2026-11-23 confirmed PR #313 OPEN/DRAFT at exact head f7158c2cc2cbe82a7a44cd5750e716c8e6b05659 (parent 4f60cdc066bfbb798ab273e16e9ff632f3ca136c), based on main 7552713a9c8b4515904d3e562c8b1c188a9d8676; issue #211 is OPEN. This is the pre-edit state for revision 9; this preparation changes only receipt files and does not change PR or issue metadata.",
+      "head_parent_sha": "4f60cdc066bfbb798ab273e16e9ff632f3ca136c"
+    }
+  },
+  "entry_criteria": [
+    {
+      "criterion": "Bounded core frames exist",
+      "status": "PASS",
+      "scope": "Core frame implementation exists on the recorded main source; this alone does not establish the M1 gate."
+    },
+    {
+      "criterion": "Font descriptors exist",
+      "status": "PASS",
+      "scope": "Font descriptor and glyph sources are present on the historical candidate snapshot at crates/ascii-convert/src/font.rs and crates/ascii-convert/src/glyphs.rs. Current FNT-002 replacement PR #334 is OPEN/DRAFT at head 5b677c503c27ceb29417391504417a7076945383 on base main 7552713a9c8b4515904d3e562c8b1c188a9d8676; issue #120 is OPEN. Repertoire/editor/clip/export acceptance remains incomplete."
+    },
+    {
+      "criterion": "Image conversion exists in the M1 candidate",
+      "status": "BLOCKED",
+      "scope": "Historical candidate snapshot @539 lacked density conversion. Current main @7552713a9c8b4515904d3e562c8b1c188a9d8676 has density via merged PR #332 (head 20d84094bf23008948c44c6baf14997297704ee5, merge 7bb0a7bebe39c214ce0b3e7b221c8d2152ce35bd) and raster-budget changes via merged PR #339 (merge 7552713a9c8b4515904d3e562c8b1c188a9d8676). PR #314 closed unmerged and issue #118 is CLOSED. CNV-003 replacement PR #323 is OPEN/DRAFT at head 9fd81180c76393b353afb15d796046edd1920974 on current main, issue #130 OPEN. Despite these source changes, apps/cli is absent and full gate evidence/sign-offs are missing, so no integrated M1 candidate exists."
+    },
+    {
+      "criterion": "Standalone CLI build exists for the M1 candidate",
+      "status": "BLOCKED",
+      "scope": "The 0bbbf8da69aae5758b20d3ee34d38216313309d6 CLI smoke is a historical branch-scoped monochrome density-to-TXT result and does not evidence current PR #338. PR #338 is OPEN/DRAFT at head c6860756c0d42c9d42e99f6087f35fca7b3fe816, based on PR #333 head a6f16b18bfb92c5150ca06dab4c6675385f6f5c0; issue #129 is OPEN. apps/cli remains absent from current main @7552713a9c8b4515904d3e562c8b1c188a9d8676, and structural matching, PNG export, config-registry loading, and integrated M1 acceptance are not established."
+    },
+    {
+      "criterion": "Rights-cleared small fixtures are pinned to one integrated source/settings/binary candidate",
+      "status": "BLOCKED",
+      "scope": "Some component PRs report hashes for synthetic fixtures/settings, but no M1-wide fixture/settings bundle is tied to an integrated source and binary."
+    }
+  ],
+  "exit_criteria": [
+    {
+      "criterion": "Deterministic CPU character-grid goldens on the exact M1 candidate",
+      "status": "BLOCKED",
+      "evidence": "A component-only CLI golden was generated at branch head 0bbbf8da69aae5758b20d3ee34d38216313309d6 and matched byte-for-byte across three runs (output SHA-256 cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623). It is not an integrated M1 source/binary/fixture/settings candidate, so the exact-candidate gate criterion remains unmet."
+    },
+    {
+      "criterion": "Aspect, color, alpha, stride, overflow, and invalid-image checks pass on the exact M1 candidate",
+      "status": "BLOCKED",
+      "evidence": "Portable component tests reported in draft PRs include passing synthetic subcases, but they are split across unmerged heads and do not provide a complete reviewer-linked M1 scenario receipt."
+    },
+    {
+      "criterion": "Unsupported HDR behavior is explained",
+      "status": "PASS",
+      "scope": "Historical 2026-11-16 component evidence: QA-102 PR #305 reported a synthetic conversion-boundary test for an actionable unsupported HDR/wide-gamut error on its own head. This remains component evidence for that historical head only; it does not establish current QA-102/EC-010 or M1 candidate acceptance."
+    },
+    {
+      "criterion": "Firewall-denied text and PNG conversion is recorded",
+      "status": "NOT RUN",
+      "evidence": "No firewall-denied end-to-end CLI result or evidence artifact exists. The positive component smoke used local files with --offline; that is not a denied-firewall test. The tested CLI source reports PNG export unavailable."
+    },
+    {
+      "criterion": "Named native OS/session/compositor/GPU/driver/permission state and manual observations are recorded",
+      "status": "NOT RUN",
+      "evidence": "No native surface-owning host observation or M1 manual evidence was supplied. CI runner labels and a component-test OS report are not native acceptance evidence."
+    }
+  ],
+  "scenario_outcomes": [
+    {
+      "scenario_ids": [
+        "QA-101/EC-001",
+        "QA-101/EC-002",
+        "QA-101/EC-003",
+        "QA-101/EC-005"
+      ],
+      "status": "PASS",
+      "scope": "Historical 2026-11-16 component results only: 4 passing tests were reported on PR #304 head 9ad6656cb6e024f221977e025d1decd6afca88e7. PR #304 has since closed; these results do not establish current QA-101 or M1 acceptance.",
+      "m1_acceptance_status": "BLOCKED",
+      "evidence_url": "https://github.com/Astraive/asciiwall/pull/304"
+    },
+    {
+      "scenario_ids": [
+        "QA-101/EC-004"
+      ],
+      "status": "NOT RUN",
+      "scope": "Historical 2026-11-16 PR #304 stack stated there was no decoder-to-converter callsite and no EXIF fixture or decoder result; PR #304 has since closed. Current QA-101 is tracked by PR #335, and no EC-004 result is claimed here.",
+      "evidence_url": "https://github.com/Astraive/asciiwall/pull/304"
+    },
+    {
+      "scenario_ids": [
+        "QA-101/EC-004"
+      ],
+      "status": "PASS",
+      "scope": "Narrow portable automated decoder-to-converter regression only, reported at exact QA-101 PR #335 head 2556847e7ed71289f43f37bada0b5166cf28436f on main 7552713a9c8b4515904d3e562c8b1c188a9d8676. The public decode_image → convert_density_detailed path applies EXIF orientation 6 once before density-grid sizing. This is not authenticated QA-101 acceptance, a candidate-wide receipt, native/manual evidence, or QA-M1 acceptance.",
+      "m1_acceptance_status": "BLOCKED",
+      "evidence_url": "https://github.com/Astraive/asciiwall/pull/335",
+      "evidence_report_updated_at": "2026-11-21T22:59:42Z",
+      "related_issue_evidence_url": "https://github.com/Astraive/asciiwall/issues/77#issuecomment-7070569029",
+      "work_item_snapshot": {
+        "issue": 77,
+        "issue_state": "OPEN",
+        "pull_request": 335,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "2556847e7ed71289f43f37bada0b5166cf28436f",
+        "base_ref": "main",
+        "base_sha": "7552713a9c8b4515904d3e562c8b1c188a9d8676"
+      },
+      "tested_source_test_revision": "2556847e7ed71289f43f37bada0b5166cf28436f",
+      "test_source_path": "crates/ascii-convert/tests/qa_101_input_conversion.rs",
+      "source_sha256": "7bccff449301fbe3776824fd98a6faec6a299fba2d33a087c766b7d657e4f2d9",
+      "source_sha256_status": "INDEPENDENTLY COMPUTED SHA-256 of raw Git blob bytes at source revision 2556847e7ed71289f43f37bada0b5166cf28436f; see source_file_hashes for all recovered files.",
+      "test_source_sha256": "3c4e8f520db5f49ea252ede8180537cf8ccc6fddcbcd671fa315cfcb20919d7c",
+      "test_source_sha256_status": "INDEPENDENTLY COMPUTED SHA-256 of the raw Git blob at 2556847e7ed71289f43f37bada0b5166cf28436f; this is test source, not a compiled test-executable hash.",
+      "test_harness_sha256": null,
+      "test_harness_sha256_status": "UNAVAILABLE; no SHA-256 of the exact compiled test executable is recorded. Source-file hashes do not identify compiled executable bytes.",
+      "candidate_binary_sha256": null,
+      "candidate_binary_sha256_status": "No integrated M1 candidate/application binary was produced or identified; no candidate binary hash is reported.",
+      "api_path": "ascii_media::decode_image → ascii_convert::convert_density_detailed",
+      "orientation_assertions": {
+        "exif_orientation": 6,
+        "applied_once_before_density_grid_sizing": true,
+        "oriented_source_dimensions": [
+          3,
+          4
+        ],
+        "display_dimensions": [
+          24,
+          36
+        ],
+        "display_rect": [
+          0,
+          2,
+          24,
+          32
+        ],
+        "output_grid_dimensions": [
+          3,
+          3
+        ],
+        "grid_from_unoriented_dimensions_would_be": [
+          3,
+          2
+        ]
+      },
+      "fixtures": {
+        "baseline_jpeg": {
+          "size_bytes": 355,
+          "sha256": "90f84b4bf806830d877894c41bc6ab5b0688565237094060abeca4b2fdee4982",
+          "reported_status": "Source comment labels the embedded fixture a rights-cleared synthetic JPEG; this is not separate license evidence."
+        },
+        "exif_orientation_6_jpeg": {
+          "size_bytes": 391,
+          "sha256": "5bc7485e75366ad9e771708914faa9f59a81a27865268d2f1c64fe9d6a997f08",
+          "reported_status": "Synthetic EXIF-6 variant derived from the embedded baseline by the source helper; no separate license evidence is recorded."
+        },
+        "decoded_oriented_raster": {
+          "dimensions": [
+            3,
+            4
+          ],
+          "format": "rgb8-srgb-opaque",
+          "sha256": "9152436c71254a3570f070f6d2f8b57b1a8e60eb3e85349c8792759d6be53f66",
+          "sha256_scope": "Domain-separated test-record digest over format, dimensions, row stride, and decoded pixel bytes; not SHA-256 of decoded pixel bytes alone.",
+          "sha256_recipe": "SHA-256 input order: byte string `QA-101 raster fixture v1` followed by NUL; format label UTF-8 bytes; one NUL byte; width as u32 little-endian; height as u32 little-endian; row_stride converted to u64 and encoded little-endian; decoded pixel bytes."
+        },
+        "fixture_provenance": {
+          "status": "PARTIAL_SOURCE_BACKED",
+          "source_file_path": "crates/ascii-media/tests/image_decode_jpeg_controls.rs",
+          "source_file_sha256": "89df432d6298a96e13d61b20ac36ca0b43fb8828c76a5f562c1b85e3faccac2a",
+          "source_file_sha256_scope": "Raw Git blob bytes at source revision 2556847e7ed71289f43f37bada0b5166cf28436f; not a hash of the encoded JPEG fixture bytes.",
+          "description": "The source comments describe an embedded synthetic 4x3 grayscale baseline JPEG with samples [20,70,120,170,35,85,135,185,50,100,150,200], quality=95, subsampling=0, and optimize=false. The QA-101 test source embeds the baseline and derives its EXIF-6 variant by prepending one APP1 segment containing Exif NUL NUL and a little-endian TIFF IFD0 Orientation (0x0112, SHORT, count 1, value 6) entry before the JPEG body.",
+          "license_and_external_provenance_status": "UNAVAILABLE; the source comment’s “rights-cleared” wording is only a source label. No distinct raw-fixture license evidence or external provenance record is present; no license or external origin is claimed."
+        }
+      },
+      "raw_fixture_provenance_and_license_status": "PARTIAL source-backed synthetic-JPEG recipe and EXIF-6 derivation are recorded in fixtures.fixture_provenance. The source comment’s rights-cleared label is not separate license evidence; distinct raw-fixture license evidence and external provenance remain unavailable.",
+      "conversion_settings_sha256": null,
+      "conversion_settings_sha256_status": "UNAVAILABLE; the test source defines a settings-digest reporter, but no exact captured digest or persistent stdout is retained. No value is inferred.",
+      "automated_test_runs": {
+        "targeted_local": {
+          "command": "cargo test --locked -p ascii-convert --test qa_101_input_conversion -- --nocapture",
+          "tested_source_test_revision": "2556847e7ed71289f43f37bada0b5166cf28436f",
+          "status": "PASS",
+          "tests_passed": 5,
+          "output_flags": {
+            "acceptance_receipt": "not-authenticated",
+            "run_provenance": "not-run",
+            "native_provenance": "not-run"
+          }
+        },
+        "ascii_media_package": {
+          "command": "cargo test --locked -p ascii-media",
+          "tested_source_test_revision": "2556847e7ed71289f43f37bada0b5166cf28436f",
+          "status": "PASS",
+          "tests_passed": 55,
+          "suites": 5
+        },
+        "ascii_convert_package": {
+          "command": "cargo test --locked -p ascii-convert",
+          "tested_source_test_revision": "2556847e7ed71289f43f37bada0b5166cf28436f",
+          "status": "PASS",
+          "tests_passed": 84,
+          "suites": 8
+        },
+        "workspace": {
+          "command": "cargo test --locked --workspace",
+          "tested_source_test_revision": "2556847e7ed71289f43f37bada0b5166cf28436f",
+          "status": "PASS",
+          "tests_passed": 162,
+          "suites": 16
+        },
+        "all_targets_check": {
+          "command": "cargo check --locked --workspace --all-targets",
+          "status": "PASS"
+        },
+        "formatting": {
+          "command": "cargo fmt --all -- --check",
+          "status": "PASS"
+        },
+        "strict_clippy": {
+          "command": "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
+          "status": "PASS"
+        },
+        "repository_quality": {
+          "command": "python scripts/check-repository.py",
+          "status": "PASS",
+          "markdown_files_checked": 127,
+          "json_files_checked": 3
+        },
+        "exact_head_actions": {
+          "portable_and_repository_quality_runs": [
+            44959539581,
+            44951529097,
+            44938890622,
+            44921646120
+          ],
+          "security_run": 44921646110,
+          "status": "PASS",
+          "source_head": "2556847e7ed71289f43f37bada0b5166cf28436f",
+          "note": "The reviewed report states the Actions logs checked out PR merge ref 446bbc6280749b61ef4a1c4fb271c0cedab275ea; the clean detached local run above is reported at the exact source head."
+        }
+      },
+      "persistent_run_log_status": "NOT RETAINED; no persistent local run-log artifact or exact test stdout is linked by the reviewed report.",
+      "environment": {
+        "reported_checkout": "Clean detached D-drive checkout at the exact source head.",
+        "host_os_build": null,
+        "host_os_build_status": "UNAVAILABLE; not stated in the reviewed exact-head report.",
+        "device_gpu_driver": null,
+        "device_gpu_driver_status": "UNAVAILABLE; not stated in the reviewed exact-head report.",
+        "session_compositor": null,
+        "permission_state": null,
+        "native_manual_status": "NOT RUN",
+        "environment_status": "UNAVAILABLE beyond the reported clean detached D-drive checkout; no account username recorded."
+      },
+      "independent_code_review": {
+        "reviewer": "Luna max",
+        "reviewed_on": null,
+        "reviewed_on_status": "UNAVAILABLE; the reviewed evidence gives no explicit reviewer date; a posting timestamp does not establish the review date.",
+        "reviewed_base_sha": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+        "reviewed_head_sha": "2556847e7ed71289f43f37bada0b5166cf28436f",
+        "status": "PASS",
+        "findings": "No actionable findings.",
+        "evidence_url": "https://github.com/Astraive/asciiwall/pull/335",
+        "scope": "Read-only full-diff code review only; not independent scenario acceptance or M1 sign-off."
+      },
+      "acceptance_receipt_status": "NOT AUTHENTICATED",
+      "run_provenance_status": "NOT RUN",
+      "native_provenance_status": "NOT RUN",
+      "native_manual_acceptance_status": "NOT RUN",
+      "source_sha256_path": "crates/ascii-media/src/image.rs",
+      "source_file_hashes": {
+        "source_revision": "2556847e7ed71289f43f37bada0b5166cf28436f",
+        "scope": "Each value is SHA-256 of the raw Git blob bytes at the pinned revision; no line-ending normalization or executable hash is implied.",
+        "files": [
+          {
+            "path": "crates/ascii-media/src/image.rs",
+            "role": "public image decoder implementation",
+            "sha256": "7bccff449301fbe3776824fd98a6faec6a299fba2d33a087c766b7d657e4f2d9"
+          },
+          {
+            "path": "crates/ascii-convert/src/density.rs",
+            "role": "density conversion implementation",
+            "sha256": "1d0d4e6dad33ebb64530e5721fa560dc6a55a593ff8fec7a3d08b2764ad7efe2"
+          },
+          {
+            "path": "crates/ascii-convert/src/sampling.rs",
+            "role": "sampling implementation",
+            "sha256": "eab422200547715e13317d0dc0c8c40bc0da3480c788a8e75683d92a514eaca1"
+          },
+          {
+            "path": "crates/ascii-convert/tests/qa_101_input_conversion.rs",
+            "role": "QA-101 integration test source",
+            "sha256": "3c4e8f520db5f49ea252ede8180537cf8ccc6fddcbcd671fa315cfcb20919d7c"
+          },
+          {
+            "path": "crates/ascii-convert/tests/support/mod.rs",
+            "role": "QA-101 test support module source",
+            "sha256": "136d1fcc5fad688473d2e8fe373c46cfb0da5c4a25e944208f6f0b982a19a292"
+          },
+          {
+            "path": "crates/ascii-convert/tests/support/synthetic_font.rs",
+            "role": "QA-101 synthetic-font generator source",
+            "sha256": "8a0b3b4e8ee150d6d16b084e51200525112ed6424855afa652a55ed3274176c8"
+          },
+          {
+            "path": "crates/ascii-media/tests/image_decode_jpeg_controls.rs",
+            "role": "JPEG fixture recipe and EXIF-6 derivation source",
+            "sha256": "89df432d6298a96e13d61b20ac36ca0b43fb8828c76a5f562c1b85e3faccac2a"
+          }
+        ]
+      }
+    },
+    {
+      "scenario_ids": [
+        "QA-102/EC-006",
+        "QA-102/EC-007",
+        "QA-102/EC-008"
+      ],
+      "status": "PASS",
+      "scope": "Historical 2026-11-16 synthetic direct-converter coverage only, reported in QA-102 PR #305. The PR #305 EC-010 PASS is superseded historical evidence. EC-008 decoder-to-converter traversal was separately NOT RUN; no current-head scenario acceptance is inferred.",
+      "m1_acceptance_status": "BLOCKED",
+      "evidence_url": "https://github.com/Astraive/asciiwall/pull/305"
+    },
+    {
+      "scenario_ids": [
+        "QA-102/EC-009"
+      ],
+      "status": "NOT RUN",
+      "scope": "Historical PR #305 stack stated it had no restricted-worker/UI safe-error path. QA-004 #35 is a hard dependency, and no QA-004 receipt is present in this revision.",
+      "evidence_url": "https://github.com/Astraive/asciiwall/pull/305"
+    },
+    {
+      "scenario_ids": [
+        "QA-102/EC-010"
+      ],
+      "status": "PASS",
+      "historical_stale_pass": {
+        "pull_request": 305,
+        "head_sha": "fd7828e98db7e63057a4ba51d46739d6f201e4b7",
+        "historical_result": "PASS",
+        "current_interpretation": "SUPERSEDED_HISTORICAL"
+      },
+      "scope": "Existing narrow portable EC-010 decoder-budget execution remains bound only to exact PR #341 source/test revision e283576e17b87769d21982bf4b07cbc6c15b9b32. Two Windows x64 automated tests established that the persisted oversized JPEG is rejected with BudgetExceeded(RasterBytes) before full decoded-output allocation. This does not prove rejection before any allocation: encoded-input snapshot/header work may allocate, and the sentinel covers only the decoded-output allocation seam. At preparation, PR #341 is OPEN/DRAFT at exact code/test head 2f6fd69a102139add62679b9b49c59afd3adf9e1 (direct parent c530da65f10dd07b3bda340a8fda48f34549d264; earlier docs-only commit 8075a1af6ddf17c349be7e43e68cbbcc1b51e7b1). The local/CI QA-102 input-conversion component tests at 2f6 are documented separately and are not a new EC-010-specific execution receipt. EC-010 tested_source_test_revision, execution commands/log details, test harness binaries, fixture/hash, source hashes, and allocation caveat remain tied to e283576e17b87769d21982bf4b07cbc6c15b9b32. No integrated M1 application, worker/UI flow, restricted worker, native/manual scenario, or GPU path was exercised. QA-102 acceptance and QA-M1 remain BLOCKED.",
+      "m1_acceptance_status": "BLOCKED",
+      "evidence_url": "https://github.com/Astraive/asciiwall/pull/341",
+      "tested_source_test_revision": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
+      "source_sha256": {
+        "crates/ascii-media/src/image.rs": "ebc68d7cb8d8a06602fee1468e75a806b2590660edee2e56d706810f67a77e99",
+        "crates/ascii-media/tests/image_decode_jpeg_controls.rs": "2f9bdac858bce36066ece90247fcbca6d634dda1d85702b7f920e03f72211c3f",
+        "crates/ascii-media/Cargo.toml": "a41cfb18a650c428398d40f6a44e0205b25d1f2b0823c6591a6528ec53bd0cca",
+        "Cargo.lock": "a1af433632c3d70a159a748480cec7eaae4018dbc66dfa13deb14b48108e6939"
+      },
+      "candidate_binary_sha256": null,
+      "candidate_binary_sha256_status": "No integrated M1 candidate or application binary was produced or identified. The two locally rehashed Cargo Running executables below are Rust test harnesses, not candidate binaries.",
+      "fixture": {
+        "path": "crates/ascii-media/tests/fixtures/ec010-oversized-budget.jpg",
+        "size_bytes": 29300,
+        "sha256": "7ea9607205ef59dd2be26c992ced846f679e58501f0462b86abe62c50b59a320",
+        "rights_status": "rights-cleared synthetic JPEG",
+        "independently_inspected_format": "Baseline JPEG, 1024x1024 pixels, 3 components",
+        "expected_decoded_rgb_output_bytes": 3145728
+      },
+      "automated_test_runs": {
+        "local": {
+          "command": "cargo test --locked --package ascii-convert --test qa_102_input_conversion",
+          "tested_source_test_revision": "1d44523e9365a98bc4d301a53d71d5552eb99dfb",
+          "status": "PASS",
+          "tests_passed": 6
+        },
+        "github_actions": {
+          "head_sha": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
+          "portable_and_repository_run_url": "https://github.com/Astraive/asciiwall/actions/runs/44940619318",
+          "portable_and_repository_status": "PASS",
+          "runner_labels": [
+            "ubuntu-latest",
+            "macos-latest",
+            "windows-latest"
+          ],
+          "qa_102_suite": "6/6 passed",
+          "ec010_decoder_budget_tests": "Both tests passed on each OS",
+          "security_run_url": "https://github.com/Astraive/asciiwall/actions/runs/44940619320",
+          "security_status": "PASS"
+        }
+      },
+      "environment": {
+        "ci_runner_labels": [
+          "ubuntu-latest",
+          "macos-latest",
+          "windows-latest"
+        ],
+        "host_build_session_compositor_gpu_driver_permission": "NOT REPORTED BY CI",
+        "native_manual_status": "NOT RUN",
+        "limits": "Portable CI runners are not a named native surface-owning host or M1 acceptance tuple."
+      },
+      "independent_code_review": {
+        "reviewer": "Fresh Luna max full-diff review",
+        "reviewed_on": "2026-11-22",
+        "reviewed_head_sha": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
+        "status": "PASS",
+        "findings": "No actionable defect",
+        "scope": "Code review only; not independent scenario reviewer/sign-off."
+      },
+      "historical_superseded_pr337_head": {
+        "head_sha": "623ace74feaf70bd555398d51b4492a154fb8571",
+        "current_interpretation": "SUPERSEDED_HISTORICAL",
+        "recorded_in_revision": 3
+      },
+      "replacement_pr341": {
+        "pull_request": 341,
+        "state": "OPEN_DRAFT",
+        "head_ref": "test/qa-102-main-r2",
+        "head_sha": "2f6fd69a102139add62679b9b49c59afd3adf9e1",
+        "base_ref": "main",
+        "base_sha": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+        "issue": 78,
+        "issue_state": "OPEN",
+        "observed_on": "2026-11-23",
+        "portable_ec010_decoder_budget_execution_status": "PASS_NARROW_PORTABLE",
+        "scenario_acceptance_status": "BLOCKED",
+        "execution_receipt_status": "PRESENT_NARROW_PORTABLE",
+        "head_parent_sha": "c530da65f10dd07b3bda340a8fda48f34549d264",
+        "head_change_scope": "test-only: crates/ascii-convert/tests/qa_102_input_conversion.rs",
+        "tested_source_test_revision": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
+        "current_head_execution_status": "NOT RUN",
+        "updated_at": "2026-11-22T23:40:25Z",
+        "earlier_docs_only_commit_sha": "8075a1af6ddf17c349be7e43e68cbbcc1b51e7b1",
+        "earlier_docs_only_commit_parent_sha": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
+        "current_head_execution_scope": "EC-010-specific execution only. QA-102 input-conversion component tests at 2f6 are not a new EC-010-specific execution receipt."
+      },
+      "component_test_evidence": [
+        {
+          "tested_head_sha": "6bb7c004adc2180436053d75d7896cc136ed3907",
+          "status": "PASS",
+          "actions_run": 44917321240,
+          "actions_url": "https://github.com/Astraive/asciiwall/actions/runs/44917321240",
+          "scope": "Automated component tests at the previous code/test head only; not execution at closed docs-only head 01e9a1f290526ca8748eac9411ece3ba84ad3d3f."
+        },
+        {
+          "pull_request": 341,
+          "head_sha": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
+          "status": "PASS",
+          "scope": "Automated component CI at replacement PR #341 exact head only; not authenticated scenario acceptance for #337 or M1.",
+          "actions_run": 44940619318,
+          "actions_url": "https://github.com/Astraive/asciiwall/actions/runs/44940619318"
+        },
+        {
+          "pull_request": 341,
+          "head_sha": "2f6fd69a102139add62679b9b49c59afd3adf9e1",
+          "head_parent_sha": "c530da65f10dd07b3bda340a8fda48f34549d264",
+          "earlier_docs_only_commit_sha": "8075a1af6ddf17c349be7e43e68cbbcc1b51e7b1",
+          "status": "PASS",
+          "scope": "Exact-head QA-102 component verification only for qa_102_input_conversion. This does not establish EC-006–008 authenticated scenario PASS, a new EC-010-specific execution receipt, full QA-102 acceptance, M1 acceptance, or sign-off.",
+          "local_verification": {
+            "tested_head_sha": "2f6fd69a102139add62679b9b49c59afd3adf9e1",
+            "qa_102_input_conversion": {
+              "command": "cargo test --locked --package ascii-convert --test qa_102_input_conversion",
+              "status": "PASS",
+              "tests_passed": 6
+            },
+            "targeted_clippy": {
+              "command": "cargo clippy --locked --package ascii-convert --test qa_102_input_conversion -- -D warnings",
+              "status": "PASS"
+            },
+            "format_check": {
+              "command": "cargo fmt --all -- --check",
+              "status": "PASS"
+            },
+            "repository_checker": {
+              "command": "python scripts/check-repository.py",
+              "status": "PASS",
+              "markdown_files": 127,
+              "json_files": 3
+            }
+          },
+          "actions_run": 45083660580,
+          "actions_url": "https://github.com/Astraive/asciiwall/actions/runs/45083660580",
+          "github_actions": {
+            "head_sha": "2f6fd69a102139add62679b9b49c59afd3adf9e1",
+            "status": "PASS",
+            "jobs_passed": 5,
+            "portable_core_test": "qa_102_input_conversion: 6/6 passed on ubuntu-latest, macos-latest, and windows-latest"
+          },
+          "ec010_specific_execution_receipt": "NOT CLAIMED at 2f6; the existing narrow EC-010 execution receipt remains bound to e283576e17b87769d21982bf4b07cbc6c15b9b32.",
+          "exact_head_code_test_review": {
+            "status": "PASS",
+            "reviewer_identity": "GPT-6 Luna (Luna max)",
+            "reviewer_model": "openai-codex/gpt-6-luna:max",
+            "reviewed_on": "2026-11-23",
+            "head_sha": "2f6fd69a102139add62679b9b49c59afd3adf9e1",
+            "findings": "No actionable implementation P0–P2 findings. The sole P2 concerned the stale #341 live-head narrative in this receipt; this revision corrects it. The same reviewer rechecked the live PR description and found no remaining misleading P0–P2 metadata.",
+            "scope": "Exact PR #341 head implementation/code-test review plus live PR-description metadata recheck; not authenticated scenario acceptance or QA-M1 sign-off."
+          }
+        }
+      ],
+      "qa102_target_pull_request": 341,
+      "qa102_target_pr_head_sha": "2f6fd69a102139add62679b9b49c59afd3adf9e1",
+      "qa102_target_pr_state": "OPEN_DRAFT",
+      "replacement_pr_head_sha": "2f6fd69a102139add62679b9b49c59afd3adf9e1",
+      "replacement_pr_state": "OPEN_DRAFT",
+      "replacement_component_evidence_url": "https://github.com/Astraive/asciiwall/pull/341",
+      "closed_pr337_at_closure": {
+        "pull_request": 337,
+        "state": "CLOSED",
+        "head_ref": "test/qa-102-main-r1",
+        "head_sha": "01e9a1f290526ca8748eac9411ece3ba84ad3d3f",
+        "head_parent_sha": "6bb7c004adc2180436053d75d7896cc136ed3907",
+        "head_change_scope": "docs-only",
+        "base_ref": "main",
+        "base_sha": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+        "issue": 78,
+        "issue_state": "OPEN",
+        "updated_at": "2026-11-21T21:40:38Z",
+        "execution_status": "NOT RUN",
+        "previous_head_component_evidence": {
+          "tested_head_sha": "6bb7c004adc2180436053d75d7896cc136ed3907",
+          "status": "PASS",
+          "actions_run": 44917321240,
+          "actions_url": "https://github.com/Astraive/asciiwall/actions/runs/44917321240",
+          "scope": "Automated component tests at the previous code/test parent only; not execution at closed docs-only head 01e9a1f290526ca8748eac9411ece3ba84ad3d3f."
+        },
+        "closure_status": "CLOSED_WITHOUT_MERGE",
+        "merged": false,
+        "observed_on": "2026-11-22"
+      },
+      "execution_status": "PASS",
+      "execution_receipt_status": "PRESENT_NARROW_PORTABLE",
+      "scenario_acceptance_status": "BLOCKED",
+      "portable_decoder_budget_execution": {
+        "tested_head_sha": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
+        "worktree": "D:/worktrees/asciiwall-qa102-ec010-receipt-e283576-20261122-0419-RunEc010Receipt",
+        "completed_at_local": "2026-11-22T04:25:16.2584749+05:30",
+        "environment_variables": {
+          "CARGO_HOME": "D:/qa102-ec010-cargo-home-20261122-0419-RunEc010Receipt",
+          "CARGO_TARGET_DIR": "D:/worktrees/asciiwall-qa102-ec010-receipt-e283576-20261122/.cargo-target"
+        },
+        "commands": [
+          {
+            "command": "cargo test --locked --package ascii-media --test image_decode_jpeg_controls oversized_jpeg_fixture_is_rejected_by_public_decoder_with_raster_budget_error -- --exact",
+            "exit_code": 0,
+            "tests_passed": 1,
+            "tests_filtered": 20,
+            "outcome": "PASS; persisted fixture SHA-256 verified and public decode_image returned BudgetExceeded(RasterBytes)."
+          },
+          {
+            "command": "cargo test --locked --package ascii-media --lib image::codec_cancellation_tests::oversized_jpeg_is_rejected_before_output_allocation -- --exact",
+            "exit_code": 0,
+            "tests_passed": 1,
+            "tests_filtered": 11,
+            "outcome": "PASS; the same BudgetExceeded(RasterBytes) error was returned and the decoded-output allocation seam was not reached."
+          }
+        ],
+        "source_behavior": "reserve_plan checks the raster budget before decoded-output allocation.",
+        "allocation_scope_caveat": "Claims rejection before full decoded-output allocation only, not before any allocation; encoded-input snapshot/header work may allocate, and the sentinel covers only the decoded-output allocation seam.",
+        "host": {
+          "os": "Windows 11 Home Single Language x64, build 10.0.26300",
+          "rust_target": "x86_64-pc-windows-msvc",
+          "rustc": "1.100.0 (0ef1bc386 2026-11-09)",
+          "cargo": "1.100.0 (3acc79c0c 2026-11-05)",
+          "permission_state": "Non-admin"
+        },
+        "device_and_session_state": {
+          "gpu_adapter_inventory": [
+            "Intel UHD Graphics",
+            "NVIDIA GeForce RTX 3050 6GB Laptop GPU"
+          ],
+          "gpu_used_by_tests": false,
+          "compositor_used_or_measured": false,
+          "desktop_ui_used": false,
+          "restricted_worker_used": false,
+          "external_device_used": false,
+          "session_type": "Not exercised or not reported",
+          "compositor": "Not exercised",
+          "driver_state": "Not reported"
+        },
+        "test_executables": [
+          {
+            "role": "Public-decoder Rust test harness; not an application/candidate binary",
+            "path": "D:/worktrees/asciiwall-qa102-ec010-receipt-e283576-20261122/.cargo-target/debug/build/ascii-media/f10f71b2767415d5/out/image_decode_jpeg_controls-f10f71b2767415d5.exe",
+            "size_bytes": 2733056,
+            "sha256": "d2cf51aa9443134dbfff1aa1c77fb8c471acc3a289300a3f6c7db747721c3bd8"
+          },
+          {
+            "role": "Allocation-sentinel unit-test Rust harness; not an application/candidate binary",
+            "path": "D:/worktrees/asciiwall-qa102-ec010-receipt-e283576-20261122/.cargo-target/debug/build/ascii-media/594045a41a600b57/out/ascii_media-594045a41a600b57.exe",
+            "size_bytes": 3084800,
+            "sha256": "3c3b4c5eca4d3c6652ef0d4c5882abeac5d1519d01e41621bc394dea26f4e1f3"
+          }
+        ],
+        "artifact_layout_note": "Cargo Running paths match the exact rehashed test executables. .cargo-target/debug/deps does not exist in this Windows build layout.",
+        "nonqualifying_attempts": [
+          "Shared Cargo cache setup failed before tests; not a pass.",
+          "A short-name unit-test filter selected zero tests; not a pass."
+        ],
+        "run_log_status": "No local run-log file was found. Exact commands, outcomes, and recorded completion time are included here; no QA-004 archived-log evidence is claimed.",
+        "independent_evidence_review": {
+          "reviewer_identity": "ReviewEc010Receipt (independent read-only reviewer)",
+          "reviewer_model": "openai-codex/gpt-6-luna:max",
+          "reviewed_on": "2026-11-22",
+          "status": "APPROVED_NARROW_PORTABLE_EC010_DECODER_BUDGET_PASS",
+          "outcome": "Independently verified live refs/states, fixture properties/hash, source/test/Cargo hashes, both test-executable hashes, command scope/counts, host fields, and the allocation-sentinel limit; found no hash, head, or execution-scope mismatch. Approves only this narrow portable decoder-budget PASS.",
+          "limitation": "This evidence review is not authenticated full QA-102 scenario acceptance, QA-004 integration, Engine maintainer/CLI reviewer sign-off, or QA-M1 acceptance."
+        },
+        "acceptance_gaps": [
+          "EC-009 remains NOT RUN.",
+          "QA-004 #35 integration/receipt remains outstanding.",
+          "Required Engine maintainer and CLI reviewer sign-offs remain null/PENDING; this independent evidence review does not substitute for them.",
+          "Native/manual/full QA-102 scenario acceptance remains incomplete; issue #78 remains OPEN."
+        ]
+      },
+      "replacement_pr_parent_sha": "c530da65f10dd07b3bda340a8fda48f34549d264",
+      "replacement_pr_head_change_scope": "test-only: crates/ascii-convert/tests/qa_102_input_conversion.rs",
+      "replacement_pr_current_head_execution_status": "NOT RUN",
+      "replacement_pr_current_head_execution_scope": "EC-010-specific execution only. The QA-102 input-conversion component tests at 2f6 are not a new EC-010-specific execution receipt."
+    },
+    {
+      "scenario_ids": [
+        "CLI-001/branch-monochrome-density-TXT"
+      ],
+      "status": "PASS",
+      "scope": "Actual CLI binary built from branch head 0bbbf8da69aae5758b20d3ee34d38216313309d6 converted the synthetic 8x4 RGBA8 fixture to 16x5 monochrome TXT three times with the same argv; bytewise comparisons passed. Binary SHA-256 ff42bad49708689cd53481d6fc1f10edb908467d7009e28a7e183a13fcfcf624 was recorded locally, but the executable is not included and reviewers cannot recompute it from PR artifacts. The final golden is included; individual run outputs/logs are not. Image fixture SHA-256 097a523501401c5a778f963661902f31e85739ece9b699b96302c39ccfdd6050; settings manifest SHA-256 651bfcd61379215a7db7cd8b3064fea6c5b991b14eb77f075cc08ca74f1b6ecf; output SHA-256 cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623.",
+      "m1_acceptance_status": "BLOCKED",
+      "evidence_path": "tests/evidence/gates/M1/m1-cli-density-settings.json"
+    },
+    {
+      "scenario_ids": [
+        "QA-M1/CPU-golden",
+        "QA-M1/aspect-color-alpha-stride-overflow-invalid-image"
+      ],
+      "status": "BLOCKED",
+      "scope": "No complete exact-candidate golden or integrated scenario run is available. The branch-only CLI golden is partial evidence and is not promoted to M1 PASS."
+    },
+    {
+      "scenario_ids": [
+        "QA-M1/firewall-denied-text",
+        "QA-M1/firewall-denied-png"
+      ],
+      "status": "NOT RUN",
+      "scope": "No end-to-end candidate CLI output exists for these scenarios."
+    },
+    {
+      "scenario_ids": [
+        "QA-M1/native-surface-host",
+        "QA-M1/manual-observations"
+      ],
+      "status": "NOT RUN",
+      "scope": "No native surface-owning host or manual observation evidence is available."
+    }
+  ],
+  "nonwaivable_p0_disposition": {
+    "status": "BLOCKED",
+    "decision": "no-go",
+    "waived": false,
+    "basis": "The P0 gate still has no exact integrated source/binary candidate or complete acceptance receipt. QA-101 EC-004 has a narrow portable decoder-to-converter EXIF-6 regression PASS and independently verified raw source-file hashes, but these do not establish an executable hash, run provenance, or ticket/M1 acceptance. QA-102 EC-010 has a narrow portable decoder-budget execution PASS, but neither component result is full ticket or M1 acceptance. EC-009 remains NOT RUN, QA-004 integration and authenticated reviewer/owner sign-offs are missing, and no firewall-denied candidate CLI run or native/manual evidence exists.",
+    "p0_evidence": [
+      {
+        "item": "QA-101 EC-001 zero-dimension/overflow consumer-boundary regression",
+        "observed_component_result": "PASS",
+        "gate_disposition": "BLOCKED; not a candidate-wide reviewer-linked receipt"
+      },
+      {
+        "item": "QA-101 EC-004 EXIF orientation decoder-to-converter regression",
+        "observed_component_result": "PASS; narrow portable public API-path regression only",
+        "gate_disposition": "BLOCKED; no authenticated QA-101 acceptance receipt, exact test-executable hash, captured settings digest, persistent run log, separate raw-fixture license/external provenance, or native/manual evidence. Raw source-file hashes and a limited fixture-source description do not close these gaps."
+      },
+      {
+        "item": "QA-102 EC-008 odd stride/padded-data converter regression",
+        "observed_component_result": "PASS",
+        "gate_disposition": "BLOCKED; decoder-to-converter traversal and M1 scenario receipt are not run"
+      },
+      {
+        "item": "QA-102 EC-009 malformed/truncated image restricted-worker safe UI error",
+        "observed_component_result": "NOT RUN",
+        "gate_disposition": "BLOCKED; required worker/UI path is absent from the reported stack"
+      },
+      {
+        "item": "QA-M1 firewall-denied text/PNG conversion",
+        "observed_component_result": "NOT RUN",
+        "gate_disposition": "BLOCKED; no end-to-end CLI conversion evidence"
+      },
+      {
+        "item": "QA-102 EC-010 compressed JPEG raster-budget decoder regression",
+        "observed_component_result": "PASS; narrow portable decoder-budget execution only, with public decoder and decoded-output allocation-sentinel tests",
+        "gate_disposition": "BLOCKED; proves rejection before full decoded-output allocation only, not before any allocation; does not establish QA-004 integration, full QA-102 scenario acceptance, or M1 acceptance."
+      }
+    ]
+  },
+  "p1_limitations": {
+    "accepted_by_independent_reviewers": [],
+    "unaccepted_or_unassessed": [
+      "No integrated M1 support scope is accepted.",
+      "HDR/wide-gamut evidence is limited to synthetic conversion-boundary tests; no full candidate receipt exists.",
+      "FNT-002 preview/repertoire consumer integration remains incomplete; current replacement PR #334 is OPEN/DRAFT at head 5b677c503c27ceb29417391504417a7076945383 and issue #120 is OPEN.",
+      "CLI-001's 0bbbf8da69aae5758b20d3ee34d38216313309d6 smoke is historical and does not evidence current PR #338 (OPEN/DRAFT, head c6860756c0d42c9d42e99f6087f35fca7b3fe816 based on #333 head a6f16b18bfb92c5150ca06dab4c6675385f6f5c0; issue #129 OPEN). Structural matching, config-registry loading, PNG export, firewall-denied behavior, and M1 integration remain unavailable or NOT RUN."
+    ]
+  },
+  "observed_component_heads": [
+    {
+      "observation_as_of": "2026-11-16",
+      "work_item": "FNT-002",
+      "issue": 120,
+      "pull_request": 306,
+      "state": "OPEN_DRAFT",
+      "head_sha": "3b587d8187847e2e6e42c72bb5feabe4fb4f9470",
+      "base_sha": "08381114be95f5270d45eb51daa0039eeb5fa1a5",
+      "target_main_sha_at_capture": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
+      "merge_state": "DIRTY",
+      "component_test_outcomes_reported": [
+        "PASS: cargo test --locked -p ascii-convert --test repertoire (9 tests), reported for the fractional-block review fix in the PR body",
+        "PASS: cargo fmt --all -- --check, reported for the fractional-block review fix in the PR body"
+      ],
+      "ci": [
+        {
+          "head_sha": "3b587d8187847e2e6e42c72bb5feabe4fb4f9470",
+          "status": "NOT REPORTED",
+          "evidence": "gh pr checks 306 reported no checks on the current branch head."
+        }
+      ],
+      "prior_head_ci": [
+        {
+          "head_sha": "13fe7e23c75c00140c32f6d29dd47ce8896c2c27",
+          "current_head": false,
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43845406845",
+          "status": "PASS",
+          "checks": [
+            "Repository quality",
+            "Portable core (ubuntu-latest)",
+            "Portable core (macos-latest)",
+            "Portable core (windows-latest)"
+          ]
+        },
+        {
+          "head_sha": "13fe7e23c75c00140c32f6d29dd47ce8896c2c27",
+          "current_head": false,
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43845406837",
+          "status": "PASS",
+          "workflow": "Security analysis"
+        }
+      ],
+      "independent_exact_head_review": {
+        "reviewer": "Independent Luna xhigh review",
+        "head_sha": "3b587d8187847e2e6e42c72bb5feabe4fb4f9470",
+        "status": "PASS",
+        "findings": "no actionable P0-P3 findings",
+        "evidence": "https://github.com/Astraive/asciiwall/pull/306"
+      },
+      "limitations": "Historical 2026-11-16 snapshot: PR #306 was OPEN/DRAFT at head 3b587d8187847e2e6e42c72bb5feabe4fb4f9470, with no exact-head CI reported; the recorded component tests and review apply only to their listed historical heads. PR #306 later closed unmerged. Current FNT-002 replacement PR #334 is OPEN/DRAFT at head 5b677c503c27ceb29417391504417a7076945383; issue #120 is OPEN."
+    },
+    {
+      "observation_as_of": "2026-11-16",
+      "work_item": "CLI-001",
+      "issue": 129,
+      "pull_request": null,
+      "branch": "feat/cli-001-headless-conversion",
+      "head_sha": "0bbbf8da69aae5758b20d3ee34d38216313309d6",
+      "source_tree_object_id": "04283b76a28afce8e6040bbf73490c8d1ea28870",
+      "github_pull_request_query": "No pull request found for this branch at observation time.",
+      "component_outcome": "PASS: three actual monochrome density-to-TXT conversions with the same argv produced bytewise-identical output.",
+      "limitations": "Historical 2026-11-16 smoke on branch head 0bbbf8da69aae5758b20d3ee34d38216313309d6: no PR was found for that branch at that observation time. This smoke does not evidence current PR #338, which is OPEN/DRAFT at head c6860756c0d42c9d42e99f6087f35fca7b3fe816 based on PR #333 head a6f16b18bfb92c5150ca06dab4c6675385f6f5c0; issue #129 is OPEN. apps/cli remains absent from current main @7552713a9c8b4515904d3e562c8b1c188a9d8676; structural matching, config-registry loading, PNG export, and integrated M1 acceptance are not established."
+    },
+    {
+      "observation_as_of": "2026-11-16",
+      "work_item": "CNV-002",
+      "issue": 72,
+      "pull_request": 307,
+      "state": "MERGED",
+      "head_sha": "4f1ab1b227d4fa21bf28a2b7b0923727dd662ca0",
+      "base_sha": "08381114be95f5270d45eb51daa0039eeb5fa1a5",
+      "merge_commit": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
+      "issue_state": "OPEN",
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43848063216",
+          "workflow": "Repository checks",
+          "status": "PASS"
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43846638758",
+          "workflow": "Security analysis",
+          "status": "PASS"
+        }
+      ],
+      "limitations": "Historical 2026-11-16 snapshot: PR #307 had merged at 4f1ab1b227d4fa21bf28a2b7b0923727dd662ca0 into then-main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; issue #72 was reported OPEN at that capture. Current main later advanced to 7552713a9c8b4515904d3e562c8b1c188a9d8676 through merged PRs #332 and #339. Closed PR #291 remains historical, not active."
+    },
+    {
+      "observation_as_of": "2026-11-16",
+      "work_item": "CNV-001",
+      "issue": 118,
+      "pull_request": 314,
+      "state": "OPEN_DRAFT",
+      "head_sha": "b78920f82ff496e2ee9bd9b5ea454d906a003fa0",
+      "base_branch": "main",
+      "base_sha": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
+      "current_main_sha": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
+      "merge_state": "CLEAN",
+      "issue_state": "OPEN",
+      "component_test_outcomes_reported": [
+        "PASS: cargo test --offline --locked -p ascii-convert (73 tests)",
+        "PASS: cargo test --offline --locked --workspace (149 tests)",
+        "PASS: cargo fmt --all -- --check",
+        "PASS: cargo clippy --offline --locked --workspace --all-targets -- -D warnings"
+      ],
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43992778709",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": [
+            "Repository quality",
+            "Portable core (macos-latest)",
+            "Portable core (ubuntu-latest)",
+            "Portable core (windows-latest)"
+          ]
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43992218980",
+          "workflow": "Python security analysis",
+          "status": "PASS",
+          "checks": [
+            "Python security analysis"
+          ]
+        }
+      ],
+      "independent_exact_head_review": {
+        "reviewer": "Independent Luna max review",
+        "head_sha": "b78920f82ff496e2ee9bd9b5ea454d906a003fa0",
+        "status": "PASS",
+        "findings": "none",
+        "evidence": "https://github.com/Astraive/asciiwall/pull/314"
+      },
+      "limitations": "Historical 2026-11-16 snapshot: PR #314 was OPEN/DRAFT at head b78920f82ff496e2ee9bd9b5ea454d906a003fa0 with the recorded clean component checks/review, and issue #118 was then OPEN. PR #314 subsequently closed unmerged; issue #118 is now CLOSED. Density is present on current main @7552713a9c8b4515904d3e562c8b1c188a9d8676 via merged PR #332. Downstream PRs #302, #304, and #305 and their tests/checks are historical records for their own heads; each has since closed."
+    },
+    {
+      "observation_as_of": "2026-11-16",
+      "work_item": "CNV-003",
+      "issue": 130,
+      "pull_request": 302,
+      "state": "OPEN_DRAFT",
+      "head_sha": "5564df42a11664a9892a9bf64afb64a17f1cac50",
+      "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "synchronization_status": "STALE_NOT_SYNCHRONIZED_TO_PR_314",
+      "current_cnv_001_replacement_head_sha": "b78920f82ff496e2ee9bd9b5ea454d906a003fa0",
+      "component_test_outcomes_reported": [
+        "PASS: cargo test --locked -p ascii-convert --test sampling_geometry (9 tests)",
+        "PASS: cargo test --locked -p ascii-convert --test density_matcher (22 tests)",
+        "PASS: cargo test --workspace --locked (153 tests)"
+      ],
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43842202805",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": [
+            "Repository quality",
+            "Portable core (ubuntu-latest)",
+            "Portable core (macos-latest)",
+            "Portable core (windows-latest)"
+          ]
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43841203670",
+          "workflow": "Security analysis",
+          "status": "PASS"
+        }
+      ],
+      "limitations": "Historical 2026-11-16 snapshot: PR #302 was OPEN/DRAFT at head 5564df42a11664a9892a9bf64afb64a17f1cac50, stacked on old CNV-001 head 05d00a050b63343530c63af2c1cd25c091346e84. Its tests/checks are historical for that head, and PR #302 has since closed. Current CNV-003 replacement PR #323 is OPEN/DRAFT at head 9fd81180c76393b353afb15d796046edd1920974; issue #130 is OPEN. No exact integrated M1 candidate or native/UI acceptance is established."
+    },
+    {
+      "observation_as_of": "2026-11-16",
+      "work_item": "QA-101",
+      "issue": 77,
+      "pull_request": 304,
+      "state": "OPEN_DRAFT",
+      "head_sha": "9ad6656cb6e024f221977e025d1decd6afca88e7",
+      "base_branch": "feat/cnv-001-density-matching",
+      "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "synchronization_status": "STALE_NOT_SYNCHRONIZED_TO_PR_314",
+      "current_cnv_001_replacement_head_sha": "b78920f82ff496e2ee9bd9b5ea454d906a003fa0",
+      "component_test_outcomes_reported": [
+        "PASS: cargo test --locked -p ascii-convert --test qa_101_input_conversion (4 tests)",
+        "PASS: cargo test --locked --workspace (147 tests across 14 suites)"
+      ],
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43842059317",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": [
+            "Repository quality",
+            "Portable core (ubuntu-latest)",
+            "Portable core (macos-latest)",
+            "Portable core (windows-latest)"
+          ]
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43841157245",
+          "workflow": "Security analysis",
+          "status": "PASS"
+        }
+      ],
+      "limitations": "Historical 2026-11-16 snapshot: PR #304 was OPEN/DRAFT at head 9ad6656cb6e024f221977e025d1decd6afca88e7, stacked on the old CNV-001 branch; its tests/checks apply only to that historical head, and PR #304 has since closed. Current QA-101 replacement PR #335 is OPEN/DRAFT at head 2556847e7ed71289f43f37bada0b5166cf28436f; issue #77 is OPEN. EC-004 EXIF orientation is NOT RUN; QA-004 #35 and reviewer-linked scenario receipts remain outstanding."
+    },
+    {
+      "observation_as_of": "2026-11-16",
+      "work_item": "QA-102",
+      "issue": 78,
+      "pull_request": 305,
+      "state": "OPEN_DRAFT",
+      "head_sha": "fd7828e98db7e63057a4ba51d46739d6f201e4b7",
+      "base_branch": "feat/cnv-001-density-matching",
+      "base_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "synchronization_status": "STALE_NOT_SYNCHRONIZED_TO_PR_314",
+      "current_cnv_001_replacement_head_sha": "b78920f82ff496e2ee9bd9b5ea454d906a003fa0",
+      "component_test_outcomes_reported": [
+        "PASS: cargo test --locked -p ascii-convert --test qa_102_input_conversion (5 tests)",
+        "PASS: cargo test --locked -p ascii-convert --test density_matcher (22 tests)",
+        "PASS: cargo test --locked --workspace (148 tests across 14 suites)"
+      ],
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43841878874",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": [
+            "Repository quality",
+            "Portable core (ubuntu-latest)",
+            "Portable core (macos-latest)",
+            "Portable core (windows-latest)"
+          ]
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43841062064",
+          "workflow": "Security analysis",
+          "status": "PASS"
+        }
+      ],
+      "independent_pre_restack_review": {
+        "reviewer": "Independent Luna xhigh review",
+        "reviewed_head_sha": "fd7828e98db7e63057a4ba51d46739d6f201e4b7",
+        "status": "FINDINGS",
+        "scope": "Pre-restack review of the old QA-102 head; no resolution is claimed for this head.",
+        "findings": [
+          "P2: QA-102 source hashes in docs/quality/edge-case-matrix.md are stale (the source hash is the old fcd3684 value and the synthetic-font generator hash is also incorrect).",
+          "P2: PR #305 EC-010 text incorrectly says no decoder path exists, despite the compressed-raster budget regression in crates/ascii-media/tests/image_decode.rs:524."
+        ]
+      },
+      "limitations": "Historical 2026-11-16 snapshot: PR #305 was OPEN/DRAFT at head fd7828e98db7e63057a4ba51d46739d6f201e4b7, stacked on the old CNV-001 branch. Its reported tests/checks and pre-restack review findings apply only to that historical head; PR #305 has since closed, and its EC-010 PASS is superseded historical evidence, not current-head fixture-run or QA-004 evidence. At the 2026-11-22 observation recorded below, QA-102 replacement PR #341 was OPEN/DRAFT at head e283576e17b87769d21982bf4b07cbc6c15b9b32; issue #78 was OPEN. QA-004 #35, authenticated independent scenario reviewer, native/manual evidence, and exact host/session/compositor/GPU/driver/permission tuple remain unavailable."
+    },
+    {
+      "observation_as_of": "2026-11-22",
+      "work_item": "QA-102",
+      "issue": 78,
+      "pull_request": 341,
+      "replaces_pull_request": 337,
+      "state": "OPEN_DRAFT",
+      "head_sha": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
+      "base_branch": "main",
+      "base_sha": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+      "tested_source_test_revision": "1d44523e9365a98bc4d301a53d71d5552eb99dfb",
+      "component_test_outcomes_reported": [
+        "PASS: cargo test --locked --package ascii-convert --test qa_102_input_conversion (6 tests) at tested source/test revision 1d44523e9365a98bc4d301a53d71d5552eb99dfb.",
+        "PASS: exact-head Actions run 44940619318 reports 6/6 QA-102 integration tests and both EC-010 decoder-budget tests passing on Ubuntu, macOS, and Windows."
+      ],
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/44940619318",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": [
+            "Repository quality",
+            "Portable core (ubuntu-latest)",
+            "Portable core (macos-latest)",
+            "Portable core (windows-latest)",
+            "QA-102 integration tests (6/6) and both EC-010 decoder-budget tests on each OS"
+          ]
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/44940619320",
+          "workflow": "Python security analysis",
+          "status": "PASS"
+        }
+      ],
+      "independent_exact_head_review": {
+        "reviewer": "Fresh Luna max full-diff review",
+        "reviewed_head_sha": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
+        "reviewed_on": "2026-11-22",
+        "status": "PASS",
+        "findings": "No actionable defect",
+        "scope": "Code review only; not independent scenario acceptance/sign-off."
+      },
+      "limitations": "Automated component evidence only. QA-004 #35 receipt integration, authenticated independent scenario reviewer, native/manual evidence, and exact host/session/compositor/GPU/driver/permission tuple remain unavailable; issue #78 remains open and no full QA-102 or M1 acceptance is claimed."
+    },
+    {
+      "observation_as_of": "2026-11-16",
+      "work_item": "RND-001",
+      "issue": 123,
+      "pull_request": 308,
+      "state": "OPEN_DRAFT",
+      "head_sha": "77dfcb469f6065b699899a4530a799df856bb7b4",
+      "base_sha": "08381114be95f5270d45eb51daa0039eeb5fa1a5",
+      "current_main_sha": "539ed2bd3493cb97ded00820f3f8bb7e9e280bea",
+      "merge_state": "DIRTY",
+      "ci": [
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43846875408",
+          "workflow": "Repository checks",
+          "status": "PASS",
+          "checks": [
+            "Repository quality",
+            "Portable core (ubuntu-latest)",
+            "Portable core (macos-latest)",
+            "Portable core (windows-latest)"
+          ]
+        },
+        {
+          "run": "https://github.com/Astraive/asciiwall/actions/runs/43846875274",
+          "workflow": "Security analysis",
+          "status": "PASS"
+        }
+      ],
+      "limitations": "Historical 2026-11-16 snapshot: PR #308 was OPEN/DRAFT at head 77dfcb469f6065b699899a4530a799df856bb7b4, based on main 08381114be95f5270d45eb51daa0039eeb5fa1a5 and then-main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; it has since closed. Its earlier offscreen evidence is tied only to integrated head 05464596bb95d6fb9273d034cff8f4def2d1e907. Current RND-001 replacement PR #320 is OPEN/DRAFT at head d6b7db23678b29abe17bf39c5d9d15d55b1ee0f9; issue #123 is OPEN. No native surface-owning host/device-loss injector or native host acceptance evidence is established by this historical record."
+    }
+  ],
+  "current_component_statuses": {
+    "observed_on": "2026-11-23",
+    "current_main_revision": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+    "items": [
+      {
+        "work_item": "FNT-002",
+        "issue": 120,
+        "issue_state": "OPEN",
+        "pull_request": 334,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "5b677c503c27ceb29417391504417a7076945383"
+      },
+      {
+        "work_item": "CNV-003",
+        "issue": 130,
+        "issue_state": "OPEN",
+        "pull_request": 323,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "9fd81180c76393b353afb15d796046edd1920974"
+      },
+      {
+        "work_item": "QA-101",
+        "issue": 77,
+        "issue_state": "OPEN",
+        "pull_request": 335,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "2556847e7ed71289f43f37bada0b5166cf28436f"
+      },
+      {
+        "work_item": "QA-102",
+        "status_record_role": "closed PR #337 closure snapshot; replaced by active PR #341",
+        "issue": 78,
+        "issue_state": "OPEN",
+        "pull_request": 337,
+        "pull_request_state": "CLOSED",
+        "head_ref": "test/qa-102-main-r1",
+        "head_sha": "01e9a1f290526ca8748eac9411ece3ba84ad3d3f",
+        "head_parent_sha": "6bb7c004adc2180436053d75d7896cc136ed3907",
+        "head_change_scope": "docs-only",
+        "base_ref": "main",
+        "base_sha": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+        "updated_at": "2026-11-21T21:40:38Z",
+        "current_head_execution_status": "NOT RUN",
+        "previous_head_component_evidence": {
+          "tested_head_sha": "6bb7c004adc2180436053d75d7896cc136ed3907",
+          "status": "PASS",
+          "scope": "Automated decoder-budget/component tests at the parent code/test head only; not execution at closed docs-only head 01e9a1f290526ca8748eac9411ece3ba84ad3d3f.",
+          "reported_by": "docs/quality/edge-case-matrix.md",
+          "actions_run": 44917321240,
+          "actions_url": "https://github.com/Astraive/asciiwall/actions/runs/44917321240"
+        },
+        "merged": false,
+        "observed_on": "2026-11-22"
+      },
+      {
+        "work_item": "QA-102",
+        "issue": 78,
+        "issue_state": "OPEN",
+        "pull_request": 341,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "2f6fd69a102139add62679b9b49c59afd3adf9e1",
+        "status_record_role": "current replacement PR #341",
+        "head_ref": "test/qa-102-main-r2",
+        "base_ref": "main",
+        "base_sha": "7552713a9c8b4515904d3e562c8b1c188a9d8676",
+        "updated_at": "2026-11-22T23:40:25Z",
+        "component_test_status": "PASS",
+        "component_test_actions_run": 45083660580,
+        "scenario_acceptance_status": "BLOCKED",
+        "observed_on": "2026-11-23",
+        "portable_ec010_decoder_budget_execution_status": "PASS_NARROW_PORTABLE",
+        "execution_receipt_status": "PRESENT_NARROW_PORTABLE",
+        "head_parent_sha": "c530da65f10dd07b3bda340a8fda48f34549d264",
+        "head_change_scope": "test-only: crates/ascii-convert/tests/qa_102_input_conversion.rs",
+        "tested_source_test_head_sha": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
+        "current_head_execution_status": "NOT RUN",
+        "earlier_docs_only_commit_sha": "8075a1af6ddf17c349be7e43e68cbbcc1b51e7b1",
+        "qa_102_component_test_head_sha": "2f6fd69a102139add62679b9b49c59afd3adf9e1",
+        "tested_source_test_head_scope": "The unchanged tested_source_test_head_sha identifies only the narrow EC-010 decoder-budget execution; the current QA-102 input-conversion component tests are at 2f6.",
+        "current_head_execution_scope": "EC-010-specific execution only; no new EC-010-specific receipt at 2f6.",
+        "current_exact_head_code_test_review_status": "PASS",
+        "current_exact_head_code_test_reviewer_identity": "GPT-6 Luna (Luna max)"
+      },
+      {
+        "work_item": "RND-001",
+        "issue": 123,
+        "issue_state": "OPEN",
+        "pull_request": 320,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "d6b7db23678b29abe17bf39c5d9d15d55b1ee0f9"
+      },
+      {
+        "work_item": "CLI-001",
+        "issue": 129,
+        "issue_state": "OPEN",
+        "pull_request": 338,
+        "pull_request_state": "OPEN_DRAFT",
+        "head_sha": "c6860756c0d42c9d42e99f6087f35fca7b3fe816",
+        "base_pull_request": 333,
+        "base_head_sha": "a6f16b18bfb92c5150ca06dab4c6675385f6f5c0",
+        "historical_smoke_head_sha": "0bbbf8da69aae5758b20d3ee34d38216313309d6",
+        "historical_smoke_applies": false
+      }
+    ],
+    "live_status_source": "Live GitHub queries on 2026-11-23 confirmed PR #313 OPEN/DRAFT at f7158c2cc2cbe82a7a44cd5750e716c8e6b05659 (parent 4f60cdc066bfbb798ab273e16e9ff632f3ca136c) on main 7552713a9c8b4515904d3e562c8b1c188a9d8676, and QA-102 PR #341 OPEN/DRAFT at 2f6fd69a102139add62679b9b49c59afd3adf9e1 (parent c530da65f10dd07b3bda340a8fda48f34549d264) on the same base; issues #211 and #78 are OPEN. The earlier docs-only #341 commit 8075a1af6ddf17c349be7e43e68cbbcc1b51e7b1 is parented by e283576e17b87769d21982bf4b07cbc6c15b9b32. At 2f6 the six QA-102 input-conversion component tests passed locally and in exact-head Actions run 45083660580; that is not full scenario acceptance or a new EC-010-specific receipt, whose tested source/test revision remains e283. A fresh exact-head implementation/code-test review by GPT-6 Luna (Luna max) on 2026-11-23 found no actionable implementation P0–P2. The sole P2 concerned the stale #341 live-head narrative in this receipt; this revision corrects it. The same reviewer rechecked the live PR description and found no remaining misleading P0–P2 metadata. This code review is not authenticated scenario acceptance or M1 sign-off. Other component-status entries and QA-101 raw Git-blob hashes are carried forward from the 2026-11-22 snapshot and are not newly observed by this revision.",
+    "issue_observations": [
+      {
+        "number": 78,
+        "state": "OPEN",
+        "title": "[QA-102] Verify input and conversion scenarios EC-006 through EC-010",
+        "closed_at": null,
+        "updated_at": "2026-11-22T23:40:26Z"
+      },
+      {
+        "number": 211,
+        "state": "OPEN",
+        "title": "[QA-M1] Sign off M1 ASCII Engine Prototype acceptance gate",
+        "closed_at": null,
+        "updated_at": "2026-11-21T22:34:01Z"
+      },
+      {
+        "number": 77,
+        "state": "OPEN",
+        "title": "[QA-101] Verify input and conversion scenarios EC-001 through EC-005",
+        "closed_at": null,
+        "updated_at": "2026-11-21T22:59:45Z"
+      }
+    ]
+  },
+  "superseded_records": [
+    {
+      "observation_as_of": "2026-11-16",
+      "pull_request": 291,
+      "state": "CLOSED",
+      "superseded_by": 307,
+      "note": "Historical 2026-11-16 record: CNV-002 replacement PR #307 had merged at 4f1ab1b227d4fa21bf28a2b7b0923727dd662ca0 into then-main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; do not list #291 as active. Current main later advanced to 7552713a9c8b4515904d3e562c8b1c188a9d8676 through merged PRs #332 and #339."
+    },
+    {
+      "observation_as_of": "2026-11-16",
+      "pull_request": 292,
+      "state": "CLOSED",
+      "superseded_by": 314,
+      "head_sha": "05d00a050b63343530c63af2c1cd25c091346e84",
+      "replacement_head_sha": "8fffc12b174de4930dfeb00bffd47d5b865e5791",
+      "note": "Historical 2026-11-16 record: PR #292 was closed and replacement PR #314 was then OPEN/DRAFT at main 539ed2bd3493cb97ded00820f3f8bb7e9e280bea; issue #118 was then OPEN. Current state: PR #314 closed unmerged, issue #118 CLOSED, and density conversion is on main via merged PR #332 (merge 7bb0a7bebe39c214ce0b3e7b221c8d2152ce35bd) at current main 7552713a9c8b4515904d3e562c8b1c188a9d8676."
+    },
+    {
+      "observation_as_of": "2026-11-16",
+      "pull_request": 300,
+      "state": "CLOSED",
+      "superseded_by": 306,
+      "note": "Historical 2026-11-16 record: PR #306 was the then-current FNT-002 open draft replacement for #300. PR #306 has since closed; current FNT-002 PR #334 is OPEN/DRAFT at head 5b677c503c27ceb29417391504417a7076945383 and issue #120 is OPEN."
+    },
+    {
+      "observation_as_of": "2026-11-16",
+      "pull_request": 303,
+      "state": "CLOSED",
+      "superseded_by": 308,
+      "note": "Historical 2026-11-16 record: PR #308 was the then-current RND-001 open draft replacement for #303. PR #308 has since closed; current RND-001 PR #320 is OPEN/DRAFT at head d6b7db23678b29abe17bf39c5d9d15d55b1ee0f9 and issue #123 is OPEN."
+    }
+  ],
+  "fixture_and_settings_hashes": {
+    "m1_candidate_bundle": {
+      "fixture_sha256": null,
+      "settings_sha256": null,
+      "status": "UNAVAILABLE"
+    },
+    "partial_component_test_inputs": [
+      {
+        "source_pr": 291,
+        "source_head": "52a7a471cf86851c47984a51486e1d8eb245bf64",
+        "test_source_sha256": "54e70504d02256ee2cbd2949d3b4af426d5e22de150fd3b38f61f2f2326f319b",
+        "fixture_sha256": [
+          "08e5d6f7183a3407c481b795c637ddbc7a2a8049e976e053951903cc9fd89570",
+          "0315fa91e964fa07b4eb3a5a273c7a1dc1349b1d01a961a7a734f9145c6edb34",
+          "1269523da5404a82c95810df1fcd3ea8701ff959b3dcec3b9b573d01a7ad07f9"
+        ],
+        "settings_sha256": [
+          "a9ee7cf7a500baf3d4184e36da29f22d30a6a7baa96b402a5daadac30da2f59e",
+          "4814ab24ce1feb10d313cc0563711d38b30864196eae406116259fcdd16380b2"
+        ],
+        "scope": "Historical CNV-002 synthetic test inputs from closed/superseded PR #291; not an M1 candidate fixture/settings bundle."
+      },
+      {
+        "source_pr": 302,
+        "source_head": "5564df42a11664a9892a9bf64afb64a17f1cac50",
+        "fixture_sha256": [
+          "26887198972e5be6930aa838b2a771ff6048b377a69d1ee92db10bdd5f3099ea",
+          "b4b5e352a9237df1fd5932b6748ea80c6d91e2c80ac294198313cad5f6db1070"
+        ],
+        "settings_sha256": [
+          "5de059c1e35e4532e960c73112484cda200e56ee4717b31ead6e8d5a04e53317"
+        ],
+        "synthetic_font_generator_sha256": "8a0b3b4e8ee150d6d16b084e51200525112ed6424855afa652a55ed3274176c8",
+        "scope": "CNV-003 synthetic component fixtures/settings only; not an M1 candidate fixture/settings bundle."
+      },
+      {
+        "source_pr": 341,
+        "source_head": "e283576e17b87769d21982bf4b07cbc6c15b9b32",
+        "tested_source_test_revision": "1d44523e9365a98bc4d301a53d71d5552eb99dfb",
+        "fixture_path": "crates/ascii-media/tests/fixtures/ec010-oversized-budget.jpg",
+        "fixture_size_bytes": 29300,
+        "fixture_sha256": [
+          "7ea9607205ef59dd2be26c992ced846f679e58501f0462b86abe62c50b59a320"
+        ],
+        "binary_sha256": null,
+        "binary_sha256_status": "No integrated M1 candidate binary was produced or identified; PR #341 records test execution only.",
+        "scope": "Rights-cleared synthetic JPEG and source/test inputs for the QA-102 EC-010 automated decoder-budget regression only; not an integrated M1 candidate fixture/settings/binary bundle."
+      }
+    ],
+    "cli_001_branch_smoke": {
+      "issue": 129,
+      "pull_request": null,
+      "branch": "feat/cli-001-headless-conversion",
+      "source_head": "0bbbf8da69aae5758b20d3ee34d38216313309d6",
+      "source_tree_object_id": "04283b76a28afce8e6040bbf73490c8d1ea28870",
+      "binary_sha256": "ff42bad49708689cd53481d6fc1f10edb908467d7009e28a7e183a13fcfcf624",
+      "binary_sha256_status": "OBSERVED_LOCALLY_NOT_INDEPENDENTLY_RECOMPUTABLE_FROM_PR_ARTIFACTS",
+      "binary_artifact_included": false,
+      "image_fixture_sha256": "097a523501401c5a778f963661902f31e85739ece9b699b96302c39ccfdd6050",
+      "font_fixture_sha256": "50fea7e6d99d4f46d5e8bd800a3b6b4ec4c89d0617f0be102e421a74808e018b",
+      "font_generator_source_sha256": "ed96313cfbbc552a891745851922d28c576db4349ee060f5c44f473cf2950f93",
+      "settings_manifest_sha256": "651bfcd61379215a7db7cd8b3064fea6c5b991b14eb77f075cc08ca74f1b6ecf",
+      "output_sha256": "cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623",
+      "retained_golden_output_included": true,
+      "individual_run_output_files_included": false,
+      "run_logs_included": false,
+      "runs": 3,
+      "bytewise_equal": true,
+      "scope": "Branch-scoped CLI component smoke only; none of these hashes is represented as the integrated M1 candidate bundle."
+    }
+  },
+  "environment_and_artifacts": {
+    "m1_candidate_environment": {
+      "status": "NOT RUN",
+      "os_and_build": null,
+      "session_type": null,
+      "compositor": null,
+      "gpu_and_driver": null,
+      "permission_state": null,
+      "manual_observation_evidence_path": null
+    },
+    "cli_component_smoke_environment": {
+      "status": "PASS",
+      "source_head": "0bbbf8da69aae5758b20d3ee34d38216313309d6",
+      "binary_sha256": "ff42bad49708689cd53481d6fc1f10edb908467d7009e28a7e183a13fcfcf624",
+      "binary_artifact_included": false,
+      "binary_sha256_independently_recomputable_from_pr_artifacts": false,
+      "os_and_build": "Microsoft Windows 10.0.26300.9711 x86_64",
+      "rustc": "1.100.0 (0ef1bc386 2026-11-09)",
+      "cargo": "1.100.0 (3acc79c0c 2026-11-05)",
+      "session_type": null,
+      "compositor": null,
+      "gpu_and_driver": null,
+      "permission_state": "Headless local file conversion only; no native surface permission exercised.",
+      "firewall_denied": "NOT RUN; --offline did not establish a denied-firewall environment.",
+      "runs": 3,
+      "output_sha256_each_run": [
+        "cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623",
+        "cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623",
+        "cd7df554f6dc4a5b156e7ffa3506e891ec96569cf2a82b96cf1559cd0006a623"
+      ],
+      "retained_golden_output_included": true,
+      "individual_run_output_files_included": false,
+      "run_logs_included": false,
+      "bytewise_equal": true
+    },
+    "portable_ci_environment": {
+      "runner_labels_observed": [
+        "ubuntu-latest",
+        "macos-latest",
+        "windows-latest"
+      ],
+      "limits": "These are PR-specific portable CI runners, not a named native surface-owning host. Exact OS build/session/compositor/GPU/driver/permission state and M1 manual observations are unavailable."
+    },
+    "historical_component_local_environment": {
+      "source_pr": 291,
+      "source_head": "52a7a471cf86851c47984a51486e1d8eb245bf64",
+      "os_and_build": "Windows 10 build 26300 x64",
+      "rust_version": "1.100.0",
+      "session_type": null,
+      "compositor": null,
+      "gpu_and_driver": null,
+      "permission_state": null,
+      "limits": "Historical local component-test environment as reported in closed PR #291; not an M1/native acceptance tuple."
+    },
+    "failures": [
+      {
+        "component": "CLI-001 branch binary build",
+        "attempt": "Initial build using the pre-existing default Cargo home",
+        "outcome": "FAIL",
+        "observed_error": "Could not create a registry cache directory; OS error 183 (a file with the same name already exists).",
+        "follow_up": "Retried using the isolated Cargo home and target directory in the CLI settings manifest; the build succeeded and produced the recorded branch-binary hash."
+      }
+    ],
+    "failure_interpretation": "No M1 candidate run failed because no integrated candidate was built or exercised. The initial branch-build environment attempt failed and was resolved with isolated directories; all three actual CLI conversions passed."
+  },
+  "review_signoff": {
+    "status": "PENDING",
+    "required_reviewers": [
+      "independent Engine maintainer",
+      "independent CLI reviewer"
+    ],
+    "engine_maintainer": {
+      "identity": null,
+      "decision": null,
+      "signed_on": null,
+      "evidence_link": null
+    },
+    "cli_reviewer": {
+      "identity": null,
+      "decision": null,
+      "signed_on": null,
+      "evidence_link": null
+    },
+    "implementer_self_certification": "not claimed"
+  },
+  "final_disposition": {
+    "decision": "no-go",
+    "reason": "Current main @7552713a9c8b4515904d3e562c8b1c188a9d8676 includes density via merged PR #332 and raster-budget changes via #339, but apps/cli is absent and no integrated M1 source/binary candidate exists. QA-101/EC-004 has only a narrow portable public decoder-to-converter EXIF-6 regression PASS at PR #335 head 2556847e7ed71289f43f37bada0b5166cf28436f. This receipt records independently computed raw Git-blob hashes for seven QA-101 implementation/test/fixture-source files; they are not executable hashes. The recorded 9152436c71254a3570f070f6d2f8b57b1a8e60eb3e85349c8792759d6be53f66 raster value is a domain-separated test-record digest over metadata plus pixels, not a pixel-bytes-only SHA-256. The source-backed fixture description is partial; a distinct raw-fixture license or external provenance is absent. The exact compiled test-executable hash, captured settings digest, persistent run log, explicit review date, authenticated QA-101 acceptance, and native/manual evidence remain unavailable or NOT RUN. PR #341 is OPEN/DRAFT at exact head 2f6fd69a102139add62679b9b49c59afd3adf9e1, direct parent c530da65f10dd07b3bda340a8fda48f34549d264, based on main 7552713a9c8b4515904d3e562c8b1c188a9d8676; the earlier docs-only commit 8075a1af6ddf17c349be7e43e68cbbcc1b51e7b1 precedes c530. Local QA-102 input-conversion component tests (6 passed), targeted Clippy, fmt, repository checker, and exact-head Actions run 45083660580 passed at 2f6. This is component evidence only, not full QA-102/M1 acceptance or a new EC-010-specific execution receipt; the narrow EC-010 run logs, test harness binaries, tested source/test revision, and allocation caveat remain bound to e283576e17b87769d21982bf4b07cbc6c15b9b32. A fresh exact-head implementation/code-test review by GPT-6 Luna (Luna max) on 2026-11-23 found no actionable implementation P0–P2. The sole P2 concerned the stale #341 live-head narrative in this receipt; this revision corrects it. The same reviewer rechecked the live PR description and found no remaining misleading P0–P2 metadata. This review is not an authenticated scenario review or M1 sign-off. Issue #78 remains OPEN. QA-102 acceptance remains BLOCKED: EC-009 is NOT RUN, QA-004 #35 integration, required reviewer/owner sign-offs, native/manual evidence, and full scenario acceptance are missing. No M1 completion is claimed; issue #211 remains OPEN.",
+    "issue_211_remains_open": true,
+    "m1_completion_claimed": false,
+    "native_renderer_or_wallpaper_claimed": false
+  }
+}
