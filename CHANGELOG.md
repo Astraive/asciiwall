@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, PNG/JPEG decoding, and the bounded `ascii-scene` runtime. **No application binary or published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace contains portable `ascii-core` contracts, bounded `ascii-runtime` handoff and resource-ownership contracts, `ascii-convert` glyph-table and image-processing implementations, `ascii-media` PNG/JPEG decoding, and the bounded `ascii-scene` SCN-001 contract. **No application binary or published release tag exists yet.**
 
 ### Added
 
@@ -21,14 +21,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Append-only `-CreateMissing` issue-publication mode in `scripts/publish-issues.ps1` with durable `creation_batch` pinning, read-only preservation of existing issues and ledger records, milestone ownership isolation, per-item non-`Status` project custom-field GraphQL batching, offline preview basis reporting, and an isolated scope/preservation regression (`scripts/test-publisher-scope.ps1`) documented in [docs/backlog-publication.md](docs/backlog-publication.md).
 - Full `356`-issue planning publication across `Astraive/asciiwall` (`278`) and `Astraive/asciiwall-library` (`78`) (`39` protected foundation issues plus `317` newly verified `-CreateMissing` issues including `asciiwall/M1`), confirmed by an independent REST/GraphQL audit (`354` native parent edges, `576` native hard blockers including `38` cross-repo edges, `356` Project 4 issue items with zero drafts, and unchanged protected issue/project metadata) documented in [docs/setup-audit.md](docs/setup-audit.md).
 - Dependency-free `crates/ascii-core` COR-001 contracts for bounded ASCII frames, allocator-safe grid preflight, reusable owned cell storage, cancellation, typed displayable errors, and zero-copy validated raster views, with behavior-focused integration tests; updated the [data model contract](docs/architecture/data-model-and-contracts.md) and [E01 implementation plan](docs/plans/engine-implementation-plan.md).
+- COR-009 content cache identities for conversion, video, and GPU-derived results; source-observation revalidation, byte-budget LRU eviction with explicit resource leases, shared-root accounting and serialized store publication, disk-space reservations, and loss-safe transactional output with recoverable partial artifacts.
 - Added `ascii-core` package, assignment, and local monitor identities; immutable package-release and assignment-binding conflicts; generation-stale-result guards; and a fixed v1 package-release wire descriptor with exact golden and rejection vectors ([COR-002]).
 - Bounded `ascii-convert` glyph tables with measured cell-clipped masks, descriptors, deterministic fingerprints, and typed font-validation failures ([FNT-001](docs/engine/glyph-matching-and-fonts.md)).
 - Restricted FNT-001 glyph-table construction to the privately stored `GlyphRepertoire` validated against printable ASCII, block elements, and Braille, with regression coverage for unsupported Unicode scalars.
 - Added `ascii-media` PNG/JPEG decoding with content sniffing, strict PNG/JPEG validation, normalized owned RGB/RGBA frames, EXIF orientation, explicit color-capability errors, cancellation, and operation/shared-resource preflight budgets (`[IMG-001]`).
 - Explicit `ascii-convert` sRGB/linear-light normalization, opaque-background compositing, alpha-preserving transparent-layer source-over, profile warnings, and typed HDR rejection ([CNV-002](docs/engine/color-and-image-processing.md)).
+- Bounded `ascii-runtime` handoff queues, buffer leases, completion acknowledgements, and shared concurrency/memory budgets ([COR-005](docs/architecture/resource-ownership-and-shutdown.md)).
+- Added COR-008 storage support for platform-specific roots, a versioned atomic JSON install registry, schema-validated configuration with last-good recovery, importer transaction journaling, bounded redacted diagnostics, and privacy-filtered portable exports, with focused storage transaction tests.
+- Added a process-local `RasterToAsciiConsumer` that receives the bounded handoff, copies into construction-time budgeted scratch outside conversion, validates descriptor-derived raster/frame metadata, and invokes `ascii-convert`; the returned wrapper retains its acknowledged lease/output permit until dropped, including across generation invalidation. This does not add a native mapping, production transport or decoder owner, crash/disconnect recovery, or GPU/device completion.
 - Added the first-party `ascii-scene` SCN-001 contract: validated typed parameters and descriptor limits, a sealed executable generator trait with generic `SceneRuntime`, SplitMix64 node/effect streams, bounded Q16.16 simulation, reusable character buffers, capability-filtered snapshots, deterministic normalized-pointer attraction and recorded-event replay, aggregate resource reservations, and exact-step export with explicit idle fallback. No CFG/PKG schema, application UI, wallpaper, thumbnail, or native consumer is added.
 
 ### Changed
+
+- Hardened portable handoff ownership: live completion tokens own a strong pool handle without slot-to-pool self-pinning; unacknowledged slots stay quarantined while any pool handle remains and until generation invalidation, while dropping the last handle releases pool memory and output permits. Dropped leases reclaim only after acknowledgement; one-slot freshness replacement validates before eviction; Stop now takes priority over repeated revocation; existing transition charges transfer without double counting. CPU handoff, slot writes, raster validation, and pixel callbacks now hold shared work permits, while each live output lease owns its permit directly until lease release/drop even if generation invalidation severs the slot. Focused regressions also race concurrent lease drop with completion acknowledgement and sustain concurrent revocation traffic while Stop is pending. Native OS/GPU transport remains unimplemented and is not claimed.
+
+- Recorded the remaining COR-005 integration blocker: the process-local consumer is not a production transport owner or decoder/transition caller. Native mapping and transport ownership, producer-crash/disconnect recovery, production permit wiring, and GPU/device-completion evidence remain prerequisites; issue `#73` stays open.
 
 - Repaired relative Markdown navigation across existing original root documentation entrypoints (`c321475`, committed after PR `#1` and prior to `[PRJ-004]`).
 - Updated Project 4 registries and audit semantics for layout-specific grouping (`BOARD_LAYOUT` `verticalGroupByFields` columns / `groupByFields` swimlanes; 17 `TABLE_LAYOUT` views with one `group_by`, UI-only `slice_by`, and two ordered sorts). Configured and saved all table views in the authenticated Orca browser, reloaded all 18 views, verified native axes/sorts against GraphQL, and recorded UI slice reads plus screenshots under external `../.issues/reports/project-view-ui-verification.json`.
@@ -36,7 +44,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- [COR-009] Continue cache eviction past lock-blocked entries sharing an LRU tick; test identity
+  changes for every GPU uniform independently.
+- [COR-009] Reject symlink output destinations and retain dangling recovery paths; roll back
+  published output on parent-directory sync failure with distinct staged/recovery paths.
+
+- [COR-009] Preserve existing Unix output-file permissions during transactional replacement and
+  create new outputs with owner-only permissions.
+
+- [COR-009] Keep expanded-input and scratch capacity charged after reservation drop until a fresh
+  host-space probe reconciles files that can survive cancellation or errors.
+- [COR-009] Bound managed cache files during store, reopen, and trim while preserving empty entries
+  under a zero-byte payload budget; report current-count/limit errors when pinned or locked files
+  prevent satisfying the cap.
+- [COR-009] Snapshot and sort LRU eviction candidates once per trim, preserving stable entry/orphan
+  tie-breaks and continuing past lock-blocked files without rescanning the whole cache.
+
+- [COR-009] Deterministically verify that overlapping stores from independently opened caches contend on the shared-root mutex and preserve the shared byte budget.
+
+- [COR-009] Query `FILE_CASE_SENSITIVE_INFO.Flags` through `GetFileInformationByHandleEx` when
+  pruning Windows case-variant output registrations; if the flag cannot be read, merge only
+  spellings the filesystem resolves to the same existing entry and retain uncertain registrations.
+
 - Durable publication-ledger replacement uses a same-directory overwrite rename instead of the Windows PowerShell `File.Replace` null-backup binding; a real filesystem regression runs locally and in CI.
+- Redacted complete whitespace-containing and drive-relative paths from diagnostic logs, rejected Windows-trimmed and reserved-device registry/journal path components, compared storage-root and registry-path aliases with Windows ordinal case-insensitive semantics (including final sigma), and bounded explicit restore of oversized settings files ([COR-008]).
+- Preserve existing Windows destination DACLs with ACL-preserving replacement; first creation is no-clobber so a concurrent destination is never replaced with the temporary file's inherited ACL ([COR-008]).
 - Project-field schema preflight preserves singleton GraphQL argument collections instead of mistaking a valid input object for multiple arguments.
 - Preserve ISO-looking JSON text and exact protected ledger timestamp strings through repeated reads and atomic writes; the real filesystem regression now exercises lossless reloads.
 - Hardened FNT-001 cancellation through parser preflight, glyph description, rasterization, and final sorting; prevented implicit deep clones of budgeted tables, validated legacy cmap format 2 beside Unicode maps, fixed one-pixel edge descriptors, expanded fingerprint invalidation coverage, and documented the checked parser-allocation envelope.
@@ -46,6 +78,113 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Poll cancellation inside JPEG marker/entropy fill-byte runs and stop charging the owned PNG snapshot again as codec scratch; bound PNG scratch by row/inflater buffers and the largest non-IDAT chunk buffer, with large ancillary and IDAT regressions (`[IMG-001]`).
 - Preflight premultiplied raster channels before allocating normalized output, charge the cancellable validation pass to work budgets, and test cancellation within that pass ([CNV-002]).
 - Made `NormalizedRaster` intentionally non-`Clone` to prevent unbudgeted pixel-buffer copies, and clarified that `ascii-media` decoding is outside this PR's scope ([CNV-002]).
+- Collect COR-005 output permits under the buffer-pool lock, fallibly reserve for only live permits outside it, then release after unlocking; document the non-nested pool/budget lock order.
+- Keep a converted output's budget permit owned by its `FrameLease`, not the pool slot, so generation invalidation cannot uncharge an accessible `ConvertedFrame`; a dropped unacknowledged lease transfers its permit to the quarantined slot.
+- Keep the active old-scene COR-005 memory permit borrowed while a transition is staged; abort releases only the candidate charge, while completion releases the old charge once and deactivates the original permit.
+- Linearize urgent Stop/revocation publication against the final ordinary FIFO dequeue with an atomic dequeue-commit bit; a pending urgent event wins the commit race (`[COR-005]`).
+- Make ordinary `ControlQueue::try_send` use a nonblocking lock and report lock contention separately from a full queue, with a deterministic held-lock regression (`[COR-005]`).
+- Reserve the exact CPU cell-storage bytes for converted COR-005 frames and retain the charge with each `ConvertedFrame`, releasing it on errors and drop (`[COR-005]`).
+- Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
+- Preserve queued COR-005 frames when replacement is cancelled during staging, before publication, with public `submit_frame` regression coverage (`[COR-005]`).
+- Linearize one-slot replacement cancellation against fill-lease acquisition: cancellation before acquisition restores the prior `Published` frame; after acquisition, copying and publication finish despite cancellation (`[COR-005]`).
+- [COR-008] Serialize atomic writes, importer journal transitions, and diagnostic-log rotation by
+  storage directory; clean owned interrupted-write temporaries, sync newly created directory
+  entries where supported, preserve only schema-valid last-good configs, and redact clipped
+  diagnostics plus portable file URIs and network endpoints.
+- [COR-008] Re-check normalized root identities after each directory is created; fail closed
+  on aliases revealed by dangling-symlink materialization.
+- [COR-008] Inject failures at every config/registry atomic-write hook boundary and verify recovery
+  yields only complete valid state, cleans owned temporaries, and permits subsequent writes; race
+  retained concurrent log records through rotation without loss or corruption.
+- [COR-008] Filter nested cursor/window-history keys from both export modes; preserve
+  case-preserving canonical paths for directory-lock I/O and enforce owner-only Unix lock files.
+- [COR-008] Preserve retained settings-recovery copies across retry attempts by creating
+  collision-safe sibling snapshots; verify bytes survive recovery retries after rollback failure.
+- [COR-008] Redact extensionless Unicode names and dotfiles beneath recognized local roots in
+  portable exports.
+- [COR-008] Redact dotted filenames beneath recognized local roots even when their suffixes are
+  Unicode or otherwise not ASCII extensions, while preserving harmless version text such as
+  `Supported versions v1.0/v2.0`.
+- [COR-008] Protect schema downgrade checks for oversized current configs; redact Windows
+  drive-relative paths in portable exports and logs; reject colliding install-registry paths.
+- [COR-008] Track TOML lexical state during oversized schema checks; redact drive-relative
+  paths across Unicode punctuation; reject Windows ordinal case aliases after per-component
+  trailing-dot/space normalization while preserving valid Unicode paths.
+- [COR-008] Restore prior registry bytes when an update fails at the parent-directory sync
+  boundary; expose the write hook for deterministic rollback coverage.
+- [COR-008] Bound diagnostic logs to 16 files of at most 16 MiB each and 64 KiB per record; bound
+  portable-export traversal and serialized output, reject over-budget exports without partial data,
+  and redact single-label host-and-port endpoints such as `buildhost:9000` with trailing sentence,
+  angle, or colon punctuation while retaining non-endpoint text.
+- [COR-008] Filter portable host/hostname keys at separator, camelCase, and digit boundaries while
+  preserving benign substrings; redact home and local paths bounded by Unicode initial/final
+  punctuation or selected quote delimiters; reject macOS install-registry aliases using ICU Unicode
+  18.0.0 NFD and full case folding.
+
+- [COR-008] Strip app/application-rule fields from portable exports; they remain available only in
+  explicitly labeled nonportable local backups.
+- COR-009 cache hardening preserves output bytes written after a disk-probe snapshot, captures
+  absolute output destinations, resolves case-variant registrations using filesystem semantics,
+  atomically publishes marked cache roots, and retains a process-wide shared file lock per pinned
+  entry until all its leases are acknowledged, even after cache and lease handles drop.
+  Lease acknowledgement remains retryable; retained-byte accounting, OS file locks, and failed-write
+  protections remain.
+- [COR-009] Bind GPU cache identity to typed GPU-stage uniforms, including color/effect values and pointer, click, and window interaction controls.
+- [COR-009] Resolve Windows drive-relative export destinations to stable absolute targets before writer callbacks, preserving publication when a callback changes the process CWD.
+- [COR-009] Serialize operations on a shared cache root with a process-local per-root mutex before
+  the OS file lock, preserving root accounting and generated-file publication across Windows threads.
+- [COR-009] Persist a monotonic generated-file ID high-water mark before file creation, reconcile
+  legacy files, and fail closed on damaged initialized or exhausted counter state to prevent
+  filename reuse after eviction.
+- [COR-009] Sync the managed directory after durably creating the high-water counter and initialization
+  marker on platforms that support directory sync, preserving ID evidence across eviction.
+- [COR-009] Update existing generated-file ID high-water marks via a synced sibling and
+  target-specific replacement, preserving the prior counter on publication failure.
+- [COR-009] Stage initial counter bytes in a fully written, synced sibling before no-clobber
+  publication; partial-write failures leave no final counter behind.
+- [COR-009] Use a synced recoverable backup swap where filesystems cannot replace an existing
+  high-water counter name; transactional output publication remains no-clobber on those targets.
+- [COR-009] Recover malformed uninitialized high-water counters from live generated IDs; backup
+  recovery retains the greatest valid mark and restores it durably, while fallback output
+  publication continues to reject existing destinations.
+- [COR-009] Sync the marked-cache staging directory before publishing it and sync the root after rename
+  on platforms that support directory sync; report either barrier's failure.
+- [COR-009] Sync destination directories after transactional output replacement and before registering
+  output identities; directory-sync failures return an unregistered transaction error.
+- [COR-008] Redact user-qualified home paths in generic portable-export strings, including
+  `=`-prefixed values, while preserving tilde text without a path; reject over-limit journal paths
+  before cloning and retain the final whole-document size guard.
+- [COR-008] Persist canonical TOML settings and reject replacement of malformed or unsupported current
+  state without changing its bytes or `.last-good`. Provide explicit validated recovery, restrict
+  app-owned directories and persisted files to owner-only Unix permissions, and redact machine-local
+  paths after colon delimiters.
+- [COR-008] Reject TOML inputs above the 8 MiB configuration limit before copying them for parsing;
+  preserve `DocumentTooLarge` for oversized input.
+- [COR-008] Reject nested cursor and window-geometry history keys in local settings before
+  saving or rotating last-good.
+- [COR-008] Fail closed when recovery compares versioned settings with a versionless last-good file.
+- [COR-008] Require settings saves to compare the observed current bytes or absence under the
+  directory lock; stale writes return a typed conflict before current or last-good mutation.
+- [COR-008] Acquire the destination directory lock before reading current and last-good settings,
+  holding it through revision comparison, validation, and replacement so recovery serializes with
+  competing writers; stale restores leave current settings and last-good unchanged.
+- [COR-008] Reject recursive history-key paths in last-good recovery, including nested and dotted
+  names such as `cursor.history`, without changing current settings or backup bytes.
+- [COR-008] Reject duplicate package identifiers in persisted install-registry JSON during load and
+  save validation, preserving the original bytes on either rejection.
+- [COR-008] Roll back restored settings after parent-directory sync failure, preserving pre-recovery
+  current and last-good bytes; report rollback failures explicitly and cover the public recovery
+  sync hook with a deterministic byte-preservation regression.
+- [COR-008] Redact generic portable-export strings containing embedded POSIX or Windows relative
+  file paths while preserving harmless prose and slash-separated text; add public export coverage.
+- [COR-008] Retain the pre-recovery settings copy when rollback rename fails and expose its path in a
+  typed error; deterministic public fault injection verifies the copy remains recoverable.
+- [COR-008] Redact extensionless relative paths beneath recognized local directories in generic
+  portable-export strings while preserving ordinary slash prose; add embedded path coverage.
+- [COR-008] Add serialized atomic registry read-modify-write updates so concurrent callers preserve
+  independent package changes; retain full replacement for explicit save operations.
+- Assign checked, non-reused process-unique identities to public COR-005 frame descriptors so same-generation metadata from different pools cannot alias; add deterministic public-path regression coverage ([COR-005]).
+- Replace deprecated `AtomicU64::fetch_update` with `try_update` for COR-005 pool identities, preserving checked non-wrapping allocation and relaxed ordering (`[COR-005]`).
 - Reserve normalized output under a caller-shared RAII owner until each raster drops; keep `Budget` allocation-free and limited to per-operation input-plus-output peak accounting ([CNV-002]).
 - Size density grids from the selected custom-crop geometry, retain normalized profile warnings in detailed conversion results, and preflight and cancellably initialize bounded quality-patch storage ([CNV-001]).
 - Charge premultiplied validation and readable input extent to density-conversion work and simultaneous-memory budgets; cancel before quality-patch buffer reservations and reject sRGB8-indistinguishable foreground/background colors ([CNV-001]).

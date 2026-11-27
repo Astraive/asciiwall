@@ -1,0 +1,2227 @@
+use ascii_runtime::cache::{
+    CacheError, CacheIdentity, CellGeometry, ContentDigest, ConversionKey, CropRect, DerivedCache,
+    DiskBudget, DiskRequirements, FitCrop, FitMode, FontHinting, FontRasterSettings, GpuCacheKey,
+    GpuUniformSettings, GridSize, OutputFailureKind, OutputRegistry, PatchDimensions, Rational,
+    Rgba8, SourceContent, SourceObservation, SourceStatHint, StoreOutcome, VideoCacheKey,
+    VideoStreamSelection, VideoTimeRange,
+};
+use std::fs;
+use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
+
+#[cfg(windows)]
+mod windows_case_sensitivity {
+    use std::ffi::c_void;
+    use std::fs::File;
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use std::path::Path;
+
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    const FILE_SHARE_READ: u32 = 0x0001;
+    const FILE_SHARE_WRITE: u32 = 0x0002;
+    const FILE_SHARE_DELETE: u32 = 0x0004;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_CASE_SENSITIVE_INFO_CLASS: i32 = 23;
+    const FILE_CS_FLAG_CASE_SENSITIVE_DIR: u32 = 0x0000_0001;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileCaseSensitiveInfo {
+        flags: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateFileW(
+            file_name: *const u16,
+            desired_access: u32,
+            share_mode: u32,
+            security_attributes: *const c_void,
+            creation_disposition: u32,
+            flags_and_attributes: u32,
+            template_file: *mut c_void,
+        ) -> *mut c_void;
+        fn GetFileInformationByHandleEx(
+            file: *mut c_void,
+            file_information_class: i32,
+            file_information: *mut c_void,
+            buffer_size: u32,
+        ) -> i32;
+        fn SetFileInformationByHandle(
+            file: *mut c_void,
+            file_information_class: i32,
+            file_information: *mut c_void,
+            buffer_size: u32,
+        ) -> i32;
+    }
+
+    pub fn set_and_read(path: &Path, case_sensitive: bool) -> io::Result<bool> {
+        let path_wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: the path is NUL-terminated UTF-16; arguments request an existing directory
+        // handle with the read/write-attributes rights required by the two information calls.
+        let handle = unsafe {
+            CreateFileW(
+                path_wide.as_ptr(),
+                FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == (-1isize as *mut c_void) {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: CreateFileW returned a valid owned handle; File closes it on drop.
+        let directory = unsafe { File::from_raw_handle(handle) };
+        let mut information = FileCaseSensitiveInfo {
+            flags: if case_sensitive {
+                FILE_CS_FLAG_CASE_SENSITIVE_DIR
+            } else {
+                0
+            },
+        };
+        // SAFETY: the handle has FILE_WRITE_ATTRIBUTES and information is the documented
+        // FILE_CASE_SENSITIVE_INFO structure with the matching size.
+        let success = unsafe {
+            SetFileInformationByHandle(
+                directory.as_raw_handle(),
+                FILE_CASE_SENSITIVE_INFO_CLASS,
+                &mut information as *mut FileCaseSensitiveInfo as *mut c_void,
+                std::mem::size_of::<FileCaseSensitiveInfo>() as u32,
+            )
+        };
+        if success == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut information = FileCaseSensitiveInfo::default();
+        // SAFETY: the handle has FILE_READ_ATTRIBUTES and information is a writable,
+        // correctly sized FILE_CASE_SENSITIVE_INFO structure.
+        let success = unsafe {
+            GetFileInformationByHandleEx(
+                directory.as_raw_handle(),
+                FILE_CASE_SENSITIVE_INFO_CLASS,
+                &mut information as *mut FileCaseSensitiveInfo as *mut c_void,
+                std::mem::size_of::<FileCaseSensitiveInfo>() as u32,
+            )
+        };
+        if success == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(information.flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0)
+    }
+
+    pub fn is_unsupported(error: &io::Error) -> bool {
+        matches!(error.raw_os_error(), Some(1 | 50 | 87 | 120))
+    }
+}
+
+#[cfg(windows)]
+fn configure_windows_case_mode(directory: &Path, case_sensitive: bool) -> bool {
+    match windows_case_sensitivity::set_and_read(directory, case_sensitive) {
+        Ok(actual) => {
+            assert_eq!(actual, case_sensitive, "verify the actual directory flag");
+            true
+        }
+        Err(error) if windows_case_sensitivity::is_unsupported(&error) => {
+            eprintln!(
+                "skipping case-mode regression: OS/filesystem reports the flag unsupported \
+                 (Windows error {:?}: {error})",
+                error.raw_os_error()
+            );
+            false
+        }
+        Err(error) => panic!("configure Windows directory case mode: {error}"),
+    }
+}
+
+#[cfg(windows)]
+fn windows_drive_letter(path: &Path) -> Option<u8> {
+    path.components()
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Prefix(prefix) => match prefix.kind() {
+                std::path::Prefix::Disk(drive) | std::path::Prefix::VerbatimDisk(drive) => {
+                    Some(drive)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+}
+
+static TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static CWD_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new() -> Self {
+        let parent = std::env::temp_dir();
+        Self::try_new_under(&parent)
+            .unwrap_or_else(|error| panic!("create test temporary directory: {error}"))
+    }
+
+    fn try_new_under(parent: &Path) -> io::Result<Self> {
+        loop {
+            let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(
+                "asciiwall-cor009-cache-{}-{id}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct CurrentDirectoryGuard(PathBuf);
+
+impl CurrentDirectoryGuard {
+    fn change_to(path: &Path) -> io::Result<Self> {
+        let previous = std::env::current_dir()?;
+        std::env::set_current_dir(path)?;
+        Ok(Self(previous))
+    }
+}
+
+impl Drop for CurrentDirectoryGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
+fn partial_output_count(directory: &Path) -> usize {
+    fs::read_dir(directory)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".asciiwall-output-")
+        })
+        .count()
+}
+
+fn derived_file_count(cache_root: &Path) -> usize {
+    let mut count = 0usize;
+    for entry in fs::read_dir(cache_root).unwrap().filter_map(Result::ok) {
+        if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+            count += fs::read_dir(entry.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("derived-"))
+                .count();
+        }
+    }
+    count
+}
+
+fn derived_file_bytes(cache_root: &Path) -> u64 {
+    let mut bytes = 0u64;
+    for directory in fs::read_dir(cache_root).unwrap().filter_map(Result::ok) {
+        if !directory
+            .file_type()
+            .is_ok_and(|file_type| file_type.is_dir())
+        {
+            continue;
+        }
+        for entry in fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+        {
+            if entry.file_name().to_string_lossy().starts_with("derived-") {
+                bytes += entry.metadata().unwrap().len();
+            }
+        }
+    }
+    bytes
+}
+
+fn digest(byte: u8) -> ContentDigest {
+    ContentDigest([byte; 32])
+}
+
+fn conversion_key(source: SourceContent) -> ConversionKey {
+    ConversionKey {
+        source,
+        decode_version: "decode-1".to_owned(),
+        orientation_version: "orientation-1".to_owned(),
+        color_version: "color-1".to_owned(),
+        algorithm_version: "raster-1".to_owned(),
+        font_digest: digest(2),
+        font_raster_settings: FontRasterSettings {
+            size_millipoints: 12_000,
+            horizontal_scale_milli: 1_000,
+            vertical_scale_milli: 1_000,
+            hinting: FontHinting::Default,
+            antialias: true,
+            subpixel: false,
+            extra_parameters: vec![("sdf-spread".to_owned(), 8)],
+        },
+        glyphs: vec![" ".to_owned(), ".".to_owned(), "#".to_owned()],
+        grid: GridSize {
+            columns: 80,
+            rows: 24,
+        },
+        fit_crop: FitCrop {
+            mode: FitMode::Fit,
+            crop: None,
+        },
+        sampling_identity_digest: digest(4),
+        sampling_filter: "lanczos3".to_owned(),
+        cell_geometry: CellGeometry {
+            cell_width_milli_px: 8_000,
+            cell_height_milli_px: 16_000,
+        },
+        patch_dimensions: None,
+        palette: vec![
+            Rgba8 {
+                red: 0,
+                green: 0,
+                blue: 0,
+                alpha: 255,
+            },
+            Rgba8 {
+                red: 255,
+                green: 255,
+                blue: 255,
+                alpha: 255,
+            },
+        ],
+        settings_digest: digest(3),
+    }
+}
+
+fn identity(byte: u8) -> CacheIdentity {
+    CacheIdentity::Conversion(conversion_key(SourceContent::Digest(digest(byte))))
+}
+
+#[test]
+fn every_conversion_semantic_component_changes_identity() {
+    let base = conversion_key(SourceContent::Digest(digest(1)));
+    let base_identity = CacheIdentity::Conversion(base.clone());
+    macro_rules! changed {
+        ($field:ident, $value:expr) => {{
+            let mut changed = base.clone();
+            changed.$field = $value;
+            assert_ne!(
+                base_identity,
+                CacheIdentity::Conversion(changed),
+                stringify!($field)
+            );
+        }};
+    }
+
+    changed!(source, SourceContent::Digest(digest(9)));
+    changed!(source, SourceContent::Missing);
+    changed!(decode_version, "decode-2".to_owned());
+    changed!(orientation_version, "orientation-2".to_owned());
+    changed!(color_version, "color-2".to_owned());
+    changed!(algorithm_version, "raster-2".to_owned());
+    changed!(font_digest, digest(8));
+    changed!(settings_digest, digest(7));
+    changed!(sampling_identity_digest, digest(5));
+
+    let mut raster = base.clone();
+    raster.font_raster_settings.size_millipoints += 1;
+    assert_ne!(base, raster);
+    let mut raster = base.clone();
+    raster.font_raster_settings.horizontal_scale_milli += 1;
+    assert_ne!(base, raster);
+    let mut raster = base.clone();
+    raster.font_raster_settings.vertical_scale_milli += 1;
+    assert_ne!(base, raster);
+    let mut raster = base.clone();
+    raster.font_raster_settings.hinting = FontHinting::Full;
+    assert_ne!(base, raster);
+    let mut raster = base.clone();
+    raster.font_raster_settings.antialias = false;
+    assert_ne!(base, raster);
+    let mut raster = base.clone();
+    raster.font_raster_settings.subpixel = true;
+    assert_ne!(base, raster);
+    let mut raster = base.clone();
+    raster.font_raster_settings.extra_parameters[0].1 += 1;
+    assert_ne!(base, raster);
+    let mut sampling_filter = base.clone();
+    sampling_filter.sampling_filter = "nearest".to_owned();
+    assert_ne!(base, sampling_filter);
+    let mut cell_geometry = base.clone();
+    cell_geometry.cell_geometry.cell_width_milli_px += 1;
+    assert_ne!(base, cell_geometry);
+    let mut cell_geometry = base.clone();
+    cell_geometry.cell_geometry.cell_height_milli_px += 1;
+    assert_ne!(base, cell_geometry);
+    let mut patch_dimensions = base.clone();
+    patch_dimensions.patch_dimensions = Some(PatchDimensions {
+        width: 16,
+        height: 8,
+    });
+    assert_ne!(base, patch_dimensions);
+
+    let mut glyph_order = base.clone();
+    glyph_order.glyphs.reverse();
+    assert_ne!(base, glyph_order);
+    let mut glyph_content = base.clone();
+    glyph_content.glyphs[1] = ",".to_owned();
+    assert_ne!(base, glyph_content);
+    let mut columns = base.clone();
+    columns.grid.columns += 1;
+    assert_ne!(base, columns);
+    let mut rows = base.clone();
+    rows.grid.rows += 1;
+    assert_ne!(base, rows);
+    let mut fit = base.clone();
+    fit.fit_crop.mode = FitMode::Crop;
+    assert_ne!(base, fit);
+    let crop = CropRect {
+        x: 1,
+        y: 2,
+        width: 3,
+        height: 4,
+    };
+    let mut crop_key = base.clone();
+    crop_key.fit_crop.crop = Some(crop);
+    assert_ne!(base, crop_key);
+    for field in 0..4 {
+        let mut crop_key = crop_key.clone();
+        let mut crop = crop_key.fit_crop.crop.expect("crop exists");
+        match field {
+            0 => crop.x += 1,
+            1 => crop.y += 1,
+            2 => crop.width += 1,
+            _ => crop.height += 1,
+        }
+        crop_key.fit_crop.crop = Some(crop);
+        assert_ne!(base, crop_key);
+    }
+    let mut palette_value = base.clone();
+    palette_value.palette[0].red = 1;
+    assert_ne!(base, palette_value);
+    let mut palette_order = base.clone();
+    palette_order.palette.reverse();
+    assert_ne!(base, palette_order);
+}
+
+#[test]
+fn video_and_gpu_semantic_components_change_identity() {
+    let conversion = conversion_key(SourceContent::Digest(digest(1)));
+    let video = VideoCacheKey {
+        conversion: conversion.clone(),
+        stream: VideoStreamSelection {
+            stream_index: 0,
+            stream_id: Some("video-main".to_owned()),
+        },
+        time_range: VideoTimeRange {
+            start_ns: 0,
+            end_ns: 2_000_000_000,
+        },
+        fps: Rational::new(30, 1).expect("valid fps"),
+        temporal_algorithm_version: "temporal-1".to_owned(),
+        seed: 4,
+    };
+    let base_video = CacheIdentity::Video(video.clone());
+    macro_rules! video_changed {
+        ($field:ident, $value:expr) => {{
+            let mut changed = video.clone();
+            changed.$field = $value;
+            assert_ne!(
+                base_video,
+                CacheIdentity::Video(changed),
+                stringify!($field)
+            );
+        }};
+    }
+    let mut stream_index = video.clone();
+    stream_index.stream.stream_index += 1;
+    assert_ne!(base_video, CacheIdentity::Video(stream_index));
+    let mut stream_id = video.clone();
+    stream_id.stream.stream_id = Some("video-alt".to_owned());
+    assert_ne!(base_video, CacheIdentity::Video(stream_id));
+    let mut start = video.clone();
+    start.time_range.start_ns += 1;
+    assert_ne!(base_video, CacheIdentity::Video(start));
+    let mut end = video.clone();
+    end.time_range.end_ns += 1;
+    assert_ne!(base_video, CacheIdentity::Video(end));
+    video_changed!(fps, Rational::new(24, 1).expect("valid fps"));
+    video_changed!(temporal_algorithm_version, "temporal-2".to_owned());
+    video_changed!(seed, 5);
+    let mut upstream = video.clone();
+    upstream.conversion.decode_version = "decode-2".to_owned();
+    assert_ne!(base_video, CacheIdentity::Video(upstream));
+    assert!(Rational::new(0, 1).is_err());
+    assert!(Rational::new(1, 0).is_err());
+    assert_eq!(
+        Rational::new(30, 1).expect("valid fps"),
+        Rational::new(60, 2).expect("equivalent rational fps")
+    );
+
+    let gpu = GpuCacheKey {
+        upstream: Box::new(CacheIdentity::Conversion(conversion.clone())),
+        backend: "vulkan".to_owned(),
+        device: "device-0".to_owned(),
+        shader_digest: digest(8),
+        uniforms: GpuUniformSettings {
+            foreground: Rgba8 {
+                red: 0xd7,
+                green: 0xfb,
+                blue: 0xe8,
+                alpha: 0xff,
+            },
+            background: Rgba8 {
+                red: 0x07,
+                green: 0x11,
+                blue: 0x0b,
+                alpha: 0xff,
+            },
+            secondary: Rgba8 {
+                red: 0x58,
+                green: 0xaa,
+                blue: 0x80,
+                alpha: 0xff,
+            },
+            opacity: 1.0,
+            glitch_enabled: false,
+            glitch_strength: 0.1,
+            scanlines_enabled: true,
+            scanlines_strength: 0.1,
+            bloom_enabled: true,
+            bloom_strength: 0.2,
+            trails_enabled: false,
+            trails_decay: 0.8,
+            vignette: 0.0,
+            noise: 0.0,
+            interaction_pointer_radius_cells: 10.0,
+            interaction_pointer_strength: 0.5,
+            interaction_pointer_max_offset_cells: 4.0,
+            interaction_click_radius_cells: 15.0,
+            interaction_click_strength: 0.6,
+            interaction_window_margin_cells: 2.0,
+            interaction_window_strength: 0.5,
+        },
+    };
+    let base_gpu = CacheIdentity::Gpu(gpu.clone());
+    let mut backend = gpu.clone();
+    backend.backend = "metal".to_owned();
+    assert_ne!(base_gpu, CacheIdentity::Gpu(backend));
+    let mut device = gpu.clone();
+    device.device = "device-1".to_owned();
+    assert_ne!(base_gpu, CacheIdentity::Gpu(device));
+    let mut shader = gpu.clone();
+    shader.shader_digest = digest(9);
+    assert_ne!(base_gpu, CacheIdentity::Gpu(shader));
+    macro_rules! uniform_changes_identity {
+        ($field:ident, $value:expr) => {{
+            let mut changed = gpu.clone();
+            changed.uniforms.$field = $value;
+            assert_ne!(base_gpu, CacheIdentity::Gpu(changed), stringify!($field));
+        }};
+    }
+    uniform_changes_identity!(
+        foreground,
+        Rgba8 {
+            red: 0xd6,
+            green: 0xfb,
+            blue: 0xe8,
+            alpha: 0xff,
+        }
+    );
+    uniform_changes_identity!(
+        background,
+        Rgba8 {
+            red: 0x08,
+            green: 0x11,
+            blue: 0x0b,
+            alpha: 0xff,
+        }
+    );
+    uniform_changes_identity!(
+        secondary,
+        Rgba8 {
+            red: 0x59,
+            green: 0xaa,
+            blue: 0x80,
+            alpha: 0xff,
+        }
+    );
+    uniform_changes_identity!(opacity, 0.9);
+    uniform_changes_identity!(glitch_enabled, true);
+    uniform_changes_identity!(glitch_strength, 0.2);
+    uniform_changes_identity!(scanlines_enabled, false);
+    uniform_changes_identity!(scanlines_strength, 0.25);
+    uniform_changes_identity!(bloom_enabled, false);
+    uniform_changes_identity!(bloom_strength, 0.3);
+    uniform_changes_identity!(trails_enabled, true);
+    uniform_changes_identity!(trails_decay, 0.7);
+    uniform_changes_identity!(vignette, 0.1);
+    uniform_changes_identity!(noise, 0.1);
+    uniform_changes_identity!(interaction_pointer_radius_cells, 11.0);
+    uniform_changes_identity!(interaction_pointer_strength, 0.75);
+    uniform_changes_identity!(interaction_pointer_max_offset_cells, 5.0);
+    uniform_changes_identity!(interaction_click_radius_cells, 16.0);
+    uniform_changes_identity!(interaction_click_strength, 0.8);
+    uniform_changes_identity!(interaction_window_margin_cells, 3.0);
+    uniform_changes_identity!(interaction_window_strength, 0.75);
+    let mut gpu_upstream = gpu;
+    gpu_upstream.upstream = Box::new(CacheIdentity::Video(video));
+    assert_ne!(base_gpu, CacheIdentity::Gpu(gpu_upstream));
+}
+
+#[test]
+fn source_stat_and_path_are_revalidation_hints_not_identity() {
+    let first = SourceObservation::available(
+        "media/first.bin",
+        Some(SourceStatHint {
+            length_bytes: 100,
+            modified_unix_ns: Some(10),
+            file_id: Some(vec![1, 2]),
+        }),
+        digest(1),
+    );
+    let changed_hint = SourceObservation::available(
+        "media/renamed.bin",
+        Some(SourceStatHint {
+            length_bytes: 101,
+            modified_unix_ns: Some(11),
+            file_id: Some(vec![3, 4]),
+        }),
+        digest(1),
+    );
+    assert_eq!(first.identity(), changed_hint.identity());
+    assert!(changed_hint.requires_content_revalidation_from(&first));
+    let key = CacheIdentity::Conversion(conversion_key(first.identity()));
+    assert_eq!(
+        key,
+        CacheIdentity::Conversion(conversion_key(changed_hint.identity()))
+    );
+    let temp = TempDir::new();
+    let cache = DerivedCache::open(temp.path().join("cache"), 64).unwrap();
+    cache
+        .store_observed(key.clone(), first.clone(), b"derived")
+        .unwrap();
+    assert!(matches!(
+        cache.lease(&key),
+        Err(CacheError::SourceObservationRequired)
+    ));
+    assert!(matches!(
+        cache.lease_observed(&key, &changed_hint),
+        Err(CacheError::SourceRevalidationRequired)
+    ));
+    assert_eq!(
+        cache
+            .store_observed(key.clone(), changed_hint.clone(), b"derived")
+            .unwrap(),
+        StoreOutcome::AlreadyPresent
+    );
+    let mut lease = cache.lease_observed(&key, &changed_hint).unwrap();
+    lease.acknowledge().unwrap();
+    assert!(matches!(
+        cache.store_observed(
+            CacheIdentity::Conversion(conversion_key(SourceContent::Digest(digest(9)))),
+            first.clone(),
+            b"mismatch"
+        ),
+        Err(CacheError::SourceIdentityMismatch)
+    ));
+
+    let rehashed = SourceObservation::available("media/renamed.bin", None, digest(2));
+    assert_ne!(first.identity(), rehashed.identity());
+    assert!(!rehashed.requires_content_revalidation_from(&first));
+    assert!(matches!(
+        cache.lease_observed(&key, &rehashed),
+        Err(CacheError::SourceIdentityMismatch)
+    ));
+    let missing = SourceObservation::missing("media/renamed.bin", None);
+    assert_eq!(missing.identity(), SourceContent::Missing);
+    assert_ne!(first.identity(), missing.identity());
+}
+
+#[test]
+fn byte_lru_pins_active_resources_until_explicit_acknowledgement() {
+    let temp = TempDir::new();
+    let cache = DerivedCache::open(temp.path().join("cache"), 8).expect("open cache");
+    let a = identity(1);
+    let b = identity(2);
+    let c = identity(3);
+    assert_eq!(
+        cache.store(a.clone(), b"aaa").unwrap(),
+        StoreOutcome::Inserted
+    );
+    assert_eq!(
+        cache.store(b.clone(), b"bbb").unwrap(),
+        StoreOutcome::Inserted
+    );
+    let mut lease = cache.lease(&a).expect("lease a");
+    let pinned_path = lease.path().to_path_buf();
+    assert!(pinned_path.exists());
+
+    // B is the least-recently-used unpinned entry and is evicted to make room for C.
+    assert_eq!(
+        cache.store(c.clone(), b"cccc").unwrap(),
+        StoreOutcome::Inserted
+    );
+    assert!(matches!(cache.lease(&b), Err(CacheError::NotFound)));
+    assert!(pinned_path.exists());
+    assert_eq!(cache.snapshot().unwrap().used_bytes, 7);
+
+    // Lowering the limit evicts C but cannot remove the still-active A entry.
+    assert!(matches!(
+        cache.set_budget_bytes(0),
+        Err(CacheError::BudgetPinned { .. })
+    ));
+    assert!(pinned_path.exists());
+    assert_eq!(cache.snapshot().unwrap().used_bytes, 3);
+    lease.acknowledge().expect("completion releases and trims");
+    assert!(!pinned_path.exists());
+    assert_eq!(cache.snapshot().unwrap().used_bytes, 0);
+}
+
+#[test]
+fn eviction_continues_to_equal_tick_orphan_after_entry_lock_failure() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let managed_dir = cache_root.join(".asciiwall-cache-v1");
+    let cache = DerivedCache::open(&cache_root, 16).expect("open cache");
+    cache.store(identity(203), b"entry").unwrap();
+
+    let entry_path = fs::read_dir(&managed_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_name().to_string_lossy().starts_with("derived-"))
+        .expect("stored entry path")
+        .path();
+
+    let other_cache = DerivedCache::open(&cache_root, 16).expect("open second cache");
+    cache
+        .store(identity(203), b"entry")
+        .expect("re-touch the entry after opening the second cache");
+    other_cache.store(identity(204), b"free").unwrap();
+    let orphan_path = fs::read_dir(&managed_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry.file_name().to_string_lossy().starts_with("derived-")
+                && entry.path() != entry_path
+        })
+        .expect("second cache entry path")
+        .path();
+    let pinned_file = fs::File::open(&entry_path).unwrap();
+    pinned_file
+        .try_lock()
+        .expect("hold an exclusive lock on the known cache entry");
+
+    cache
+        .set_budget_bytes(b"entry".len() as u64)
+        .expect("evict the unpinned orphan at the same LRU tick");
+
+    assert!(!orphan_path.exists());
+    assert_eq!(cache.snapshot().unwrap().used_bytes, b"entry".len() as u64);
+    drop(pinned_file);
+    assert_eq!(fs::read(&entry_path).unwrap(), b"entry");
+}
+
+#[test]
+fn dropped_unacknowledged_lease_survives_reopen_and_is_scoped_to_its_root() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let independent_root = temp.path().join("independent-cache");
+    let cache = DerivedCache::open(&cache_root, 3).expect("open cache");
+    let key = identity(201);
+    cache.store(key.clone(), b"pin").unwrap();
+    let lease = cache.lease(&key).unwrap();
+    let pinned_path = lease.path().to_path_buf();
+
+    drop(cache);
+    drop(lease);
+
+    assert!(matches!(
+        DerivedCache::open(&cache_root, 0),
+        Err(CacheError::BudgetPinned {
+            used_bytes: 3,
+            budget_bytes: 0,
+            requested_bytes: 0,
+        })
+    ));
+    assert!(pinned_path.exists());
+
+    let independent_cache =
+        DerivedCache::open(&independent_root, 0).expect("independent root is unpinned");
+    assert_eq!(independent_cache.snapshot().unwrap().used_bytes, 0);
+}
+
+#[test]
+fn explicit_ack_releases_shared_pin_after_cache_handle_drop() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 3).expect("open first cache");
+    let key = identity(202);
+    first_cache.store(key.clone(), b"pin").unwrap();
+    let second_cache = DerivedCache::open(&cache_root, 3).expect("open second cache");
+    let mut lease = first_cache.lease(&key).unwrap();
+    let mut second_lease = first_cache.lease(&key).unwrap();
+    let pinned_path = lease.path().to_path_buf();
+    drop(first_cache);
+
+    assert!(matches!(
+        second_cache.store(identity(203), b"new"),
+        Err(CacheError::BudgetPinned { .. })
+    ));
+    lease
+        .acknowledge()
+        .expect("first acknowledgement releases one lease pin");
+    assert!(matches!(
+        second_cache.store(identity(203), b"new"),
+        Err(CacheError::BudgetPinned { .. })
+    ));
+    second_lease
+        .acknowledge()
+        .expect("last acknowledgement releases the shared pin");
+    assert_eq!(
+        second_cache.store(identity(203), b"new").unwrap(),
+        StoreOutcome::Inserted
+    );
+    assert!(!pinned_path.exists());
+}
+
+#[test]
+fn lease_acknowledgement_retries_after_lock_failure_before_release() {
+    let temp = TempDir::new();
+    let cache = DerivedCache::open(temp.path().join("cache"), 3).unwrap();
+    let key = identity(49);
+    cache.store(key.clone(), b"pin").unwrap();
+    let mut lease = cache.lease(&key).unwrap();
+    let pinned_path = lease.path().to_path_buf();
+
+    assert!(matches!(
+        cache.set_budget_bytes(0),
+        Err(CacheError::BudgetPinned { .. })
+    ));
+    let operations_lock = cache
+        .root()
+        .join(".asciiwall-cache-v1")
+        .join(".operations.lock");
+    fs::remove_file(&operations_lock).unwrap();
+    fs::create_dir(&operations_lock).unwrap();
+
+    let error = lease
+        .acknowledge()
+        .expect_err("a non-file operations lock prevents acknowledgement");
+    assert!(matches!(
+        error,
+        CacheError::UnsafeDerivedPath(_) | CacheError::Io(_)
+    ));
+    assert!(pinned_path.exists());
+
+    fs::remove_dir(&operations_lock).unwrap();
+    drop(fs::File::create(&operations_lock).unwrap());
+    assert_eq!(cache.snapshot().unwrap().active_leases, 1);
+    lease
+        .acknowledge()
+        .expect("the retained lease can retry after the lock is repaired");
+    assert!(!pinned_path.exists());
+    let snapshot = cache.snapshot().unwrap();
+    assert_eq!(snapshot.active_leases, 0);
+    assert_eq!(snapshot.used_bytes, 0);
+}
+
+#[test]
+fn dropping_a_lease_does_not_acknowledge_external_completion() {
+    let temp = TempDir::new();
+    let cache = DerivedCache::open(temp.path().join("cache"), 3).unwrap();
+    let key = identity(7);
+    cache.store(key.clone(), b"pin").unwrap();
+    let lease = cache.lease(&key).unwrap();
+    let path = lease.path().to_path_buf();
+    drop(lease);
+
+    assert!(matches!(
+        cache.set_budget_bytes(0),
+        Err(CacheError::BudgetPinned { .. })
+    ));
+    assert!(path.exists());
+    assert_eq!(cache.snapshot().unwrap().active_leases, 1);
+}
+
+#[test]
+fn eviction_only_deletes_generated_files_beneath_the_managed_cache_root() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    fs::create_dir(&cache_root).unwrap();
+    let unmanaged_file = cache_root.join("unmanaged.bin");
+    fs::write(&unmanaged_file, b"not registered by the cache").unwrap();
+    let project_root = temp.path().join("projects");
+    fs::create_dir(&project_root).unwrap();
+    let project_file = project_root.join("user-project.bin");
+    fs::write(&project_file, b"user data").unwrap();
+
+    let cache = DerivedCache::open(&cache_root, 3).unwrap();
+    cache.store(identity(1), b"one").unwrap();
+    cache.store(identity(2), b"two").unwrap();
+    assert!(unmanaged_file.exists());
+    assert_eq!(
+        fs::read(&unmanaged_file).unwrap(),
+        b"not registered by the cache"
+    );
+    assert!(project_file.exists());
+    assert_eq!(fs::read(&project_file).unwrap(), b"user data");
+    assert_eq!(derived_file_count(cache.root()), 1);
+    assert_eq!(cache.snapshot().unwrap().used_bytes, 3);
+}
+
+#[test]
+fn concurrent_first_cache_opens_publish_only_owned_managed_directories() {
+    const OPENERS: usize = 12;
+
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    fs::create_dir(&cache_root).unwrap();
+    let start = Arc::new(Barrier::new(OPENERS));
+    let mut workers = Vec::with_capacity(OPENERS);
+    for _ in 0..OPENERS {
+        let root = cache_root.clone();
+        let start = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            start.wait();
+            DerivedCache::open(root, 64)
+        }));
+    }
+
+    let caches = workers
+        .into_iter()
+        .map(|worker| {
+            worker
+                .join()
+                .unwrap()
+                .expect("concurrent first open succeeds")
+        })
+        .collect::<Vec<_>>();
+    let managed_dir = cache_root.join(".asciiwall-cache-v1");
+    assert_eq!(
+        fs::read(managed_dir.join(".asciiwall-owner")).unwrap(),
+        b"AsciiWall derived cache ownership v1\n"
+    );
+    let incomplete_staging_directories = fs::read_dir(&cache_root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".asciiwall-cache-v1.init-")
+        })
+        .count();
+    assert_eq!(incomplete_staging_directories, 0);
+    drop(caches);
+}
+
+#[test]
+fn unmanaged_root_file_with_a_derived_name_is_never_claimed_or_deleted() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    fs::create_dir(&cache_root).unwrap();
+    let unmanaged = cache_root.join("derived-0000000000000000.bin");
+    fs::write(&unmanaged, b"user-owned content").unwrap();
+
+    let cache = DerivedCache::open(&cache_root, 0).unwrap();
+    assert_eq!(cache.snapshot().unwrap().used_bytes, 0);
+    assert_eq!(fs::read(&unmanaged).unwrap(), b"user-owned content");
+}
+
+#[test]
+fn a_second_cache_instance_cannot_evict_another_instances_live_lease() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    let key = identity(42);
+    first_cache.store(key.clone(), b"leased").unwrap();
+    let mut lease = first_cache.lease(&key).unwrap();
+    let leased_path = lease.path().to_path_buf();
+
+    assert!(matches!(
+        DerivedCache::open(&cache_root, 0),
+        Err(CacheError::BudgetPinned { .. })
+    ));
+    assert_eq!(fs::read(&leased_path).unwrap(), b"leased");
+
+    lease.acknowledge().unwrap();
+    first_cache.set_budget_bytes(0).unwrap();
+    assert!(!leased_path.exists());
+}
+
+#[test]
+fn store_reconciles_an_entry_evicted_by_another_cache_instance() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    let key = identity(43);
+    first_cache.store(key.clone(), b"original").unwrap();
+
+    let second_cache = DerivedCache::open(&cache_root, 0).unwrap();
+    assert_eq!(second_cache.snapshot().unwrap().used_bytes, 0);
+    drop(second_cache);
+
+    assert_eq!(
+        first_cache.store(key.clone(), b"replacement").unwrap(),
+        StoreOutcome::Inserted
+    );
+    let lease = first_cache.lease(&key).unwrap();
+    assert_eq!(fs::read(lease.path()).unwrap(), b"replacement");
+}
+
+#[test]
+fn stale_cache_entry_cannot_lease_another_identity_after_eviction_and_reopen() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    let stale_identity = identity(50);
+    let replacement_identity = identity(51);
+    first_cache.store(stale_identity.clone(), b"first").unwrap();
+    let mut stale_lease = first_cache.lease(&stale_identity).unwrap();
+    let stale_path = stale_lease.path().to_path_buf();
+    stale_lease.acknowledge().unwrap();
+
+    let evicting_cache = DerivedCache::open(&cache_root, 0).unwrap();
+    assert_eq!(evicting_cache.snapshot().unwrap().used_bytes, 0);
+    drop(evicting_cache);
+    assert!(!stale_path.exists());
+
+    let fresh_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    fresh_cache
+        .store(replacement_identity.clone(), b"replacement")
+        .unwrap();
+    let mut replacement_lease = fresh_cache.lease(&replacement_identity).unwrap();
+    assert_ne!(replacement_lease.path(), stale_path.as_path());
+    assert_eq!(fs::read(replacement_lease.path()).unwrap(), b"replacement");
+    replacement_lease.acknowledge().unwrap();
+
+    assert!(matches!(
+        first_cache.lease(&stale_identity),
+        Err(CacheError::NotFound)
+    ));
+}
+
+#[test]
+fn legacy_generated_files_seed_the_persistent_file_id_high_water_mark() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let legacy_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    let legacy_identity = identity(52);
+    legacy_cache
+        .store(legacy_identity.clone(), b"legacy")
+        .unwrap();
+    let mut legacy_lease = legacy_cache.lease(&legacy_identity).unwrap();
+    let legacy_path = legacy_lease.path().to_path_buf();
+    legacy_lease.acknowledge().unwrap();
+    drop(legacy_cache);
+
+    let managed_dir = cache_root.join(".asciiwall-cache-v1");
+    fs::remove_file(managed_dir.join(".file-id-high-water")).unwrap();
+    fs::remove_file(managed_dir.join(".file-id-high-water-v1")).unwrap();
+
+    let upgraded_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    assert_eq!(fs::read(&legacy_path).unwrap(), b"legacy");
+
+    let replacement_identity = identity(53);
+    upgraded_cache
+        .store(replacement_identity.clone(), b"new")
+        .unwrap();
+    let mut replacement_lease = upgraded_cache.lease(&replacement_identity).unwrap();
+    assert_ne!(replacement_lease.path(), legacy_path.as_path());
+    assert_eq!(fs::read(replacement_lease.path()).unwrap(), b"new");
+    replacement_lease.acknowledge().unwrap();
+}
+
+#[test]
+fn damaged_file_id_high_water_evidence_fails_closed() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let cache = DerivedCache::open(&cache_root, 16).unwrap();
+    cache.store(identity(54), b"existing").unwrap();
+    drop(cache);
+
+    let counter = cache_root
+        .join(".asciiwall-cache-v1")
+        .join(".file-id-high-water");
+    fs::write(&counter, b"malformed").unwrap();
+    assert!(matches!(
+        DerivedCache::open(&cache_root, 16),
+        Err(CacheError::Io(error)) if error.kind() == ErrorKind::InvalidData
+    ));
+
+    fs::remove_file(counter).unwrap();
+    assert!(matches!(
+        DerivedCache::open(&cache_root, 16),
+        Err(CacheError::Io(error)) if error.kind() == ErrorKind::InvalidData
+    ));
+}
+
+#[test]
+fn file_id_high_water_overflow_does_not_create_or_reuse_a_filename() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let cache = DerivedCache::open(&cache_root, 16).unwrap();
+    let counter = cache_root
+        .join(".asciiwall-cache-v1")
+        .join(".file-id-high-water");
+    fs::write(&counter, b"ffffffffffffffff\n").unwrap();
+
+    assert!(matches!(
+        cache.store(identity(55), b"new"),
+        Err(CacheError::ArithmeticOverflow)
+    ));
+    assert_eq!(derived_file_count(&cache_root), 0);
+}
+
+#[test]
+fn independently_opened_caches_enforce_one_shared_root_budget() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    let second_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    let first_key = identity(44);
+
+    first_cache.store(first_key.clone(), b"first").unwrap();
+    second_cache.store(identity(45), b"other").unwrap();
+
+    assert!(derived_file_bytes(&cache_root) <= 5);
+    assert_eq!(derived_file_count(&cache_root), 1);
+    assert_eq!(derived_file_bytes(&cache_root), 5);
+    assert_eq!(first_cache.snapshot().unwrap().used_bytes, 5);
+    assert!(matches!(
+        first_cache.lease(&first_key),
+        Err(CacheError::NotFound)
+    ));
+}
+
+#[test]
+fn shared_root_budget_respects_a_lease_from_another_instance() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    let second_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    assert_eq!(
+        first_cache.store(identity(46), b"first").unwrap(),
+        StoreOutcome::Inserted
+    );
+
+    let leased_key = identity(46);
+    let mut lease = first_cache.lease(&leased_key).unwrap();
+    assert!(matches!(
+        second_cache.store(identity(47), b"other"),
+        Err(CacheError::BudgetPinned {
+            used_bytes: 5,
+            budget_bytes: 5,
+            requested_bytes: 5,
+        })
+    ));
+    assert_eq!(derived_file_bytes(&cache_root), 5);
+
+    lease.acknowledge().unwrap();
+    assert_eq!(
+        second_cache.store(identity(47), b"other").unwrap(),
+        StoreOutcome::Inserted
+    );
+    assert_eq!(derived_file_bytes(&cache_root), 5);
+}
+
+#[test]
+fn repeated_cross_instance_lease_failures_recover_after_acknowledgement() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    let first_cache = DerivedCache::open(&cache_root, 5).unwrap();
+    let second_cache = DerivedCache::open(&cache_root, 5).unwrap();
+
+    for round in 0..32u8 {
+        let first_key = identity(round.wrapping_add(64));
+        let second_key = identity(round.wrapping_add(128));
+        first_cache.store(first_key.clone(), b"first").unwrap();
+        let mut lease = first_cache.lease(&first_key).unwrap();
+
+        assert!(matches!(
+            second_cache.store(second_key.clone(), b"other"),
+            Err(CacheError::BudgetPinned {
+                used_bytes: 5,
+                budget_bytes: 5,
+                requested_bytes: 5,
+            })
+        ));
+        assert_eq!(derived_file_bytes(&cache_root), 5);
+
+        lease.acknowledge().unwrap();
+        assert_eq!(
+            second_cache.store(second_key, b"other").unwrap(),
+            StoreOutcome::Inserted
+        );
+        assert_eq!(derived_file_count(&cache_root), 1);
+        assert_eq!(derived_file_bytes(&cache_root), 5);
+        assert!(matches!(
+            first_cache.lease(&first_key),
+            Err(CacheError::NotFound)
+        ));
+        assert_eq!(first_cache.snapshot().unwrap().used_bytes, 5);
+    }
+}
+
+#[test]
+fn disk_reservations_count_expanded_input_scratch_output_and_safety_reserve() {
+    let budget = DiskBudget::new(100, 10);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            expanded_input_bytes: 20,
+            scratch_bytes: 30,
+            output_bytes: 40,
+        })
+        .expect("exactly fits after safety reserve");
+    assert_eq!(budget.snapshot().reserved_bytes, 90);
+    let probe = budget.begin_available_bytes_probe().unwrap();
+    assert!(budget.refresh_available_bytes(probe, 80));
+    assert_eq!(budget.snapshot().available_bytes, 80);
+    assert!(
+        budget
+            .reserve(DiskRequirements {
+                output_bytes: 1,
+                ..DiskRequirements::default()
+            })
+            .is_err()
+    );
+    drop(reservation);
+    assert_eq!(budget.snapshot().reserved_bytes, 0);
+    assert!(
+        DiskRequirements {
+            expanded_input_bytes: u64::MAX,
+            scratch_bytes: 1,
+            output_bytes: 0,
+        }
+        .total_bytes()
+        .is_err()
+    );
+}
+
+#[test]
+fn non_output_reservations_stay_charged_across_cancellation_and_stale_probes() {
+    let temp = TempDir::new();
+    let budget = DiskBudget::new(100, 0);
+    let stale_probe = budget.begin_available_bytes_probe().unwrap();
+
+    let operation: io::Result<()> = {
+        let _reservation = budget
+            .reserve(DiskRequirements {
+                expanded_input_bytes: 20,
+                scratch_bytes: 30,
+                ..DiskRequirements::default()
+            })
+            .unwrap();
+        fs::write(temp.path().join("expanded-input.bin"), [b'i'; 20]).unwrap();
+        fs::write(temp.path().join("scratch.bin"), [b's'; 30]).unwrap();
+        Err(io::Error::other(
+            "injected cancellation with temporary files retained",
+        ))
+    };
+    assert_eq!(operation.unwrap_err().kind(), ErrorKind::Other);
+    assert_eq!(budget.snapshot().reserved_bytes, 0);
+    assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 50);
+
+    assert!(budget.refresh_available_bytes(stale_probe, 100));
+    assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 50);
+    assert!(
+        budget
+            .reserve(DiskRequirements {
+                output_bytes: 51,
+                ..DiskRequirements::default()
+            })
+            .is_err(),
+        "the stale host reading must not make the released non-output bytes available"
+    );
+    drop(
+        budget
+            .reserve(DiskRequirements {
+                output_bytes: 50,
+                ..DiskRequirements::default()
+            })
+            .expect("the exact unconsumed capacity remains available"),
+    );
+
+    let fresh_probe = budget.begin_available_bytes_probe().unwrap();
+    assert!(budget.refresh_available_bytes(fresh_probe, 50));
+    assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 0);
+    assert!(
+        budget
+            .reserve(DiskRequirements {
+                output_bytes: 51,
+                ..DiskRequirements::default()
+            })
+            .is_err(),
+        "a fresh host reading reconciles retained non-output files"
+    );
+}
+
+#[test]
+fn stale_disk_probe_keeps_writes_charged_until_a_fresh_probe() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(100, 0);
+    let probe_started_before_write = budget.begin_available_bytes_probe().unwrap();
+    let output_reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 40,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let destination = temp.path().join("probe-race.bin");
+    registry
+        .write_transactional(identity(47), &destination, &output_reservation, |output| {
+            output.write_all(&[b'x'; 40])
+        })
+        .unwrap();
+
+    assert!(budget.refresh_available_bytes(probe_started_before_write, 100));
+    assert_eq!(budget.snapshot().available_bytes, 100);
+    assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 40);
+    assert!(
+        budget
+            .reserve(DiskRequirements {
+                output_bytes: 61,
+                ..DiskRequirements::default()
+            })
+            .is_err(),
+        "the 40 post-probe output bytes leave only 60 bytes reservable"
+    );
+    let remaining = budget
+        .reserve(DiskRequirements {
+            output_bytes: 60,
+            ..DiskRequirements::default()
+        })
+        .expect("the exactly remaining capacity can be reserved");
+    assert_eq!(budget.snapshot().reserved_bytes, 60);
+    drop(remaining);
+}
+
+#[test]
+fn completed_outputs_remain_charged_and_refresh_replaces_consumed_estimates() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(100, 0);
+    let completed = budget
+        .reserve(DiskRequirements {
+            output_bytes: 60,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let other = budget
+        .reserve(DiskRequirements {
+            output_bytes: 40,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let destination = temp.path().join("retained-output.bin");
+    let payload = [b'x'; 60];
+    registry
+        .write_transactional(identity(43), &destination, &completed, |output| {
+            output.write_all(&payload)
+        })
+        .unwrap();
+    assert_eq!(budget.snapshot().reserved_bytes, 40);
+    assert_eq!(budget.snapshot().consumed_bytes_since_refresh, 60);
+    drop(completed);
+    assert!(
+        budget
+            .reserve(DiskRequirements {
+                output_bytes: 60,
+                ..DiskRequirements::default()
+            })
+            .is_err()
+    );
+    drop(other);
+
+    let refreshed_budget = DiskBudget::new(100, 0);
+    let in_progress = refreshed_budget
+        .reserve(DiskRequirements {
+            output_bytes: 60,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let partial_destination = temp.path().join("partial-output.bin");
+    registry
+        .write_transactional(identity(44), &partial_destination, &in_progress, |output| {
+            output.write_all(b"twenty bytes output")
+        })
+        .unwrap();
+    assert_eq!(refreshed_budget.snapshot().reserved_bytes, 41);
+    assert_eq!(refreshed_budget.snapshot().consumed_bytes_since_refresh, 19);
+    let probe = refreshed_budget.begin_available_bytes_probe().unwrap();
+    assert!(refreshed_budget.refresh_available_bytes(probe, 81));
+    assert_eq!(refreshed_budget.snapshot().reserved_bytes, 41);
+    assert_eq!(refreshed_budget.snapshot().consumed_bytes_since_refresh, 0);
+    let extra = refreshed_budget
+        .reserve(DiskRequirements {
+            output_bytes: 40,
+            ..DiskRequirements::default()
+        })
+        .expect("fresh estimate includes bytes already written");
+    drop(extra);
+    drop(in_progress);
+}
+
+#[test]
+fn failed_and_disk_full_output_preserve_original_and_report_unregistered_partial_temp() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 64);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            expanded_input_bytes: 100,
+            scratch_bytes: 100,
+            output_bytes: 100,
+        })
+        .unwrap();
+    let failed_identity = identity(4);
+    let failed_destination = temp.path().join("existing.bin");
+    fs::write(&failed_destination, b"original").unwrap();
+    let failed = registry.write_transactional(
+        failed_identity.clone(),
+        &failed_destination,
+        &reservation,
+        |output| {
+            output.write_all(b"partial")?;
+            Err(io::Error::other("injected writer failure"))
+        },
+    );
+    let failed = failed.expect_err("injected writer failure must fail transaction");
+    assert_eq!(failed.kind, OutputFailureKind::Writer);
+    let partial = failed.partial_temp_path.expect("partial path is reported");
+    assert_ne!(partial, failed_destination);
+    assert_eq!(fs::read(partial).unwrap(), b"partial");
+    assert_eq!(fs::read(&failed_destination).unwrap(), b"original");
+    assert_eq!(registry.registered_path(&failed_identity), None);
+
+    let disk_full_identity = identity(5);
+    let disk_full_destination = temp.path().join("disk-full.bin");
+    fs::write(&disk_full_destination, b"old output").unwrap();
+    let disk_full = registry.write_transactional(
+        disk_full_identity.clone(),
+        &disk_full_destination,
+        &reservation,
+        |output| {
+            output.write_all(b"written before full")?;
+            Err(io::Error::new(ErrorKind::StorageFull, "injected disk full"))
+        },
+    );
+    let disk_full = disk_full.expect_err("disk-full write must fail");
+    assert_eq!(disk_full.kind, OutputFailureKind::DiskFull);
+    let partial = disk_full
+        .partial_temp_path
+        .expect("disk-full partial path is reported");
+    assert_eq!(fs::read(partial).unwrap(), b"written before full");
+    assert_eq!(fs::read(&disk_full_destination).unwrap(), b"old output");
+    assert_eq!(registry.registered_path(&disk_full_identity), None);
+    assert_eq!(partial_output_count(temp.path()), 2);
+}
+
+#[test]
+fn quota_exhaustion_is_classified_as_disk_full_without_publishing_output() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 64);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 8,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(33);
+    let destination = temp.path().join("quota-exhausted.bin");
+    fs::write(&destination, b"original").unwrap();
+
+    let error = registry
+        .write_transactional(key.clone(), &destination, &reservation, |output| {
+            output.write_all(b"part")?;
+            Err(io::Error::new(
+                ErrorKind::QuotaExceeded,
+                "injected quota exhaustion",
+            ))
+        })
+        .expect_err("quota exhaustion must fail the transaction");
+
+    assert_eq!(error.kind, OutputFailureKind::DiskFull);
+    assert_eq!(fs::read(&destination).unwrap(), b"original");
+    assert_eq!(fs::read(error.partial_temp_path.unwrap()).unwrap(), b"part");
+    assert_eq!(registry.registered_path(&key), None);
+}
+
+#[cfg(unix)]
+const NOT_DISK_FULL_RAW_ERROR: i32 = 39;
+#[cfg(windows)]
+const NOT_DISK_FULL_RAW_ERROR: i32 = 122;
+
+#[cfg(any(unix, windows))]
+#[test]
+fn unrelated_platform_error_codes_are_not_reported_as_disk_full() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 64);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 8,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(32);
+    let destination = temp.path().join("unrelated-os-error.bin");
+    fs::write(&destination, b"original").unwrap();
+
+    let error = registry
+        .write_transactional(key.clone(), &destination, &reservation, |output| {
+            output.write_all(b"part")?;
+            Err(io::Error::from_raw_os_error(NOT_DISK_FULL_RAW_ERROR))
+        })
+        .expect_err("unrelated platform errors remain writer failures");
+
+    assert_eq!(error.kind, OutputFailureKind::Writer);
+    assert_eq!(fs::read(destination).unwrap(), b"original");
+    assert!(error.partial_temp_path.unwrap().exists());
+    assert_eq!(registry.registered_path(&key), None);
+}
+
+#[test]
+fn successful_output_creation_registers_only_after_commit() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 64);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 32,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(8);
+    let destination = temp.path().join("new-output.bin");
+    assert!(!destination.exists());
+    let committed = registry
+        .write_transactional(key.clone(), &destination, &reservation, |output| {
+            output.write_all(b"created output")
+        })
+        .expect("new destination commits");
+    assert_eq!(committed, destination);
+    assert_eq!(fs::read(&committed).unwrap(), b"created output");
+    assert_eq!(registry.registered_path(&key), Some(committed));
+    assert_eq!(partial_output_count(temp.path()), 0);
+}
+
+#[test]
+fn relative_output_destination_is_captured_before_callback_changes_working_directory() {
+    let _cwd_test_lock = CWD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = TempDir::new();
+    let initial_working_directory = temp.path().join("initial");
+    let changed_working_directory = temp.path().join("changed");
+    fs::create_dir(&initial_working_directory).unwrap();
+    fs::create_dir(&changed_working_directory).unwrap();
+    let _current_directory_guard =
+        CurrentDirectoryGuard::change_to(&initial_working_directory).unwrap();
+
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 64,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(48);
+    let relative_destination = PathBuf::from("relative-output.bin");
+    let committed = registry
+        .write_transactional(key.clone(), &relative_destination, &reservation, |output| {
+            output.write_all(b"captured at transaction start")?;
+            std::env::set_current_dir(&changed_working_directory)
+        })
+        .expect("the captured absolute destination remains stable after the callback changes cwd");
+
+    let expected_destination = initial_working_directory.join("relative-output.bin");
+    assert_eq!(committed, expected_destination);
+    assert_eq!(
+        registry.registered_path(&key),
+        Some(expected_destination.clone())
+    );
+    assert_eq!(
+        fs::read(&expected_destination).unwrap(),
+        b"captured at transaction start"
+    );
+    assert!(
+        !changed_working_directory
+            .join("relative-output.bin")
+            .exists()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn drive_relative_output_destination_is_captured_before_callback_changes_working_directory() {
+    let _cwd_test_lock = CWD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut candidate_parents = vec![std::env::temp_dir()];
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        candidate_parents.push(PathBuf::from(local_app_data));
+    }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(parent) = executable.parent()
+    {
+        candidate_parents.push(parent.to_path_buf());
+    }
+    if let Ok(current_directory) = std::env::current_dir() {
+        candidate_parents.push(current_directory);
+    }
+
+    let mut drive_temp = None;
+    let mut last_temp_error = None;
+    for parent in candidate_parents {
+        let Some(drive_letter) = windows_drive_letter(&parent) else {
+            continue;
+        };
+        match TempDir::try_new_under(&parent) {
+            Ok(temp) => {
+                drive_temp = Some((temp, drive_letter));
+                break;
+            }
+            Err(error) => last_temp_error = Some(error),
+        }
+    }
+    let Some((temp, drive_letter)) = drive_temp else {
+        if let Some(error) = last_temp_error {
+            eprintln!(
+                "skipping drive-relative output regression: no writable drive-qualified temp directory ({error})"
+            );
+        } else {
+            eprintln!(
+                "skipping drive-relative output regression: no drive-qualified temp directory is available"
+            );
+        }
+        return;
+    };
+    let initial_working_directory = temp.path().join("initial");
+    let changed_working_directory = temp.path().join("changed");
+    fs::create_dir(&initial_working_directory).unwrap();
+    fs::create_dir(&changed_working_directory).unwrap();
+    let _current_directory_guard =
+        CurrentDirectoryGuard::change_to(&initial_working_directory).unwrap();
+    let drive_relative_destination = PathBuf::from(format!(
+        "{}:drive-relative-output.bin",
+        char::from(drive_letter)
+    ));
+    assert!(!drive_relative_destination.is_absolute());
+    assert!(!drive_relative_destination.has_root());
+
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 64,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(49);
+    let committed = registry
+        .write_transactional(
+            key.clone(),
+            &drive_relative_destination,
+            &reservation,
+            |output| {
+                output.write_all(b"drive-relative target captured before callback")?;
+                std::env::set_current_dir(&changed_working_directory)
+            },
+        )
+        .expect("drive-relative destination remains bound to its original drive cwd");
+
+    let expected_destination = initial_working_directory.join("drive-relative-output.bin");
+    assert_eq!(committed, expected_destination);
+    assert_eq!(
+        registry.registered_path(&key),
+        Some(expected_destination.clone())
+    );
+    assert_eq!(
+        fs::read(&expected_destination).unwrap(),
+        b"drive-relative target captured before callback"
+    );
+    assert!(
+        !changed_working_directory
+            .join("drive-relative-output.bin")
+            .exists()
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn successful_output_replaces_existing_destination() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 64);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 32,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(9);
+    let destination = temp.path().join("replace-output.bin");
+    fs::write(&destination, b"original output").unwrap();
+    let committed = registry
+        .write_transactional(key.clone(), &destination, &reservation, |output| {
+            output.write_all(b"replacement")
+        })
+        .expect("supported targets atomically replace existing output");
+    assert_eq!(fs::read(&destination).unwrap(), b"replacement");
+    assert_eq!(registry.registered_path(&key), Some(committed));
+    assert_eq!(partial_output_count(temp.path()), 0);
+}
+
+#[cfg(not(any(unix, windows)))]
+#[test]
+fn unsupported_targets_do_not_clobber_existing_destinations() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 64);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 32,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(10);
+    let destination = temp.path().join("no-clobber-output.bin");
+    fs::write(&destination, b"original output").unwrap();
+    let error = registry
+        .write_transactional(key.clone(), &destination, &reservation, |output| {
+            output.write_all(b"replacement")
+        })
+        .expect_err("unsupported targets reject replacement");
+    assert_eq!(error.kind, OutputFailureKind::Commit);
+    assert!(
+        error
+            .partial_temp_path
+            .expect("staged artifact remains")
+            .exists()
+    );
+    assert_eq!(fs::read(&destination).unwrap(), b"original output");
+    assert_eq!(registry.registered_path(&key), None);
+}
+
+#[test]
+fn commit_and_temp_creation_failures_preserve_recovery_boundaries() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 64);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 32,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+
+    let key = identity(11);
+    let destination_directory = temp.path().join("destination-directory");
+    fs::create_dir(&destination_directory).unwrap();
+    let existing_file = destination_directory.join("keep.bin");
+    fs::write(&existing_file, b"preserve this").unwrap();
+    let error = registry
+        .write_transactional(
+            key.clone(),
+            &destination_directory,
+            &reservation,
+            |output| output.write_all(b"not committed"),
+        )
+        .expect_err("a file cannot replace the non-empty destination directory");
+    assert_eq!(error.kind, OutputFailureKind::Commit);
+    assert!(
+        error
+            .partial_temp_path
+            .expect("commit partial is reported")
+            .exists()
+    );
+    assert_eq!(fs::read(&existing_file).unwrap(), b"preserve this");
+    assert_eq!(registry.registered_path(&key), None);
+
+    let missing_parent_destination = temp.path().join("absent-parent").join("output.bin");
+    let temp_error = registry
+        .write_transactional(
+            identity(12),
+            &missing_parent_destination,
+            &reservation,
+            |output| output.write_all(b"no stage created"),
+        )
+        .expect_err("temporary creation fails without its parent directory");
+    assert_eq!(temp_error.kind, OutputFailureKind::TemporaryCreate);
+    assert_eq!(temp_error.partial_temp_path, None);
+    assert_eq!(partial_output_count(temp.path()), 1);
+}
+
+#[test]
+fn reserved_output_limit_is_enforced_and_partial_is_not_registered() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(100, 10);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 3,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(6);
+    let destination = temp.path().join("too-large.bin");
+    fs::write(&destination, b"original").unwrap();
+    let error = registry.write_transactional(key.clone(), &destination, &reservation, |output| {
+        let _ = output.write_all(b"four");
+        Ok(())
+    });
+    let error = error.expect_err("output exceeding its reservation fails");
+    assert_eq!(error.kind, OutputFailureKind::OutputLimitExceeded);
+    let partial = error.partial_temp_path.expect("partial path is reported");
+    assert!(partial.exists());
+    assert_eq!(fs::read(destination).unwrap(), b"original");
+    assert_eq!(registry.registered_path(&key), None);
+}
+
+#[test]
+fn reopening_cache_accounts_for_generated_files_and_evicts_them_before_unmanaged_files() {
+    let temp = TempDir::new();
+    let cache_root = temp.path().join("cache");
+    fs::create_dir(&cache_root).unwrap();
+    let unmanaged_file = cache_root.join("unmanaged.bin");
+    fs::write(&unmanaged_file, b"leave this alone").unwrap();
+
+    let first_cache = DerivedCache::open(&cache_root, 16).unwrap();
+    first_cache.store(identity(20), b"one").unwrap();
+    first_cache.store(identity(21), b"two").unwrap();
+    drop(first_cache);
+
+    let reopened = DerivedCache::open(&cache_root, 4).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.used_bytes, 3);
+    assert_eq!(snapshot.entries, 0);
+    assert_eq!(derived_file_count(&cache_root), 1);
+    assert_eq!(fs::read(&unmanaged_file).unwrap(), b"leave this alone");
+
+    reopened.store(identity(22), b"zz").unwrap();
+    assert_eq!(reopened.snapshot().unwrap().used_bytes, 2);
+    assert_eq!(derived_file_count(&cache_root), 1);
+    assert_eq!(fs::read(&unmanaged_file).unwrap(), b"leave this alone");
+}
+
+#[test]
+fn output_reservation_limits_successful_bytes_across_transactions() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(100, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 3,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+
+    let first = temp.path().join("first.bin");
+    registry
+        .write_transactional(identity(23), &first, &reservation, |output| {
+            output.write_all(b"ab")
+        })
+        .unwrap();
+    let second = temp.path().join("second.bin");
+    registry
+        .write_transactional(identity(24), &second, &reservation, |output| {
+            output.write_all(b"c")
+        })
+        .unwrap();
+
+    let third = temp.path().join("third.bin");
+    fs::write(&third, b"original").unwrap();
+    let key = identity(25);
+    let error = registry
+        .write_transactional(key.clone(), &third, &reservation, |output| {
+            output.write_all(b"d")
+        })
+        .expect_err("a reused reservation cannot authorize additional output bytes");
+    assert_eq!(error.kind, OutputFailureKind::OutputLimitExceeded);
+    assert_eq!(fs::read(first).unwrap(), b"ab");
+    assert_eq!(fs::read(second).unwrap(), b"c");
+    assert_eq!(fs::read(third).unwrap(), b"original");
+    assert_eq!(
+        fs::read(
+            error
+                .partial_temp_path
+                .expect("failed stage is recoverable")
+        )
+        .unwrap(),
+        b""
+    );
+    assert_eq!(registry.registered_path(&key), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_destination_parent_spelling_removes_stale_identity_registration() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let real_parent = temp.path().join("real");
+    let alias_parent = temp.path().join("alias");
+    fs::create_dir(&real_parent).unwrap();
+    symlink(&real_parent, &alias_parent).unwrap();
+
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 32,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let first_identity = identity(26);
+    let second_identity = identity(27);
+    let real_destination = real_parent.join("output.bin");
+    let alias_destination = alias_parent.join("output.bin");
+
+    registry
+        .write_transactional(
+            first_identity.clone(),
+            &real_destination,
+            &reservation,
+            |output| output.write_all(b"first"),
+        )
+        .unwrap();
+    registry
+        .write_transactional(
+            second_identity.clone(),
+            &alias_destination,
+            &reservation,
+            |output| output.write_all(b"second"),
+        )
+        .unwrap();
+
+    assert_eq!(registry.registered_path(&first_identity), None);
+    assert_eq!(
+        registry.registered_path(&second_identity),
+        Some(alias_destination)
+    );
+    assert_eq!(fs::read(real_destination).unwrap(), b"second");
+}
+
+#[cfg(unix)]
+#[test]
+fn stage_path_substitution_before_commit_is_detected() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 32,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(28);
+    let destination = temp.path().join("output.bin");
+    fs::write(&destination, b"original").unwrap();
+
+    let error = registry
+        .write_transactional(key.clone(), &destination, &reservation, |output| {
+            output.write_all(b"trusted stage")?;
+            let staged_path = fs::read_dir(temp.path())?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.file_name().is_some_and(|name| {
+                        name.to_string_lossy().starts_with(".asciiwall-output-")
+                    })
+                })
+                .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "staged path not found"))?;
+            fs::remove_file(&staged_path)?;
+            fs::write(staged_path, b"substituted")?;
+            Ok(())
+        })
+        .expect_err("a path no longer naming the staged handle must not be committed");
+
+    assert_eq!(error.kind, OutputFailureKind::Commit);
+    let partial = error
+        .partial_temp_path
+        .expect("substituted stage remains reportable");
+    assert_eq!(fs::read(partial).unwrap(), b"substituted");
+    assert_eq!(fs::read(destination).unwrap(), b"original");
+    assert_eq!(registry.registered_path(&key), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn case_sensitive_windows_directory_keeps_case_variant_outputs_distinct() {
+    let temp = TempDir::new();
+    let directory = temp.path().join("case-sensitive");
+    fs::create_dir(&directory).unwrap();
+    if !configure_windows_case_mode(&directory, true) {
+        return;
+    }
+    let upper_destination = directory.join("Output.bin");
+    let lower_destination = directory.join("output.bin");
+    assert!(!lower_destination.exists());
+
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 32,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let first_identity = identity(29);
+    let second_identity = identity(30);
+
+    registry
+        .write_transactional(
+            first_identity.clone(),
+            &upper_destination,
+            &reservation,
+            |output| output.write_all(b"upper"),
+        )
+        .unwrap();
+    registry
+        .write_transactional(
+            second_identity.clone(),
+            &lower_destination,
+            &reservation,
+            |output| output.write_all(b"lower"),
+        )
+        .unwrap();
+
+    assert_eq!(fs::read(&upper_destination).unwrap(), b"upper");
+    assert_eq!(fs::read(&lower_destination).unwrap(), b"lower");
+    assert_eq!(
+        registry.registered_path(&first_identity),
+        Some(upper_destination)
+    );
+    assert_eq!(
+        registry.registered_path(&second_identity),
+        Some(lower_destination)
+    );
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+}
+
+#[cfg(windows)]
+#[test]
+fn ordinary_windows_directory_keeps_case_variants_case_insensitive() {
+    let temp = TempDir::new();
+    let directory = temp.path().join("case-insensitive");
+    fs::create_dir(&directory).unwrap();
+    if !configure_windows_case_mode(&directory, false) {
+        return;
+    }
+    let upper_destination = directory.join("Output.bin");
+    let lower_destination = directory.join("output.bin");
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 32,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let first_identity = identity(31);
+    let second_identity = identity(32);
+
+    registry
+        .write_transactional(
+            first_identity.clone(),
+            &upper_destination,
+            &reservation,
+            |output| output.write_all(b"first"),
+        )
+        .unwrap();
+    assert!(lower_destination.exists());
+    assert_eq!(
+        fs::canonicalize(&upper_destination).unwrap(),
+        fs::canonicalize(&lower_destination).unwrap()
+    );
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+    fs::remove_file(&upper_destination).unwrap();
+    assert!(!lower_destination.exists());
+
+    registry
+        .write_transactional(
+            second_identity.clone(),
+            &lower_destination,
+            &reservation,
+            |output| output.write_all(b"second"),
+        )
+        .unwrap();
+
+    assert_eq!(registry.registered_path(&first_identity), None);
+    assert_eq!(
+        registry.registered_path(&second_identity),
+        Some(lower_destination)
+    );
+    assert_eq!(fs::read(&upper_destination).unwrap(), b"second");
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn case_variant_replacement_after_deletion_clears_stale_unix_registration() {
+    let temp = TempDir::new();
+    let upper_destination = temp.path().join("Output.bin");
+    let lower_destination = temp.path().join("output.bin");
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 32,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let first_identity = identity(45);
+    let second_identity = identity(46);
+
+    registry
+        .write_transactional(
+            first_identity.clone(),
+            &upper_destination,
+            &reservation,
+            |output| output.write_all(b"first"),
+        )
+        .unwrap();
+    if !lower_destination.exists() {
+        eprintln!("skipping case-alias assertion: this Unix directory is case-sensitive");
+        return;
+    }
+    assert_eq!(
+        fs::canonicalize(&upper_destination).unwrap(),
+        fs::canonicalize(&lower_destination).unwrap(),
+        "the test spellings must resolve to one filesystem entry"
+    );
+    assert_eq!(
+        registry.registered_path(&first_identity),
+        Some(upper_destination.clone())
+    );
+    fs::remove_file(&upper_destination).unwrap();
+    assert!(!upper_destination.exists());
+    assert!(!lower_destination.exists());
+
+    registry
+        .write_transactional(
+            second_identity.clone(),
+            &lower_destination,
+            &reservation,
+            |output| output.write_all(b"second"),
+        )
+        .unwrap();
+
+    assert_eq!(registry.registered_path(&first_identity), None);
+    assert_eq!(
+        registry.registered_path(&second_identity),
+        Some(lower_destination.clone())
+    );
+    assert_eq!(fs::read(&upper_destination).unwrap(), b"second");
+    assert_eq!(
+        fs::canonicalize(&upper_destination).unwrap(),
+        fs::canonicalize(&lower_destination).unwrap()
+    );
+}
+
+#[test]
+fn failed_output_retry_preserves_previous_registration() {
+    let temp = TempDir::new();
+    let registry = OutputRegistry::default();
+    let budget = DiskBudget::new(1_024, 0);
+    let reservation = budget
+        .reserve(DiskRequirements {
+            output_bytes: 64,
+            ..DiskRequirements::default()
+        })
+        .unwrap();
+    let key = identity(31);
+    let destination = temp.path().join("valid-output.bin");
+    let committed = registry
+        .write_transactional(key.clone(), &destination, &reservation, |output| {
+            output.write_all(b"previous")
+        })
+        .unwrap();
+    assert_eq!(registry.registered_path(&key), Some(committed.clone()));
+
+    let missing_parent_destination = temp.path().join("missing-parent").join("output.bin");
+    let error = registry
+        .write_transactional(
+            key.clone(),
+            &missing_parent_destination,
+            &reservation,
+            |output| output.write_all(b"replacement"),
+        )
+        .expect_err("a retry with a missing parent must fail");
+
+    assert_eq!(error.kind, OutputFailureKind::TemporaryCreate);
+    assert_eq!(error.partial_temp_path, None);
+    assert_eq!(registry.registered_path(&key), Some(committed.clone()));
+    assert_eq!(fs::read(committed).unwrap(), b"previous");
+}
+
+#[test]
+fn reopening_repairs_uninitialized_high_water_without_reusing_live_ids() {
+    let counter_cases: [(&str, &[u8]); 3] = [
+        ("partial", b"000000000000000"),
+        ("empty", b""),
+        ("corrupt", b"not-a-counter\n"),
+    ];
+
+    for (case_name, counter_contents) in counter_cases {
+        let temp = TempDir::new();
+        let cache_root = temp.path().join("cache");
+        drop(DerivedCache::open(&cache_root, 64).expect("create owned cache directory"));
+        let managed_dir = fs::read_dir(&cache_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .expect("find cache-managed directory");
+        let live_id = 0x2a_u64;
+        let live_path = managed_dir.join(format!("derived-{live_id:016x}.bin"));
+        fs::write(&live_path, b"live generated file").unwrap();
+        fs::remove_file(managed_dir.join(".file-id-high-water-v1")).unwrap();
+        fs::write(managed_dir.join(".file-id-high-water"), counter_contents).unwrap();
+
+        let cache = DerivedCache::open(&cache_root, 64)
+            .unwrap_or_else(|error| panic!("{case_name} high-water recovery failed: {error}"));
+        let key = identity(200);
+        cache.store(key.clone(), b"new generated file").unwrap();
+        let lease = cache.lease(&key).unwrap();
+        let generated_id = live_id + 1;
+
+        let expected_path =
+            fs::canonicalize(managed_dir.join(format!("derived-{generated_id:016x}.bin"))).unwrap();
+        assert_eq!(lease.path(), expected_path.as_path());
+        assert_eq!(fs::read(&live_path).unwrap(), b"live generated file");
+        assert_eq!(fs::read(lease.path()).unwrap(), b"new generated file");
+        assert_eq!(
+            fs::read(managed_dir.join(".file-id-high-water")).unwrap(),
+            format!("{:016x}\n", generated_id + 1).as_bytes()
+        );
+    }
+}

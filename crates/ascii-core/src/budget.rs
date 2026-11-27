@@ -1,10 +1,13 @@
 //! Explicit, allocation-free preflight for bounded core work.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::GridSize;
 use crate::error::{BudgetKind, Error, MalformedReason};
 use crate::frame::AsciiCell;
+
+const CANCELLATION_REQUESTED: u8 = 0b01;
+const CANCELLATION_COMMIT_IN_PROGRESS: u8 = 0b10;
 
 /// Independent byte and work ceilings for frame and raster validation.
 ///
@@ -50,7 +53,7 @@ impl Budget {
 /// Cancellation state that may be shared safely with an in-progress core operation.
 #[derive(Debug)]
 pub struct CancellationToken {
-    cancelled: AtomicBool,
+    state: AtomicU8,
 }
 
 impl CancellationToken {
@@ -58,19 +61,88 @@ impl CancellationToken {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            cancelled: AtomicBool::new(false),
+            state: AtomicU8::new(0),
         }
     }
 
     /// Requests cancellation of operations using this token.
+    ///
+    /// A short state transition protected by [`Self::commit_if_not_cancelled`] completes before
+    /// this request takes effect. This keeps cancellation and that transition in one order.
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            if state & CANCELLATION_REQUESTED != 0 {
+                return;
+            }
+            if state & CANCELLATION_COMMIT_IN_PROGRESS != 0 {
+                core::hint::spin_loop();
+                state = self.state.load(Ordering::Acquire);
+                continue;
+            }
+            match self.state.compare_exchange_weak(
+                state,
+                state | CANCELLATION_REQUESTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => state = actual,
+            }
+        }
     }
 
-    /// Returns whether cancellation has been requested.
-    #[must_use]
+    /// Returns whether cancellation has taken effect.
+    ///
+    /// A cancellation racing with a committed state transition is visible after that transition
+    /// completes.
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) & CANCELLATION_REQUESTED != 0
+    }
+
+    /// Runs a short state transition only if cancellation has not taken effect.
+    ///
+    /// The transition and [`Self::cancel`] are ordered atomically: if this method acquires the
+    /// transition first, a concurrent cancellation takes effect after it completes; otherwise the
+    /// transition is not run. Keep the closure short and nonblocking. It MUST NOT call
+    /// [`Self::cancel`] on this token.
+    pub fn commit_if_not_cancelled<T>(&self, transition: impl FnOnce() -> T) -> Result<T, Error> {
+        let _guard = self.begin_commit()?;
+        Ok(transition())
+    }
+
+    fn begin_commit(&self) -> Result<CancellationCommitGuard<'_>, Error> {
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            if state & CANCELLATION_REQUESTED != 0 {
+                return Err(Error::Cancelled);
+            }
+            if state & CANCELLATION_COMMIT_IN_PROGRESS != 0 {
+                core::hint::spin_loop();
+                state = self.state.load(Ordering::Acquire);
+                continue;
+            }
+            match self.state.compare_exchange_weak(
+                state,
+                state | CANCELLATION_COMMIT_IN_PROGRESS,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(CancellationCommitGuard { state: &self.state }),
+                Err(actual) => state = actual,
+            }
+        }
+    }
+}
+
+struct CancellationCommitGuard<'a> {
+    state: &'a AtomicU8,
+}
+
+impl Drop for CancellationCommitGuard<'_> {
+    fn drop(&mut self) {
+        self.state
+            .fetch_and(!CANCELLATION_COMMIT_IN_PROGRESS, Ordering::Release);
     }
 }
 

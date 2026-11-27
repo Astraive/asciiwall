@@ -1,0 +1,18 @@
+[package]
+name = "ascii-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ascii-convert = { path = "../ascii-convert" }
+ascii-core = { path = "../ascii-core" }
+icu_properties = "=2.4.0"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+toml = "=0.8.23"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+icu_casemap = "=2.4.0"
+icu_normalizer = "=2.4.0"
