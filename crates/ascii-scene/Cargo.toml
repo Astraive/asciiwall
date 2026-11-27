@@ -8,3 +8,4 @@ publish = false
 
 [dependencies]
 ascii-core = { path = "../ascii-core" }
+ascii-convert = { path = "../ascii-convert" }

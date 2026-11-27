@@ -19,7 +19,7 @@ const MIN_LIFETIME_TICKS: u32 = 120;
 
 pub const STARFIELD_NODE_ID: &str = "builtin.particle-field.default";
 
-mod sealed {
+pub(crate) mod sealed {
     pub trait Sealed {}
 }
 /// Sealed first-party execution contract driven by the bounded `SceneRuntime`.
@@ -29,6 +29,24 @@ pub trait SceneGenerator: sealed::Sealed {
     fn node_id(&self) -> &str;
     /// Returns checked logical scratch storage without allocating.
     fn scratch_bytes(&self, parameters: &SceneParameters) -> Result<u64, Error>;
+    /// Returns checked logical scratch storage for the selected grid without allocating.
+    fn scratch_bytes_for_dimensions(
+        &self,
+        parameters: &SceneParameters,
+        dimensions: SceneDimensions,
+    ) -> Result<u64, Error> {
+        let _ = dimensions;
+        self.scratch_bytes(parameters)
+    }
+    /// Returns checked bounded work beyond the shared frame/particle estimate.
+    fn additional_work_units_per_advance(
+        &self,
+        _dimensions: SceneDimensions,
+        _parameters: &SceneParameters,
+        _max_catch_up_steps: u8,
+    ) -> Result<u64, Error> {
+        Ok(0)
+    }
     /// Prepares bounded buffers; the runtime-only permit proves resources were reserved first.
     fn prepare(
         &mut self,
@@ -44,6 +62,10 @@ pub trait SceneGenerator: sealed::Sealed {
         parameters: &SceneParameters,
         snapshots: &ApprovedSnapshots<'_>,
     );
+    /// Returns true when this generator has no evolving state at its current configuration.
+    fn is_static(&self) -> bool {
+        false
+    }
     /// Writes into caller-owned output storage without allocating.
     fn render(&self, dimensions: SceneDimensions, output: &mut [char]);
 }
@@ -268,11 +290,17 @@ impl<G: SceneGenerator> SceneRuntime<G> {
         if generator.node_id().is_empty() || generator.node_id().len() > MAX_NODE_ID_BYTES {
             return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
         }
-        let scratch_bytes = generator.scratch_bytes(&parameters)?;
-        let resource_estimate = parameters.estimate_resources(
+        let scratch_bytes = generator.scratch_bytes_for_dimensions(&parameters, dimensions)?;
+        let additional_work_units = generator.additional_work_units_per_advance(
+            dimensions,
+            &parameters,
+            limits.max_catch_up_steps(),
+        )?;
+        let resource_estimate = parameters.estimate_resources_with_additional_work(
             dimensions,
             scratch_bytes,
             limits.max_catch_up_steps(),
+            additional_work_units,
         )?;
         let reservation = budget.reserve(resource_estimate.total_bytes())?;
 
@@ -304,15 +332,21 @@ impl<G: SceneGenerator> SceneRuntime<G> {
         elapsed: Duration,
         snapshots: &ApprovedSnapshots<'_>,
     ) -> Result<AdvanceReport, Error> {
-        let report = self.simulation.advance(elapsed, self.parameters)?;
-        for context in self
-            .simulation
-            .contexts(report, self.parameters.simulation_hz())
-        {
-            self.generator
-                .step(context, self.dimensions, &self.parameters, snapshots);
+        let report = if self.generator.is_static() {
+            self.simulation.freeze()
+        } else {
+            self.simulation.advance(elapsed, self.parameters)?
+        };
+        if !self.generator.is_static() {
+            for context in self
+                .simulation
+                .contexts(report, self.parameters.simulation_hz())
+            {
+                self.generator
+                    .step(context, self.dimensions, &self.parameters, snapshots);
+            }
         }
-        let output_refreshed = report.simulation_steps() > 0;
+        let output_refreshed = report.simulation_steps() > 0 && !self.generator.is_static();
         if output_refreshed {
             self.generator.render(self.dimensions, &mut self.frame);
         }
@@ -327,7 +361,7 @@ impl<G: SceneGenerator> SceneRuntime<G> {
     where
         F: FnMut(u64) -> ApprovedSnapshots<'snapshot>,
     {
-        let simulation_steps = if self.parameters.is_static() {
+        let simulation_steps = if self.parameters.is_static() || self.generator.is_static() {
             0
         } else {
             requested_steps

@@ -1,8 +1,10 @@
 use ascii_core::{BudgetKind, Error, MalformedReason};
 
-use crate::descriptor::{GENERATOR_DESCRIPTOR, ResourceEstimate};
-use crate::generator::{ParticleFieldGenerator, SceneRuntime};
-use crate::params::{MAX_SIMULATION_WORK_UNITS, SceneDimensions, SceneParameters};
+use crate::descriptor::ResourceEstimate;
+use crate::generator::{ParticleFieldGenerator, SceneGenerator, SceneRuntime};
+use crate::params::{
+    MAX_CATCH_UP_STEPS, MAX_SIMULATION_WORK_UNITS, SceneDimensions, SceneParameters,
+};
 use crate::resource::SceneResourceBudget;
 use crate::snapshots::{
     ApprovedSnapshots, NormalizedPoint, SignalKind, SnapshotCandidates, SnapshotCapabilities,
@@ -67,16 +69,16 @@ pub struct ExportContext<'a> {
 }
 
 /// Exact fixed-step character output paired with its caller-selected export identity.
-pub struct ExportedFrame<'a> {
+pub struct ExportedFrame<'a, G: SceneGenerator = ParticleFieldGenerator<'static>> {
     selected_start_timestamp_unix_ms: i64,
     settings_fingerprint: [u8; 32],
     font_identity: [u8; 32],
     step_index: u64,
     signal_track: ExportSignalTrack<'a>,
-    runtime: SceneRuntime<ParticleFieldGenerator<'static>>,
+    runtime: SceneRuntime<G>,
 }
 
-impl<'a> ExportedFrame<'a> {
+impl<'a, G: SceneGenerator> ExportedFrame<'a, G> {
     #[must_use]
     pub const fn parameters(&self) -> SceneParameters {
         self.runtime.parameters()
@@ -198,13 +200,36 @@ impl<'a> ExportContext<'a> {
         step_index: u64,
         budget: &SceneResourceBudget,
     ) -> Result<ExportedFrame<'a>, Error> {
-        validate_signal_track(self.signal_track)?;
+        self.execute_frame_with(
+            dimensions,
+            step_index,
+            budget,
+            ParticleFieldGenerator::default(),
+        )
+    }
+
+    /// Executes the exact requested fixed-step frame using a caller-selected first-party generator.
+    ///
+    /// The generator must retain any required immutable inputs (such as MatrixRain's glyph table)
+    /// for the lifetime of the returned frame. Recorded events are accepted only when that
+    /// generator declares the corresponding signal; no unsupported interaction is synthesized.
+    pub fn execute_frame_with<G: SceneGenerator>(
+        self,
+        dimensions: SceneDimensions,
+        step_index: u64,
+        budget: &SceneResourceBudget,
+        generator: G,
+    ) -> Result<ExportedFrame<'a, G>, Error> {
+        if !generator.descriptor().deterministic_export {
+            return Err(Error::Malformed(MalformedReason::InvalidConfiguration));
+        }
+        validate_signal_track(generator.descriptor(), self.signal_track)?;
         let event_count = match self.signal_track {
             ExportSignalTrack::Recorded(events) => events.len(),
             ExportSignalTrack::IdleFallback => 0,
         };
 
-        let simulation_steps = if self.parameters.is_static() {
+        let simulation_steps = if self.parameters.is_static() || generator.is_static() {
             0
         } else {
             step_index
@@ -222,7 +247,16 @@ impl<'a> ExportContext<'a> {
         let step_work = simulation_steps
             .checked_mul(particle_count.max(1))
             .ok_or(Error::SizeOverflow)?;
-        // Charge both the supported-signal validation scan and the replay scan.
+        // The generator hook bounds one regular advance including its render pass; charging it
+        // for every exact step is conservative and keeps generic exports within the shared limit.
+        let generator_work_per_advance = generator.additional_work_units_per_advance(
+            dimensions,
+            &self.parameters,
+            MAX_CATCH_UP_STEPS,
+        )?;
+        let generator_work = simulation_steps
+            .checked_mul(generator_work_per_advance)
+            .ok_or(Error::SizeOverflow)?;
         let event_work = u64::try_from(event_count)
             .map_err(|_| Error::SizeOverflow)?
             .checked_mul(2)
@@ -230,18 +264,14 @@ impl<'a> ExportContext<'a> {
         let work_units = render_work
             .checked_add(particle_work)
             .and_then(|work| work.checked_add(step_work))
+            .and_then(|work| work.checked_add(generator_work))
             .and_then(|work| work.checked_add(event_work))
             .ok_or(Error::SizeOverflow)?;
         if work_units > MAX_SIMULATION_WORK_UNITS {
             return Err(Error::BudgetExceeded(BudgetKind::WorkUnits));
         }
 
-        let mut runtime = SceneRuntime::try_new(
-            self.parameters,
-            dimensions,
-            ParticleFieldGenerator::default(),
-            budget,
-        )?;
+        let mut runtime = SceneRuntime::try_new(self.parameters, dimensions, generator, budget)?;
         let events: &[RecordedEvent] = match self.signal_track {
             ExportSignalTrack::Recorded(events) => events,
             ExportSignalTrack::IdleFallback => &[],
@@ -275,12 +305,15 @@ impl<'a> ExportContext<'a> {
     }
 }
 
-fn validate_signal_track(track: ExportSignalTrack<'_>) -> Result<(), Error> {
+fn validate_signal_track(
+    descriptor: &'static crate::descriptor::GeneratorDescriptor,
+    track: ExportSignalTrack<'_>,
+) -> Result<(), Error> {
     let ExportSignalTrack::Recorded(events) = track else {
         return Ok(());
     };
     for event in events {
-        if !GENERATOR_DESCRIPTOR
+        if !descriptor
             .supported_signals
             .contains(&event.kind.signal_kind())
         {

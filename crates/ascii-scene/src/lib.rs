@@ -8,6 +8,7 @@ mod descriptor;
 mod determinism;
 mod export;
 mod generator;
+mod matrix_rain;
 mod params;
 mod resource;
 mod simulation;
@@ -27,6 +28,10 @@ pub use export::{
     RecordedEventKind,
 };
 pub use generator::{ParticleFieldGenerator, STARFIELD_NODE_ID, SceneGenerator, SceneRuntime};
+pub use matrix_rain::{
+    MATRIX_RAIN_DESCRIPTOR, MATRIX_RAIN_PRESETS, MatrixRainConfig, MatrixRainGenerator,
+    MatrixRainPresetDescriptor,
+};
 pub use params::{
     MAX_CATCH_UP_STEPS, MAX_GRID_CELLS, MAX_GRID_DIMENSION, MAX_PARTICLES,
     MAX_RUNTIME_RESOURCE_BYTES, MAX_SIMULATION_WORK_UNITS, SceneDimensions, SceneParameters,

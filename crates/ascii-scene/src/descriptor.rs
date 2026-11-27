@@ -51,6 +51,7 @@ pub enum ParameterKind {
     U32,
     FiniteFloat,
     Boolean,
+    ColorRgba,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,6 +60,7 @@ pub enum ParameterDefault {
     U32(u32),
     Float(f32),
     Boolean(bool),
+    ColorRgba(u32),
 }
 
 /// Generator-local parameter introspection; this is not a settings registry or package schema.
