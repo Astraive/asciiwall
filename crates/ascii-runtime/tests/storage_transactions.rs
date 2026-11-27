@@ -1786,6 +1786,50 @@ fn configuration_failures_at_each_atomic_boundary_preserve_valid_recovery() {
         assert_eq!(replaced_backup.value(), expected_current);
     }
 }
+#[test]
+fn failed_backup_replacements_remove_both_owned_temporaries() {
+    let temp = TempDir::new();
+    let storage = Storage::new(linux_roots(temp.path()));
+    let current_path = storage.config_path();
+    let backup_path = storage.config_backup_path();
+    let original = config(json!({"theme": "original"}));
+    save_current_config(&storage, &original, validate_test_config)
+        .expect("save initial config without backup");
+
+    let parent = current_path.parent().expect("configuration directory");
+    let current_temporary = parent.join(".ascii-runtime-settings.toml.state.tmp");
+    let backup_temporary = parent.join(".ascii-runtime-settings.toml.last-good.state.tmp");
+    for attempt in 0..3 {
+        let candidate = config(json!({"theme": format!("candidate-{attempt}")}));
+        let error = save_current_config_with_hook(
+            &storage,
+            &candidate,
+            validate_test_config,
+            |stage| {
+                if stage == AtomicWriteStage::BackupTemporarySynced {
+                    return Err(io::Error::other("injected backup replacement failure"));
+                }
+                Ok(())
+            },
+        )
+        .expect_err("injected backup replacement failure");
+        assert!(matches!(error, StorageError::Io(_)));
+        assert!(!current_temporary.exists(), "failed save removes current temporary");
+        assert!(!backup_temporary.exists(), "failed save removes backup temporary");
+        assert_eq!(
+            parse_config(&fs::read(&current_path).expect("read current config")).value(),
+            original.value(),
+            "failed backup replacement leaves the current document unchanged"
+        );
+        assert!(!backup_path.exists(), "failed backup replacement leaves no backup");
+        let temporary_count = fs::read_dir(parent)
+            .expect("read config directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".state.tmp"))
+            .count();
+        assert_eq!(temporary_count, 0, "retries do not accumulate temporary files");
+    }
+}
 
 #[test]
 fn saving_config_revalidates_against_the_active_schema_before_replacement() {
