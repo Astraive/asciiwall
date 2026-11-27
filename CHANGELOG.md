@@ -42,7 +42,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- [WND-001] Restrict child traversal and owner-process queries to the shell window and candidate `Progman` / `WorkerW` roots; unrelated Explorer trees no longer consume the probe budget or fail a desktop-hierarchy observation. Ignore `EnumChildWindows`'s documented-unused return value so empty `WorkerW` roots do not fail the scan. Remove the non-desktop view count, which this scoped scan cannot truthfully provide.
+- [WND-001] Count only the known shell window and candidate `Progman` / `WorkerW` roots and children against the 512 work/record cap; unrelated top-level roots are class-checked under the 250 ms deadline without owner queries or traversal. Preserve explicit timeout/fail-closed reporting and ignore `EnumChildWindows`'s documented-unused return value.
 - Durable publication-ledger replacement uses a same-directory overwrite rename instead of the Windows PowerShell `File.Replace` null-backup binding; a real filesystem regression runs locally and in CI.
 - Project-field schema preflight preserves singleton GraphQL argument collections instead of mistaking a valid input object for multiple arguments.
 - Preserve ISO-looking JSON text and exact protected ledger timestamp strings through repeated reads and atomic writes; the real filesystem regression now exercises lossless reloads.
