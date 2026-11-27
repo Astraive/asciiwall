@@ -1874,7 +1874,6 @@ fn preserve_existing_file_permissions(temporary: &Path, destination: &Path) -> i
     }
 }
 
-#[cfg(windows)]
 #[derive(Debug)]
 struct ReplaceDestinationError {
     error: io::Error,
