@@ -802,6 +802,30 @@ impl WindowsHost {
             let _ = self.leases.retire(lease);
             return Err(map_native(error));
         }
+        // The initial frame was presented while this HWND was hidden. Force a redraw now
+        // that it is visible; otherwise the renderer's static-frame cache can skip it.
+        self.renderer.invalidate();
+        let visible_outcome = self
+            .renderer
+            .present(&self.current_frame, &render_target(&hosted, None));
+        if let Err(error) = check_cancellation(&self.cancellation) {
+            hosted.window.hide();
+            let _ = self.leases.retire(lease);
+            return Err(error);
+        }
+        match visible_outcome {
+            Ok(ascii_render::PresentOutcome::Presented { .. }) => {}
+            Ok(_) => {
+                hosted.window.hide();
+                let _ = self.leases.retire(lease);
+                return Err(WindowsHostError::FirstFrameNotPresented);
+            }
+            Err(error) => {
+                hosted.window.hide();
+                let _ = self.leases.retire(lease);
+                return Err(WindowsHostError::Renderer(error));
+            }
+        }
         if let Err(error) = self.set_wallpaper_capability(CapabilityAvailability::Available) {
             hosted.window.hide();
             let _ = self.leases.retire(lease);

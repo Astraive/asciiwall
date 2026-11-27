@@ -14,7 +14,7 @@ Before attach, establish the intended DPI-awareness context, styles, non-activat
 
 `displays` performs a complete bounded `EnumDisplayMonitors` pass under per-monitor DPI awareness. The fixed-capacity public snapshot reports physical-pixel geometry and opaque local monitor identities, not HWNDs or OS device names. Topology is re-enumerated periodically and on display-change messages; message dimensions alone are never treated as a topology.
 
-`attach` accepts only a bounded, unambiguous Explorer hierarchy containing `SHELLDLL_DefView` with a direct `Progman`/`WorkerW` parent in the same shell process and a per-monitor-aware DPI context. Unsupported or ambiguous hierarchies, inaccessible shell state, and incompatible DPI contexts fail closed. The adapter creates a disabled, nonactivating, non-topmost owned window hidden at the output bounds, creates a Win32 WGPU surface, configures an sRGB/FIFO/opaque target, and presents the initial valid frame while hidden. It then changes only that owned HWND to a disabled child, attaches it to the verified shell parent, and checks exact parent/process/class, bottom sibling order, output geometry, styles, and visibility. It revalidates shell hierarchy and the `Default` input desktop, checks that foreground ownership did not change, then reveals with `SW_SHOWNOACTIVATE`. These checks establish structural Win32 state only; they do not prove that the surface is visibly below icons or preserves desktop interaction.
+`attach` accepts only a bounded, unambiguous Explorer hierarchy containing `SHELLDLL_DefView` with a direct `Progman`/`WorkerW` parent in the same shell process and a per-monitor-aware DPI context. Unsupported or ambiguous hierarchies, inaccessible shell state, and incompatible DPI contexts fail closed. The adapter creates a disabled, nonactivating, non-topmost owned window hidden at the output bounds, creates a Win32 WGPU surface, configures an sRGB/FIFO/opaque target, and presents the initial valid frame while hidden. It then changes only that owned HWND to a disabled child, attaches it to the verified shell parent, and checks exact parent/process/class, bottom sibling order, output geometry, styles, and visibility. It revalidates shell hierarchy and the `Default` input desktop, checks that foreground ownership did not change, then reveals with `SW_SHOWNOACTIVATE`. After successful reveal, it invalidates the renderer and requires a fresh post-reveal `Presented` result before attach succeeds. If that presentation is cancelled or fails, it hides the window and retires the lease. These checks establish structural Win32 state and renderer submission only; they do not prove that the compositor visibly displays the surface below icons or preserves desktop interaction.
 
 `present` requires the exact active `SurfaceLease` and rechecks visible placement before rendering. Surface loss, outdated surfaces, and suboptimal presentation retire the affected lease before bounded recreation. The host polls WTS/session messages and checks the input desktop; lock, disconnect, or a non-`Default` desktop hides owned surfaces and stops presentation. Unlock triggers a full topology and shell revalidation, a hidden current-frame presentation, and only then a nonactivating reveal. Topology changes retire and rebuild affected outputs. Shell recovery backs off from 100 ms to 1.6 s, stops after five failed attempts, and requires an explicit `retry_recovery` call to reset the circuit. `Drop` releases each WGPU surface before destroying only its token-verified owned HWND; Explorer-owned windows are never destroyed.
 
@@ -38,6 +38,21 @@ The user ran `C:\Users\gskne\AppData\Local\Temp\wnd002-manual-check\wnd002-manua
 - `Cargo.toml` SHA-256: `40e44cc390c1bdfc0f51320e40a7101b7e43f9f8ee3c59b8171f44e1aadbf3c2`.
 
 Desktop icon click/selection and typing into an application remain **NOT TESTED**. No screenshot, focus pass, root cause, or production support is established by this attempt.
+
+### Updated diagnostic runner (prepared, not run)
+
+The updated diagnostic runner links the current WND-002 worktree fix. It has been prepared but has **NOT** been run on the desktop; no post-fix visual result is available.
+
+- Runner source SHA-256: `d6c65373bf88b463443adc2dcab3335fd54c47bebf33244dd80f929228aeb8e3`.
+- Runner executable SHA-256: `8d019c0280927284aab521fd73461a71dc6cc536201d8e6ec04f3dd62d716ebd`.
+
+These hashes identify the prepared updated runner and are separate from the old-run hashes above.
+
+### WND-002 post-reveal redraw diagnosis
+
+Static diagnosis found that `attach_internal` rendered and cached the initial frame while the HWND was hidden. Once revealed, the manual runner's same-frame/same-target `host.present` could return `Skipped(Unchanged)`, so no renderer presentation was required after reveal. The fix invalidates renderer state after a successful reveal and requires a fresh `Presented` outcome; failure hides the window and retires its lease.
+
+`Presented` means renderer submission, not compositor visibility or user-visible wallpaper acceptance. The earlier user attempt above remains **NOT PASSED** and is not evidence that this fix is visually accepted. Manual retest with the updated runner is pending; icon click/selection and typing remain **NOT TESTED**.
 
 ## Pointer and window feeds
 
