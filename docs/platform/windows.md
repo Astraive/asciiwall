@@ -26,7 +26,7 @@ Native evidence is **partially measured; not accepted**. On Windows 11 Home Sing
 
 One guarded Explorer restart/recovery was observed (evidence: PR #371, code head `b443d0ef37d1780c271c4a13d0812b3b87fea4c2`): the monitor reported `SurfaceRetired`/HostLost and health became Unavailable, then capability returned Available/Healthy with replacement `SurfaceAttached` generation 1 and registry epoch 1. After 150 seconds it remained Healthy; `WallpaperSurface` was Available at Low confidence with lease_count 1. Host drop reported owned windows released.
 
-Still unverified: below-icon placement, focus/nonactivation, desktop icon click/selection/menus, typing into an app, shell visual recovery, Task View/virtual desktops, topology/hotplug, lock/disconnect, recovery exhaustion, and application-controller Stop. Win+D was inconclusive: no host events were recorded, and delivery or visible effect was not confirmed. A subsequent user visual attempt is recorded below. These observations do not establish zero leaks, icon interaction, focus preservation, or acceptance; WND-002 remains experimental and unsupported.
+Still unverified or untested: focus/nonactivation, desktop icon click/selection/menus, typing into an app, shell visual recovery, Task View/virtual desktops, topology/hotplug, lock/disconnect, recovery exhaustion, and application-controller Stop. Below-icon visible placement is **NOT PASSED** for the user visual attempt recorded below. Win+D was inconclusive: no host events were recorded, and delivery or visible effect was not confirmed. These observations do not establish zero leaks, icon interaction, focus preservation, or acceptance; WND-002 remains experimental and unsupported.
 
 ### User visual acceptance attempt
 
