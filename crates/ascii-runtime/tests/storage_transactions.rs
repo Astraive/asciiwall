@@ -923,12 +923,15 @@ fn registry_update_parent_sync_failure_restores_exact_prior_state() {
 }
 
 #[test]
-fn registry_update_rollback_failure_reports_prior_state_wording() {
+fn registry_update_rollback_failure_retains_original_and_startup_cleans_orphans() {
     let temp = TempDir::new();
     let storage = Storage::new(linux_roots(temp.path()));
+    let previous = registry("1.0.0");
     storage
-        .save_registry(&registry("1.0.0"))
+        .save_registry(&previous)
         .expect("save initial registry");
+    let registry_path = storage.registry_path();
+    let previous_bytes = fs::read(&registry_path).expect("capture original registry");
 
     let error = storage
         .update_registry_with_hook(
@@ -944,16 +947,61 @@ fn registry_update_rollback_failure_reports_prior_state_wording() {
             },
         )
         .expect_err("registry rollback failure should be reported");
-    assert!(matches!(
-        &error,
-        StorageError::RecoveryRollbackFailed {
-            retained_recovery_copy: Some(_),
-            ..
-        }
-    ));
     let display = error.to_string();
+    let retained = match error {
+        StorageError::RecoveryRollbackFailed {
+            retained_recovery_copy: Some(path),
+            ..
+        } => path,
+        other => panic!("expected retained recovery copy, got {other}"),
+    };
     assert!(display.contains("parent-directory sync failed (injected sync failure)"));
     assert!(display.contains("restoring prior state also failed (injected rollback failure)"));
+    assert!(retained.exists());
+    assert_eq!(
+        fs::read(&retained).expect("read retained original registry"),
+        previous_bytes
+    );
+
+    let parent = registry_path.parent().expect("registry parent");
+    for restart in 0..4 {
+        for sequence in 0..64 {
+            fs::write(
+                parent.join(format!(
+                    ".ascii-runtime-install-registry.json.recovery-original-{}.tmp",
+                    restart * 64 + sequence
+                )),
+                b"stale crash orphan",
+            )
+            .expect("seed interrupted recovery copy");
+        }
+        assert!(matches!(
+            storage.update_registry_with_hook(
+                |current| *current = registry("3.0.0"),
+                injected_failure(AtomicWriteStage::TemporaryCreated),
+            ),
+            Err(StorageError::Io(_))
+        ));
+        let recovery_orphans = fs::read_dir(parent)
+            .expect("read registry parent")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".recovery-original-")
+            })
+            .count();
+        assert_eq!(
+            recovery_orphans, 0,
+            "restart {restart} removes crash orphans"
+        );
+    }
+
+    assert_eq!(
+        fs::read(&retained).expect("explicitly retained original remains available"),
+        previous_bytes
+    );
 }
 
 #[test]
