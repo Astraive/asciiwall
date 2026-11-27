@@ -2,7 +2,9 @@
 
 ## Scope and strategy
 
-This issue-scoped probe performs read-only queries only: `GetShellWindow`, bounded `EnumWindows` / `EnumChildWindows` traversal, class-name and owner-process inspection, and `GetParent` relationships confirmed with `IsChild`, plus OS-version, native-architecture, and current-session queries. The strategy identifier is `windows-shell-hierarchy-enumeration-v1`. It limits hierarchy traversal to 512 window records and a 250 ms callback deadline, and reports budget exhaustion, timeout, missing shell, and API failure explicitly. It retains class categories/counts only; no HWND or foreign process ID is returned.
+This issue-scoped probe performs read-only queries: `GetShellWindow`, bounded `EnumWindows` / `EnumChildWindows` traversal, class-name and owner-process inspection for candidate desktop roots and `SHELLDLL_DefView` nodes, plus OS-version, native-architecture, and current-session queries. The strategy identifier is `windows-shell-hierarchy-enumeration-v1`.
+The traversal is limited to 512 window records and a 250 ms callback deadline; it reports budget exhaustion, timeout, missing shell, and failed owner queries for candidate roots or desktop-view nodes explicitly.
+`SHELLDLL_DefView` nodes under unrelated roots are excluded from desktop classification; the probe does not count Explorer folder views outside its candidate roots. It retains only class categories/counts; no HWND or foreign process ID is returned.
 
 It does not create a window or graphics device, attach a surface, send shell messages, restart Explorer, or change desktop state. GPU adapter/backend identity is **NOT QUERIED** by this hierarchy-only probe; the report says so explicitly rather than inferring a rendering backend.
 
