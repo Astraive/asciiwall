@@ -6,7 +6,8 @@ use std::sync::{
 use ascii_core::{AssignmentId, Generation};
 use ascii_runtime::{
     ApplyInput, AssignmentController, AssignmentHost, AssignmentState, Blocker, CompletionOutcome,
-    ReasonCode, StopKind, SwitchTransition,
+    PauseAction, ReasonCode, StopKind, SurfaceDisposition, SuspendPolicy, SuspendResourcePolicy,
+    SwitchTransition, TransitionPolicy, pause_action,
 };
 
 fn assignment(value: u8) -> AssignmentId {
@@ -147,6 +148,21 @@ fn install_initial(controller: &mut AssignmentController<Active>, host: &mut Hos
         controller.active_resource().map(|resource| resource.id),
         Some(1)
     );
+}
+
+fn suspend_policy() -> SuspendPolicy {
+    SuspendPolicy {
+        resources: SuspendResourcePolicy::ReleaseExpensive,
+        surface: SurfaceDisposition::Release,
+    }
+}
+
+fn immediate_suspend_action() -> PauseAction {
+    PauseAction::Suspend {
+        resources: SuspendResourcePolicy::ReleaseExpensive,
+        surface: SurfaceDisposition::Release,
+        transition: TransitionPolicy::Bypass,
+    }
 }
 
 #[test]
@@ -306,82 +322,36 @@ fn forced_stop_invalidates_pending_work_and_releases_active_resource() {
 }
 
 #[test]
-fn hard_blockers_during_preparation_never_switch_replacement() {
-    for (blocker, reason) in [
-        (Blocker::SessionLocked, ReasonCode::SessionLocked),
-        (Blocker::DisplayOff, ReasonCode::DisplayOff),
-        (Blocker::HostUnavailable, ReasonCode::HostUnavailable),
-    ] {
-        let mut controller = AssignmentController::<Active>::new();
-        let mut host = Host::default();
-        install_initial(&mut controller, &mut host);
-        let job = controller.request(input(9), &mut host).unwrap();
-        let completion = job.execute(&mut host);
-        let switch_count = host.switch_count;
-        let drops_before_completion = host.drops.count();
-        controller.set_blocker(blocker, true);
-
-        assert_eq!(
-            controller.complete_preparation(completion, &mut host),
-            CompletionOutcome::Failed(reason)
-        );
-        assert_eq!(host.switch_count, switch_count);
-        assert_eq!(host.drops.count(), drops_before_completion + 1);
-        assert_eq!(controller.snapshot().state, AssignmentState::Suspended);
-        assert_eq!(controller.snapshot().reason, Some(reason));
-        assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
-        assert_eq!(
-            controller.active_resource().map(|resource| resource.id),
-            Some(1)
-        );
-    }
-}
-
-#[test]
-fn hard_blocker_during_initial_preparation_never_switches_assignment() {
+fn hard_blocker_during_initial_preparation_invalidates_and_reports_blocker_reason() {
     let mut controller = AssignmentController::<Active>::new();
     let mut host = Host::default();
+    let job = controller.request(input(11), &mut host).unwrap();
+    let completion = job.execute(&mut host);
+    let generation = controller.snapshot().generation;
+    let drops_before_completion = host.drops.count();
 
     controller.set_blocker(Blocker::DisplayOff, true);
+    assert_ne!(controller.snapshot().generation, generation);
     assert_eq!(controller.snapshot().state, AssignmentState::Unloaded);
-    assert!(controller.snapshot().blockers.contains(Blocker::DisplayOff));
     assert_eq!(controller.snapshot().reason, Some(ReasonCode::DisplayOff));
-
-    let job = controller.request(input(11), &mut host).unwrap();
-    assert!(controller.snapshot().blockers.contains(Blocker::DisplayOff));
-    let completion = job.execute(&mut host);
-    let drops_before_completion = host.drops.count();
-    controller.set_blocker(Blocker::SessionLocked, true);
-
-    assert_eq!(controller.snapshot().state, AssignmentState::Preparing);
     assert_eq!(
         controller.complete_preparation(completion, &mut host),
-        CompletionOutcome::Failed(ReasonCode::SessionLocked)
+        CompletionOutcome::Stale
     );
     assert_eq!(host.switch_count, 0);
     assert_eq!(host.drops.count(), drops_before_completion + 1);
-    assert_eq!(controller.snapshot().state, AssignmentState::Unloaded);
+    assert_eq!(controller.snapshot().active_assignment, None);
+    assert!(controller.active_resource().is_none());
+
+    controller.set_blocker(Blocker::SessionLocked, true);
     assert_eq!(
         controller.snapshot().reason,
         Some(ReasonCode::SessionLocked)
     );
-    assert!(
-        controller
-            .snapshot()
-            .blockers
-            .contains(Blocker::SessionLocked)
-    );
-    assert!(controller.snapshot().blockers.contains(Blocker::DisplayOff));
-    assert_eq!(controller.snapshot().active_assignment, None);
-    assert!(controller.active_resource().is_none());
-
     controller.set_blocker(Blocker::SessionLocked, false);
-    assert_eq!(controller.snapshot().state, AssignmentState::Unloaded);
     assert_eq!(controller.snapshot().reason, Some(ReasonCode::DisplayOff));
     controller.set_blocker(Blocker::DisplayOff, false);
-    assert_eq!(controller.snapshot().state, AssignmentState::Unloaded);
     assert_eq!(controller.snapshot().reason, None);
-    assert_eq!(controller.snapshot().active_assignment, None);
 }
 
 #[test]
@@ -401,6 +371,173 @@ fn soft_user_pause_during_preparation_does_not_cancel_replacement() {
     assert!(controller.snapshot().blockers.contains(Blocker::UserPause));
     controller.set_blocker(Blocker::UserPause, false);
     assert_eq!(controller.snapshot().state, AssignmentState::Running);
+}
+
+#[test]
+fn lock_and_display_off_during_preparation_suspend_old_assignment_and_invalidate_job() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    let job = controller.request(input(8), &mut host).unwrap();
+    let completion = job.execute(&mut host);
+
+    let mut event_snapshot = controller.snapshot();
+    event_snapshot.blockers.insert(Blocker::SessionLocked);
+    assert_eq!(
+        pause_action(event_snapshot, suspend_policy()),
+        Ok(immediate_suspend_action())
+    );
+
+    let preparing_generation = controller.snapshot().generation;
+    controller.set_blocker(Blocker::SessionLocked, true);
+    controller.set_blocker(Blocker::DisplayOff, true);
+    let blocked = controller.snapshot();
+    assert_ne!(blocked.generation, preparing_generation);
+    assert_eq!(blocked.state, AssignmentState::Suspended);
+    assert_eq!(blocked.reason, Some(ReasonCode::SessionLocked));
+    assert_eq!(blocked.active_assignment, Some(assignment(1)));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
+    assert_eq!(
+        pause_action(blocked, suspend_policy()),
+        Ok(immediate_suspend_action())
+    );
+    assert_eq!(
+        controller.complete_preparation(completion, &mut host),
+        CompletionOutcome::Stale
+    );
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
+    assert_eq!(host.drops.count(), 1);
+    assert_eq!(
+        controller.request(input(10), &mut host).map(|_| ()),
+        Err(ReasonCode::SessionLocked)
+    );
+
+    controller.set_blocker(Blocker::SessionLocked, false);
+    assert_eq!(controller.snapshot().state, AssignmentState::Suspended);
+    assert_eq!(controller.snapshot().reason, Some(ReasonCode::DisplayOff));
+    controller.set_blocker(Blocker::DisplayOff, false);
+    assert_eq!(controller.snapshot().state, AssignmentState::Running);
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
+
+    let token = controller.begin_stop(StopKind::User);
+    assert_eq!(
+        pause_action(controller.snapshot(), suspend_policy()),
+        Ok(PauseAction::Stop {
+            kind: StopKind::User
+        })
+    );
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+    assert!(controller.complete_stop(token));
+    assert_eq!(controller.snapshot().state, AssignmentState::Detached);
+    assert_eq!(controller.snapshot().active_assignment, None);
+    assert_eq!(host.drops.count(), 2);
+}
+
+#[test]
+fn host_unavailable_during_preparation_suspends_old_assignment_and_invalidates_job() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    let job = controller.request(input(6), &mut host).unwrap();
+    let completion = job.execute(&mut host);
+
+    let preparing_generation = controller.snapshot().generation;
+    controller.set_blocker(Blocker::HostUnavailable, true);
+    let blocked = controller.snapshot();
+    assert_ne!(blocked.generation, preparing_generation);
+    assert_eq!(blocked.state, AssignmentState::Suspended);
+    assert_eq!(blocked.reason, Some(ReasonCode::HostUnavailable));
+    assert_eq!(blocked.active_assignment, Some(assignment(1)));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
+    assert_eq!(
+        pause_action(blocked, suspend_policy()),
+        Ok(immediate_suspend_action())
+    );
+    assert_eq!(
+        controller.complete_preparation(completion, &mut host),
+        CompletionOutcome::Stale
+    );
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
+    assert_eq!(host.drops.count(), 1);
+    assert_eq!(
+        controller.request(input(12), &mut host).map(|_| ()),
+        Err(ReasonCode::HostUnavailable)
+    );
+
+    controller.set_blocker(Blocker::HostUnavailable, false);
+    assert_eq!(controller.snapshot().state, AssignmentState::Running);
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
+}
+#[test]
+fn display_off_during_failed_precommit_suspends_and_then_resumes_old_assignment() {
+    let mut controller = AssignmentController::<Active>::new();
+    let mut host = Host::default();
+    install_initial(&mut controller, &mut host);
+    host.prepare_fails = true;
+
+    let job = controller.request(input(7), &mut host).unwrap();
+    assert_eq!(
+        controller.complete_preparation(job.execute(&mut host), &mut host),
+        CompletionOutcome::Failed(ReasonCode::PreparationFailed)
+    );
+    assert_eq!(controller.snapshot().state, AssignmentState::Failed);
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
+    assert_eq!(host.drops.count(), 0);
+
+    let mut event_snapshot = controller.snapshot();
+    event_snapshot.blockers.insert(Blocker::DisplayOff);
+    assert_eq!(
+        pause_action(event_snapshot, suspend_policy()),
+        Ok(immediate_suspend_action())
+    );
+
+    controller.set_blocker(Blocker::DisplayOff, true);
+    assert_eq!(controller.snapshot().state, AssignmentState::Suspended);
+    assert_eq!(controller.snapshot().reason, Some(ReasonCode::DisplayOff));
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
+    assert_eq!(
+        controller.request(input(11), &mut host).map(|_| ()),
+        Err(ReasonCode::DisplayOff)
+    );
+
+    controller.set_blocker(Blocker::DisplayOff, false);
+    assert_eq!(controller.snapshot().state, AssignmentState::Running);
+    assert_eq!(controller.snapshot().active_assignment, Some(assignment(1)));
+    assert_eq!(
+        controller.active_resource().map(|resource| resource.id),
+        Some(1)
+    );
+
+    let token = controller.begin_stop(StopKind::Security);
+    assert!(controller.complete_stop(token));
+    assert_eq!(controller.snapshot().state, AssignmentState::Detached);
+    assert_eq!(host.drops.count(), 1);
 }
 
 #[test]

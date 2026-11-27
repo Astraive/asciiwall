@@ -37,6 +37,7 @@
 
 mod assignment;
 mod buffer_pool;
+pub mod pause;
 mod queues;
 mod raster_consumer;
 
@@ -44,6 +45,11 @@ pub use assignment::{
     ApplyInput, AssignmentController, AssignmentHost, AssignmentSnapshot, AssignmentState, Blocker,
     Blockers, CompletionOutcome, PreparationCompletion, PreparationJob, ReasonCode, StopKind,
     StopToken, SwitchTransition,
+};
+
+pub use pause::{
+    PauseAction, PausePolicyError, PlaybackPositionPolicy, ResumeClock, ResumePlan,
+    SurfaceDisposition, SuspendPolicy, SuspendResourcePolicy, TransitionPolicy, pause_action,
 };
 
 pub use buffer_pool::{

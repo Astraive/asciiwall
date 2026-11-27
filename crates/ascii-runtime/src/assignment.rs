@@ -152,7 +152,6 @@ const fn reason_for(blockers: Blockers) -> Option<ReasonCode> {
         None
     }
 }
-
 const fn hard_blocker_reason(blockers: Blockers) -> Option<ReasonCode> {
     if blockers.contains(Blocker::SessionLocked) {
         Some(ReasonCode::SessionLocked)
@@ -351,6 +350,9 @@ impl<A> AssignmentController<A> {
         if self.state == AssignmentState::Stopping {
             return Err(ReasonCode::StopInProgress);
         }
+        if let Some(reason) = hard_blocker_reason(self.blockers) {
+            return Err(reason);
+        }
         let Some(generation) = self.generation.checked_next() else {
             self.state = AssignmentState::Failed;
             self.reason = Some(ReasonCode::GenerationExhausted);
@@ -379,6 +381,17 @@ impl<A> AssignmentController<A> {
         H: AssignmentHost<Active = A>,
     {
         if completion.generation != self.generation || self.state != AssignmentState::Preparing {
+            return CompletionOutcome::Stale;
+        }
+        if let Some(reason) = hard_blocker_reason(self.blockers) {
+            self.generation = self.generation.checked_next().unwrap_or(self.generation);
+            if self.active.is_some() {
+                self.state = AssignmentState::Suspended;
+                self.reason = Some(reason);
+            } else {
+                self.state = AssignmentState::Unloaded;
+                self.reason = None;
+            }
             return CompletionOutcome::Stale;
         }
         let prepared = match completion.result {
@@ -424,7 +437,8 @@ impl<A> AssignmentController<A> {
         }
     }
 
-    /// Tracks environment blockers and derives presentation state only for an active assignment.
+    /// Adds/removes runtime blockers, immediately invalidating hard-blocked preparation while
+    /// preserving any active assignment and keeping unloaded blocker reasons observable.
     pub fn set_blocker(&mut self, blocker: Blocker, present: bool) {
         if matches!(
             self.state,
@@ -437,19 +451,43 @@ impl<A> AssignmentController<A> {
         } else {
             self.blockers.remove(blocker);
         }
-        if self.active.is_some() {
-            if matches!(
-                self.state,
-                AssignmentState::Running
-                    | AssignmentState::Paused
-                    | AssignmentState::Throttled
-                    | AssignmentState::Suspended
-            ) {
+        let hard_reason = hard_blocker_reason(self.blockers);
+        if self.active.is_none() {
+            if self.state == AssignmentState::Preparing && hard_reason.is_some() {
+                self.generation = self.generation.checked_next().unwrap_or(self.generation);
+                self.state = AssignmentState::Unloaded;
+            }
+            if self.state == AssignmentState::Unloaded {
+                self.reason = reason_for(self.blockers);
+            }
+            return;
+        }
+        match self.state {
+            AssignmentState::Preparing => {
+                if let Some(reason) = hard_reason {
+                    self.generation = self.generation.checked_next().unwrap_or(self.generation);
+                    self.state = AssignmentState::Suspended;
+                    self.reason = Some(reason);
+                }
+            }
+            AssignmentState::Failed => {
+                if let Some(reason) = hard_reason {
+                    self.state = AssignmentState::Suspended;
+                    self.reason = Some(reason);
+                }
+            }
+            AssignmentState::Running
+            | AssignmentState::Paused
+            | AssignmentState::Throttled
+            | AssignmentState::Suspended => {
                 self.state = state_for(self.blockers);
                 self.reason = reason_for(self.blockers);
             }
-        } else if self.state == AssignmentState::Unloaded {
-            self.reason = reason_for(self.blockers);
+            AssignmentState::Unloaded
+            | AssignmentState::Validating
+            | AssignmentState::Attaching
+            | AssignmentState::Stopping
+            | AssignmentState::Detached => {}
         }
     }
 
