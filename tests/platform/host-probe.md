@@ -64,13 +64,14 @@ No binary or fixture is bundled, so there are no corresponding binary/fixture ha
 
 ## User-interactive acceptance gates — INCOMPLETE
 
-- Below-icon visible placement: **NOT VERIFIED**; runner attached a surface, but visual placement was not observed.
+- Below-icon visible placement: **NOT PASSED** for the recorded user visual attempt: the user reported no visible background change. Earlier runner attachment/presentation returns do not establish visible placement.
 - Focus/non-activation interaction: **NOT VERIFIED**; no focus test was performed.
 - Win+D / Show Desktop: **NOT VERIFIED**.
 - Explorer process restart and host-level recovery: **OBSERVED ONCE**; visible Explorer shell recovery remains **NOT VERIFIED** (details below).
-- Desktop icon click/selection preservation: **NOT VERIFIED**.
+- Desktop icon click/selection preservation: **NOT TESTED**.
 
-These remain unfinished acceptance gates, not passes or failed placement results. They require user-session interaction and must be recorded separately before any production strategy or support tier is selected.
+The user visual attempt is a failed visibility gate, distinct from focus and other gates that remain unverified or untested. These results do not establish a root cause or support tier; they require further user-session evidence before any production strategy or support tier is selected.
+
 
 ## Additional disposable WND-002 lifecycle evidence
 
