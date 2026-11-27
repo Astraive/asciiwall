@@ -8,9 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 **Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace contains portable `ascii-core` contracts, bounded `ascii-runtime` handoff and resource-ownership contracts, `ascii-convert` glyph-table and image-processing implementations, `ascii-media` PNG/JPEG decoding, and the bounded `ascii-scene` SCN-001 contract. **No application binary or published release tag exists yet.**
 
+### Fixed
+
+- `HostAdapter::reconcile` now rejects truncated snapshots as successful reconciliation while preserving retained feed/lease state in a typed error; behind-revision errors retain precedence.
+
 ### Added
 
 - Added an issue-scoped Windows desktop hierarchy feasibility probe in `ascii-platform`; host enumeration is bounded and read-only, with placement, focus, Explorer-restart, and icon-interaction gates explicitly left not run ([WND-001](tests/platform/host-probe.md)).
+- Defined the portable WPH-001 v1.0 capability, event, fallback, and surface-lease contracts with authoritative bounded feed/lease reconciliation snapshots, explicit truncation, and non-reusable process-local registry epochs. The contract compiles across targets without adding non-Windows adapters; no production host or native support claim is added, and WND-001 interactive gates remain unrun.
 - Initial repository MIT license ([LICENSE](LICENSE), `Copyright (c) 2026 Astraive`).
 - Frozen 100-document research and engineering specification pack (`docs/`, merged in PR `#1` at `3801d37`), plus documentation verification report ([docs/quality/documentation-verification.md](docs/quality/documentation-verification.md)).
 - External local-backlog validation and dry-run publication tooling (`scripts/validate-backlog.py`, `scripts/publish-issues.ps1`, [docs/backlog-validation.md](docs/backlog-validation.md), [docs/backlog-publication.md](docs/backlog-publication.md)); live issue creation requires explicit authorization for the requested scope.
