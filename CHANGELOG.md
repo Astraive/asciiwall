@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace includes portable `ascii-core` contracts, `ascii-convert` glyph-table and image-processing implementations, PNG/JPEG decoding, and the bounded `ascii-scene` runtime. **No application binary or published release tag exists yet.**
+**Repository status:** Design specification, repository-infrastructure baseline, and full `356`-issue planning backlog published on GitHub Project 4 (`278` in `Astraive/asciiwall`, `78` in `Astraive/asciiwall-library`). The Rust workspace contains portable `ascii-core` contracts, bounded `ascii-runtime` handoff and resource-ownership contracts, `ascii-convert` glyph-table and image-processing implementations, `ascii-media` PNG/JPEG decoding, and the bounded `ascii-scene` SCN-001 contract. **No application binary or published release tag exists yet.**
 
 ### Added
 
@@ -51,9 +51,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Poll cancellation inside JPEG marker/entropy fill-byte runs and stop charging the owned PNG snapshot again as codec scratch; bound PNG scratch by row/inflater buffers and the largest non-IDAT chunk buffer, with large ancillary and IDAT regressions (`[IMG-001]`).
 - Preflight premultiplied raster channels before allocating normalized output, charge the cancellable validation pass to work budgets, and test cancellation within that pass ([CNV-002]).
 - Made `NormalizedRaster` intentionally non-`Clone` to prevent unbudgeted pixel-buffer copies, and clarified that `ascii-media` decoding is outside this PR's scope ([CNV-002]).
-- Keep the published frame intact when a one-slot replacement is cancelled by staging within bounded, budget-charged resources (`[COR-005]`).
+- Collect COR-005 output permits under the buffer-pool lock, fallibly reserve for only live permits outside it, then release after unlocking; document the non-nested pool/budget lock order.
 - Keep a converted output's budget permit owned by its `FrameLease`, not the pool slot, so generation invalidation cannot uncharge an accessible `ConvertedFrame`; a dropped unacknowledged lease transfers its permit to the quarantined slot.
+- Keep the active old-scene COR-005 memory permit borrowed while a transition is staged; abort releases only the candidate charge, while completion releases the old charge once and deactivates the original permit.
+- Linearize urgent Stop/revocation publication against the final ordinary FIFO dequeue with an atomic dequeue-commit bit; a pending urgent event wins the commit race (`[COR-005]`).
 - Make ordinary `ControlQueue::try_send` use a nonblocking lock and report lock contention separately from a full queue, with a deterministic held-lock regression (`[COR-005]`).
+- Reserve the exact CPU cell-storage bytes for converted COR-005 frames and retain the charge with each `ConvertedFrame`, releasing it on errors and drop (`[COR-005]`).
+- Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
+- Preserve queued COR-005 frames when replacement is cancelled during staging, before publication, with public `submit_frame` regression coverage (`[COR-005]`).
 - Linearize one-slot replacement cancellation against fill-lease acquisition: cancellation before acquisition restores the prior `Published` frame; after acquisition, copying and publication finish despite cancellation (`[COR-005]`).
 - Assign checked, non-reused process-unique identities to public COR-005 frame descriptors so same-generation metadata from different pools cannot alias; add deterministic public-path regression coverage ([COR-005]).
 - Replace deprecated `AtomicU64::fetch_update` with `try_update` for COR-005 pool identities, preserving checked non-wrapping allocation and relaxed ordering (`[COR-005]`).
@@ -68,8 +73,3 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Reject contain transforms when f64 rounding cannot preserve centered letterbox margins at extreme destination sizes (`#294`).
 - Normalize box-sampling overlap per axis before combining weights, allowing valid subnormal footprints without requiring representable absolute 2D area (`[CNV-001]`).
 - Keep Box subinterval starts and positive spans separate while measuring overlaps relative to integer source-pixel origins, preserving narrow quality patches at large or fractional source origins ([CNV-001]).
-- Collect COR-005 output permits under the buffer-pool lock, fallibly reserve for only live permits outside it, then release after unlocking; document the non-nested pool/budget lock order.
-- Keep the active old-scene COR-005 memory permit borrowed while a transition is staged; abort releases only the candidate charge, while completion releases the old charge once and deactivates the original permit.
-- Linearize urgent Stop/revocation publication against the final ordinary FIFO dequeue with an atomic dequeue-commit bit; a pending urgent event wins the commit race (`[COR-005]`).
-- Correct repository-state documentation to list the merged `ascii-convert` workspace crate without claiming a production application or consumer.
-- Reject a queued-frame replacement cancelled during its buffer copy before publication, with public `submit_frame` regression coverage (`[COR-005]`).
