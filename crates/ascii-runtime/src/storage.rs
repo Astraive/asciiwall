@@ -1874,12 +1874,14 @@ fn preserve_existing_file_permissions(temporary: &Path, destination: &Path) -> i
     }
 }
 
+#[cfg(windows)]
 #[derive(Debug)]
 struct ReplaceDestinationError {
     error: io::Error,
     preserve_source: bool,
 }
 
+#[cfg(windows)]
 impl ReplaceDestinationError {
     fn new(error: io::Error, preserve_source: bool) -> Self {
         Self {
@@ -1898,6 +1900,7 @@ fn remove_replace_backup(path: &Path, context: &str) -> io::Result<()> {
     })
 }
 
+#[cfg(windows)]
 fn path_exists_conservatively(path: &Path) -> Result<bool, io::Error> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
