@@ -4,6 +4,8 @@ mod capability;
 mod events;
 mod host;
 #[cfg(windows)]
+mod observer;
+#[cfg(windows)]
 mod probe;
 
 pub use capability::{
@@ -23,6 +25,13 @@ pub use events::{
 pub use host::{
     HostAdapter, ReconciliationError, SurfaceLease, SurfaceLeaseError, SurfaceLeaseRegistry,
     SurfaceRetirementReason,
+};
+#[cfg(windows)]
+pub use observer::{
+    DesktopClickBatch, DesktopClickObservation, DesktopHitClassification, FullscreenCandidate,
+    MAX_DESKTOP_CLICK_OBSERVATIONS, MAX_FULLSCREEN_OBSERVATIONS, MAX_WINDOWS_OBSERVED,
+    ObservedWindowBounds, WindowBoundsSource, WindowsObserver, WindowsObserverConsent,
+    WindowsObserverError, WindowsObserverSnapshot,
 };
 #[cfg(windows)]
 pub use probe::{

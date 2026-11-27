@@ -16,24 +16,32 @@ Observe display changes and re-enumerate outputs. The dimensions in a display-ch
 
 Validate Win+D, Show Desktop, Task View, virtual-desktop changes, desktop icon toggling, auto-hide taskbars, custom scale, desktop refresh, shell restarts, and remote-session transitions. Keep a lightweight controller window/message pump alive even when the settings UI is closed.
 
-## Pointer and window feeds
+## Passive pointer and window observation
 
-A passive raw-input registration is a candidate for background mouse button observation. Do not use flags that suppress normal legacy delivery or capture the device. Raw relative movement is not a global cursor location; obtain and transform desktop coordinates separately. [S07](../research/source-register.md#s07) [S08](../research/source-register.md#s08)
+`ascii_platform::WindowsObserver` is a Windows-only observer, separate from wallpaper-surface ownership. `WindowsObserverConsent::default()` is disabled and starts no worker or hooks. The application must obtain explicit user consent before granting pointer/button or window-metadata observation; desktop-click classification additionally requires both grants. `revoke()` synchronously stops this observer, unregisters only its own raw-input registration, unhooks, and clears retained observations. It does not stop or own wallpaper rendering.
 
-Use an out-of-context WinEvent hook plus an initial snapshot to maintain window metadata. Callbacks enqueue bounded events and return immediately; they never perform conversion or GPU work. The observer needs a functioning message loop. [S04](../research/source-register.md#s04)
+When consented, mouse buttons use `RIDEV_INPUTSINK` only. Registration is refused if the process already has a mouse Raw Input registration; `RIDEV_NOLEGACY`, capture, suppression, and input replay are never used. Raw Input supplies button transitions; global screen coordinates are sampled separately with `GetCursorPos` in the native window procedure and associated with the monitor under that point. The procedure copies fixed-size button fields and enqueues them; WinEvent callbacks only enqueue bounded events; enumeration callbacks only copy bounded native handles/rectangles. `HostAdapter` publishes only the existing pointer-position, pointer-button, window-rectangle, and window-state feeds. No output-scale or session-lock feed is published. The queues and snapshots are fixed-capacity (128 native events, 32 host events, 32 click observations, 10 windows, and 8 outputs). Overflow is reported through reconciliation or an explicit click-batch overflow flag; consumers must discard hit-sensitive history on click overflow.
 
-Normalize window rectangles deliberately: `GetWindowRect` can be DPI-virtualized and include invisible resize borders; DWM attributes offer different bounds. [S05](../research/source-register.md#s05) [S06](../research/source-register.md#s06) Exclude own windows, shell chrome, cloaked/minimized/off-desktop windows where reliably detectable. Fullscreen is a heuristic over output overlap/state, not an infallible game detector.
+An out-of-context WinEvent hook set and initial `EnumWindows` snapshot maintain metadata. If the complete hook set is unavailable, the window feeds are unavailable and no initial snapshot is exposed. Own-process windows are excluded; shell-process windows are excluded only when Windows reports their process identity. Hidden, minimized, and reliably DWM-cloaked windows are retained as state-only entries. If the cloak query fails, geometry is retained with `WindowState::Other`; windows are not discarded based on an unavailable virtual-desktop query. No title or process name is collected or logged.
 
-## Desktop-only clicks
+Bounds prefer DWM extended-frame coordinates. `GetWindowRect` is used only when the worker can verify its per-monitor-v2 thread DPI context; otherwise missing bounds remain missing. The Windows-local `windows_snapshot()` retains each rectangle's source (`DwmExtendedFrame` or `GetWindowRectPerMonitorV2`), while `HostAdapter` publishes only the existing handle-free pointer/button/rectangle/state feeds. This adapter does not publish output-scale values or promote its extra observations into shared capability/feed fields. Fullscreen candidates are Windows-local and per-output: at least 98% overlap is required and confidence is medium, not an infallible game/fullscreen detector. Output association is left unknown on a tie.
 
-Passive observation sees more than the wallpaper. A desktop-only reaction requires a trustworthy hit-policy result. Desktop icons, context menus, drag-selection, and app windows must still receive their original input. Never capture then replay clicks to emulate pass-through. When hit testing is uncertain, suppress the reaction; do not guess that the click was on empty wallpaper.
+## Desktop-only click observations
 
-## Session and recovery constraints
+Click classification is a Windows-local passive observation, not a shared capability claim or an instruction to deliver input. A positive empty-wallpaper result requires a shell-process `Progman`/`WorkerW` target or a verified same-process desktop-list hit test that finds no item. Pointer-bearing list-view messages are never sent to foreign processes; a foreign-process Explorer icon list therefore classifies as unknown. Icon hits, menus, taskbar surfaces, and non-shell windows are occupied. Failed, timed-out, stale, or ambiguous hit tests are unknown; unknown and occupied results must suppress wallpaper reactions. The click queue never captures, changes, or replays input, so the normal icon/menu/application click path remains owned by Windows. Consumers should use `drain_desktop_clicks()` and discard the batch's hit-sensitive history if `overflowed` is set.
 
-Stop observation/rendering at lock, suspend, secure-desktop transitions where detectable, and session disconnect. Do not attempt to render into UAC/login desktops. Power events inform the scheduler; the app must not keep the computer awake. [S59](../research/source-register.md#s59)
+## Lock and secure-desktop boundaries
 
-On normal exit, destroy only owned surfaces and restore only settings the app actually changed. If the user changed static wallpaper independently, do not overwrite their newer choice. Forced termination cannot guarantee an exit animation or restoration callback. Keep a safe static background configured only with explicit user consent.
+The observer registers for current-session WTS notifications and independently checks the input desktop every 250 ms. A reported lock, disconnect/logoff, non-default input desktop, or inability to verify the default desktop stops the observer and clears pointer, window, output, and click observations. Lock notifications are used only to revoke/clear observations; this adapter does not publish a shared session-lock feed or resume itself after a boundary. It does not observe UAC/login desktops and does not control or stop wallpaper rendering. An application may create a new observer only after its own consent policy permits it.
 
-## Acceptance gate
+## Acceptance evidence
 
-A Windows release must survive 20 attach/detach cycles, Explorer restart, mixed-DPI monitor movement, lock/unlock, and rapid Apply changes without losing icon interaction, taking focus, leaking windows, or leaving a topmost surface. These are proposed tests, not results already measured.
+The deterministic Windows-only tests cover disabled-by-default consent, consent dependency validation, pure shell hit-policy outcomes, bounded/coalescing event queues, click-overflow reporting, rectangle validation, and the per-output 98% fullscreen heuristic. Pending Windows x64 checks are:
+
+```text
+cargo check -p ascii-platform --target x86_64-pc-windows-msvc
+cargo test -p ascii-platform --target x86_64-pc-windows-msvc observer::windows::tests
+cargo test -p ascii-platform --target x86_64-pc-windows-msvc observer::tests
+```
+
+These checks have not been run in this change. Live acceptance evidence is also pending: unchanged original icon/menu/application click delivery, 1000-Hz/event-storm behavior, mixed-DPI calibration and monitor movement, lock/secure-desktop transitions, Explorer restart, and revocation while wallpaper rendering continues. Do not treat the adapter implementation or its deterministic tests as evidence that these native/manual gates passed.
