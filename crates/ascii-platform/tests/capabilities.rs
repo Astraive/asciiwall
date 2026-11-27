@@ -674,6 +674,32 @@ fn adapter_fault_requires_safe_preview_or_consented_static_fallback() {
 }
 
 #[test]
+fn host_restriction_contains_requires_all_known_bits() {
+    let first = HostRestrictions::WINDOW_GEOMETRY_UNAVAILABLE;
+    let second = HostRestrictions::SHELL_OWNS_PRESENTATION;
+    let only_first = HostRestrictions::empty().with(first).unwrap();
+    let both = only_first.with(second).unwrap();
+
+    assert!(!only_first.contains(first | second));
+    assert!(both.contains(first | second));
+    assert!(!both.contains(0));
+    assert!(!both.contains(1 << 15));
+}
+
+#[test]
+fn pointer_button_contains_requires_all_known_bits() {
+    let first = PointerButtons::LEFT;
+    let second = PointerButtons::RIGHT;
+    let only_first = PointerButtons::new(first).unwrap();
+    let both = PointerButtons::new(first | second).unwrap();
+
+    assert!(!only_first.contains(first | second));
+    assert!(both.contains(first | second));
+    assert!(!both.contains(0));
+    assert!(!both.contains(1 << 7));
+}
+
+#[test]
 fn window_tokens_include_core_generation_identity() {
     let old = ascii_platform::WindowIdentity::new(7, Generation::INITIAL);
     let replacement =
