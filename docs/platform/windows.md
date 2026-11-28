@@ -57,11 +57,21 @@ Error: Win32 { operation: "CreateWindowExW", code: 0 }
 - Runner executable SHA-256: `026dbdb333413db331f1572fce6261aa6678b34d6ca7dd379ef49be0a0ec4145`.
 - Runner executable: `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe`.
 
+### Instrumented diagnostic runner (built, not run)
+
+This release runner includes the WND-002 creation diagnostics: it clears last-error immediately before `CreateWindowExW`, captures it on failure before restoring the thread DPI context, and reports controller/surface kind, parent HWND, styles, requested bounds, and whether `WM_NCCREATE`/`WM_CREATE` were reached. It does not alter placement behavior or establish the underlying failure cause. The binary is **NOT RUN**.
+
+- Build: **PASSED** with `CARGO_HOME=D:/tmp/cargo-cor008-acl-20261127` and `CARGO_TARGET_DIR=D:/tmp/target-cor008-acl-20261127`:
+  `cargo +1.100.0 build --offline --locked --release --manifest-path 'C:\Users\gskne\AppData\Local\Temp\wnd002-manual-check\Cargo.toml'`
+- Runner source SHA-256: `d6c65373bf88b463443adc2dcab3335fd54c47bebf33244dd80f929228aeb8e3`.
+- Instrumented executable SHA-256: `ae213a07b4ffb825a930a8ca9d8cc975e738ccf3bde438edfd309e61d4252cdd`.
+- Executable: `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe`.
+
 ### WND-002 post-reveal redraw diagnosis
 
 Static diagnosis found that `attach_internal` rendered and cached the initial frame while the HWND was hidden. Once revealed, the manual runner's same-frame/same-target `host.present` could return `Skipped(Unchanged)`, so no renderer presentation was required after reveal. The fix invalidates renderer state after a successful reveal and requires a fresh `Presented` outcome; failure hides the window and retires its lease.
 
-No HWND was created, so this run provides no renderer, reveal, or compositor evidence. The user's earlier “no” answers about icon/context-menu and typing/focus are not enough to establish those behaviors: the runner exited before attaching a surface, and no separate interaction observations were supplied. Keep icon and typing/focus acceptance **UNVERIFIED**. Exact `CreateWindowExW` cause remains under investigation; do not infer it from reported code `0`. The hidden-first-frame fix addresses renderer cache reuse but cannot prove desktop placement. Keep this implementation experimental and PR/issue open until the creation failure is fixed and all required gates pass.
+The prior user-run attempt reached shell/display discovery, then failed at `CreateWindowExW` before creating a surface, so no renderer, reveal, or compositor test ran. Its reported code `0` was ambiguous because the old code read last-error without clearing it. The instrumented build above clears/captures last-error and records creation context/stages; it is built but not run. This does not establish the cause or prove placement. Icon and typing/focus acceptance remain **UNVERIFIED**. Keep the implementation experimental and PR/issue open until the failure is understood and all required gates pass.
 
 ## Pointer and window feeds
 
