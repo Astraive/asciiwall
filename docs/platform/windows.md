@@ -57,9 +57,15 @@ Error: Win32 { operation: "CreateWindowExW", code: 0 }
 - Runner executable SHA-256: `026dbdb333413db331f1572fce6261aa6678b34d6ca7dd379ef49be0a0ec4145`.
 - Runner executable: `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe`.
 
-### Instrumented diagnostic runner (built, not run)
+### Instrumented diagnostic runner (user-run; HWND creation still fails)
 
-This release runner includes the WND-002 creation diagnostics: it clears last-error immediately before `CreateWindowExW`, captures it on failure before restoring the thread DPI context, and reports controller/surface kind, parent HWND, styles, requested bounds, and whether `WM_NCCREATE`/`WM_CREATE` were reached. It does not alter placement behavior or establish the underlying failure cause. The binary is **NOT RUN**.
+The user ran this build. `CreateWindowExW` still failed before the application window procedure: captured Win32 `code=0`, `stage=0` (`WM_NCCREATE` and `WM_CREATE` were not reached), parent `458818`, styles `0x4e000000` / `0x08080080`, and bounds `(0,0,1920,1080)`. No HWND was created, so there was no attach, reveal, or present. The user saw no desktop change. Exact output:
+
+```text
+PROBE: observation=Observation { status: Experimental, reason: ShellHierarchyObserved, error: None, win32_error: None }; shell_window_class=Some(Progman); top_level_progman_count=1; top_level_workerw_count=15; desktop_view_count=1; shell_owned_desktop_view_count=1; desktop_views_parented_by_progman=1; desktop_views_parented_by_workerw=0; desktop_views_with_other_parent=0
+DISPLAY: left_px=0 top_px=0 width_px=1920 height_px=1080
+Error: CreateWindowFailed { kind: "surface", code: 0, parent: 458818, style: 1308622848, extended_style: 134742144, left: 0, top: 0, width: 1920, height: 1080, stage: 0 }
+```
 
 - Build: **PASSED** with `CARGO_HOME=D:/tmp/cargo-cor008-acl-20261127` and `CARGO_TARGET_DIR=D:/tmp/target-cor008-acl-20261127`:
   `cargo +1.100.0 build --offline --locked --release --manifest-path 'C:\Users\gskne\AppData\Local\Temp\wnd002-manual-check\Cargo.toml'`
@@ -71,7 +77,7 @@ This release runner includes the WND-002 creation diagnostics: it clears last-er
 
 Static diagnosis found that `attach_internal` rendered and cached the initial frame while the HWND was hidden. Once revealed, the manual runner's same-frame/same-target `host.present` could return `Skipped(Unchanged)`, so no renderer presentation was required after reveal. The fix invalidates renderer state after a successful reveal and requires a fresh `Presented` outcome; failure hides the window and retires its lease.
 
-The prior user-run attempt reached shell/display discovery, then failed at `CreateWindowExW` before creating a surface, so no renderer, reveal, or compositor test ran. Its reported code `0` was ambiguous because the old code read last-error without clearing it. The instrumented build above clears/captures last-error and records creation context/stages; it is built but not run. This does not establish the cause or prove placement. Icon and typing/focus acceptance remain **UNVERIFIED**. Keep the implementation experimental and PR/issue open until the failure is understood and all required gates pass.
+The instrumented failure confirms that creation stopped before the app window procedure, but does not identify the cause. Microsoft lists invalid parameters and a failing `WH_CBT` hook among possible `CreateWindowExW` failures ([API documentation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createwindowexw)); neither is established here. No HWND, renderer, reveal, or compositor test ran. Icon and typing/focus acceptance remain **UNVERIFIED**. Keep the implementation experimental and PR/issue open until creation succeeds and all required gates pass.
 
 ## Pointer and window feeds
 
