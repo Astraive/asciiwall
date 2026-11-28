@@ -145,7 +145,20 @@ PS C:\Users\gskne>
 
 `Progman` was a valid but foreign-process/thread parent at the metadata check. The same minimal child style succeeded under both Progman and the app's hidden controller, so invalid parent and foreign-process parenting alone do not explain the failure. The full production style/exstyle pair (`0x4E000000` / `0x08080080`) failed even at 1×1 under the same-process controller; the production 1920×1080 dimensions and Progman parent are therefore not necessary for this failure. The result narrows the problem to the full style/exstyle set or an interaction; it does not identify a specific bit. The `0` DPI-context values are opaque handles classified as unknown by the diagnostic, not DPI modes. The CBT callback returned `0`, so no downstream CBT veto was observed. No usable surface or visual/interaction acceptance was established.
 
-Next diagnostic: run a controlled 2×2 matrix under the same controller parent at 1×1: minimal versus full window styles crossed with no versus full extended styles. Record each result and destroy each successful HWND. This separates style-only, exstyle-only, and combined effects. Do not change production styles or placement until the failing bit or interaction is isolated.
+#### Next hidden 2×2 style/exstyle matrix runner (built; pending user run)
+Source SHA-256: `1eded3eda7d6b8e08ed1d9fe6088d9d94952748f5c2d575849c3dbc218a39d95`; executable SHA-256: `9d95287bf4b6d808d0a3c13d8421c4527d7622d88692ea01754194c71f4a7fef`.
+
+PowerShell command: `& "D:\tmp\target-cor008-acl-20261127\release\wnd002-style-matrix.exe"`.
+
+The runner creates a hidden 1×1 controller with the production controller style/exstyle, a private class, and a WndProc that mirrors production creation-stage tracking and `WM_MOUSEACTIVATE`/`WM_ERASEBKGND` handling. It adopts Progman's DPI context for four child-window trials at 1×1: minimal/full window styles crossed with no/full extended styles. It logs `GetLastError` and `WM_NCCREATE`/`WM_CREATE` stage bits per trial. No trial includes `WS_VISIBLE`; successful trials are destroyed immediately. It does not call `ShowWindow` or `SetParent`. This is a controlled controller/WndProc replica, not full production-runtime parity: it omits the WGPU bootstrap. It has not been run and is not a placement test.
+
+If the matrix fails only with the full window-style group, split `WS_CLIPSIBLINGS` and `WS_CLIPCHILDREN` separately. Microsoft documents `WS_CLIPCHILDREN` as a style used when creating a parent window; this makes it a candidate to isolate, not a proven cause. [Microsoft Window Styles](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-styles)
+
+#### Lively Wallpaper source comparison (reference only)
+
+Reviewed Lively's [`WinDesktopCore`](https://github.com/lively-community/lively/blob/core-separation/src/Lively/Lively/Core/WinDesktopCore.cs#L153-L236) on branch `core-separation`. It checks Progman's **extended** style for `WS_EX_NOREDIRECTIONBITMAP`; when raised desktop is detected, it looks for a `WorkerW` child of Progman. Otherwise it finds the top-level WorkerW after `SHELLDLL_DefView`. Its per-screen path positions an already-created renderer HWND before attaching; the raised attach path adds `WS_CHILD`, adds `WS_EX_LAYERED` with alpha 255 before `SetParent`, inserts the HWND relative to DefView, and repairs WorkerW z-order ([attach](https://github.com/lively-community/lively/blob/core-separation/src/Lively/Lively/Core/WinDesktopCore.cs#L1043-L1081), [transparency helper](https://github.com/lively-community/lively/blob/core-separation/src/Lively/Lively.Common/Helpers/WindowUtil.cs#L300-L329)). A historical [Windows 11 26002+ fix](https://github.com/lively-community/lively/commit/9142f6a4cfc2) added the Progman-child WorkerW lookup as a fallback.
+
+This differs from AsciiWall's failing `CreateWindowExW` child creation and does not establish a fix. The current AsciiWall output reports Progman's `GWL_STYLE` (`0x96000000`), not `GWL_EXSTYLE`, and counts top-level WorkerW windows only; it does not establish `WS_EX_NOREDIRECTIONBITMAP` or a Progman-child WorkerW. Lively's setup also sends private message `0x052C` with `SMTO_NORMAL`/1000 ms; do not copy that behavior blindly. Lively is GPL-3.0; this comparison records behavior only, with no code copied.
 
 ## Pointer and window feeds
 
