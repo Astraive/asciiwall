@@ -77,9 +77,9 @@ Error: CreateWindowFailed { kind: "surface", code: 0, parent: 458818, style: 130
 
 Static diagnosis found that `attach_internal` rendered and cached the initial frame while the HWND was hidden. Once revealed, the manual runner's same-frame/same-target `host.present` could return `Skipped(Unchanged)`, so no renderer presentation was required after reveal. The fix invalidates renderer state after a successful reveal and requires a fresh `Presented` outcome; failure hides the window and retires its lease.
 
-The instrumented failure confirms that creation stopped before the app window procedure, but does not identify the cause. Microsoft lists invalid parameters and a failing `WH_CBT` hook among possible `CreateWindowExW` failures ([API documentation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createwindowexw)); neither is established here. No HWND, renderer, reveal, or compositor test ran. Icon and typing/focus acceptance remain **UNVERIFIED**. Keep the implementation experimental and PR/issue open until creation succeeds and all required gates pass.
+The user-run CBT diagnostic observed one `HCBT_CREATEWND` event for the expected class, parent, styles, and bounds. `CallNextHookEx` returned `0`, so no downstream CBT veto was observed in this invocation. `CreateWindowExW` nevertheless failed with captured code `0` and stage `0`; the app did not record `WM_NCCREATE` or `WM_CREATE`. The user reports no wallpaper/background change. This rules out only the observed downstream-CBT-veto path; the cause remains unknown. No usable application surface, attach, reveal, or present completed. Icon and typing/focus acceptance remain **UNVERIFIED**. Keep the implementation experimental and PR/issue open.
 
-### Thread-specific CBT follow-up runner (built; pending user run)
+### Thread-specific CBT follow-up runner (user-run; creation still fails)
 
 The previous run failed at `CreateWindowExW` with captured last-error `0` and stage `0`. This disposable runner installs a thread-specific `WH_CBT` hook only around `host.attach`, captures `HCBT_CREATEWND` fields from `CREATESTRUCTW`, then calls `CallNextHookEx` and returns its result unchanged ([`SetWindowsHookExW`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw), [`CallNextHookEx`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-callnexthookex)). If hook installation fails, it reports the error and proceeds without an installed observer. It unhooks immediately after attach; unhook failure reports incomplete capture and stops before presentation or hold. The temporary hook changes this thread's hook-chain ordering while installed; it is not global.
 
@@ -94,7 +94,18 @@ Interpret the output conservatively:
 - Runner executable SHA-256: `6054c41f4f292f0a97ee59c8cc1219e9c70e7edc278838f82a8fb778b1203252`.
 - Runner executable: `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe`.
 
-This runner has **NOT BEEN USER-RUN**. If attach succeeds, it holds for up to 180 seconds; Ctrl+C requests detach. The assistant did not launch it.
+The user ran this runner and reported no wallpaper/background change. The CBT callback saw a candidate HWND, but `CreateWindowExW` still returned failure before a usable surface existed. Exact output:
+
+```text
+PS C:\Users\gskne> & "D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe"
+PROBE: observation=Observation { status: Experimental, reason: ShellHierarchyObserved, error: None, win32_error: None }; shell_window_class=Some(Progman); top_level_progman_count=1; top_level_workerw_count=15; desktop_view_count=1; shell_owned_desktop_view_count=1; desktop_views_parented_by_progman=1; desktop_views_parented_by_workerw=0; desktop_views_with_other_parent=0
+DISPLAY: left_px=0 top_px=0 width_px=1920 height_px=1080
+CBT: hcbt_createwnd_callbacks=1 hwnd=0x6F1292 parent=0x70042 class="AsciiWall.WindowsHost.0000000000000001" style=0x4E000000 exstyle=0x8080080 bounds=(0, 0, 1920, 1080) hcbt_createwnd_downstream=0
+Error: CreateWindowFailed { kind: "surface", code: 0, parent: 458818, style: 1308622848, extended_style: 134742144, left: 0, top: 0, width: 1920, height: 1080, stage: 0 }
+PS C:\Users\gskne>
+```
+
+The candidate handle `0x6F1292` was observed during `HCBT_CREATEWND`; it is not evidence of a successfully created or retained surface. The single callback with downstream result `0` does not support a downstream CBT veto. The next diagnosis must explain the failure after the CBT notification and before the app's window procedure.
 
 ## Pointer and window feeds
 
