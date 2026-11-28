@@ -72,7 +72,13 @@ dependencies = [
 name = "ascii-platform"
 version = "0.1.0"
 dependencies = [
+ "ascii-convert",
  "ascii-core",
+ "ascii-render",
+ "pollster",
+ "raw-window-handle",
+ "wgpu",
+ "windows-sys",
 ]
 
 [[package]]

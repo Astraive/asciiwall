@@ -273,6 +273,14 @@ fn pinned_golden_and_static_invalidation() {
             after_first,
             "unchanged scene performs no uploads, allocations or draws"
         );
+        renderer.invalidate();
+        assert_eq!(
+            renderer.present(&frame, &target).unwrap(),
+            PresentOutcome::Presented { suboptimal: false },
+            "invalidating after a hidden first draw must bypass the unchanged-frame cache"
+        );
+        let after_invalidation = renderer.stats();
+        assert_eq!(after_invalidation.draw_calls, after_first.draw_calls + 2);
         let (pixels, stride) = read_pixels(&device, &queue, &output);
         compare_golden(&frame, &table, &pixels, stride);
         let invalidated = RenderTarget::texture(&output, identity, 2);
@@ -280,12 +288,18 @@ fn pinned_golden_and_static_invalidation() {
             renderer.present(&frame, &invalidated).unwrap(),
             PresentOutcome::Presented { suboptimal: false }
         );
+        let before_final_invalidation = renderer.stats();
+        renderer.invalidate();
+        assert_eq!(
+            renderer.present(&frame, &target).unwrap(),
+            PresentOutcome::Presented { suboptimal: false }
+        );
         let redrawn = renderer.stats();
         assert_eq!(
             redrawn.uploads, after_first.uploads,
             "damage only redraws cached input"
         );
-        assert_eq!(redrawn.draw_calls, after_first.draw_calls + 2);
+        assert_eq!(redrawn.draw_calls, before_final_invalidation.draw_calls + 2);
         let (size, metadata, mut cells) = frame.into_parts();
         cells[0] = AsciiCell::new(1, [17, 45, 99, 255], [0, 0, 0, 255]);
         let changed = AsciiFrame::try_new(

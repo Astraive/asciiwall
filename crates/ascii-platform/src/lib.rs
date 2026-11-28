@@ -5,6 +5,9 @@ mod events;
 mod host;
 #[cfg(windows)]
 mod probe;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_host;
 
 pub use capability::{
     AdapterVersion, CAPABILITY_CONTRACT_VERSION, CapabilityAvailability, CapabilityChange,
@@ -29,4 +32,10 @@ pub use probe::{
     Architecture, EnvironmentTuple, GateObservations, GpuBackend, HierarchyObservation,
     HierarchySummary, HostProbeReport, Observation, ObservationReason, ProbeStatus, SessionKind,
     WindowClass, WindowsVersion, probe_host,
+};
+
+#[cfg(windows)]
+pub use windows_host::{
+    DisplayInfo, DisplaySnapshot, MAX_WINDOWS_HOST_DISPLAYS, WindowsHost, WindowsHostConfig,
+    WindowsHostError,
 };

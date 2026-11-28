@@ -94,11 +94,35 @@ unsafe extern "system" {
     fn GetParent(window: Hwnd) -> Hwnd;
     fn GetShellWindow() -> Hwnd;
     fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
+    fn GetWindow(window: Hwnd, command: u32) -> Hwnd;
+    fn GetWindowLongPtrW(window: Hwnd, index: i32) -> isize;
+}
+
+const GW_HWNDNEXT: u32 = 2;
+const GW_HWNDPREV: u32 = 3;
+const GWL_EXSTYLE: i32 = -20;
+const WS_EX_LAYERED: isize = 0x0008_0000;
+const WS_EX_NOREDIRECTIONBITMAP: isize = 0x0020_0000;
+
+fn extended_style_result(style: isize, error: u32, flag: isize) -> Option<bool> {
+    if style == 0 && error != 0 {
+        None
+    } else {
+        Some(style & flag != 0)
+    }
+}
+
+fn extended_style(window: Hwnd, flag: isize) -> Option<bool> {
+    unsafe { SetLastError(0) };
+    let style = unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) };
+    let error = if style == 0 { last_error() } else { 0 };
+    extended_style_result(style, error, flag)
 }
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetLastError() -> u32;
+    fn SetLastError(error: u32);
     fn GetCurrentProcessId() -> u32;
     fn GetNativeSystemInfo(system_info: *mut SystemInfo);
     fn ProcessIdToSessionId(process_id: u32, session_id: *mut u32) -> Bool;
@@ -114,6 +138,7 @@ struct NativeScan {
     snapshot: HierarchySnapshot,
     shell_window: Hwnd,
     shell_process_id: u32,
+    current_root_window: Hwnd,
     current_root_class: WindowClass,
     current_root_is_shell_window: bool,
     deadline: Instant,
@@ -134,6 +159,7 @@ impl NativeScan {
             snapshot,
             shell_window,
             shell_process_id,
+            current_root_window: std::ptr::null_mut(),
             current_root_class: WindowClass::Unknown,
             current_root_is_shell_window: false,
             deadline,
@@ -164,6 +190,74 @@ impl NativeScan {
         self.snapshot.records[index] = record;
         self.snapshot.record_count += 1;
         true
+    }
+}
+
+fn observe_top_level_shell_order(scan: &mut NativeScan) {
+    let shell = scan.shell_window;
+    let previous = unsafe { GetWindow(shell, GW_HWNDPREV) };
+    let previous_class = if previous.is_null() {
+        None
+    } else if scan.reserve_work() {
+        Some(class_of(previous))
+    } else {
+        return;
+    };
+
+    let mut next = unsafe { GetWindow(shell, GW_HWNDNEXT) };
+    let first_next = next;
+    let mut next_class = None;
+    let mut first_workerw_after = Some(false);
+    while !next.is_null() {
+        if !scan.reserve_work() {
+            return;
+        }
+        let class = class_of(next);
+        if next_class.is_none() {
+            next_class = Some(class);
+        }
+        let owner = if class == WindowClass::WorkerW {
+            let mut process_id = 0;
+            // SAFETY: `next` is a borrowed HWND from the shell's top-level Z-order chain.
+            if unsafe { GetWindowThreadProcessId(next, &mut process_id) } == 0 || process_id == 0 {
+                scan.snapshot.failure = Some(ScanFailure::NativeEnumerationFailed(last_error()));
+                return;
+            }
+            Some(process_id == scan.shell_process_id)
+        } else {
+            None
+        };
+        first_workerw_after = workerw_after_shell_step(first_workerw_after, class, owner);
+        if first_workerw_after != Some(false) {
+            break;
+        }
+        next = unsafe { GetWindow(next, GW_HWNDNEXT) };
+    }
+
+    if unsafe { GetWindow(shell, GW_HWNDPREV) } != previous
+        || unsafe { GetWindow(shell, GW_HWNDNEXT) } != first_next
+    {
+        return;
+    }
+    scan.snapshot.top_level_previous_sibling_class = previous_class;
+    scan.snapshot.top_level_next_sibling_class = next_class;
+    scan.snapshot.first_shell_owned_workerw_after_shell = first_workerw_after;
+}
+
+fn workerw_after_shell_step(
+    current: Option<bool>,
+    class: WindowClass,
+    shell_owned: Option<bool>,
+) -> Option<bool> {
+    current?;
+    match class {
+        WindowClass::Unknown => None,
+        WindowClass::WorkerW => match shell_owned {
+            Some(true) => Some(true),
+            Some(false) => current,
+            None => None,
+        },
+        _ => current,
     }
 }
 
@@ -225,6 +319,10 @@ pub(super) fn enumerate_hierarchy() -> HierarchySnapshot {
     }
 
     let mut scan = NativeScan::new(shell_window, shell_process_id, shell_class);
+    observe_top_level_shell_order(&mut scan);
+    if scan.snapshot.failure.is_some() {
+        return scan.snapshot;
+    }
     let scan_ptr = &mut scan as *mut NativeScan;
     let succeeded = scan_shell_before_top_level(
         || {
@@ -303,8 +401,20 @@ unsafe fn scan_root(scan_ptr: *mut NativeScan, window: Hwnd, is_shell_window: bo
     } else {
         false
     };
-    // SAFETY: scan_ptr was validated by reserve_work and is live for the synchronous callback.
-    let action = unsafe { record_root(&mut *scan_ptr, class, shell_owned, is_shell_window) };
+    let no_redirection_bitmap = if class == WindowClass::Progman && shell_owned {
+        extended_style(window, WS_EX_NOREDIRECTIONBITMAP)
+    } else {
+        None
+    };
+    let scan = unsafe { &mut *scan_ptr };
+    scan.current_root_window = window;
+    let action = record_root(
+        scan,
+        class,
+        shell_owned,
+        is_shell_window,
+        no_redirection_bitmap,
+    );
     match action {
         RootScanAction::Abort => false,
         RootScanAction::SkipChildren => true,
@@ -329,14 +439,14 @@ unsafe fn scan_child(scan_ptr: *mut NativeScan, window: Hwnd) -> bool {
         return false;
     }
     let class = class_of(window);
-    // Only shell desktop-view nodes need parent and owner-process inspection.
-    if class != WindowClass::ShellDefView {
+    if !matches!(class, WindowClass::ShellDefView | WindowClass::WorkerW) {
         return true;
     }
-    // SAFETY: GetParent and IsChild inspect borrowed handles; IsChild rejects an owner mistaken for a parent.
+    // SAFETY: GetParent and IsChild inspect borrowed handles; exact root equality rejects deeper
+    // descendants and owner windows.
     let parent_window = unsafe { GetParent(window) };
     let is_child_relationship = !parent_window.is_null()
-        // SAFETY: the two handles are borrowed during this synchronous enumeration callback.
+        && parent_window == unsafe { (*scan_ptr).current_root_window }
         && unsafe { IsChild(parent_window, window) } != 0;
     let parent_class = if is_child_relationship {
         class_of(parent_window)
@@ -346,10 +456,102 @@ unsafe fn scan_child(scan_ptr: *mut NativeScan, window: Hwnd) -> bool {
     let Some(shell_owned) = belongs_to_shell_process(scan_ptr, window) else {
         return false;
     };
+    // SAFETY: these read-only sibling queries share the scan's time and work bounds.
+    let siblings = if is_child_relationship && class == WindowClass::ShellDefView {
+        unsafe { sibling_context(scan_ptr, window, parent_window) }
+    } else {
+        None
+    };
+    let layered = if class == WindowClass::ShellDefView && shell_owned {
+        extended_style(window, WS_EX_LAYERED)
+    } else {
+        None
+    };
     // SAFETY: scan_ptr was validated by reserve_work and is live for the synchronous callback.
     let scan = unsafe { &mut *scan_ptr };
-    let succeeded = record_child(scan, class, parent_class, shell_owned);
+    let succeeded = record_child(scan, class, parent_class, shell_owned, siblings, layered);
     succeeded && scan.snapshot.failure.is_none()
+}
+
+#[derive(Clone, Copy)]
+struct SiblingContext {
+    previous_class: Option<WindowClass>,
+    next_class: Option<WindowClass>,
+    workerw_after: Option<bool>,
+}
+
+unsafe fn sibling_context(
+    scan_ptr: *mut NativeScan,
+    desktop_view: Hwnd,
+    parent: Hwnd,
+) -> Option<SiblingContext> {
+    let first_next = unsafe { GetWindow(desktop_view, GW_HWNDNEXT) };
+    let next_class = if first_next.is_null() {
+        None
+    } else {
+        Some(class_of(first_next))
+    };
+    let mut workerw_after = match next_class {
+        None => Some(false),
+        Some(WindowClass::WorkerW) => belongs_to_shell_process(scan_ptr, first_next),
+        Some(WindowClass::Unknown) => None,
+        Some(_) => Some(false),
+    };
+    let previous = unsafe { GetWindow(desktop_view, GW_HWNDPREV) };
+    let previous_class = if previous.is_null() {
+        None
+    } else {
+        if !reserve_work(scan_ptr) || unsafe { GetParent(previous) } != parent {
+            return None;
+        }
+        Some(class_of(previous))
+    };
+
+    let mut siblings = [std::ptr::null_mut(); MAX_WINDOW_RECORDS];
+    let mut sibling_count = 0;
+    let mut next = first_next;
+    while !next.is_null() {
+        if sibling_count == siblings.len()
+            || !reserve_work(scan_ptr)
+            || unsafe { GetParent(next) } != parent
+        {
+            return None;
+        }
+        siblings[sibling_count] = next;
+        sibling_count += 1;
+        next = unsafe { GetWindow(next, GW_HWNDNEXT) };
+    }
+    let mut candidate_valid = true;
+    if workerw_after == Some(true) {
+        candidate_valid = reserve_work(scan_ptr)
+            && unsafe { GetParent(first_next) } == parent
+            && class_of(first_next) == WindowClass::WorkerW
+            && belongs_to_shell_process(scan_ptr, first_next) == Some(true);
+    }
+    if unsafe { GetParent(desktop_view) } != parent
+        || unsafe { GetWindow(desktop_view, GW_HWNDNEXT) } != first_next
+        || !candidate_valid
+    {
+        workerw_after = None;
+    }
+    for index in 0..sibling_count {
+        if !reserve_work(scan_ptr)
+            || unsafe { GetParent(siblings[index]) } != parent
+            || unsafe { GetWindow(siblings[index], GW_HWNDNEXT) }
+                != siblings
+                    .get(index + 1)
+                    .copied()
+                    .unwrap_or(std::ptr::null_mut())
+        {
+            workerw_after = None;
+            break;
+        }
+    }
+    Some(SiblingContext {
+        previous_class,
+        next_class,
+        workerw_after,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -364,6 +566,7 @@ fn record_root(
     class: WindowClass,
     shell_owned: bool,
     is_shell_window: bool,
+    no_redirection_bitmap: Option<bool>,
 ) -> RootScanAction {
     let root = WindowRecord {
         class,
@@ -372,6 +575,12 @@ fn record_root(
         root_is_shell_window: is_shell_window,
         shell_owned,
         top_level: true,
+        parent_is_root: false,
+        no_redirection_bitmap,
+        layered: None,
+        previous_sibling_class: None,
+        next_sibling_class: None,
+        workerw_sibling_after: None,
     };
     if !scan.push(root) {
         return RootScanAction::Abort;
@@ -390,6 +599,8 @@ fn record_child(
     class: WindowClass,
     parent_class: WindowClass,
     shell_owned: bool,
+    siblings: Option<SiblingContext>,
+    layered: Option<bool>,
 ) -> bool {
     scan.push(WindowRecord {
         class,
@@ -398,6 +609,12 @@ fn record_child(
         root_is_shell_window: scan.current_root_is_shell_window,
         shell_owned,
         top_level: false,
+        parent_is_root: parent_class == scan.current_root_class,
+        no_redirection_bitmap: None,
+        layered,
+        previous_sibling_class: siblings.and_then(|context| context.previous_class),
+        next_sibling_class: siblings.and_then(|context| context.next_class),
+        workerw_sibling_after: siblings.and_then(|context| context.workerw_after),
     })
 }
 
@@ -502,8 +719,8 @@ mod tests {
     use super::super::{ObservationReason, ProbeStatus, ScanFailure, classify_snapshot};
     use super::{
         MAX_ENUMERATION_WORK, NativeScan, RootScanAction, WindowClass, child_enumeration_succeeded,
-        is_candidate_root, note_shell_window_enumerated, record_child, record_root,
-        scan_shell_before_top_level,
+        extended_style_result, is_candidate_root, note_shell_window_enumerated, record_child,
+        record_root, scan_shell_before_top_level, workerw_after_shell_step,
     };
     use std::cell::RefCell;
 
@@ -517,16 +734,58 @@ mod tests {
         if !scan.reserve_work() {
             return false;
         }
-        match record_root(scan, class, shell_owned, is_shell_window) {
+        match record_root(scan, class, shell_owned, is_shell_window, None) {
             RootScanAction::Abort => false,
             RootScanAction::SkipChildren => true,
             RootScanAction::EnumerateChildren => {
                 let parent_class = scan.current_root_class;
                 descendants.iter().all(|child_class| {
-                    scan.reserve_work() && record_child(scan, *child_class, parent_class, true)
+                    scan.reserve_work()
+                        && record_child(scan, *child_class, parent_class, true, None, None)
                 })
             }
         }
+    }
+
+    #[test]
+    fn top_level_workerw_candidate_decision_is_fail_closed() {
+        assert_eq!(
+            workerw_after_shell_step(Some(false), WindowClass::Other, None),
+            Some(false),
+            "no WorkerW after the shell window means no candidate was observed"
+        );
+        assert_eq!(
+            workerw_after_shell_step(Some(false), WindowClass::WorkerW, Some(false)),
+            Some(false),
+            "a foreign-owned WorkerW is not a shell candidate"
+        );
+        assert_eq!(
+            workerw_after_shell_step(Some(false), WindowClass::WorkerW, Some(true)),
+            Some(true),
+            "a shell-owned WorkerW after the shell window is a hierarchy candidate"
+        );
+        assert_eq!(
+            workerw_after_shell_step(Some(false), WindowClass::Unknown, None),
+            None,
+            "an unreadable class makes candidate absence unprovable"
+        );
+        assert_eq!(
+            workerw_after_shell_step(Some(false), WindowClass::WorkerW, None),
+            None,
+            "an unreadable WorkerW owner makes the candidate unknown"
+        );
+        assert_eq!(
+            workerw_after_shell_step(None, WindowClass::WorkerW, Some(true)),
+            None,
+            "a later positive observation cannot erase an earlier unknown"
+        );
+    }
+
+    #[test]
+    fn extended_style_result_distinguishes_zero_error_and_flag() {
+        assert_eq!(extended_style_result(0, 0, 0x8), Some(false));
+        assert_eq!(extended_style_result(0, 5, 0x8), None);
+        assert_eq!(extended_style_result(0x8, 0, 0x8), Some(true));
     }
 
     #[test]

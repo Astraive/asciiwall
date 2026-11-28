@@ -2,48 +2,42 @@
 
 ## Scope and strategy
 
-This issue-scoped probe performs read-only queries: `GetShellWindow`, bounded `EnumWindows` / `EnumChildWindows` traversal, class-name and owner-process inspection for candidate desktop roots and `SHELLDLL_DefView` nodes, plus OS-version, native-architecture, and current-session queries. The strategy identifier is `windows-shell-hierarchy-enumeration-v1`.
-The traversal caps relevant shell/candidate-root and child records at 512 and enforces a 250 ms callback deadline. Unrelated top-level roots are only class-checked under that deadline; they consume no work or record budget and are not traversed. Budget exhaustion, timeout, missing shell, and failed owner queries for candidate roots or desktop-view nodes are reported explicitly.
-`SHELLDLL_DefView` nodes under unrelated roots are excluded from desktop classification; the probe does not count Explorer folder views outside its candidate roots. It retains only class categories/counts; no HWND or foreign process ID is returned.
+The probe performs read-only queries using `GetShellWindow`, bounded `EnumWindows` / `EnumChildWindows`, and `GetWindow` Z-order traversal; it classifies candidate roots and `SHELLDLL_DefView` nodes, then records OS/session identity. Current strategy identifier: `windows-shell-hierarchy-enumeration-v4`.
+The combined shell-root, descendant, sibling, and top-level Z-order inspection shares the 512-work-unit ceiling and 250 ms deadline. Unrelated top-level roots are class-checked but not traversed. Time/work exhaustion, missing shell, failed ownership queries, and incomplete/unstable sibling order fail closed as unavailable or unknown fields.
+The raised-desktop fields record tri-state style-bit observations (`Some(true)` / `Some(false)` only after a successful query; `None` means the required unique shell-owned window or style query was unavailable). `workerw_immediately_after_desktop_view` is true only when the unique shell-owned top-level Progman and direct-child DefView have the expected style bits, and exactly one shell-owned direct-child WorkerW is verified as the immediate next sibling under that same Progman. A missing/intervening/foreign/duplicate sibling is false; unreadable or unstable evidence is unknown. This is hierarchy evidence, not identification of a wallpaper surface or an attachment recommendation.
+Any incomplete enumeration fails closed for the raised-desktop proof fields: the Progman and DefView style booleans and immediate-WorkerW order result are `None`, even if a valid-looking prefix was observed. Partial counts may remain but are non-authoritative.
+Microsoft-referenced raised-desktop behavior is quoted in [Lively issue #2074](https://github.com/lively-community/lively/issues/2074): builds 26100+ reportedly use a raised desktop where Progman has `WS_EX_NOREDIRECTIONBITMAP`, DefView is `WS_EX_LAYERED`, and a WorkerW child renders the wallpaper. This is community reporting quoting Microsoft, not a public Windows API contract; the probe independently records only observed style bits and window relationships.
+The probe retains class categories/counts, observed style-bit booleans, and order relationships; no HWND or foreign process ID is returned. It does not create a window or graphics device, attach a surface, send shell messages, restart Explorer, or change desktop state. GPU identity is **NOT QUERIED**.
 
-It does not create a window or graphics device, attach a surface, send shell messages, restart Explorer, or change desktop state. GPU adapter/backend identity is **NOT QUERIED** by this hierarchy-only probe; the report says so explicitly rather than inferring a rendering backend.
 
 ## Recorded non-interactive host observation
 
-The previously supplied read-only host observation (not output from this implementation or a CI run) reported the following exact environment tuple:
+The recorded v3 observation predates raised-desktop style and direct-child WorkerW-slot evidence; v3 lacked those style/order fields, which were not captured in that run. Keep these v3 results as historical; do not infer their values from the recorded hierarchy. Interactive acceptance gates remain **NOT RUN**.
+The user-supplied Windows 11 build 26300 (x64) v3 probe reported shell=`Progman`; `top_level_progman_count=1`; `top_level_workerw_count=25` in the latest v3 observation (26 in a prior run); and a stable Progman/DefView relationship: one shell-owned `SHELLDLL_DefView` directly parented by `Progman`, with no previous or next sibling and `workerw_sibling_after_desktop_view=Some(false)`. The shell's previous top-level sibling class was `Other`, and its next top-level sibling class was `None`. `first_shell_owned_workerw_after_shell=Some(false)`: this bounded walk found no shell-owned top-level `WorkerW` after `Progman` (candidate absence only, not universal absence). No wallpaper HWND is inferred.
 
-- OS: Windows 11 Home Single Language, build `26300`, x64.
-- Session: Console.
-- Graphics devices observed in the host inventory: Intel UHD, driver `32.0.101.7026`; NVIDIA RTX 3050 laptop, driver `32.0.16.2124`.
-- Probe strategy: `windows-shell-hierarchy-enumeration-v1`; the probe itself does not query GPU identities.
+The user-supplied Windows 11 build 26300 (x64) v4 probe reported `shell_window_class=Progman`; `top_level_progman_count=1`; `top_level_workerw_count=17`; one shell-owned DefView direct child of Progman; `progman_no_redirection_bitmap=Some(true)`; `desktop_view_layered=Some(true)`; `workerw_immediately_after_desktop_view=Some(false)`; `shell_owned_progman_child_workerw_count=0`; previous and next DefView sibling classes `None`. Thus no shell-owned direct-child WorkerW slot immediately after DefView was observed. The top-level WorkerW count is an observation from this run and may vary. No 0x052C shell message was sent, no surface was attached, and there was no desktop/window interaction. No wallpaper HWND is inferred.
 
-The query result was: `GetShellWindow()` returned an Explorer-owned `Progman` window with a `SHELLDLL_DefView` child. In that same process, `FindWindowW("Progman", nullptr)` did not find a window. Top-level `WorkerW` enumeration returned 18 windows and found no `SHELLDLL_DefView` child. The probe deliberately does not rely on `FindWindowW`, a fixed parent, a numeric handle, or one universal WorkerW layout. No HWNDs or foreign process IDs are recorded here.
 
-This is hierarchy observation only. It is not evidence that a surface can be placed below icons or that the hierarchy is stable across other Windows builds, sessions, or Explorer restarts.
+Hierarchy evidence is not proof of below-icon presentation, compositor visibility, click-through, or stability across Windows builds, sessions, or Explorer restarts.
 
 ## Windows test evidence
 
-**Local Windows evidence:** `cargo fmt --package ascii-platform -- --check` passed; `cargo clippy --locked --package ascii-platform --all-targets -- -D warnings` passed; `cargo test --locked --package ascii-platform` passed (9 tests across 3 suites). The test command is non-disruptive and does not create a window:
-
+Verification reported by the maintainer for v4:
 ```text
-cargo test --locked --package ascii-platform
+cargo +1.100.0 fmt -p ascii-platform --check
+cargo +1.100.0 clippy --offline --locked -p ascii-platform --all-targets -- -D warnings
+cargo +1.100.0 test --offline --locked -p ascii-platform -- --nocapture
 ```
 
-The package includes deterministic injected hierarchy tests for an absent shell, changed WorkerW layout, Explorer-folder views excluded from desktop classification, unexpected-parent precedence when recognized and unknown views coexist, an unreadable actual shell-root class, timeout, and core work-budget exhaustion, plus one native read-only report test. The source hashes below were captured immediately before the Clippy/test run and match the source revision that passed those checks:
-
-- `crates/ascii-platform/src/lib.rs`: `5cbb5ea5a0d2fd07f283050934bce27101f8dd229c963a33ba7af7e1f3589e6b`
-- `crates/ascii-platform/src/probe.rs`: `4546e1bb121cf662a907262c89bf1762c624df1bd3ab46eb8d65b1b0766e25d7`
-- `crates/ascii-platform/src/probe/windows.rs`: `971572e35d0d8c20fbc749b4ace1379f7d50a5de2cfd4da2d7e86e0a8737a5a4`
-- `crates/ascii-platform/tests/host_probe.rs`: `ddef24f1fb9e7a509f7a2c0d9e3c4eac4038137d78fa8cd7e5e21615b899c00c`
-
-No binary or fixture is bundled, so there are no corresponding binary/fixture hashes.
+All three commands passed. Package tests passed: 50 across 5 suites; 1 test was ignored. The v4 command did not rerun the isolated layered WGPU compatibility test; its earlier v3 run passed on the host-selected adapter. That test uses hidden isolated HWNDs—not a desktop-attached surface—and establishes only that the selected backend could create, configure, render, and present an opaque WGPU surface with the tested layered child styles. It does not establish desktop visibility, below-icon placement, click-through, input/focus behavior, or recovery. Earlier v3 verification, reported by the maintainer (not v4 verification): formatting and strict Clippy passed; package tests passed, 47 total (31 unit, 15 capabilities, 1 host probe), with 1 ignored. The isolated layered WGPU compatibility test passed on v3.
 
 ## User-interactive acceptance gates — NOT RUN
 
-- Below-icon visible placement: **NOT RUN**; no surface was created.
+- Below-icon visible placement: **NOT RUN**; no desktop-attached surface was created.
 - Focus/non-activation interaction: **NOT RUN**; no focus test was performed.
 - Win+D / Show Desktop: **NOT RUN**.
 - Explorer restart/recovery: **NOT RUN**.
 - Desktop icon click/selection preservation: **NOT RUN**.
+- Blank-desktop click-through, icon open, desktop context menu, and typing/focus preservation: **NOT RUN**.
 
-These are unfinished acceptance gates, not passes and not failed placement results. They require a user-session interaction and must be recorded separately before any production strategy or support tier is selected.
+These are unfinished acceptance gates, not passes and not failed placement results. They require user-session interaction and must be recorded separately; the existing Progman attachment path remains unverified, with no support or acceptance claim.
