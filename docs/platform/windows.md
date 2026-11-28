@@ -41,9 +41,15 @@ The user ran `C:\Users\gskne\AppData\Local\Temp\wnd002-manual-check\wnd002-manua
 
 Desktop icon click/selection and typing into an application remain **NOT TESTED**. No screenshot, focus pass, root cause, or production support is established by this attempt.
 
-### Updated diagnostic runner (built and user-run; failed)
+### Updated diagnostic runner (built and user-run; HWND creation failed)
 
-The user ran this release runner and reported **NOT PASSED**: no visible desktop background change; desktop icon selection/context-menu behavior did not work; and typing/focus in another application did not remain normal. The user did not provide the console output, so the exact attach stage, `PresentOutcome`, observed HWND/z-order, and interaction effects remain unknown. Do not treat any acceptance behavior as passed.
+The user ran this release runner. Shell discovery completed and reported one Progman, one DefView parented by Progman, 15 top-level WorkerW windows, and a 1920x1080 display at (0,0). `CreateWindowExW` then failed with reported Win32 code `0`; the process exited before creating a surface, attaching, or presenting. The user saw no desktop change. The run output was:
+
+```text
+PROBE: observation=Observation { status: Experimental, reason: ShellHierarchyObserved, error: None, win32_error: None }; shell_window_class=Some(Progman); top_level_progman_count=1; top_level_workerw_count=15; desktop_view_count=1; shell_owned_desktop_view_count=1; desktop_views_parented_by_progman=1; desktop_views_parented_by_workerw=0; desktop_views_with_other_parent=0
+DISPLAY: left_px=0 top_px=0 width_px=1920 height_px=1080
+Error: Win32 { operation: "CreateWindowExW", code: 0 }
+```
 
 - Build: **PASSED** with `CARGO_HOME=D:/tmp/cargo-cor008-acl-20261127` and `CARGO_TARGET_DIR=D:/tmp/target-cor008-acl-20261127`:
   `cargo +1.100.0 build --offline --locked --release --manifest-path 'C:\Users\gskne\AppData\Local\Temp\wnd002-manual-check\Cargo.toml'`
@@ -55,7 +61,7 @@ The user ran this release runner and reported **NOT PASSED**: no visible desktop
 
 Static diagnosis found that `attach_internal` rendered and cached the initial frame while the HWND was hidden. Once revealed, the manual runner's same-frame/same-target `host.present` could return `Skipped(Unchanged)`, so no renderer presentation was required after reveal. The fix invalidates renderer state after a successful reveal and requires a fresh `Presented` outcome; failure hides the window and retires its lease.
 
-The updated runner attempt above also fails acceptance. The earlier visual attempt remains **NOT PASSED**. Without the new console output, it is unknown whether this run reached `Presented` or which native window/interaction behavior failed. The hidden-first-frame fix addresses renderer cache reuse; it does not prove desktop compositor visibility or preserve icon/input interaction. Keep the implementation experimental and PR/issue open until the cause is fixed and all required gates pass.
+No HWND was created, so this run provides no renderer, reveal, or compositor evidence. The user's earlier “no” answers about icon/context-menu and typing/focus are not enough to establish those behaviors: the runner exited before attaching a surface, and no separate interaction observations were supplied. Keep icon and typing/focus acceptance **UNVERIFIED**. Exact `CreateWindowExW` cause remains under investigation; do not infer it from reported code `0`. The hidden-first-frame fix addresses renderer cache reuse but cannot prove desktop placement. Keep this implementation experimental and PR/issue open until the creation failure is fixed and all required gates pass.
 
 ## Pointer and window feeds
 
