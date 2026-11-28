@@ -93,6 +93,21 @@ pub(super) enum NativeError {
         operation: &'static str,
         code: u32,
     },
+    StyleMutationFailed {
+        operation: &'static str,
+        code: u32,
+        hwnd: usize,
+        index: i32,
+        is_window_before: bool,
+        is_window_after: bool,
+        current_pid: u32,
+        current_tid: u32,
+        owner_pid: u32,
+        owner_tid: u32,
+        observed_style: isize,
+        observed_style_readable: bool,
+        api_return: isize,
+    },
     CreateWindowFailed {
         kind: &'static str,
         code: u32,
@@ -1552,23 +1567,53 @@ pub(super) struct NativeSignals {
     pub owned_window_destroyed: bool,
 }
 
+fn set_window_long_failed(api_return: isize, error: u32) -> bool {
+    api_return == 0 && error != 0
+}
+
 fn set_window_long(
     hwnd: HWND,
     index: i32,
     value: isize,
     operation: &'static str,
 ) -> Result<(), NativeError> {
-    // SAFETY: hwnd is an owned window on the current thread; the style index and bit pattern are
-    // defined by Win32. Clear last error to distinguish a previous zero style from failure.
+    // One pre-call IsWindow query captures liveness; further identity/style inspection is
+    // failure-only and does not add allocations or logging.
+    let is_window_before = index == GWL_STYLE && unsafe { IsWindow(hwnd) } != 0;
     unsafe { SetLastError(0) };
-    unsafe { SetWindowLongPtrW(hwnd, index, value) };
+    let api_return = unsafe { SetWindowLongPtrW(hwnd, index, value) };
     let error = unsafe { GetLastError() };
-    if error == 0 {
+    if !set_window_long_failed(api_return, error) {
         Ok(())
-    } else {
+    } else if index != GWL_STYLE {
         Err(NativeError::Win32 {
             operation,
             code: error,
+        })
+    } else {
+        let is_window_after = unsafe { IsWindow(hwnd) } != 0;
+        let mut owner_pid = 0;
+        let owner_tid = unsafe { GetWindowThreadProcessId(hwnd, &mut owner_pid) };
+        let current_pid = unsafe { GetCurrentProcessId() };
+        let current_tid = unsafe { GetCurrentThreadId() };
+        unsafe { SetLastError(0) };
+        let observed_style = unsafe { GetWindowLongPtrW(hwnd, index) };
+        let observed_style_error = unsafe { GetLastError() };
+        let observed_style_readable = observed_style != 0 || observed_style_error == 0;
+        Err(NativeError::StyleMutationFailed {
+            operation,
+            code: error,
+            hwnd: hwnd as usize,
+            index,
+            is_window_before,
+            is_window_after,
+            current_pid,
+            current_tid,
+            owner_pid,
+            owner_tid,
+            observed_style,
+            observed_style_readable,
+            api_return,
         })
     }
 }
@@ -1607,6 +1652,13 @@ unsafe extern "system" fn window_proc(
 mod tests {
     use super::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::WS_VISIBLE;
+
+    #[test]
+    fn set_window_long_failure_requires_zero_return_and_nonzero_error() {
+        assert!(!set_window_long_failed(1, 5));
+        assert!(!set_window_long_failed(0, 0));
+        assert!(set_window_long_failed(0, 5));
+    }
 
     #[test]
     fn surface_window_applies_layered_style_after_hidden_creation() {

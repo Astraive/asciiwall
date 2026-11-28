@@ -191,6 +191,21 @@ pub enum WindowsHostError {
         operation: &'static str,
         code: u32,
     },
+    StyleMutationFailed {
+        operation: &'static str,
+        code: u32,
+        hwnd: usize,
+        index: i32,
+        is_window_before: bool,
+        is_window_after: bool,
+        current_pid: u32,
+        current_tid: u32,
+        owner_pid: u32,
+        owner_tid: u32,
+        observed_style: isize,
+        observed_style_readable: bool,
+        api_return: isize,
+    },
     CreateWindowFailed {
         kind: &'static str,
         code: u32,
@@ -282,6 +297,25 @@ impl std::fmt::Display for WindowsHostError {
             Self::Win32 { operation, code } => {
                 write!(formatter, "{operation} failed with Win32 error {code}")
             }
+            Self::StyleMutationFailed {
+                operation,
+                code,
+                hwnd,
+                index,
+                is_window_before,
+                is_window_after,
+                current_pid,
+                current_tid,
+                owner_pid,
+                owner_tid,
+                observed_style,
+                observed_style_readable,
+                api_return,
+            } => write!(
+                formatter,
+                "{operation} failed with Win32 error {code}; hwnd=0x{hwnd:x}, index={index}, IsWindow(before/after)={is_window_before}/{is_window_after}, current_pid/tid={current_pid}/{current_tid}, owner_pid/tid={owner_pid}/{owner_tid}, observed_style=0x{:x} (readable={observed_style_readable}), api_return=0x{:x}",
+                *observed_style as usize, *api_return as usize
+            ),
             Self::CreateWindowFailed {
                 kind,
                 code,
@@ -1670,6 +1704,35 @@ fn map_native(error: native::NativeError) -> WindowsHostError {
         native::NativeError::Win32 { operation, code } => {
             WindowsHostError::Win32 { operation, code }
         }
+        native::NativeError::StyleMutationFailed {
+            operation,
+            code,
+            hwnd,
+            index,
+            is_window_before,
+            is_window_after,
+            current_pid,
+            current_tid,
+            owner_pid,
+            owner_tid,
+            observed_style,
+            observed_style_readable,
+            api_return,
+        } => WindowsHostError::StyleMutationFailed {
+            operation,
+            code,
+            hwnd,
+            index,
+            is_window_before,
+            is_window_after,
+            current_pid,
+            current_tid,
+            owner_pid,
+            owner_tid,
+            observed_style,
+            observed_style_readable,
+            api_return,
+        },
         native::NativeError::CreateWindowFailed {
             kind,
             code,

@@ -200,23 +200,25 @@ The existing ignored `layered_child_hwnd_accepts_opaque_wgpu_surface` control cr
 Production now follows that tested hidden lifecycle: create a popup without `WS_EX_LAYERED`, convert its style, add the layered exstyle, reparent to the selected shell parent, position/refresh without activation or z-order changes, then set opaque alpha. Every intermediate state omits `WS_VISIBLE`; failures retain RAII ownership and destroy the HWND. Luna reviewed the order and error paths with no blocker.
 
 - `cargo +1.100.0 fmt -p ascii-platform --check` — passed.
-- `cargo +1.100.0 test --offline --locked -p ascii-platform surface_window_applies_layered_style_after_hidden_creation` — **1 passed**. The test uses a private hidden controller and verifies initial popup styles, final child parent/style, no visibility/topmost, and alpha 255 with `LWA_ALPHA`.
-- Manual WGPU runner release build — passed; source SHA-256 `f63288ab49c5bd4c5d0d07fa146fbe4d8d85f12707586fca6ed51b834551dea5`; executable SHA-256 `10fa26ee9e66d2497c059ee02403760468c4ccec7c440f0431df632a83e3ca19`.
-- Runner executable: `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe`.
-- User-run command: `& "D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe"`.
+- `cargo +1.100.0 test --offline --locked -p ascii-platform set_window_long_failure_requires_zero_return_and_nonzero_error` — **1 passed**. Covers the documented zero-return/nonzero-error failure condition, including zero/zero success.
+- `cargo +1.100.0 test --offline --locked -p ascii-platform surface_window_applies_layered_style_after_hidden_creation` — **1 passed**. A private hidden controller verifies the initial popup styles and final child parent/style, visibility, topmost state, and alpha.
+- Manual WGPU runner release build — passed without warnings; source SHA-256 `b5c675796c9d04188fabf51a349ab0c77a96a414c53aec6185da2519e05a208f`; `Cargo.lock` SHA-256 `91bc65be2e89983c92f0157bb124178a147fdd114e04e054dec46a0232e0abf6`; executable SHA-256 `c7953d00eee46b2063946fb563f1c351788a56762de950628d73d9df12576f9c`.
+- Runner: `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe`.
+- PowerShell command: `& "D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe"`.
 
-The user has now run the rebuilt runner; the two attempts failed before `READY` and produced no visible background change. The new failure stage and limits of the runner's parent diagnostic are recorded below. Below-icon placement, icon selection/menus, typing/focus, Explorer recovery, topology/session recovery, and user acceptance remain unverified. Keep PR #371 and issue #171 open/draft.
+The user ran the previous binary twice and saw no background change; the new return-aware runner has not been launched. Below-icon placement, icon selection/menus, typing/focus, Explorer recovery, topology/session recovery, and user acceptance remain unverified. Keep PR #371 and issue #171 open/draft.
 
 #### User-run popup lifecycle retry (two failures; no visible acceptance)
 
-The user ran `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe` twice. Both observed `ShellHierarchyObserved`, Progman, one shell-owned desktop view parented by Progman, zero parented by WorkerW, a 1920×1080 display, and one CBT creation event. The popup request was `style=0x8E000000`, `exstyle=0x08000080`, `parent=0x0`, with downstream CBT result `0`. The user reported no background change.
+The user ran the previous `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe` twice. Both observed `ShellHierarchyObserved`, Progman, one shell-owned desktop view parented by Progman, zero parented by WorkerW, a 1920×1080 display, and one CBT creation event. The popup request was `style=0x8E000000`, `exstyle=0x08000080`, `parent=0x0`, with downstream CBT result `0`. The user reported no background change.
 
-Both attempts then returned `Win32 { operation: "SetWindowLongPtrW(style)", code: 6 }` (`ERROR_INVALID_HANDLE`). In the inspected production path, this occurs at the first style conversion after `WindowClass::create` returns, before the layered-style update, `SetParent`, positioning, or WGPU surface attach/present. Neither attempt printed `READY`.
+Both attempts surfaced `Win32 { operation: "SetWindowLongPtrW(style)", code: 6 }` (`ERROR_INVALID_HANDLE`) before `SetParent`, positioning, or WGPU surface attach/present. Neither printed `READY`. This was the helper's error path; the old code did not preserve the API return, so it did not prove the Win32 call itself failed.
 
-The runner's `FAILED_PARENT: hwnd=0x0` and `ABLATION: skipped because failed parent is invalid` do **not** show that Progman was invalid: the runner was reading the initial popup's `CREATESTRUCT.hwndParent`, which is expected to be null, not the eventual `SetParent` target. Its post-error ablation did not run. No shell-target conclusion or production root cause is established by these lines.
+Microsoft's [`SetWindowLongPtrW` contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowlongptrw#return-value) signals failure only when the return is zero and `GetLastError` is nonzero; a successful call returns the previous style, which may itself be zero. The helper now follows that return/error contract. A genuine GWL_STYLE failure captures the HWND's liveness and owner identity before RAII cleanup; GWL_EXSTYLE failures retain the generic Win32 error. The focused classification and hidden lifecycle tests pass as listed above.
 
-At the time of the runs, the executable SHA-256 was `10fa26ee9e66d2497c059ee02403760468c4ccec7c440f0431df632a83e3ca19` (runner source SHA-256 `f63288ab49c5bd4c5d0d07fa146fbe4d8d85f12707586fca6ed51b834551dea5`). The temporary runner diagnostic source has since been corrected; it has not yet been rebuilt. A narrow error-path diagnostic is being added to capture the owned HWND's identity around the failing style call before RAII teardown. No speculative production style/parent change is justified yet.
+The runner's `FAILED_PARENT: hwnd=0x0` and `ABLATION: skipped because failed parent is invalid` do **not** show that Progman was invalid: the runner read the initial popup's `CREATESTRUCT.hwndParent`, expected to be null, rather than the eventual `SetParent` target. Its post-error ablation did not run. No shell-target conclusion or production root cause is established by these lines.
 
+At the time of the runs, the executable SHA-256 was `10fa26ee9e66d2497c059ee02403760468c4ccec7c440f0431df632a83e3ca19` (runner source SHA-256 `f63288ab49c5bd4c5d0d07fa146fbe4d8d85f12707586fca6ed51b834551dea5`). The corrected runner now reports the post-unwind HWND separately and no longer calls the popup's null creation parent the shell target. Its rebuilt source and executable hashes are listed above. The assistant has not launched the new binary.
 
 #### Lively Wallpaper source comparison (reference only)
 
