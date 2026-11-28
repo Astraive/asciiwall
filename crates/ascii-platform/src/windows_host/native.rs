@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     ffi::c_void,
     mem::size_of,
     ptr::{null, null_mut},
@@ -77,12 +78,31 @@ const OWNED_WINDOW_EX_STYLE: u32 = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
 const OWNED_CHILD_EX_STYLE: u32 = OWNED_WINDOW_EX_STYLE | WS_EX_LAYERED;
 const RAISED_PROGMAN_EX_STYLE: u32 = WS_EX_NOREDIRECTIONBITMAP;
 const RAISED_DEFVIEW_EX_STYLE: u32 = WS_EX_LAYERED;
+const WM_NCCREATE: u32 = 0x0081;
+const WM_CREATE: u32 = 0x0001;
+const CREATION_REACHED_NCCREATE: u32 = 1;
+const CREATION_REACHED_CREATE: u32 = 2;
 const OPAQUE_LAYER_ALPHA: u8 = 255;
 static NEXT_WINDOW_ID: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NativeError {
-    Win32 { operation: &'static str, code: u32 },
+    Win32 {
+        operation: &'static str,
+        code: u32,
+    },
+    CreateWindowFailed {
+        kind: &'static str,
+        code: u32,
+        parent: usize,
+        style: u32,
+        extended_style: u32,
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+        stage: u32,
+    },
     DisplayEnumerationFailed,
     DisplayCapacityExceeded,
     InvalidDisplayBounds,
@@ -97,6 +117,10 @@ pub(super) enum NativeError {
     SecureDesktop,
     Cancelled,
     IdentityExhausted,
+}
+
+thread_local! {
+    static CREATION_STAGE: Cell<u32> = const { Cell::new(0) };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -348,8 +372,12 @@ impl WindowClass {
             None
         };
 
+        // Track which synchronous creation messages ran, so an error code of zero still
+        // distinguishes API setup failure from window-procedure rejection.
+        CREATION_STAGE.with(|stage| stage.set(0));
         // SAFETY: all pointers reference stable, NUL-terminated UTF-16 storage. The class owns the
         // registered class, and this call creates only this process's hidden, disabled HWND.
+        unsafe { SetLastError(0) };
         let hwnd = unsafe {
             CreateWindowExW(
                 options.extended_style,
@@ -366,9 +394,11 @@ impl WindowClass {
                 null(),
             )
         };
-        let creation_error = (!hwnd.is_null())
-            .then_some(())
-            .map_or_else(|| Some(unsafe { GetLastError() }), |_| None);
+        let creation_failure = if hwnd.is_null() {
+            Some((unsafe { GetLastError() }, CREATION_STAGE.with(Cell::get)))
+        } else {
+            None
+        };
 
         let restore_error = previous_context.and_then(|previous| {
             // SAFETY: restores exactly the caller thread's prior DPI-awareness context.
@@ -384,11 +414,25 @@ impl WindowClass {
             return Err(error);
         }
         if hwnd.is_null() {
-            return Err(NativeError::Win32 {
-                operation: "CreateWindowExW",
-                code: creation_error.unwrap_or(0),
+            let (code, stage) = creation_failure.unwrap_or((0, 0));
+            return Err(NativeError::CreateWindowFailed {
+                kind: if options.parent.is_null() {
+                    "controller"
+                } else {
+                    "surface"
+                },
+                code,
+                parent: options.parent as usize,
+                style: options.style,
+                extended_style: options.extended_style,
+                left: options.bounds.left,
+                top: options.bounds.top,
+                width: options.bounds.width,
+                height: options.bounds.height,
+                stage,
             });
         }
+
         // SAFETY: hwnd is our own live window and the retained class name is a valid unique
         // property key. The nonzero token distinguishes this HWND from later handle reuse.
         if unsafe { SetPropW(hwnd, self.name.as_ptr(), identity as *mut c_void) } == 0 {
@@ -1500,6 +1544,11 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message == WM_NCCREATE {
+        CREATION_STAGE.with(|stage| stage.set(stage.get() | CREATION_REACHED_NCCREATE));
+    } else if message == WM_CREATE {
+        CREATION_STAGE.with(|stage| stage.set(stage.get() | CREATION_REACHED_CREATE));
+    }
     if message == wm_mouseactivate {
         MA_NOACTIVATE as LRESULT
     } else if message == wm_erasebkgnd {

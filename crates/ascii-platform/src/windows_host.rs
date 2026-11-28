@@ -187,7 +187,22 @@ pub enum WindowsHostError {
     FirstFrameNotPresented,
     RecoveryCircuitOpen,
     RevisionExhausted,
-    Win32 { operation: &'static str, code: u32 },
+    Win32 {
+        operation: &'static str,
+        code: u32,
+    },
+    CreateWindowFailed {
+        kind: &'static str,
+        code: u32,
+        parent: usize,
+        style: u32,
+        extended_style: u32,
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+        stage: u32,
+    },
     Renderer(ascii_render::Error),
     Lease(SurfaceLeaseError),
 }
@@ -267,6 +282,23 @@ impl std::fmt::Display for WindowsHostError {
             Self::Win32 { operation, code } => {
                 write!(formatter, "{operation} failed with Win32 error {code}")
             }
+            Self::CreateWindowFailed {
+                kind,
+                code,
+                parent,
+                style,
+                extended_style,
+                left,
+                top,
+                width,
+                height,
+                stage,
+            } => write!(
+                formatter,
+                "CreateWindowExW {kind} failed with Win32 error {code}; parent=0x{parent:x}, style=0x{style:08x}, ex_style=0x{extended_style:08x}, bounds=({left},{top},{width},{height}), WM_NCCREATE={}, WM_CREATE={}",
+                stage & 1 != 0,
+                stage & 2 != 0,
+            ),
             Self::Renderer(error) => write!(formatter, "renderer failed: {error}"),
             Self::Lease(error) => write!(formatter, "surface lease failed: {error:?}"),
         }
@@ -1638,6 +1670,29 @@ fn map_native(error: native::NativeError) -> WindowsHostError {
         native::NativeError::Win32 { operation, code } => {
             WindowsHostError::Win32 { operation, code }
         }
+        native::NativeError::CreateWindowFailed {
+            kind,
+            code,
+            parent,
+            style,
+            extended_style,
+            left,
+            top,
+            width,
+            height,
+            stage,
+        } => WindowsHostError::CreateWindowFailed {
+            kind,
+            code,
+            parent,
+            style,
+            extended_style,
+            left,
+            top,
+            width,
+            height,
+            stage,
+        },
         native::NativeError::DisplayEnumerationFailed => WindowsHostError::DisplayEnumerationFailed,
         native::NativeError::DisplayCapacityExceeded => WindowsHostError::DisplayCapacityExceeded,
         native::NativeError::InvalidDisplayBounds => WindowsHostError::InvalidDisplayBounds,
@@ -1736,6 +1791,44 @@ mod tests {
             map_native(native::NativeError::Cancelled),
             WindowsHostError::InvalidFrame(ascii_core::Error::Cancelled)
         );
+    }
+
+    #[test]
+    fn create_window_failure_preserves_diagnostics_and_reports_creation_stages() {
+        for (kind, stage, nccreate, create) in
+            [("controller", 1, true, false), ("surface", 2, false, true)]
+        {
+            let error = map_native(native::NativeError::CreateWindowFailed {
+                kind,
+                code: 0,
+                parent: 0x1234,
+                style: 0x5678,
+                extended_style: 0x9abc,
+                left: -12,
+                top: 34,
+                width: 1920,
+                height: 1080,
+                stage,
+            });
+            assert_eq!(
+                error,
+                WindowsHostError::CreateWindowFailed {
+                    kind,
+                    code: 0,
+                    parent: 0x1234,
+                    style: 0x5678,
+                    extended_style: 0x9abc,
+                    left: -12,
+                    top: 34,
+                    width: 1920,
+                    height: 1080,
+                    stage,
+                }
+            );
+            let message = error.to_string();
+            assert!(message.contains(&format!("WM_NCCREATE={nccreate}")));
+            assert!(message.contains(&format!("WM_CREATE={create}")));
+        }
     }
 
     #[test]
