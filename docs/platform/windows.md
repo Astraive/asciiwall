@@ -145,14 +145,34 @@ PS C:\Users\gskne>
 
 `Progman` was a valid but foreign-process/thread parent at the metadata check. The same minimal child style succeeded under both Progman and the app's hidden controller, so invalid parent and foreign-process parenting alone do not explain the failure. The full production style/exstyle pair (`0x4E000000` / `0x08080080`) failed even at 1×1 under the same-process controller; the production 1920×1080 dimensions and Progman parent are therefore not necessary for this failure. The result narrows the problem to the full style/exstyle set or an interaction; it does not identify a specific bit. The `0` DPI-context values are opaque handles classified as unknown by the diagnostic, not DPI modes. The CBT callback returned `0`, so no downstream CBT veto was observed. No usable surface or visual/interaction acceptance was established.
 
-#### Next hidden 2×2 style/exstyle matrix runner (built; pending user run)
+#### User-run hidden 2×2 style/exstyle matrix
 Source SHA-256: `1eded3eda7d6b8e08ed1d9fe6088d9d94952748f5c2d575849c3dbc218a39d95`; executable SHA-256: `9d95287bf4b6d808d0a3c13d8421c4527d7622d88692ea01754194c71f4a7fef`.
 
 PowerShell command: `& "D:\tmp\target-cor008-acl-20261127\release\wnd002-style-matrix.exe"`.
 
-The runner creates a hidden 1×1 controller with the production controller style/exstyle, a private class, and a WndProc that mirrors production creation-stage tracking and `WM_MOUSEACTIVATE`/`WM_ERASEBKGND` handling. It adopts Progman's DPI context for four child-window trials at 1×1: minimal/full window styles crossed with no/full extended styles. It logs `GetLastError` and `WM_NCCREATE`/`WM_CREATE` stage bits per trial. No trial includes `WS_VISIBLE`; successful trials are destroyed immediately. It does not call `ShowWindow` or `SetParent`. This is a controlled controller/WndProc replica, not full production-runtime parity: it omits the WGPU bootstrap. It has not been run and is not a placement test.
+The user ran this runner. It creates a hidden 1×1 controller with production controller styles, a private class, and a WndProc matching production creation-stage and special-message behavior. It adopts Progman's DPI context for four child-window trials at 1×1. This is a controlled controller/WndProc replica, not full production-runtime parity; it omits the WGPU bootstrap. It uses no `WS_VISIBLE`, `ShowWindow`, or `SetParent`; successful trials are destroyed immediately.
 
-If the matrix fails only with the full window-style group, split `WS_CLIPSIBLINGS` and `WS_CLIPCHILDREN` separately. Microsoft documents `WS_CLIPCHILDREN` as a style used when creating a parent window; this makes it a candidate to isolate, not a proven cause. [Microsoft Window Styles](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-styles)
+User-run output:
+
+```text
+PS C:\Users\gskne> & "D:\tmp\target-cor008-acl-20261127\release\wnd002-style-matrix.exe"
+TRIAL child-disabled/no-exstyle: style=0x48000000 exstyle=0x00000000 hwnd=0x4212D8 get_last_error=0 creation_stage=0x3
+CLEANUP child-disabled/no-exstyle: destroyed immediately
+TRIAL production-style/no-exstyle: style=0x4E000000 exstyle=0x00000000 hwnd=0x4312D8 get_last_error=0 creation_stage=0x3
+CLEANUP production-style/no-exstyle: destroyed immediately
+TRIAL child-disabled/production-exstyle: style=0x48000000 exstyle=0x08080080 hwnd=0x0 get_last_error=0 creation_stage=0x0
+TRIAL production-style/production-exstyle: style=0x4E000000 exstyle=0x08080080 hwnd=0x0 get_last_error=0 creation_stage=0x0
+PS C:\Users\gskne>
+```
+
+Both window-style variants succeeded without production extended styles and reached stage `0x3`; both failed with the full production extended-style set before `WM_NCCREATE` (`stage=0x0`), even with the minimal window style. `GetLastError` remained `0`. This implicates the extended-style set or an interaction in this controlled replica, not a specific bit; it does not establish exact production-runtime causality.
+
+#### Next hidden eight-case extended-style matrix (built; pending user run)
+Source SHA-256: `6bb78c7dac67affb7b4a8ecc6efd8ecac41ac4be7aaf25b0d8092bc55352f9d2`; executable SHA-256: `4867939788be2d8fa3509290c30dcb7993d81e3249b2b5a10dbc46d78b973709`.
+
+PowerShell command: `& "D:\tmp\target-cor008-acl-20261127\release\wnd002-exstyle-matrix.exe"`.
+
+The runner fixes child style to `0x48000000` and tests all eight combinations of `WS_EX_NOACTIVATE` (`0x08000000`), `WS_EX_TOOLWINDOW` (`0x00000080`), and `WS_EX_LAYERED` (`0x00080000`) under one hidden 1×1 same-process controller. It uses the Progman DPI context and logs `GetLastError` plus creation-stage bits. Successful trials are destroyed immediately; the runner uses no `WS_VISIBLE`, `ShowWindow`, or `SetParent`. Luna reviewed it; `cargo fmt` and Windows x64 release build passed. It is a controlled replica without the WGPU bootstrap, has not been run, and does not test visible placement.
 
 #### Lively Wallpaper source comparison (reference only)
 
