@@ -41,9 +41,9 @@ The user ran `C:\Users\gskne\AppData\Local\Temp\wnd002-manual-check\wnd002-manua
 
 Desktop icon click/selection and typing into an application remain **NOT TESTED**. No screenshot, focus pass, root cause, or production support is established by this attempt.
 
-### Updated diagnostic runner (built, not run)
+### Updated diagnostic runner (built and user-run; failed)
 
-The updated diagnostic runner links the current WND-002 worktree fix. Its release build passed, but the executable remains **NOT RUN** on the desktop; no post-fix visual result is available.
+The user ran this release runner and reported **NOT PASSED**: no visible desktop background change; desktop icon selection/context-menu behavior did not work; and typing/focus in another application did not remain normal. The user did not provide the console output, so the exact attach stage, `PresentOutcome`, observed HWND/z-order, and interaction effects remain unknown. Do not treat any acceptance behavior as passed.
 
 - Build: **PASSED** with `CARGO_HOME=D:/tmp/cargo-cor008-acl-20261127` and `CARGO_TARGET_DIR=D:/tmp/target-cor008-acl-20261127`:
   `cargo +1.100.0 build --offline --locked --release --manifest-path 'C:\Users\gskne\AppData\Local\Temp\wnd002-manual-check\Cargo.toml'`
@@ -55,7 +55,7 @@ The updated diagnostic runner links the current WND-002 worktree fix. Its releas
 
 Static diagnosis found that `attach_internal` rendered and cached the initial frame while the HWND was hidden. Once revealed, the manual runner's same-frame/same-target `host.present` could return `Skipped(Unchanged)`, so no renderer presentation was required after reveal. The fix invalidates renderer state after a successful reveal and requires a fresh `Presented` outcome; failure hides the window and retires its lease.
 
-`Presented` means renderer submission, not compositor visibility or user-visible wallpaper acceptance. The earlier user attempt above remains **NOT PASSED** and is not evidence that this fix is visually accepted. Manual retest with the updated runner is pending; icon click/selection and typing remain **NOT TESTED**.
+The updated runner attempt above also fails acceptance. The earlier visual attempt remains **NOT PASSED**. Without the new console output, it is unknown whether this run reached `Presented` or which native window/interaction behavior failed. The hidden-first-frame fix addresses renderer cache reuse; it does not prove desktop compositor visibility or preserve icon/input interaction. Keep the implementation experimental and PR/issue open until the cause is fixed and all required gates pass.
 
 ## Pointer and window feeds
 
