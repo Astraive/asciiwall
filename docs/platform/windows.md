@@ -107,7 +107,7 @@ PS C:\Users\gskne>
 
 The candidate handle `0x6F1292` was observed during `HCBT_CREATEWND`; it is not evidence of a successfully created or retained surface. The single callback with downstream result `0` does not support a downstream CBT veto. The next diagnosis must explain the failure after the CBT notification and before the app's window procedure.
 
-### Hidden parent/style diagnostic runner (built; pending user run)
+### Hidden parent/style diagnostic runner (user-run; full style set still fails)
 
 The production creation-stage tracker is reset immediately before the synchronous `CreateWindowExW` call and records `WM_NCCREATE` / `WM_CREATE` at the first statements of the app WndProc. The user's `stage: 0` result therefore strongly indicates neither creation message reached that WndProc; a second entry-only counter would be redundant. The cause remains unknown.
 
@@ -120,14 +120,32 @@ The follow-up runner leaves the normal attach attempt unchanged. If attach fails
 - Runner executable SHA-256: `f2c4707401dbbbadeffd0e66fa4b8f4458a3e151e6ebf69ca7a72e4f4c90bf57`.
 - Runner executable: `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe`.
 
-The assistant has **NOT RUN** this binary. Run manually in PowerShell:
+The user ran this binary; the assistant did not launch it. PowerShell command used:
 
 ```powershell
 & "D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe"
 ```
 
-If the attach error recurs, the ablation windows omit `WS_VISIBLE`; successful trial windows are destroyed immediately. If `DestroyWindow` fails, later probes stop and the runner exits on the original attach error. If normal attach succeeds, the existing runner may reveal the experimental surface and hold for up to 180 seconds; use Ctrl+C to detach. Send the complete output. If `READY` appears, report whether the wallpaper is visible. Icon selection and typing/focus remain **UNVERIFIED**.
+The original attach attempt still failed before surface creation (`stage: 0`); the hidden minimal-style trials succeeded and were destroyed, while the full-style controller trial returned a null HWND with code `0`. The runner did not print `READY`.
 
+#### User-run result
+
+```text
+PS C:\Users\gskne> & "D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe"
+PROBE: observation=Observation { status: Experimental, reason: ShellHierarchyObserved, error: None, win32_error: None }; shell_window_class=Some(Progman); top_level_progman_count=1; top_level_workerw_count=15; desktop_view_count=1; shell_owned_desktop_view_count=1; desktop_views_parented_by_progman=1; desktop_views_parented_by_workerw=0; desktop_views_with_other_parent=0
+DISPLAY: left_px=0 top_px=0 width_px=1920 height_px=1080
+CBT: hcbt_createwnd_callbacks=1 hwnd=0x3D12D8 parent=0x70042 class="AsciiWall.WindowsHost.0000000000000001" style=0x4E000000 exstyle=0x8080080 bounds=(0, 0, 1920, 1080) hcbt_createwnd_downstream=0
+FAILED_PARENT: hwnd=0x70042 is_window=true class=Some("Progman") owner_pid=49008 owner_tid=30008 current_pid=62600 current_tid=50468 style=0x96000000 parent_dpi_context=34(other/unknown) current_dpi_context=24592(other/unknown)
+TRIAL A_shell_minimal: parent=0x70042 style=0x48000000 exstyle=0x00000000 bounds=(0,0,1,1) hwnd=0x3E12D8 immediate_error=0 destroy_success=true destroy_error=Some(0)
+TRIAL B_controller_minimal: parent=0x6E0BEA style=0x48000000 exstyle=0x00000000 bounds=(0,0,1,1) hwnd=0x3F12D8 immediate_error=0 destroy_success=true destroy_error=Some(0)
+TRIAL C_controller_full: parent=0x6E0BEA style=0x4E000000 exstyle=0x08080080 bounds=(0,0,1,1) hwnd=0x0 immediate_error=0 destroy_success=false destroy_error=None
+Error: CreateWindowFailed { kind: "surface", code: 0, parent: 458818, style: 1308622848, extended_style: 134742144, left: 0, top: 0, width: 1920, height: 1080, stage: 0 }
+PS C:\Users\gskne>
+```
+
+`Progman` was a valid but foreign-process/thread parent at the metadata check. The same minimal child style succeeded under both Progman and the app's hidden controller, so invalid parent and foreign-process parenting alone do not explain the failure. The full production style/exstyle pair (`0x4E000000` / `0x08080080`) failed even at 1×1 under the same-process controller; the production 1920×1080 dimensions and Progman parent are therefore not necessary for this failure. The result narrows the problem to the full style/exstyle set or an interaction; it does not identify a specific bit. The `0` DPI-context values are opaque handles classified as unknown by the diagnostic, not DPI modes. The CBT callback returned `0`, so no downstream CBT veto was observed. No usable surface or visual/interaction acceptance was established.
+
+Next diagnostic: run a controlled 2×2 matrix under the same controller parent at 1×1: minimal versus full window styles crossed with no versus full extended styles. Record each result and destroy each successful HWND. This separates style-only, exstyle-only, and combined effects. Do not change production styles or placement until the failing bit or interaction is isolated.
 
 ## Pointer and window feeds
 
