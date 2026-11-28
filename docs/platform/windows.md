@@ -205,7 +205,18 @@ Production now follows that tested hidden lifecycle: create a popup without `WS_
 - Runner executable: `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe`.
 - User-run command: `& "D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe"`.
 
-The assistant did not launch this runner. The real Progman/DefView/WorkerW attach, visible wallpaper change, icon selection, typing/focus, and recovery acceptance remain unverified. Keep PR #371 and issue #171 open/draft pending the user's run and remaining acceptance gates.
+The user has now run the rebuilt runner; the two attempts failed before `READY` and produced no visible background change. The new failure stage and limits of the runner's parent diagnostic are recorded below. Below-icon placement, icon selection/menus, typing/focus, Explorer recovery, topology/session recovery, and user acceptance remain unverified. Keep PR #371 and issue #171 open/draft.
+
+#### User-run popup lifecycle retry (two failures; no visible acceptance)
+
+The user ran `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe` twice. Both observed `ShellHierarchyObserved`, Progman, one shell-owned desktop view parented by Progman, zero parented by WorkerW, a 1920×1080 display, and one CBT creation event. The popup request was `style=0x8E000000`, `exstyle=0x08000080`, `parent=0x0`, with downstream CBT result `0`. The user reported no background change.
+
+Both attempts then returned `Win32 { operation: "SetWindowLongPtrW(style)", code: 6 }` (`ERROR_INVALID_HANDLE`). In the inspected production path, this occurs at the first style conversion after `WindowClass::create` returns, before the layered-style update, `SetParent`, positioning, or WGPU surface attach/present. Neither attempt printed `READY`.
+
+The runner's `FAILED_PARENT: hwnd=0x0` and `ABLATION: skipped because failed parent is invalid` do **not** show that Progman was invalid: the runner was reading the initial popup's `CREATESTRUCT.hwndParent`, which is expected to be null, not the eventual `SetParent` target. Its post-error ablation did not run. No shell-target conclusion or production root cause is established by these lines.
+
+At the time of the runs, the executable SHA-256 was `10fa26ee9e66d2497c059ee02403760468c4ccec7c440f0431df632a83e3ca19` (runner source SHA-256 `f63288ab49c5bd4c5d0d07fa146fbe4d8d85f12707586fca6ed51b834551dea5`). The temporary runner diagnostic source has since been corrected; it has not yet been rebuilt. A narrow error-path diagnostic is being added to capture the owned HWND's identity around the failing style call before RAII teardown. No speculative production style/parent change is justified yet.
+
 
 #### Lively Wallpaper source comparison (reference only)
 
