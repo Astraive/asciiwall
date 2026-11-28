@@ -9,6 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ascii_core::CancellationToken;
+
 use windows_sys::{
     Win32::{
         Foundation::{
@@ -39,17 +41,18 @@ use windows_sys::{
             },
             Input::KeyboardAndMouse::IsWindowEnabled,
             WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows,
-                EnumWindows, GW_HWNDNEXT, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetClientRect,
+                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows,
+                GW_CHILD, GW_HWNDNEXT, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetClientRect,
                 GetForegroundWindow, GetParent, GetPropW, GetWindow, GetWindowLongPtrW,
-                GetWindowThreadProcessId, HWND_BOTTOM, IsWindow, IsWindowVisible, MA_NOACTIVATE,
-                MSG, PM_REMOVE, PeekMessageW, RegisterClassExW, RegisterWindowMessageW, SW_HIDE,
-                SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SetParent,
-                SetPropW, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-                UnregisterClassW, WM_DISPLAYCHANGE as wm_displaychange,
-                WM_ERASEBKGND as wm_erasebkgnd, WM_MOUSEACTIVATE as wm_mouseactivate, WNDCLASSEXW,
-                WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DISABLED, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+                GetWindowThreadProcessId, IsWindow, IsWindowVisible, LWA_ALPHA, MA_NOACTIVATE, MSG,
+                PM_REMOVE, PeekMessageW, RegisterClassExW, RegisterWindowMessageW,
+                SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+                SWP_NOOWNERZORDER, SendMessageTimeoutW, SetLayeredWindowAttributes, SetPropW,
+                SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, UnregisterClassW,
+                WM_DISPLAYCHANGE as wm_displaychange, WM_ERASEBKGND as wm_erasebkgnd,
+                WM_MOUSEACTIVATE as wm_mouseactivate, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
+                WS_CLIPSIBLINGS, WS_DISABLED, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
@@ -57,8 +60,11 @@ use windows_sys::{
 };
 
 pub(super) const MAX_NATIVE_DISPLAYS: usize = 16;
-const MAX_HIERARCHY_RECORDS: u32 = 512;
+const MAX_HIERARCHY_RECORDS: usize = 512;
 const HIERARCHY_DEADLINE: Duration = Duration::from_millis(250);
+const WM_SPAWN_WORKERW: u32 = 0x052c;
+const WORKERW_REQUEST_TIMEOUT_MS: u32 = 250;
+const ERROR_GEN_FAILURE: u32 = 31;
 const WM_WTSSESSION_CHANGE: u32 = 0x02b1;
 const WTS_SESSION_REMOTE_CONNECT: usize = 0x3;
 const WTS_SESSION_REMOTE_DISCONNECT: usize = 0x4;
@@ -68,6 +74,10 @@ const NOTIFY_FOR_THIS_SESSION: u32 = 0;
 const DESKTOP_NAME_CAPACITY: usize = 64;
 const OWNED_CHILD_STYLE: u32 = WS_CHILD | WS_DISABLED | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
 const OWNED_WINDOW_EX_STYLE: u32 = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+const OWNED_CHILD_EX_STYLE: u32 = OWNED_WINDOW_EX_STYLE | WS_EX_LAYERED;
+const RAISED_PROGMAN_EX_STYLE: u32 = WS_EX_NOREDIRECTIONBITMAP;
+const RAISED_DEFVIEW_EX_STYLE: u32 = WS_EX_LAYERED;
+const OPAQUE_LAYER_ALPHA: u8 = 255;
 static NEXT_WINDOW_ID: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,6 +94,8 @@ pub(super) enum NativeError {
     DpiContextMismatch,
     OwnedWindowInvalid,
     PlacementVerificationFailed,
+    SecureDesktop,
+    Cancelled,
     IdentityExhausted,
 }
 
@@ -285,7 +297,7 @@ impl WindowClass {
 
     pub fn create_surface_window(
         &self,
-        dpi_context: DPI_AWARENESS_CONTEXT,
+        target: &ShellHierarchy,
         screen_left: i32,
         screen_top: i32,
         width: u32,
@@ -293,17 +305,32 @@ impl WindowClass {
     ) -> Result<Window, NativeError> {
         let width = i32::try_from(width).map_err(|_| NativeError::InvalidDisplayBounds)?;
         let height = i32::try_from(height).map_err(|_| NativeError::InvalidDisplayBounds)?;
-        self.create(WindowCreateOptions {
-            extended_style: OWNED_WINDOW_EX_STYLE,
-            style: WS_POPUP | WS_DISABLED | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-            bounds: WindowCreateBounds {
-                left: screen_left,
-                top: screen_top,
-                width,
-                height,
-            },
-            parent: null_mut(),
-            dpi_context: Some(dpi_context),
+        let mut point = windows_sys::Win32::Foundation::POINT {
+            x: screen_left,
+            y: screen_top,
+        };
+        with_thread_dpi_context(target.dpi_context, || {
+            if unsafe { ScreenToClient(target.parent, &mut point) } == 0 {
+                return Err(win32_error("ScreenToClient"));
+            }
+            let window = self.create(WindowCreateOptions {
+                extended_style: OWNED_CHILD_EX_STYLE,
+                style: OWNED_CHILD_STYLE,
+                bounds: WindowCreateBounds {
+                    left: point.x,
+                    top: point.y,
+                    width,
+                    height,
+                },
+                parent: target.parent,
+                dpi_context: Some(target.dpi_context),
+            })?;
+            if unsafe { SetLayeredWindowAttributes(window.hwnd, 0, OPAQUE_LAYER_ALPHA, LWA_ALPHA) }
+                == 0
+            {
+                return Err(win32_error("SetLayeredWindowAttributes"));
+            }
+            Ok(window)
         })
     }
 
@@ -508,26 +535,20 @@ impl Window {
 
     pub fn attach_to(
         &mut self,
-        parent: HWND,
-        parent_process_id: u32,
+        target: &ShellHierarchy,
         screen_left: i32,
         screen_top: i32,
         width: u32,
         height: u32,
     ) -> Result<(), NativeError> {
-        if !self.is_owned()
-            || parent.is_null()
-            || !self.same_shell_parent(parent, parent_process_id)
-        {
+        if !self.is_owned() || unsafe { GetParent(self.hwnd) } != target.parent {
             return Err(NativeError::OwnedWindowInvalid);
         }
-        // SAFETY: these queries return system DPI-awareness pseudo-handles for live HWNDs.
         let window_context = unsafe { GetWindowDpiAwarenessContext(self.hwnd) };
-        let parent_context = unsafe { GetWindowDpiAwarenessContext(parent) };
+        let parent_context = unsafe { GetWindowDpiAwarenessContext(target.parent) };
         if window_context.is_null() || parent_context.is_null() {
             return Err(NativeError::DpiContextUnavailable);
         }
-        // SAFETY: contexts are system-provided pseudo-handles and remain valid for comparison.
         if unsafe { AreDpiAwarenessContextsEqual(window_context, parent_context) } == 0 {
             return Err(NativeError::DpiContextMismatch);
         }
@@ -535,46 +556,30 @@ impl Window {
         let height = i32::try_from(height).map_err(|_| NativeError::InvalidDisplayBounds)?;
 
         with_thread_dpi_context(parent_context, || {
-            // Set required child/nonactivation styles before SetParent; Win32 does not infer them.
             set_window_long(
                 self.hwnd,
                 GWL_STYLE,
                 OWNED_CHILD_STYLE as isize,
                 "SetWindowLongPtrW(style)",
             )?;
-            set_window_long(
-                self.hwnd,
-                GWL_EXSTYLE,
-                OWNED_WINDOW_EX_STYLE as isize,
-                "SetWindowLongPtrW(exstyle)",
-            )?;
-            // SAFETY: `parent` was revalidated as a shell-owned Progman/WorkerW HWND and
-            // `self.hwnd` is this process's hidden owned window. No foreign window is destroyed.
-            unsafe { SetLastError(0) };
-            let previous_parent = unsafe { SetParent(self.hwnd, parent) };
-            let last_error = unsafe { GetLastError() };
-            if previous_parent.is_null() && last_error != 0 {
-                return Err(NativeError::Win32 {
-                    operation: "SetParent",
-                    code: last_error,
-                });
+            let extended = unsafe { GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) } as u32;
+            if extended & OWNED_CHILD_EX_STYLE != OWNED_CHILD_EX_STYLE
+                || extended & WS_EX_TOPMOST != 0
+            {
+                return Err(NativeError::PlacementVerificationFailed);
             }
-
             let mut point = windows_sys::Win32::Foundation::POINT {
                 x: screen_left,
                 y: screen_top,
             };
-            // SAFETY: `parent` is a live shell-owned window and point is writable. The thread is
-            // temporarily using the same DPI-awareness context as the parent.
-            if unsafe { ScreenToClient(parent, &mut point) } == 0 {
+            if unsafe { ScreenToClient(target.parent, &mut point) } == 0 {
                 return Err(win32_error("ScreenToClient"));
             }
-            // SAFETY: positions only our owned hidden child, at the parent's bottom non-topmost
-            // child Z-order, and forbids activation and owner-Z-order changes.
+            // Insert immediately after DefView: never behind the WorkerW slot or at HWND_BOTTOM.
             if unsafe {
                 SetWindowPos(
                     self.hwnd,
-                    HWND_BOTTOM,
+                    target.defview,
                     point.x,
                     point.y,
                     width,
@@ -583,7 +588,7 @@ impl Window {
                 )
             } == 0
             {
-                return Err(win32_error("SetWindowPos(HWND_BOTTOM)"));
+                return Err(win32_error("SetWindowPos(after DefView)"));
             }
             self.expected_client_rect = Some((point.x, point.y, width, height));
             Ok(())
@@ -592,79 +597,44 @@ impl Window {
 
     pub fn verify_hidden_placement(
         &self,
-        parent: HWND,
-        parent_process_id: u32,
+        target: &ShellHierarchy,
+        owned_windows: &[Option<&Window>],
     ) -> Result<(), NativeError> {
-        self.verify_placement(parent, parent_process_id, false)
+        self.verify_placement(target, owned_windows, false)
     }
 
     pub fn verify_visible_placement(
         &self,
-        parent: HWND,
-        parent_process_id: u32,
+        target: &ShellHierarchy,
+        owned_windows: &[Option<&Window>],
     ) -> Result<(), NativeError> {
-        self.verify_placement(parent, parent_process_id, true)
+        self.verify_placement(target, owned_windows, true)
+    }
+
+    pub fn verify_present_placement(&self, target: &ShellHierarchy) -> Result<(), NativeError> {
+        if !self.is_visible() {
+            return Err(NativeError::PlacementVerificationFailed);
+        }
+        verify_shell_parent_identity(target)?;
+        verify_owned_child(self, target)
     }
 
     fn verify_placement(
         &self,
-        parent: HWND,
-        parent_process_id: u32,
+        target: &ShellHierarchy,
+        owned_windows: &[Option<&Window>],
         visible: bool,
     ) -> Result<(), NativeError> {
-        if !self.is_owned()
-            || self.is_visible() != visible
-            || !self.same_shell_parent(parent, parent_process_id)
-            || unsafe { GetParent(self.hwnd) } != parent
-            || !unsafe { GetWindow(self.hwnd, GW_HWNDNEXT) }.is_null()
-            || unsafe { IsWindowEnabled(self.hwnd) } != 0
-        {
+        if !self.is_owned() || self.is_visible() != visible {
             return Err(NativeError::PlacementVerificationFailed);
         }
-        let Some((expected_x, expected_y, expected_width, expected_height)) =
-            self.expected_client_rect
-        else {
-            return Err(NativeError::PlacementVerificationFailed);
-        };
-        let window_context = unsafe { GetWindowDpiAwarenessContext(self.hwnd) };
-        let parent_context = unsafe { GetWindowDpiAwarenessContext(parent) };
-        if window_context.is_null() || parent_context.is_null() {
-            return Err(NativeError::DpiContextUnavailable);
+        verify_shell_hierarchy(target, owned_windows)?;
+        let mut contains_self = false;
+        for window in owned_windows.iter().flatten() {
+            verify_owned_child(window, target)?;
+            contains_self |= window.hwnd == self.hwnd;
         }
-        if unsafe { AreDpiAwarenessContextsEqual(window_context, parent_context) } == 0 {
-            return Err(NativeError::DpiContextMismatch);
-        }
-        let geometry_matches = with_thread_dpi_context(parent_context, || {
-            let mut client_rect = RECT::default();
-            let mut client_origin = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
-            // SAFETY: hwnd and parent were validated as live owned/shell windows; both output
-            // records are writable. The APIs only read geometry and do not change activation.
-            if unsafe { GetClientRect(self.hwnd, &mut client_rect) } == 0
-                || unsafe { ClientToScreen(self.hwnd, &mut client_origin) } == 0
-                || unsafe { ScreenToClient(parent, &mut client_origin) } == 0
-            {
-                return Err(win32_error("GetClientRect/ClientToScreen/ScreenToClient"));
-            }
-            Ok(client_origin.x == expected_x
-                && client_origin.y == expected_y
-                && client_rect.left == 0
-                && client_rect.top == 0
-                && client_rect.right == expected_width
-                && client_rect.bottom == expected_height)
-        })?;
-        if !geometry_matches {
-            return Err(NativeError::PlacementVerificationFailed);
-        }
-        let style = unsafe { GetWindowLongPtrW(self.hwnd, GWL_STYLE) } as u32;
-        let extended = unsafe { GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) } as u32;
-        if style & WS_CHILD == 0
-            || style & WS_POPUP != 0
-            || style & WS_DISABLED == 0
-            || style & (WS_CLIPSIBLINGS | WS_CLIPCHILDREN) != WS_CLIPSIBLINGS | WS_CLIPCHILDREN
-            || extended & WS_EX_NOACTIVATE == 0
-            || extended & WS_EX_TOOLWINDOW == 0
-            || extended & WS_EX_TOPMOST != 0
-        {
+        if !contains_self {
             return Err(NativeError::PlacementVerificationFailed);
         }
         Ok(())
@@ -672,19 +642,17 @@ impl Window {
 
     pub fn show_no_activate(
         &self,
-        parent: HWND,
-        parent_process_id: u32,
+        target: &ShellHierarchy,
+        owned_windows: &[Option<&Window>],
         foreground_before: HWND,
     ) -> Result<(), NativeError> {
-        self.verify_hidden_placement(parent, parent_process_id)?;
-        // SAFETY: this is our own disabled, WS_EX_NOACTIVATE child; SW_SHOWNOACTIVATE never
-        // requests activation and the window is already at the parent's bottom child Z-order.
+        self.verify_hidden_placement(target, owned_windows)?;
         unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
         if unsafe { GetForegroundWindow() } != foreground_before {
             self.hide();
             return Err(NativeError::PlacementVerificationFailed);
         }
-        self.verify_visible_placement(parent, parent_process_id)
+        self.verify_visible_placement(target, owned_windows)
     }
 
     pub fn pump_messages(
@@ -723,21 +691,6 @@ impl Window {
                 DispatchMessageW(&message);
             }
         }
-    }
-
-    fn same_shell_parent(&self, parent: HWND, process_id: u32) -> bool {
-        if parent.is_null() || unsafe { IsWindow(parent) } == 0 {
-            return false;
-        }
-        let mut actual_process_id = 0;
-        // SAFETY: parent was checked live and the function only writes a process ID.
-        let thread_id = unsafe { GetWindowThreadProcessId(parent, &mut actual_process_id) };
-        thread_id != 0
-            && actual_process_id == process_id
-            && matches!(
-                class_of(parent),
-                Some(WindowKind::Progman | WindowKind::WorkerW)
-            )
     }
 }
 
@@ -782,81 +735,121 @@ impl Drop for ShellProcess {
     }
 }
 
-pub(super) struct ShellTarget {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ShellHierarchy {
     pub parent: HWND,
     pub process_id: u32,
+    pub thread_id: u32,
     pub dpi_context: DPI_AWARENESS_CONTEXT,
+    pub defview: HWND,
+    pub workerw: HWND,
+}
+
+pub(super) struct ShellTarget {
+    pub hierarchy: ShellHierarchy,
     pub process: ShellProcess,
 }
 
-pub(super) fn discover_shell_target() -> Result<ShellTarget, NativeError> {
-    // SAFETY: GetShellWindow returns a borrowed shell HWND and does not modify desktop state.
-    let shell = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetShellWindow() };
-    if shell.is_null() {
-        return Err(NativeError::ShellUnavailable);
+pub(super) fn discover_shell_target_read_only(
+    owned_windows: &[Option<&Window>],
+) -> Result<ShellTarget, NativeError> {
+    discover_shell_target(owned_windows, None)
+}
+
+pub(super) fn discover_shell_target_for_attach(
+    owned_windows: &[Option<&Window>],
+    cancellation: &CancellationToken,
+) -> Result<ShellTarget, NativeError> {
+    discover_shell_target(owned_windows, Some(cancellation))
+}
+
+fn discover_shell_target(
+    owned_windows: &[Option<&Window>],
+    allow_missing_slot_request: Option<&CancellationToken>,
+) -> Result<ShellTarget, NativeError> {
+    let mut scan = scan_raised_hierarchy(owned_windows)?;
+    if scan.hierarchy.workerw.is_null() {
+        let Some(cancellation) = allow_missing_slot_request else {
+            return Err(NativeError::UnsupportedHierarchy);
+        };
+        let target_thread_is_distinct = scan.hierarchy.thread_id != unsafe { GetCurrentThreadId() };
+        if !default_input_desktop()? {
+            return Err(NativeError::SecureDesktop);
+        }
+        if cancellation.is_cancelled() {
+            return Err(NativeError::Cancelled);
+        }
+        if !decide_missing_worker_request(MissingWorkerRequestConditions {
+            attach_or_recovery: true,
+            unique_progman: scan.unique_progman,
+            unique_defview: scan.unique_defview,
+            raised_styles: scan.raised_styles,
+            worker_count: scan.worker_count,
+            unambiguous_siblings: scan.missing_slot_is_unambiguous,
+            target_thread_is_distinct,
+            default_desktop: true,
+            cancelled: cancellation.is_cancelled(),
+        }) {
+            return if cancellation.is_cancelled() {
+                Err(NativeError::Cancelled)
+            } else {
+                Err(NativeError::UnsupportedHierarchy)
+            };
+        }
+        let requested_hierarchy = scan.hierarchy;
+        let mut message_result = 0_usize;
+        // This private shell message is used only for a verified missing raised slot. The target
+        // thread differs from this thread because Win32 ignores same-thread message timeouts.
+        // It is never sent by read-only hierarchy checks or the diagnostic probe.
+        unsafe { SetLastError(0) };
+        let sent = unsafe {
+            SendMessageTimeoutW(
+                scan.hierarchy.parent,
+                WM_SPAWN_WORKERW,
+                0,
+                0,
+                SMTO_ABORTIFHUNG,
+                WORKERW_REQUEST_TIMEOUT_MS,
+                &mut message_result,
+            )
+        };
+        let request_error = (sent == 0).then(|| unsafe { GetLastError() });
+        // A single fresh enumeration is mandatory after the bounded request, even if it timed out.
+        scan = scan_raised_hierarchy(owned_windows)?;
+        if let Some(code) = request_error {
+            return Err(NativeError::Win32 {
+                operation: "SendMessageTimeoutW(WM_SPAWN_WORKERW)",
+                code: if code == 0 { ERROR_GEN_FAILURE } else { code },
+            });
+        }
+        if scan.hierarchy.parent != requested_hierarchy.parent
+            || scan.hierarchy.process_id != requested_hierarchy.process_id
+            || scan.hierarchy.thread_id != requested_hierarchy.thread_id
+            || scan.hierarchy.dpi_context != requested_hierarchy.dpi_context
+            || scan.hierarchy.defview != requested_hierarchy.defview
+        {
+            return Err(NativeError::ShellUnavailable);
+        }
+        if scan.hierarchy.workerw.is_null() {
+            return Err(NativeError::UnsupportedHierarchy);
+        }
+        if cancellation.is_cancelled() {
+            return Err(NativeError::Cancelled);
+        }
     }
-    let mut shell_pid = 0;
-    // SAFETY: shell is borrowed from GetShellWindow and shell_pid is writable.
-    if unsafe { GetWindowThreadProcessId(shell, &mut shell_pid) } == 0 || shell_pid == 0 {
-        return Err(win32_error("GetWindowThreadProcessId(shell)"));
-    }
-    let started = Instant::now();
-    let deadline = started.checked_add(HIERARCHY_DEADLINE).unwrap_or(started);
-    let mut scan = HierarchyScan {
-        shell,
-        shell_pid,
-        candidate: null_mut(),
-        work: 0,
-        deadline,
-        failure: None,
-    };
-    let pointer = &mut scan as *mut HierarchyScan;
-    // Inspect the known shell root first so unrelated roots cannot consume its shared bounded work.
-    if !scan_root(pointer, shell, true) {
-        return Err(scan.failure.unwrap_or(NativeError::UnsupportedHierarchy));
-    }
-    // SAFETY: EnumWindows invokes this callback synchronously while scan remains alive.
-    let enumerated = unsafe { EnumWindows(Some(top_level_callback), pointer as LPARAM) };
-    if let Some(failure) = scan.failure {
-        return Err(failure);
-    }
-    if enumerated == 0 || Instant::now() >= scan.deadline {
-        return Err(NativeError::HierarchyBoundExceeded);
-    }
-    if scan.candidate.is_null() {
-        return Err(NativeError::UnsupportedHierarchy);
-    }
-    let dpi_context = unsafe { GetWindowDpiAwarenessContext(scan.candidate) };
-    if dpi_context.is_null() {
-        return Err(NativeError::DpiContextUnavailable);
-    }
-    // Monitor bounds and SetWindowPos coordinates are physical pixels, so refuse a shell parent
-    // whose DPI virtualization would make the coordinate spaces ambiguous.
-    // SAFETY: dpi_context is a system-provided context for the live candidate HWND.
-    if unsafe { GetAwarenessFromDpiAwarenessContext(dpi_context) }
-        != DPI_AWARENESS_PER_MONITOR_AWARE
-    {
-        return Err(NativeError::DpiContextMismatch);
-    }
-    // SAFETY: the process handle is opened read-only for SYNCHRONIZE, solely to detect Explorer
-    // termination. No process memory, token, or window state is changed.
-    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, shell_pid) };
+    let hierarchy = scan.hierarchy;
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, hierarchy.process_id) };
     if process.is_null() {
         return Err(win32_error("OpenProcess(shell SYNCHRONIZE)"));
     }
     let process = ShellProcess {
         handle: process,
-        process_id: shell_pid,
+        process_id: hierarchy.process_id,
     };
     if !process.is_alive()? {
         return Err(NativeError::ShellUnavailable);
     }
-    Ok(ShellTarget {
-        parent: scan.candidate,
-        process_id: shell_pid,
-        dpi_context,
-        process,
-    })
+    Ok(ShellTarget { hierarchy, process })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -872,7 +865,6 @@ fn class_of(hwnd: HWND) -> Option<WindowKind> {
         return None;
     }
     let mut name = [0_u16; 64];
-    // SAFETY: class buffer is writable and hwnd is a borrowed window from enumeration.
     let length = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32) };
     if length <= 0 {
         return None;
@@ -897,148 +889,506 @@ fn is_class(actual: &[u16], expected: &str) -> bool {
             .all(|(wide, byte)| *wide == u16::from(byte))
 }
 
-struct HierarchyScan {
-    shell: HWND,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SiblingNode {
+    DefView,
+    Owned(usize),
+    WorkerW,
+    Foreign,
+}
+
+#[derive(Clone, Copy)]
+struct ScannedHierarchy {
+    hierarchy: ShellHierarchy,
+    unique_progman: bool,
+    unique_defview: bool,
+    raised_styles: bool,
+    worker_count: usize,
+    missing_slot_is_unambiguous: bool,
+}
+
+struct ProgmanScan {
     shell_pid: u32,
     candidate: HWND,
-    work: u32,
+    count: usize,
+    foreign_owner: bool,
+    work: usize,
     deadline: Instant,
     failure: Option<NativeError>,
 }
 
-fn check_hierarchy_deadline(scan: &mut HierarchyScan) -> bool {
-    if Instant::now() >= scan.deadline {
-        scan.failure = Some(NativeError::HierarchyBoundExceeded);
-        false
-    } else {
-        true
-    }
-}
-
-fn reserve_hierarchy_work(scan: &mut HierarchyScan) -> bool {
-    if !check_hierarchy_deadline(scan) || scan.work >= MAX_HIERARCHY_RECORDS {
-        scan.failure = Some(NativeError::HierarchyBoundExceeded);
-        return false;
-    }
-    scan.work += 1;
-    true
-}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TopLevelAction {
-    Continue,
-    ScanCandidate,
-    Abort,
+enum ProgmanCallbackDecision {
+    Skip,
+    CountCandidate,
+    DeadlineExceeded,
+    CandidateBudgetExceeded,
 }
 
-fn decide_top_level_action(
-    scan: &mut HierarchyScan,
-    is_shell_duplicate: bool,
-    class_query: impl FnOnce() -> Option<WindowKind>,
-) -> TopLevelAction {
-    if !check_hierarchy_deadline(scan) {
-        return TopLevelAction::Abort;
-    }
-    if is_shell_duplicate || !is_top_level_candidate(class_query()) {
-        return TopLevelAction::Continue;
-    }
-    if !reserve_hierarchy_work(scan) {
-        TopLevelAction::Abort
+fn decide_progman_callback(
+    is_progman: bool,
+    before_deadline: bool,
+    candidate_work: usize,
+) -> ProgmanCallbackDecision {
+    if !before_deadline {
+        ProgmanCallbackDecision::DeadlineExceeded
+    } else if !is_progman {
+        ProgmanCallbackDecision::Skip
+    } else if candidate_work >= MAX_HIERARCHY_RECORDS {
+        ProgmanCallbackDecision::CandidateBudgetExceeded
     } else {
-        TopLevelAction::ScanCandidate
+        ProgmanCallbackDecision::CountCandidate
     }
 }
 
-fn is_top_level_candidate(kind: Option<WindowKind>) -> bool {
-    matches!(kind, Some(WindowKind::Progman | WindowKind::WorkerW))
-}
-
-fn scan_root(pointer: *mut HierarchyScan, root: HWND, known_shell: bool) -> bool {
-    if pointer.is_null() {
-        return false;
-    }
-    // SAFETY: pointer refers to the live stack scan used by the synchronous Win32 enumeration.
-    let scan = unsafe { &mut *pointer };
-    if !reserve_hierarchy_work(scan) {
-        return false;
-    }
-    scan_root_with_reserved_work(pointer, root, known_shell)
-}
-
-fn scan_root_with_reserved_work(
-    pointer: *mut HierarchyScan,
-    root: HWND,
-    known_shell: bool,
-) -> bool {
-    if pointer.is_null() {
-        return false;
-    }
-    // SAFETY: pointer refers to the live stack scan used by the synchronous Win32 enumeration.
-    let scan = unsafe { &mut *pointer };
-    let kind = class_of(root);
-    let mut process_id = 0;
-    // SAFETY: root is a borrowed live HWND from GetShellWindow/EnumWindows.
-    let thread_id = unsafe { GetWindowThreadProcessId(root, &mut process_id) };
-    if thread_id == 0 || process_id != scan.shell_pid {
-        return true;
-    }
-    if !known_shell && !matches!(kind, Some(WindowKind::Progman | WindowKind::WorkerW)) {
-        return true;
-    }
-    // SAFETY: EnumChildWindows runs synchronously and the scan pointer remains valid throughout.
-    let enumerated = unsafe { EnumChildWindows(root, Some(child_callback), pointer as LPARAM) };
-    enumerated != 0 || scan.failure.is_none()
-}
-
-unsafe extern "system" fn child_callback(child: HWND, parameter: LPARAM) -> BOOL {
+unsafe extern "system" fn progman_callback(window: HWND, parameter: LPARAM) -> BOOL {
     if parameter == 0 {
         return 0;
     }
-    // SAFETY: EnumChildWindows invokes the callback synchronously with the live scan pointer.
-    let scan = unsafe { &mut *(parameter as *mut HierarchyScan) };
-    if !reserve_hierarchy_work(scan) {
-        return 0;
+    let scan = unsafe { &mut *(parameter as *mut ProgmanScan) };
+    let before_deadline = Instant::now() < scan.deadline;
+    let is_progman = before_deadline && class_of(window) == Some(WindowKind::Progman);
+    match decide_progman_callback(is_progman, before_deadline, scan.work) {
+        ProgmanCallbackDecision::Skip => return 1,
+        ProgmanCallbackDecision::DeadlineExceeded
+        | ProgmanCallbackDecision::CandidateBudgetExceeded => {
+            scan.failure = Some(NativeError::HierarchyBoundExceeded);
+            return 0;
+        }
+        ProgmanCallbackDecision::CountCandidate => {}
     }
-    if class_of(child) != Some(WindowKind::ShellDefView) {
-        return 1;
-    }
-    let parent = unsafe { GetParent(child) };
-    let Some(parent_kind @ (WindowKind::Progman | WindowKind::WorkerW)) = class_of(parent) else {
-        return 1;
-    };
-    let _ = parent_kind;
-    let mut parent_process = 0;
-    // SAFETY: parent is the direct parent of a borrowed child HWND.
-    if unsafe { GetWindowThreadProcessId(parent, &mut parent_process) } == 0
-        || parent_process != scan.shell_pid
-    {
-        return 1;
-    }
-    if scan.candidate.is_null() {
-        scan.candidate = parent;
-    } else if scan.candidate != parent {
+    scan.work += 1;
+    scan.count += 1;
+    let mut process_id = 0;
+    if unsafe { GetWindowThreadProcessId(window, &mut process_id) } == 0 {
         scan.failure = Some(NativeError::AmbiguousHierarchy);
         return 0;
     }
+    if process_id != scan.shell_pid {
+        scan.foreign_owner = true;
+    } else {
+        scan.candidate = window;
+    }
     1
 }
-unsafe extern "system" fn top_level_callback(window: HWND, parameter: LPARAM) -> BOOL {
-    if parameter == 0 {
-        return 0;
+
+fn scan_raised_hierarchy(
+    owned_windows: &[Option<&Window>],
+) -> Result<ScannedHierarchy, NativeError> {
+    let owned_count = validate_owned_windows(owned_windows)?;
+    let shell = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetShellWindow() };
+    if shell.is_null() {
+        return Err(NativeError::ShellUnavailable);
     }
-    // SAFETY: EnumWindows invokes the callback synchronously while scan remains alive.
-    let scan = unsafe { &mut *(parameter as *mut HierarchyScan) };
-    let action = decide_top_level_action(scan, window == scan.shell, || class_of(window));
-    match action {
-        TopLevelAction::Continue => 1,
-        TopLevelAction::ScanCandidate => {
-            if scan_root_with_reserved_work(parameter as *mut HierarchyScan, window, false) {
-                1
-            } else {
-                0
+    if class_of(shell) != Some(WindowKind::Progman) {
+        return Err(NativeError::UnsupportedHierarchy);
+    }
+    let mut shell_pid = 0;
+    if unsafe { GetWindowThreadProcessId(shell, &mut shell_pid) } == 0 || shell_pid == 0 {
+        return Err(win32_error("GetWindowThreadProcessId(shell)"));
+    }
+    let started = Instant::now();
+    let deadline = started.checked_add(HIERARCHY_DEADLINE).unwrap_or(started);
+    let mut top = ProgmanScan {
+        shell_pid,
+        candidate: null_mut(),
+        count: 0,
+        foreign_owner: false,
+        work: 0,
+        deadline,
+        failure: None,
+    };
+    let enumerated = unsafe {
+        EnumWindows(
+            Some(progman_callback),
+            (&mut top as *mut ProgmanScan) as LPARAM,
+        )
+    };
+    if let Some(error) = top.failure {
+        return Err(error);
+    }
+    if enumerated == 0 || Instant::now() >= deadline {
+        return Err(NativeError::HierarchyBoundExceeded);
+    }
+    if top.count != 1 || top.foreign_owner || top.candidate.is_null() {
+        return Err(if top.count == 0 {
+            NativeError::UnsupportedHierarchy
+        } else {
+            NativeError::AmbiguousHierarchy
+        });
+    }
+    let parent = top.candidate;
+    if parent != shell {
+        return Err(NativeError::AmbiguousHierarchy);
+    }
+    if unsafe { IsWindow(parent) } == 0
+        || !unsafe { GetParent(parent) }.is_null()
+        || class_of(parent) != Some(WindowKind::Progman)
+    {
+        return Err(NativeError::UnsupportedHierarchy);
+    }
+    let mut parent_process = 0;
+    let parent_thread = unsafe { GetWindowThreadProcessId(parent, &mut parent_process) };
+    if parent_thread == 0 || parent_process != shell_pid {
+        return Err(NativeError::AmbiguousHierarchy);
+    }
+    let parent_style = unsafe { GetWindowLongPtrW(parent, GWL_STYLE) } as u32;
+    let parent_ex_style = unsafe { GetWindowLongPtrW(parent, GWL_EXSTYLE) } as u32;
+    let raised_styles = parent_ex_style & RAISED_PROGMAN_EX_STYLE == RAISED_PROGMAN_EX_STYLE;
+    if parent_style & WS_CHILD != 0 || !raised_styles {
+        return Err(NativeError::UnsupportedHierarchy);
+    }
+    let dpi_context = unsafe { GetWindowDpiAwarenessContext(parent) };
+    if dpi_context.is_null() {
+        return Err(NativeError::DpiContextUnavailable);
+    }
+    if unsafe { GetAwarenessFromDpiAwarenessContext(dpi_context) }
+        != DPI_AWARENESS_PER_MONITOR_AWARE
+    {
+        return Err(NativeError::DpiContextMismatch);
+    }
+
+    let mut nodes = [SiblingNode::Foreign; MAX_HIERARCHY_RECORDS];
+    let mut node_count = 0;
+    let mut defview = null_mut();
+    let mut defview_count = 0;
+    let mut workerw = null_mut();
+    let mut worker_count = 0;
+    let mut child = unsafe { GetWindow(parent, GW_CHILD) };
+    while !child.is_null() {
+        if Instant::now() >= deadline || node_count >= MAX_HIERARCHY_RECORDS {
+            return Err(NativeError::HierarchyBoundExceeded);
+        }
+        if unsafe { IsWindow(child) } == 0 || unsafe { GetParent(child) } != parent {
+            return Err(NativeError::AmbiguousHierarchy);
+        }
+        let kind = class_of(child).ok_or(NativeError::AmbiguousHierarchy)?;
+        let mut child_process = 0;
+        if unsafe { GetWindowThreadProcessId(child, &mut child_process) } == 0 {
+            return Err(NativeError::AmbiguousHierarchy);
+        }
+        let owned_index = owned_windows[..owned_count]
+            .iter()
+            .position(|window| window.is_some_and(|owned| owned.hwnd == child));
+        if let Some(index) = owned_index {
+            let owned = owned_windows[index].expect("validated owned-window prefix");
+            if kind != WindowKind::Other || unsafe { GetParent(child) } != parent {
+                return Err(NativeError::PlacementVerificationFailed);
+            }
+            nodes[node_count] = SiblingNode::Owned(index);
+            if !owned.is_owned() {
+                return Err(NativeError::OwnedWindowInvalid);
+            }
+        } else {
+            match kind {
+                WindowKind::ShellDefView => {
+                    if !raised_mode_styles_valid(parent_ex_style, unsafe {
+                        GetWindowLongPtrW(child, GWL_EXSTYLE)
+                    } as u32)
+                    {
+                        return Err(NativeError::UnsupportedHierarchy);
+                    }
+                    defview_count += 1;
+                    defview = child;
+                    nodes[node_count] = SiblingNode::DefView;
+                }
+                WindowKind::WorkerW => {
+                    if child_process != shell_pid {
+                        return Err(NativeError::AmbiguousHierarchy);
+                    }
+                    worker_count += 1;
+                    workerw = child;
+                    nodes[node_count] = SiblingNode::WorkerW;
+                }
+                _ => nodes[node_count] = SiblingNode::Foreign,
             }
         }
-        TopLevelAction::Abort => 0,
+        node_count += 1;
+        child = unsafe { GetWindow(child, GW_HWNDNEXT) };
     }
+    if defview_count != 1 || worker_count > 1 {
+        return Err(NativeError::AmbiguousHierarchy);
+    }
+    let siblings = &nodes[..node_count];
+    let missing_slot_is_unambiguous =
+        worker_count == 0 && can_request_missing_worker(siblings, owned_count);
+    if worker_count == 1 {
+        if !valid_owned_band(siblings, owned_count) {
+            return Err(NativeError::AmbiguousHierarchy);
+        }
+    } else if !missing_slot_is_unambiguous {
+        return Err(NativeError::AmbiguousHierarchy);
+    }
+    let hierarchy = ShellHierarchy {
+        parent,
+        process_id: shell_pid,
+        thread_id: parent_thread,
+        dpi_context,
+        defview,
+        workerw,
+    };
+    verify_shell_parent_identity(&hierarchy)?;
+    Ok(ScannedHierarchy {
+        hierarchy,
+        unique_progman: true,
+        unique_defview: true,
+        raised_styles,
+        worker_count,
+        missing_slot_is_unambiguous,
+    })
+}
+
+fn validate_owned_windows(owned_windows: &[Option<&Window>]) -> Result<usize, NativeError> {
+    if owned_windows.len() > MAX_NATIVE_DISPLAYS {
+        return Err(NativeError::PlacementVerificationFailed);
+    }
+    let mut count = 0;
+    let mut saw_empty = false;
+    for slot in owned_windows {
+        let Some(window) = slot else {
+            saw_empty = true;
+            continue;
+        };
+        if saw_empty || !window.is_owned() {
+            return Err(NativeError::OwnedWindowInvalid);
+        }
+        if owned_windows[..count]
+            .iter()
+            .flatten()
+            .any(|previous| previous.hwnd == window.hwnd || previous.identity == window.identity)
+        {
+            return Err(NativeError::PlacementVerificationFailed);
+        }
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn valid_owned_band(nodes: &[SiblingNode], owned_count: usize) -> bool {
+    let Some(defview_index) = unique_node_index(nodes, SiblingNode::DefView) else {
+        return false;
+    };
+    let Some(worker_index) = unique_node_index(nodes, SiblingNode::WorkerW) else {
+        return false;
+    };
+    if worker_index <= defview_index {
+        return false;
+    }
+    let mut seen = [false; MAX_NATIVE_DISPLAYS];
+    for (index, node) in nodes.iter().enumerate() {
+        if let SiblingNode::Owned(owned_index) = *node {
+            if index <= defview_index
+                || index >= worker_index
+                || owned_index >= owned_count
+                || seen[owned_index]
+            {
+                return false;
+            }
+            seen[owned_index] = true;
+        } else if index > defview_index && index < worker_index {
+            return false;
+        }
+    }
+    seen[..owned_count].iter().all(|seen| *seen)
+}
+
+fn can_request_missing_worker(nodes: &[SiblingNode], owned_count: usize) -> bool {
+    let Some(defview_index) = unique_node_index(nodes, SiblingNode::DefView) else {
+        return false;
+    };
+    if nodes.contains(&SiblingNode::WorkerW) {
+        return false;
+    }
+    let mut seen = [false; MAX_NATIVE_DISPLAYS];
+    for (index, node) in nodes.iter().enumerate() {
+        if index <= defview_index {
+            if matches!(node, SiblingNode::Owned(_)) {
+                return false;
+            }
+            continue;
+        }
+        let SiblingNode::Owned(owned_index) = *node else {
+            return false;
+        };
+        if owned_index >= owned_count || seen[owned_index] {
+            return false;
+        }
+        seen[owned_index] = true;
+    }
+    seen[..owned_count].iter().all(|seen| *seen)
+}
+
+fn unique_node_index(nodes: &[SiblingNode], expected: SiblingNode) -> Option<usize> {
+    let mut found = None;
+    for (index, node) in nodes.iter().enumerate() {
+        if *node == expected {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(index);
+        }
+    }
+    found
+}
+
+#[derive(Clone, Copy)]
+struct MissingWorkerRequestConditions {
+    attach_or_recovery: bool,
+    unique_progman: bool,
+    unique_defview: bool,
+    raised_styles: bool,
+    worker_count: usize,
+    unambiguous_siblings: bool,
+    target_thread_is_distinct: bool,
+    default_desktop: bool,
+    cancelled: bool,
+}
+
+fn decide_missing_worker_request(conditions: MissingWorkerRequestConditions) -> bool {
+    conditions.attach_or_recovery
+        && conditions.unique_progman
+        && conditions.unique_defview
+        && conditions.raised_styles
+        && conditions.worker_count == 0
+        && conditions.unambiguous_siblings
+        && conditions.target_thread_is_distinct
+        && conditions.default_desktop
+        && !conditions.cancelled
+}
+
+fn verify_shell_parent_identity(target: &ShellHierarchy) -> Result<(), NativeError> {
+    if target.parent.is_null()
+        || unsafe { IsWindow(target.parent) } == 0
+        || !unsafe { GetParent(target.parent) }.is_null()
+        || class_of(target.parent) != Some(WindowKind::Progman)
+    {
+        return Err(NativeError::PlacementVerificationFailed);
+    }
+    let mut process_id = 0;
+    let thread_id = unsafe { GetWindowThreadProcessId(target.parent, &mut process_id) };
+    if thread_id != target.thread_id || process_id != target.process_id {
+        return Err(NativeError::PlacementVerificationFailed);
+    }
+    let style = unsafe { GetWindowLongPtrW(target.parent, GWL_STYLE) } as u32;
+    let extended = unsafe { GetWindowLongPtrW(target.parent, GWL_EXSTYLE) } as u32;
+    if style & WS_CHILD != 0 || extended & RAISED_PROGMAN_EX_STYLE != RAISED_PROGMAN_EX_STYLE {
+        return Err(NativeError::PlacementVerificationFailed);
+    }
+    verify_defview_identity(target)?;
+    let context = unsafe { GetWindowDpiAwarenessContext(target.parent) };
+    if context.is_null() {
+        return Err(NativeError::DpiContextUnavailable);
+    }
+    if unsafe { AreDpiAwarenessContextsEqual(context, target.dpi_context) } == 0 {
+        return Err(NativeError::DpiContextMismatch);
+    }
+    Ok(())
+}
+
+fn raised_mode_styles_valid(progman_ex_style: u32, defview_ex_style: u32) -> bool {
+    progman_ex_style & RAISED_PROGMAN_EX_STYLE == RAISED_PROGMAN_EX_STYLE
+        && defview_ex_style & RAISED_DEFVIEW_EX_STYLE == RAISED_DEFVIEW_EX_STYLE
+}
+
+fn verify_defview_identity(target: &ShellHierarchy) -> Result<(), NativeError> {
+    let defview = target.defview;
+    if defview.is_null()
+        || unsafe { IsWindow(defview) } == 0
+        || unsafe { GetParent(defview) } != target.parent
+        || class_of(defview) != Some(WindowKind::ShellDefView)
+    {
+        return Err(NativeError::PlacementVerificationFailed);
+    }
+    let mut process_id = 0;
+    if unsafe { GetWindowThreadProcessId(defview, &mut process_id) } == 0
+        || process_id != target.process_id
+    {
+        return Err(NativeError::PlacementVerificationFailed);
+    }
+    let extended = unsafe { GetWindowLongPtrW(defview, GWL_EXSTYLE) } as u32;
+    if extended & RAISED_DEFVIEW_EX_STYLE != RAISED_DEFVIEW_EX_STYLE {
+        return Err(NativeError::PlacementVerificationFailed);
+    }
+    Ok(())
+}
+
+fn verify_shell_hierarchy(
+    target: &ShellHierarchy,
+    owned_windows: &[Option<&Window>],
+) -> Result<(), NativeError> {
+    let current = scan_raised_hierarchy(owned_windows)?;
+    if current.hierarchy != *target || current.worker_count != 1 {
+        return Err(NativeError::PlacementVerificationFailed);
+    }
+    Ok(())
+}
+
+pub(super) fn verify_owned_windows(
+    target: &ShellHierarchy,
+    owned_windows: &[Option<&Window>],
+    visible: bool,
+) -> Result<(), NativeError> {
+    let count = validate_owned_windows(owned_windows)?;
+    for window in owned_windows[..count].iter().flatten() {
+        if window.is_visible() != visible {
+            return Err(NativeError::PlacementVerificationFailed);
+        }
+        verify_owned_child(window, target)?;
+    }
+    Ok(())
+}
+
+fn verify_owned_child(window: &Window, target: &ShellHierarchy) -> Result<(), NativeError> {
+    if !window.is_owned()
+        || unsafe { GetParent(window.hwnd) } != target.parent
+        || unsafe { IsWindowEnabled(window.hwnd) } != 0
+    {
+        return Err(NativeError::PlacementVerificationFailed);
+    }
+    let style = unsafe { GetWindowLongPtrW(window.hwnd, GWL_STYLE) } as u32;
+    let extended = unsafe { GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE) } as u32;
+    if style & OWNED_CHILD_STYLE != OWNED_CHILD_STYLE
+        || style & WS_POPUP != 0
+        || extended & OWNED_CHILD_EX_STYLE != OWNED_CHILD_EX_STYLE
+        || extended & WS_EX_TOPMOST != 0
+    {
+        return Err(NativeError::PlacementVerificationFailed);
+    }
+    let window_context = unsafe { GetWindowDpiAwarenessContext(window.hwnd) };
+    let parent_context = unsafe { GetWindowDpiAwarenessContext(target.parent) };
+    if window_context.is_null() || parent_context.is_null() {
+        return Err(NativeError::DpiContextUnavailable);
+    }
+    if unsafe { AreDpiAwarenessContextsEqual(window_context, target.dpi_context) } == 0
+        || unsafe { AreDpiAwarenessContextsEqual(parent_context, target.dpi_context) } == 0
+    {
+        return Err(NativeError::DpiContextMismatch);
+    }
+    let Some((expected_x, expected_y, expected_width, expected_height)) =
+        window.expected_client_rect
+    else {
+        return Err(NativeError::PlacementVerificationFailed);
+    };
+    let geometry_matches = with_thread_dpi_context(target.dpi_context, || {
+        let mut client_rect = RECT::default();
+        let mut client_origin = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+        if unsafe { GetClientRect(window.hwnd, &mut client_rect) } == 0
+            || unsafe { ClientToScreen(window.hwnd, &mut client_origin) } == 0
+            || unsafe { ScreenToClient(target.parent, &mut client_origin) } == 0
+        {
+            return Err(win32_error("GetClientRect/ClientToScreen/ScreenToClient"));
+        }
+        Ok(client_origin.x == expected_x
+            && client_origin.y == expected_y
+            && client_rect.left == 0
+            && client_rect.top == 0
+            && client_rect.right == expected_width
+            && client_rect.bottom == expected_height)
+    })?;
+    if !geometry_matches {
+        return Err(NativeError::PlacementVerificationFailed);
+    }
+    Ok(())
 }
 
 pub(super) fn foreground_window() -> HWND {
@@ -1174,63 +1524,260 @@ mod tests {
     }
 
     #[test]
-    fn native_display_capacity_is_fixed_and_bounded() {
-        assert_eq!(MAX_NATIVE_DISPLAYS, 16);
-        assert_eq!(MAX_HIERARCHY_RECORDS, 512);
-        assert_eq!(HIERARCHY_DEADLINE, Duration::from_millis(250));
+    fn raised_window_style_is_layered_opaque_nonactivating_and_bounded() {
+        assert_ne!(OWNED_CHILD_EX_STYLE & WS_EX_LAYERED, 0);
+        assert_ne!(OWNED_CHILD_EX_STYLE & WS_EX_NOACTIVATE, 0);
+        assert_ne!(OWNED_CHILD_STYLE & WS_CHILD, 0);
+        assert_ne!(OWNED_CHILD_STYLE & WS_DISABLED, 0);
+        assert_eq!(OWNED_CHILD_EX_STYLE & WS_EX_TOPMOST, 0);
+        assert_eq!(OPAQUE_LAYER_ALPHA, 255);
+        assert_eq!(WORKERW_REQUEST_TIMEOUT_MS, 250);
+        assert_eq!(WM_SPAWN_WORKERW, 0x052c);
+        assert_eq!(
+            RAISED_PROGMAN_EX_STYLE & WS_EX_NOREDIRECTIONBITMAP,
+            WS_EX_NOREDIRECTIONBITMAP
+        );
+        assert_eq!(RAISED_PROGMAN_EX_STYLE & WS_EX_LAYERED, 0);
+        assert_eq!(RAISED_DEFVIEW_EX_STYLE & WS_EX_NOREDIRECTIONBITMAP, 0);
+        assert_eq!(RAISED_DEFVIEW_EX_STYLE & WS_EX_LAYERED, WS_EX_LAYERED);
     }
-    fn hierarchy_scan(deadline: Instant) -> HierarchyScan {
-        HierarchyScan {
-            shell: null_mut(),
-            shell_pid: 1,
-            candidate: null_mut(),
-            work: 0,
-            deadline,
-            failure: None,
-        }
+
+    #[test]
+    fn raised_style_bits_are_split_between_progman_and_defview() {
+        assert!(raised_mode_styles_valid(
+            WS_EX_NOREDIRECTIONBITMAP,
+            WS_EX_LAYERED,
+        ));
+        assert!(raised_mode_styles_valid(
+            WS_EX_NOREDIRECTIONBITMAP,
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+        ));
+        assert!(!raised_mode_styles_valid(0, WS_EX_LAYERED));
+        assert!(!raised_mode_styles_valid(WS_EX_NOREDIRECTIONBITMAP, 0));
     }
 
     #[test]
     fn unrelated_top_level_classes_do_not_consume_candidate_budget() {
-        let mut scan = hierarchy_scan(Instant::now() + HIERARCHY_DEADLINE);
+        let mut candidate_work = MAX_HIERARCHY_RECORDS - 1;
         for _ in 0..=MAX_HIERARCHY_RECORDS {
             assert_eq!(
-                decide_top_level_action(&mut scan, false, || Some(WindowKind::Other)),
-                TopLevelAction::Continue
+                decide_progman_callback(false, true, candidate_work),
+                ProgmanCallbackDecision::Skip,
             );
         }
-        assert_eq!(scan.work, 0);
+        assert_eq!(candidate_work, MAX_HIERARCHY_RECORDS - 1);
         assert_eq!(
-            decide_top_level_action(&mut scan, false, || Some(WindowKind::WorkerW)),
-            TopLevelAction::ScanCandidate
+            decide_progman_callback(true, true, candidate_work),
+            ProgmanCallbackDecision::CountCandidate,
         );
-        assert_eq!(scan.work, 1);
+        candidate_work += 1;
+        assert_eq!(
+            decide_progman_callback(true, true, candidate_work),
+            ProgmanCallbackDecision::CandidateBudgetExceeded,
+        );
     }
 
     #[test]
     fn candidate_work_budget_exhaustion_fails_closed() {
-        let mut scan = hierarchy_scan(Instant::now() + HIERARCHY_DEADLINE);
-        scan.work = MAX_HIERARCHY_RECORDS;
         assert_eq!(
-            decide_top_level_action(&mut scan, false, || Some(WindowKind::Progman)),
-            TopLevelAction::Abort
+            decide_progman_callback(true, true, MAX_HIERARCHY_RECORDS),
+            ProgmanCallbackDecision::CandidateBudgetExceeded,
         );
-        assert_eq!(scan.failure, Some(NativeError::HierarchyBoundExceeded));
     }
 
     #[test]
     fn deadline_is_checked_for_skipped_unrelated_top_level_classes() {
-        let mut scan = hierarchy_scan(Instant::now());
-        let mut queried = false;
         assert_eq!(
-            decide_top_level_action(&mut scan, false, || {
-                queried = true;
-                Some(WindowKind::Other)
-            }),
-            TopLevelAction::Abort
+            decide_progman_callback(false, false, 0),
+            ProgmanCallbackDecision::DeadlineExceeded,
         );
-        assert!(!queried);
-        assert_eq!(scan.work, 0);
-        assert_eq!(scan.failure, Some(NativeError::HierarchyBoundExceeded));
+    }
+
+    #[test]
+    fn native_display_and_hierarchy_capacity_are_fixed_and_bounded() {
+        assert_eq!(MAX_NATIVE_DISPLAYS, 16);
+        assert_eq!(MAX_HIERARCHY_RECORDS, 512);
+        assert_eq!(HIERARCHY_DEADLINE, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn complete_owned_band_allows_multiple_surfaces_once_between_shell_views() {
+        let nodes = [
+            SiblingNode::Foreign,
+            SiblingNode::DefView,
+            SiblingNode::Owned(1),
+            SiblingNode::Owned(0),
+            SiblingNode::WorkerW,
+            SiblingNode::Foreign,
+        ];
+        assert!(valid_owned_band(&nodes, 2));
+        assert!(!valid_owned_band(&nodes, 3));
+    }
+
+    #[test]
+    fn complete_owned_band_rejects_foreign_or_repeated_intervening_windows() {
+        assert!(!valid_owned_band(
+            &[
+                SiblingNode::DefView,
+                SiblingNode::Owned(0),
+                SiblingNode::Foreign,
+                SiblingNode::WorkerW,
+            ],
+            1,
+        ));
+        assert!(!valid_owned_band(
+            &[
+                SiblingNode::DefView,
+                SiblingNode::Owned(0),
+                SiblingNode::Owned(0),
+                SiblingNode::WorkerW,
+            ],
+            1,
+        ));
+        assert!(!valid_owned_band(
+            &[
+                SiblingNode::DefView,
+                SiblingNode::WorkerW,
+                SiblingNode::Owned(0),
+            ],
+            1,
+        ));
+        assert!(!valid_owned_band(
+            &[
+                SiblingNode::DefView,
+                SiblingNode::DefView,
+                SiblingNode::WorkerW,
+            ],
+            0,
+        ));
+        assert!(!valid_owned_band(
+            &[
+                SiblingNode::DefView,
+                SiblingNode::WorkerW,
+                SiblingNode::WorkerW,
+            ],
+            0,
+        ));
+        assert!(!valid_owned_band(
+            &[
+                SiblingNode::Owned(0),
+                SiblingNode::DefView,
+                SiblingNode::Owned(0),
+                SiblingNode::WorkerW,
+            ],
+            1,
+        ));
+    }
+
+    #[test]
+    fn missing_worker_request_requires_unambiguous_owned_tail() {
+        assert!(can_request_missing_worker(
+            &[
+                SiblingNode::Foreign,
+                SiblingNode::DefView,
+                SiblingNode::Owned(0),
+                SiblingNode::Owned(1),
+            ],
+            2,
+        ));
+        assert!(can_request_missing_worker(&[SiblingNode::DefView], 0));
+        assert!(!can_request_missing_worker(
+            &[SiblingNode::DefView, SiblingNode::Foreign],
+            0,
+        ));
+        assert!(!can_request_missing_worker(
+            &[
+                SiblingNode::DefView,
+                SiblingNode::Owned(0),
+                SiblingNode::Owned(0),
+            ],
+            1,
+        ));
+        assert!(!can_request_missing_worker(
+            &[
+                SiblingNode::DefView,
+                SiblingNode::Owned(0),
+                SiblingNode::Owned(1),
+            ],
+            1,
+        ));
+        assert!(!can_request_missing_worker(
+            &[
+                SiblingNode::Owned(0),
+                SiblingNode::DefView,
+                SiblingNode::Owned(0),
+            ],
+            1,
+        ));
+    }
+
+    #[test]
+    fn missing_worker_request_is_gated_by_raised_mode_session_and_cancellation() {
+        let conditions = MissingWorkerRequestConditions {
+            attach_or_recovery: true,
+            unique_progman: true,
+            unique_defview: true,
+            raised_styles: true,
+            worker_count: 0,
+            unambiguous_siblings: true,
+            target_thread_is_distinct: true,
+            default_desktop: true,
+            cancelled: false,
+        };
+        assert!(decide_missing_worker_request(conditions));
+        assert!(!decide_missing_worker_request(
+            MissingWorkerRequestConditions {
+                attach_or_recovery: false,
+                ..conditions
+            }
+        ));
+        assert!(!decide_missing_worker_request(
+            MissingWorkerRequestConditions {
+                unique_progman: false,
+                ..conditions
+            }
+        ));
+        assert!(!decide_missing_worker_request(
+            MissingWorkerRequestConditions {
+                unique_defview: false,
+                ..conditions
+            }
+        ));
+        assert!(!decide_missing_worker_request(
+            MissingWorkerRequestConditions {
+                raised_styles: false,
+                ..conditions
+            }
+        ));
+        assert!(!decide_missing_worker_request(
+            MissingWorkerRequestConditions {
+                worker_count: 1,
+                ..conditions
+            }
+        ));
+        assert!(!decide_missing_worker_request(
+            MissingWorkerRequestConditions {
+                unambiguous_siblings: false,
+                ..conditions
+            }
+        ));
+        assert!(!decide_missing_worker_request(
+            MissingWorkerRequestConditions {
+                target_thread_is_distinct: false,
+                ..conditions
+            }
+        ));
+        assert!(!decide_missing_worker_request(
+            MissingWorkerRequestConditions {
+                default_desktop: false,
+                ..conditions
+            }
+        ));
+        assert!(!decide_missing_worker_request(
+            MissingWorkerRequestConditions {
+                cancelled: true,
+                ..conditions
+            }
+        ));
     }
 }

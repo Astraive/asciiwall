@@ -21,7 +21,6 @@ use ascii_core::{
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
 };
-use windows_sys::Win32::Foundation::HWND;
 
 use crate::{
     AdapterVersion, CapabilityAvailability, CapabilityFeature, CapabilityRecord, CapabilityScope,
@@ -296,8 +295,7 @@ struct HostedSurface {
     revision: u64,
     display: DisplayInfo,
     device_name: [u16; 32],
-    shell_parent: HWND,
-    shell_process_id: u32,
+    shell_hierarchy: native::ShellHierarchy,
 }
 
 impl Drop for HostedSurface {
@@ -314,9 +312,9 @@ struct ActiveSurface {
 
 /// Production Windows adapter for a bounded Explorer wallpaper-surface lifecycle.
 ///
-/// Construction creates only a hidden controller window. Wallpaper HWNDs are created hidden on
-/// the owning thread by `attach`, rendered once, converted to disabled/nonactivating children,
-/// structurally verified at the bottom of the shell view's direct parent, and only then revealed.
+/// Construction creates only a hidden controller window. Wallpaper HWNDs are created as hidden,
+/// disabled, nonactivating layered children of Progman during `attach`, rendered once, then
+/// positioned after DefView and before the unique WorkerW and structurally verified before reveal.
 /// This structural check is not visual/manual acceptance evidence; the host remains experimental
 /// until the documented Windows session gates have been exercised on a named machine.
 pub struct WindowsHost {
@@ -537,22 +535,23 @@ impl WindowsHost {
         else {
             return Err(WindowsHostError::Lease(SurfaceLeaseError::RetiredLease));
         };
-        let Some(active) = self.surfaces[index].as_ref() else {
-            return Err(WindowsHostError::Lease(SurfaceLeaseError::RetiredLease));
-        };
+        let display_identity = self.surfaces[index]
+            .as_ref()
+            .ok_or(WindowsHostError::Lease(SurfaceLeaseError::RetiredLease))?
+            .hosted
+            .display
+            .identity;
         self.leases
-            .validate_present(lease, active.hosted.display.identity)
+            .validate_present(lease, display_identity)
             .map_err(WindowsHostError::Lease)?;
-        if !active.hosted.window.is_visible()
-            || active
+        let placement_matches = self.surfaces[index].as_ref().is_some_and(|active| {
+            active
                 .hosted
                 .window
-                .verify_visible_placement(
-                    active.hosted.shell_parent,
-                    active.hosted.shell_process_id,
-                )
-                .is_err()
-        {
+                .verify_present_placement(&active.hosted.shell_hierarchy)
+                .is_ok()
+        });
+        if !placement_matches {
             self.invalidate_shell();
             return Err(WindowsHostError::PlacementVerificationFailed);
         }
@@ -680,16 +679,21 @@ impl WindowsHost {
             return Err(WindowsHostError::UnsupportedHierarchy);
         }
 
-        let target = native::discover_shell_target().map_err(map_native)?;
+        check_cancellation(&self.cancellation)?;
+        require_default_input_desktop(native::default_input_desktop().map_err(map_native)?)?;
+        let existing_owned = self.owned_windows(None);
+        let target = native::discover_shell_target_for_attach(&existing_owned, &self.cancellation)
+            .map_err(map_native)?;
         if !target.process.is_alive().map_err(map_native)? {
             return Err(WindowsHostError::ShellUnavailable);
         }
         if self.shell_process.as_ref().is_some_and(|current| {
-            current.process_id() != target.process_id
-                || self.surfaces.iter().flatten().any(|active| {
-                    active.hosted.shell_parent != target.parent
-                        || active.hosted.shell_process_id != target.process_id
-                })
+            current.process_id() != target.hierarchy.process_id
+                || self
+                    .surfaces
+                    .iter()
+                    .flatten()
+                    .any(|active| active.hosted.shell_hierarchy != target.hierarchy)
         }) {
             self.invalidate_shell();
             return Err(WindowsHostError::ShellUnavailable);
@@ -697,7 +701,7 @@ impl WindowsHost {
         let window = self
             .class
             .create_surface_window(
-                target.dpi_context,
+                &target.hierarchy,
                 display_record.info.left_px,
                 display_record.info.top_px,
                 display_record.info.width_px,
@@ -729,8 +733,7 @@ impl WindowsHost {
             revision: 1,
             display: display_record.info,
             device_name: display_record.native.device_name,
-            shell_parent: target.parent,
-            shell_process_id: target.process_id,
+            shell_hierarchy: target.hierarchy,
         };
         let first_target = render_target(&hosted, None);
         let first_outcome = self.renderer.present(&self.current_frame, &first_target);
@@ -752,21 +755,21 @@ impl WindowsHost {
         hosted
             .window
             .attach_to(
-                target.parent,
-                target.process_id,
+                &target.hierarchy,
                 display_record.info.left_px,
                 display_record.info.top_px,
                 display_record.info.width_px,
                 display_record.info.height_px,
             )
             .map_err(map_native)?;
+        let owned_windows = self.owned_windows(Some(&hosted.window));
         hosted
             .window
-            .verify_hidden_placement(target.parent, target.process_id)
+            .verify_hidden_placement(&target.hierarchy, &owned_windows)
             .map_err(map_native)?;
-        let revalidated = native::discover_shell_target().map_err(map_native)?;
-        if revalidated.parent != target.parent
-            || revalidated.process_id != target.process_id
+        let revalidated =
+            native::discover_shell_target_read_only(&owned_windows).map_err(map_native)?;
+        if revalidated.hierarchy != target.hierarchy
             || !target.process.is_alive().map_err(map_native)?
         {
             return Err(WindowsHostError::PlacementVerificationFailed);
@@ -788,10 +791,11 @@ impl WindowsHost {
             let _ = self.leases.retire(lease);
             return Err(error);
         }
+        let owned_windows = self.owned_windows(Some(&hosted.window));
         let reveal_result =
             hosted
                 .window
-                .show_no_activate(target.parent, target.process_id, foreground_before);
+                .show_no_activate(&target.hierarchy, &owned_windows, foreground_before);
         if let Err(error) = check_cancellation(&self.cancellation) {
             hosted.window.hide();
             let _ = self.leases.retire(lease);
@@ -864,6 +868,23 @@ impl WindowsHost {
 
     fn display_records(&self) -> impl Iterator<Item = &DisplayRecord> {
         self.displays[..self.display_count].iter().flatten()
+    }
+    fn owned_windows<'a>(
+        &'a self,
+        additional: Option<&'a native::Window>,
+    ) -> [Option<&'a native::Window>; MAX_WINDOWS_HOST_DISPLAYS] {
+        let mut windows = [None; MAX_WINDOWS_HOST_DISPLAYS];
+        let mut count = 0;
+        for active in self.surfaces.iter().flatten() {
+            windows[count] = Some(&active.hosted.window);
+            count += 1;
+        }
+        if let Some(window) = additional
+            && count < MAX_WINDOWS_HOST_DISPLAYS
+        {
+            windows[count] = Some(window);
+        }
+        windows
     }
 
     fn display_snapshot(&self) -> DisplaySnapshot {
@@ -1144,17 +1165,26 @@ impl WindowsHost {
             && self.surfaces.iter().any(Option::is_some)
         {
             self.last_hierarchy_check = Instant::now();
-            let hierarchy_matches = match native::discover_shell_target() {
-                Ok(target) => {
-                    let matches = target.process.is_alive().unwrap_or(false)
-                        && self.surfaces.iter().flatten().all(|active| {
-                            active.hosted.shell_parent == target.parent
-                                && active.hosted.shell_process_id == target.process_id
-                        });
-                    drop(target);
-                    matches
+            let hierarchy_matches = {
+                let owned_windows = self.owned_windows(None);
+                match native::discover_shell_target_read_only(&owned_windows) {
+                    Ok(target) => {
+                        let matches =
+                            target.process.is_alive().unwrap_or(false)
+                                && self.surfaces.iter().flatten().all(|active| {
+                                    active.hosted.shell_hierarchy == target.hierarchy
+                                })
+                                && native::verify_owned_windows(
+                                    &target.hierarchy,
+                                    &owned_windows,
+                                    true,
+                                )
+                                .is_ok();
+                        drop(target);
+                        matches
+                    }
+                    Err(_) => false,
                 }
-                Err(_) => false,
             };
             if !hierarchy_matches {
                 self.invalidate_shell();
@@ -1222,14 +1252,21 @@ impl WindowsHost {
             self.schedule_recovery(true);
             return;
         }
-        let target = match crate::probe_host().hierarchy.observation {
-            observation
-                if observation.status == crate::ProbeStatus::Experimental
-                    && observation.reason == crate::ObservationReason::ShellHierarchyObserved =>
-            {
-                native::discover_shell_target()
+        if self.cancellation.is_cancelled() {
+            return;
+        }
+        let target = {
+            let owned_windows = self.owned_windows(None);
+            match crate::probe_host().hierarchy.observation {
+                observation
+                    if observation.status == crate::ProbeStatus::Experimental
+                        && observation.reason
+                            == crate::ObservationReason::ShellHierarchyObserved =>
+                {
+                    native::discover_shell_target_for_attach(&owned_windows, &self.cancellation)
+                }
+                _ => Err(native::NativeError::UnsupportedHierarchy),
             }
-            _ => Err(native::NativeError::UnsupportedHierarchy),
         };
         let Ok(shell_target) = target else {
             self.invalidate_shell();
@@ -1239,11 +1276,12 @@ impl WindowsHost {
             || self
                 .shell_process
                 .as_ref()
-                .is_some_and(|process| process.process_id() != shell_target.process_id)
-            || self.surfaces.iter().flatten().any(|active| {
-                active.hosted.shell_parent != shell_target.parent
-                    || active.hosted.shell_process_id != shell_target.process_id
-            })
+                .is_some_and(|process| process.process_id() != shell_target.hierarchy.process_id)
+            || self
+                .surfaces
+                .iter()
+                .flatten()
+                .any(|active| active.hosted.shell_hierarchy != shell_target.hierarchy)
         {
             drop(shell_target);
             self.invalidate_shell();
@@ -1255,12 +1293,15 @@ impl WindowsHost {
             let Some(active) = self.surfaces[index].as_ref() else {
                 continue;
             };
-            if active
-                .hosted
-                .window
-                .verify_hidden_placement(shell_target.parent, shell_target.process_id)
-                .is_err()
-            {
+            let hidden_placement_valid = {
+                let owned_windows = self.owned_windows(None);
+                active
+                    .hosted
+                    .window
+                    .verify_hidden_placement(&shell_target.hierarchy, &owned_windows)
+                    .is_ok()
+            };
+            if !hidden_placement_valid {
                 failed = true;
                 break;
             }
@@ -1281,21 +1322,19 @@ impl WindowsHost {
                 return;
             }
             let foreground_before = native::foreground_window();
-            if active
-                .hosted
-                .window
-                .show_no_activate(
-                    shell_target.parent,
-                    shell_target.process_id,
-                    foreground_before,
-                )
-                .is_err()
-            {
+            let reveal_succeeded = {
+                let owned_windows = self.owned_windows(None);
+                active
+                    .hosted
+                    .window
+                    .show_no_activate(&shell_target.hierarchy, &owned_windows, foreground_before)
+                    .is_ok()
+            };
+            if !reveal_succeeded {
                 failed = true;
                 break;
             }
         }
-        drop(shell_target);
         if failed {
             self.invalidate_shell();
             return;
@@ -1612,6 +1651,10 @@ fn map_native(error: native::NativeError) -> WindowsHostError {
         native::NativeError::PlacementVerificationFailed => {
             WindowsHostError::PlacementVerificationFailed
         }
+        native::NativeError::SecureDesktop => WindowsHostError::SecureDesktop,
+        native::NativeError::Cancelled => {
+            WindowsHostError::InvalidFrame(ascii_core::Error::Cancelled)
+        }
         native::NativeError::IdentityExhausted => WindowsHostError::RevisionExhausted,
     }
 }
@@ -1681,6 +1724,18 @@ mod tests {
             Err(WindowsHostError::SecureDesktop)
         );
         assert_eq!(require_default_input_desktop(true), Ok(()));
+    }
+
+    #[test]
+    fn raised_slot_session_and_cancellation_gates_map_without_native_actions() {
+        assert_eq!(
+            map_native(native::NativeError::SecureDesktop),
+            WindowsHostError::SecureDesktop
+        );
+        assert_eq!(
+            map_native(native::NativeError::Cancelled),
+            WindowsHostError::InvalidFrame(ascii_core::Error::Cancelled)
+        );
     }
 
     #[test]

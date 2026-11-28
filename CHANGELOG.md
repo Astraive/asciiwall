@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - `HostAdapter::reconcile` now rejects truncated snapshots as successful reconciliation while preserving retained feed/lease state in a typed error; behind-revision errors retain precedence.
-- [WND-002] After revealing the attached window, invalidate renderer state and require a fresh `Presented` result; hide the window and retire its lease if the post-reveal presentation is cancelled or fails. Renderer submission does not establish compositor visibility or visual acceptance.
+- [WND-002] Preserve post-reveal renderer invalidation and require a fresh `Presented` result; hide the window and retire its lease if that presentation is cancelled or fails. The experimental raised-desktop path now uses an opaque layered `Progman` child after `DefView` and before the unique shell `WorkerW`, with no bottom-of-parent or `WorkerW`-parent fallback. A missing slot may conditionally use the private, undocumented `0x052C` message through `SendMessageTimeoutW` (`SMTO_ABORTIFHUNG`, at most 250 ms) only during attach/recovery after fail-closed hierarchy/session/cancellation checks, and only when Progman belongs to a different thread than the caller; a zero API result remains failure. Probe and periodic checks remain read-only. Visual and interaction acceptance of this raised placement remains unverified; this is not a support or success claim.
 
 ### Added
 
