@@ -107,6 +107,28 @@ PS C:\Users\gskne>
 
 The candidate handle `0x6F1292` was observed during `HCBT_CREATEWND`; it is not evidence of a successfully created or retained surface. The single callback with downstream result `0` does not support a downstream CBT veto. The next diagnosis must explain the failure after the CBT notification and before the app's window procedure.
 
+### Hidden parent/style diagnostic runner (built; pending user run)
+
+The production creation-stage tracker is reset immediately before the synchronous `CreateWindowExW` call and records `WM_NCCREATE` / `WM_CREATE` at the first statements of the app WndProc. The user's `stage: 0` result therefore strongly indicates neither creation message reached that WndProc; a second entry-only counter would be redundant. The cause remains unknown.
+
+The follow-up runner leaves the normal attach attempt unchanged. If attach fails, it records the failed parent's validity, class, owner PID/TID, current PID/TID, style, and parent/current DPI contexts. It then tests hidden 1×1 `WS_CHILD | WS_DISABLED` creation (`0x48000000`, extended style `0`) with the same class/module and the shell parent's DPI context: first under the observed shell parent, then under the hidden controller. Only after the controller-parent minimal trial creates and destroys successfully does it test the full production child styles (`0x4E000000` / `0x08080080`) under that controller. No trial sets `WS_VISIBLE`, calls `ShowWindow`, or calls `SetParent`; successful trial windows are destroyed immediately. A cleanup failure stops further trials, and the original attach error then returns from the runner. These ablations diagnose window creation only; they are not placement or wallpaper-visibility acceptance.
+
+- Independent Luna safety review: no blocker. The CBT capture buffer is 128 UTF-16 units; the production class name is a fixed prefix plus 16 hexadecimal digits, so it fits. If `DestroyWindow` fails, later probes stop and the original attach error returns from `main`; there is no in-function retry.
+- Format check: **PASSED** with `cargo +1.100.0 fmt --manifest-path 'C:/Users/gskne/AppData/Local/Temp/wnd002-manual-check/Cargo.toml' --check`.
+- Release build: **PASSED** with `CARGO_HOME=D:/tmp/cargo-cor008-acl-20261127` and `CARGO_TARGET_DIR=D:/tmp/target-cor008-acl-20261127`, using `cargo +1.100.0 build --manifest-path 'C:/Users/gskne/AppData/Local/Temp/wnd002-manual-check/Cargo.toml' --release`.
+- Runner source SHA-256: `f63288ab49c5bd4c5d0d07fa146fbe4d8d85f12707586fca6ed51b834551dea5`.
+- Runner executable SHA-256: `f2c4707401dbbbadeffd0e66fa4b8f4458a3e151e6ebf69ca7a72e4f4c90bf57`.
+- Runner executable: `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe`.
+
+The assistant has **NOT RUN** this binary. Run manually in PowerShell:
+
+```powershell
+& "D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe"
+```
+
+If the attach error recurs, the ablation windows omit `WS_VISIBLE`; successful trial windows are destroyed immediately. If `DestroyWindow` fails, later probes stop and the runner exits on the original attach error. If normal attach succeeds, the existing runner may reveal the experimental surface and hold for up to 180 seconds; use Ctrl+C to detach. Send the complete output. If `READY` appears, report whether the wallpaper is visible. Icon selection and typing/focus remain **UNVERIFIED**.
+
+
 ## Pointer and window feeds
 
 A passive raw-input registration is a candidate for background mouse button observation. Do not use flags that suppress normal legacy delivery or capture the device. Raw relative movement is not a global cursor location; obtain and transform desktop coordinates separately. [S07](../research/source-register.md#s07) [S08](../research/source-register.md#s08)
