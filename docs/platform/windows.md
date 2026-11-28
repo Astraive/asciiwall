@@ -79,6 +79,23 @@ Static diagnosis found that `attach_internal` rendered and cached the initial fr
 
 The instrumented failure confirms that creation stopped before the app window procedure, but does not identify the cause. Microsoft lists invalid parameters and a failing `WH_CBT` hook among possible `CreateWindowExW` failures ([API documentation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createwindowexw)); neither is established here. No HWND, renderer, reveal, or compositor test ran. Icon and typing/focus acceptance remain **UNVERIFIED**. Keep the implementation experimental and PR/issue open until creation succeeds and all required gates pass.
 
+### Thread-specific CBT follow-up runner (built; pending user run)
+
+The previous run failed at `CreateWindowExW` with captured last-error `0` and stage `0`. This disposable runner installs a thread-specific `WH_CBT` hook only around `host.attach`, captures `HCBT_CREATEWND` fields from `CREATESTRUCTW`, then calls `CallNextHookEx` and returns its result unchanged ([`SetWindowsHookExW`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw), [`CallNextHookEx`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-callnexthookex)). If hook installation fails, it reports the error and proceeds without an installed observer. It unhooks immediately after attach; unhook failure reports incomplete capture and stops before presentation or hold. The temporary hook changes this thread's hook-chain ordering while installed; it is not global.
+
+Interpret the output conservatively:
+- `hcbt_createwnd_callbacks=1` with nonzero `hcbt_createwnd_downstream` is evidence that a downstream CBT hook vetoed that creation. Microsoft documents that a nonzero `HCBT_CREATEWND` result prevents window creation ([CBTProc](https://learn.microsoft.com/en-us/windows/win32/winmsg/cbtproc)).
+- Zero callbacks cannot distinguish a pre-CBT validation failure from creation on a different thread; `hook_install_failed` separately means the observer was not installed.
+- More than one callback can include nested/reentrant creation. The runner stores one event's fields, which can be ambiguous in that case; send the full output and do not treat the downstream value as decisive.
+
+- Format check: **PASSED** with `cargo +1.100.0 fmt --manifest-path 'C:\Users\gskne\AppData\Local\Temp\wnd002-manual-check\Cargo.toml' --check`.
+- Release build: **PASSED** with `CARGO_HOME=D:/tmp/cargo-cor008-acl-20261127` and `CARGO_TARGET_DIR=D:/tmp/target-cor008-acl-20261127` using `cargo +1.100.0 build --offline --locked --release --manifest-path 'C:\Users\gskne\AppData\Local\Temp\wnd002-manual-check\Cargo.toml'`.
+- Runner source SHA-256: `8739e9e6ba9f607371c0ae96baf324313945ef56406d49e2bb77eb8ed203f71c`.
+- Runner executable SHA-256: `6054c41f4f292f0a97ee59c8cc1219e9c70e7edc278838f82a8fb778b1203252`.
+- Runner executable: `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe`.
+
+This runner has **NOT BEEN USER-RUN**. If attach succeeds, it holds for up to 180 seconds; Ctrl+C requests detach. The assistant did not launch it.
+
 ## Pointer and window feeds
 
 A passive raw-input registration is a candidate for background mouse button observation. Do not use flags that suppress normal legacy delivery or capture the device. Raw relative movement is not a global cursor location; obtain and transform desktop coordinates separately. [S07](../research/source-register.md#s07) [S08](../research/source-register.md#s08)
