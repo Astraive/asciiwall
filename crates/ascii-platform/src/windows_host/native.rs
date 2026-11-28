@@ -48,12 +48,13 @@ use windows_sys::{
                 GetWindowThreadProcessId, IsWindow, IsWindowVisible, LWA_ALPHA, MA_NOACTIVATE, MSG,
                 PM_REMOVE, PeekMessageW, RegisterClassExW, RegisterWindowMessageW,
                 SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-                SWP_NOOWNERZORDER, SendMessageTimeoutW, SetLayeredWindowAttributes, SetPropW,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, UnregisterClassW,
-                WM_DISPLAYCHANGE as wm_displaychange, WM_ERASEBKGND as wm_erasebkgnd,
-                WM_MOUSEACTIVATE as wm_mouseactivate, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
-                WS_CLIPSIBLINGS, WS_DISABLED, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+                SWP_NOOWNERZORDER, SWP_NOZORDER, SendMessageTimeoutW, SetLayeredWindowAttributes,
+                SetParent, SetPropW, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+                UnregisterClassW, WM_DISPLAYCHANGE as wm_displaychange,
+                WM_ERASEBKGND as wm_erasebkgnd, WM_MOUSEACTIVATE as wm_mouseactivate, WNDCLASSEXW,
+                WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DISABLED, WS_EX_LAYERED,
+                WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                WS_POPUP,
             },
         },
     },
@@ -74,6 +75,7 @@ const WTS_SESSION_UNLOCK: usize = 0x8;
 const NOTIFY_FOR_THIS_SESSION: u32 = 0;
 const DESKTOP_NAME_CAPACITY: usize = 64;
 const OWNED_CHILD_STYLE: u32 = WS_CHILD | WS_DISABLED | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+const OWNED_POPUP_CREATE_STYLE: u32 = WS_POPUP | WS_DISABLED | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
 const OWNED_WINDOW_EX_STYLE: u32 = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
 const OWNED_CHILD_EX_STYLE: u32 = OWNED_WINDOW_EX_STYLE | WS_EX_LAYERED;
 const RAISED_PROGMAN_EX_STYLE: u32 = WS_EX_NOREDIRECTIONBITMAP;
@@ -257,6 +259,7 @@ struct WindowCreateOptions {
     bounds: WindowCreateBounds,
     parent: HWND,
     dpi_context: Option<DPI_AWARENESS_CONTEXT>,
+    kind: &'static str,
 }
 
 fn next_window_id() -> Option<usize> {
@@ -316,6 +319,7 @@ impl WindowClass {
             },
             parent: null_mut(),
             dpi_context: None,
+            kind: "controller",
         })
     }
 
@@ -337,22 +341,65 @@ impl WindowClass {
             if unsafe { ScreenToClient(target.parent, &mut point) } == 0 {
                 return Err(win32_error("ScreenToClient"));
             }
+            // Match the passing isolated WGPU control: direct layered-child creation and late
+            // layered setup fail on the observed build, so create a hidden popup before conversion.
             let window = self.create(WindowCreateOptions {
-                extended_style: OWNED_CHILD_EX_STYLE,
-                style: OWNED_CHILD_STYLE,
+                extended_style: OWNED_WINDOW_EX_STYLE,
+                style: OWNED_POPUP_CREATE_STYLE,
                 bounds: WindowCreateBounds {
-                    left: point.x,
-                    top: point.y,
+                    left: 0,
+                    top: 0,
                     width,
                     height,
                 },
-                parent: target.parent,
+                parent: null_mut(),
                 dpi_context: Some(target.dpi_context),
+                kind: "surface",
             })?;
+            set_window_long(
+                window.hwnd,
+                GWL_STYLE,
+                OWNED_CHILD_STYLE as isize,
+                "SetWindowLongPtrW(GWL_STYLE)",
+            )?;
+            set_window_long(
+                window.hwnd,
+                GWL_EXSTYLE,
+                OWNED_CHILD_EX_STYLE as isize,
+                "SetWindowLongPtrW(GWL_EXSTYLE)",
+            )?;
+            // SetParent returns NULL both when the previous parent was NULL and on failure. Clear
+            // last error so those cases are distinguishable, then verify the resulting parent.
+            unsafe { SetLastError(0) };
+            let previous_parent = unsafe { SetParent(window.hwnd, target.parent) };
+            let parent_error = unsafe { GetLastError() };
+            if previous_parent.is_null() && parent_error != 0 {
+                return Err(NativeError::Win32 {
+                    operation: "SetParent(surface)",
+                    code: parent_error,
+                });
+            }
+            if unsafe { GetParent(window.hwnd) } != target.parent {
+                return Err(NativeError::PlacementVerificationFailed);
+            }
+            if unsafe {
+                SetWindowPos(
+                    window.hwnd,
+                    null_mut(),
+                    point.x,
+                    point.y,
+                    width,
+                    height,
+                    SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+                )
+            } == 0
+            {
+                return Err(win32_error("SetWindowPos(surface child)"));
+            }
             if unsafe { SetLayeredWindowAttributes(window.hwnd, 0, OPAQUE_LAYER_ALPHA, LWA_ALPHA) }
                 == 0
             {
-                return Err(win32_error("SetLayeredWindowAttributes"));
+                return Err(win32_error("SetLayeredWindowAttributes(surface)"));
             }
             Ok(window)
         })
@@ -416,11 +463,7 @@ impl WindowClass {
         if hwnd.is_null() {
             let (code, stage) = creation_failure.unwrap_or((0, 0));
             return Err(NativeError::CreateWindowFailed {
-                kind: if options.parent.is_null() {
-                    "controller"
-                } else {
-                    "surface"
-                },
+                kind: options.kind,
                 code,
                 parent: options.parent as usize,
                 style: options.style,
@@ -1563,6 +1606,63 @@ unsafe extern "system" fn window_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::WS_VISIBLE;
+
+    #[test]
+    fn surface_window_applies_layered_style_after_hidden_creation() {
+        assert_ne!(OWNED_POPUP_CREATE_STYLE & WS_POPUP, 0);
+        assert_eq!(OWNED_POPUP_CREATE_STYLE & (WS_CHILD | WS_VISIBLE), 0);
+        assert_eq!(OWNED_WINDOW_EX_STYLE & WS_EX_LAYERED, 0);
+
+        let class_name = format!(
+            "AsciiWallWnd002Lifecycle_{}_{}",
+            unsafe { GetCurrentProcessId() },
+            unsafe { GetCurrentThreadId() },
+        );
+        let class = WindowClass::register(class_name).expect("register private test class");
+        let controller = class
+            .create_controller()
+            .expect("create hidden test controller");
+        let dpi_context = unsafe { GetWindowDpiAwarenessContext(controller.hwnd) };
+        assert!(!dpi_context.is_null());
+        let target = ShellHierarchy {
+            parent: controller.hwnd,
+            process_id: unsafe { GetCurrentProcessId() },
+            thread_id: unsafe { GetCurrentThreadId() },
+            dpi_context,
+            defview: null_mut(),
+            workerw: null_mut(),
+        };
+
+        let child = class
+            .create_surface_window(&target, 0, 0, 1, 1)
+            .expect("create hidden surface child");
+        assert_eq!(unsafe { GetParent(child.hwnd) }, controller.hwnd);
+        let style = unsafe { GetWindowLongPtrW(child.hwnd, GWL_STYLE) as u32 };
+        assert_ne!(style & WS_CHILD, 0);
+        assert_eq!(style & WS_VISIBLE, 0);
+        assert_eq!(unsafe { IsWindowVisible(child.hwnd) }, 0);
+        let ex_style = unsafe { GetWindowLongPtrW(child.hwnd, GWL_EXSTYLE) as u32 };
+        assert_ne!(ex_style & WS_EX_LAYERED, 0);
+        assert_eq!(ex_style & WS_EX_TOPMOST, 0);
+
+        let mut color_key = 0;
+        let mut alpha = 0;
+        let mut flags = 0;
+        assert_ne!(
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetLayeredWindowAttributes(
+                    child.hwnd,
+                    &mut color_key,
+                    &mut alpha,
+                    &mut flags,
+                )
+            },
+            0
+        );
+        assert_eq!(alpha, OPAQUE_LAYER_ALPHA);
+        assert_eq!(flags, LWA_ALPHA);
+    }
 
     #[test]
     fn recovery_window_style_is_child_disabled_and_never_topmost() {

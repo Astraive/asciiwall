@@ -167,18 +167,51 @@ PS C:\Users\gskne>
 
 Both window-style variants succeeded without production extended styles and reached stage `0x3`; both failed with the full production extended-style set before `WM_NCCREATE` (`stage=0x0`), even with the minimal window style. `GetLastError` remained `0`. This implicates the extended-style set or an interaction in this controlled replica, not a specific bit; it does not establish exact production-runtime causality.
 
-#### Next hidden eight-case extended-style matrix (built; pending user run)
+#### User-run hidden eight-case extended-style matrix (WS_EX_LAYERED isolates creation failure)
 Source SHA-256: `6bb78c7dac67affb7b4a8ecc6efd8ecac41ac4be7aaf25b0d8092bc55352f9d2`; executable SHA-256: `4867939788be2d8fa3509290c30dcb7993d81e3249b2b5a10dbc46d78b973709`.
 
 PowerShell command: `& "D:\tmp\target-cor008-acl-20261127\release\wnd002-exstyle-matrix.exe"`.
 
-The runner fixes child style to `0x48000000` and tests all eight combinations of `WS_EX_NOACTIVATE` (`0x08000000`), `WS_EX_TOOLWINDOW` (`0x00000080`), and `WS_EX_LAYERED` (`0x00080000`) under one hidden 1×1 same-process controller. It uses the Progman DPI context and logs `GetLastError` plus creation-stage bits. Successful trials are destroyed immediately; the runner uses no `WS_VISIBLE`, `ShowWindow`, or `SetParent`. Luna reviewed it; `cargo fmt` and Windows x64 release build passed. It is a controlled replica without the WGPU bootstrap, has not been run, and does not test visible placement.
+The user ran this hidden same-process controller matrix. It fixes child style to `0x48000000` and tests all combinations of `WS_EX_NOACTIVATE` (`0x08000000`), `WS_EX_TOOLWINDOW` (`0x00000080`), and `WS_EX_LAYERED` (`0x00080000`); successful trials are destroyed immediately. Exact output:
+
+```text
+TRIAL none: style=0x48000000 exstyle=0x00000000 hwnd=0x1441004 get_last_error=0 creation_stage=0x3
+CLEANUP none: destroyed immediately
+TRIAL noactivate: style=0x48000000 exstyle=0x08000000 hwnd=0x1451004 get_last_error=0 creation_stage=0x3
+CLEANUP noactivate: destroyed immediately
+TRIAL toolwindow: style=0x48000000 exstyle=0x00000080 hwnd=0x1461004 get_last_error=0 creation_stage=0x3
+CLEANUP toolwindow: destroyed immediately
+TRIAL noactivate|toolwindow: style=0x48000000 exstyle=0x08000080 hwnd=0x1471004 get_last_error=0 creation_stage=0x3
+CLEANUP noactivate|toolwindow: destroyed immediately
+TRIAL layered: style=0x48000000 exstyle=0x00080000 hwnd=0x0 get_last_error=0 creation_stage=0x0
+TRIAL noactivate|layered: style=0x48000000 exstyle=0x08080000 hwnd=0x0 get_last_error=0 creation_stage=0x0
+TRIAL toolwindow|layered: style=0x48000000 exstyle=0x00080080 hwnd=0x0 get_last_error=0 creation_stage=0x0
+TRIAL all-bits: style=0x48000000 exstyle=0x08080080 hwnd=0x0 get_last_error=0 creation_stage=0x0
+```
+
+All four cases without `WS_EX_LAYERED` reached `WM_NCCREATE` and `WM_CREATE` (`creation_stage=0x3`); all four containing it failed before `WM_NCCREATE` (`stage=0`). `WS_EX_NOACTIVATE` and `WS_EX_TOOLWINDOW` alone were not sufficient causes. This isolates the creation-time failure in the user's controlled class/controller/session, not a general Windows guarantee; zero last-error is inconclusive.
+
+#### Popup-to-child lifecycle investigation and local verification
+
+A first production-path attempt created a `WS_CHILD` directly, added `WS_EX_LAYERED`, refreshed cached styles with `SetWindowPos(SWP_FRAMECHANGED)`, then called `SetLayeredWindowAttributes`. The hidden production-path test returned `ERROR_INVALID_PARAMETER` (87) at the layered-attributes call. Simply moving the layered bit to a post-create update on an already-created child was not viable on this host.
+
+The existing ignored `layered_child_hwnd_accepts_opaque_wgpu_surface` control creates a hidden top-level popup, changes its style to `WS_CHILD`, adds `WS_EX_LAYERED`, calls `SetParent`, refreshes the frame, sets alpha, and creates/configures/renders/presents a WGPU surface. Rerun on this host after the matrix: **1 passed**. It uses an isolated private parent, not Explorer or the desktop.
+
+Production now follows that tested hidden lifecycle: create a popup without `WS_EX_LAYERED`, convert its style, add the layered exstyle, reparent to the selected shell parent, position/refresh without activation or z-order changes, then set opaque alpha. Every intermediate state omits `WS_VISIBLE`; failures retain RAII ownership and destroy the HWND. Luna reviewed the order and error paths with no blocker.
+
+- `cargo +1.100.0 fmt -p ascii-platform --check` — passed.
+- `cargo +1.100.0 test --offline --locked -p ascii-platform surface_window_applies_layered_style_after_hidden_creation` — **1 passed**. The test uses a private hidden controller and verifies initial popup styles, final child parent/style, no visibility/topmost, and alpha 255 with `LWA_ALPHA`.
+- Manual WGPU runner release build — passed; source SHA-256 `f63288ab49c5bd4c5d0d07fa146fbe4d8d85f12707586fca6ed51b834551dea5`; executable SHA-256 `10fa26ee9e66d2497c059ee02403760468c4ccec7c440f0431df632a83e3ca19`.
+- Runner executable: `D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe`.
+- User-run command: `& "D:\tmp\target-cor008-acl-20261127\release\wnd002-manual-check.exe"`.
+
+The assistant did not launch this runner. The real Progman/DefView/WorkerW attach, visible wallpaper change, icon selection, typing/focus, and recovery acceptance remain unverified. Keep PR #371 and issue #171 open/draft pending the user's run and remaining acceptance gates.
 
 #### Lively Wallpaper source comparison (reference only)
 
 Reviewed Lively's [`WinDesktopCore`](https://github.com/lively-community/lively/blob/core-separation/src/Lively/Lively/Core/WinDesktopCore.cs#L153-L236) on branch `core-separation`. It checks Progman's **extended** style for `WS_EX_NOREDIRECTIONBITMAP`; when raised desktop is detected, it looks for a `WorkerW` child of Progman. Otherwise it finds the top-level WorkerW after `SHELLDLL_DefView`. Its per-screen path positions an already-created renderer HWND before attaching; the raised attach path adds `WS_CHILD`, adds `WS_EX_LAYERED` with alpha 255 before `SetParent`, inserts the HWND relative to DefView, and repairs WorkerW z-order ([attach](https://github.com/lively-community/lively/blob/core-separation/src/Lively/Lively/Core/WinDesktopCore.cs#L1043-L1081), [transparency helper](https://github.com/lively-community/lively/blob/core-separation/src/Lively/Lively.Common/Helpers/WindowUtil.cs#L300-L329)). A historical [Windows 11 26002+ fix](https://github.com/lively-community/lively/commit/9142f6a4cfc2) added the Progman-child WorkerW lookup as a fallback.
 
-This differs from AsciiWall's failing `CreateWindowExW` child creation and does not establish a fix. The current AsciiWall output reports Progman's `GWL_STYLE` (`0x96000000`), not `GWL_EXSTYLE`, and counts top-level WorkerW windows only; it does not establish `WS_EX_NOREDIRECTIONBITMAP` or a Progman-child WorkerW. Lively's setup also sends private message `0x052C` with `SMTO_NORMAL`/1000 ms; do not copy that behavior blindly. Lively is GPL-3.0; this comparison records behavior only, with no code copied.
+Lively's existing-HWND attach sequence is consistent with creating a window first and then converting/attaching it; it does not prove that AsciiWall's sequence works against this session's Progman or makes a visible wallpaper. The current AsciiWall output reports Progman's `GWL_STYLE` (`0x96000000`), not `GWL_EXSTYLE`, and counts top-level WorkerW windows only; it does not establish `WS_EX_NOREDIRECTIONBITMAP` or a Progman-child WorkerW. Lively's setup also sends private message `0x052C` with `SMTO_NORMAL`/1000 ms; do not copy that behavior blindly. Lively is GPL-3.0; this comparison records behavior only, with no code copied.
 
 ## Pointer and window feeds
 
